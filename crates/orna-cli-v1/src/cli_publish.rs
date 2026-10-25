@@ -539,6 +539,10 @@ const LEGACY_READ_ONLY_HELP: &str = orna_repository_v1::LegacyWriteRefused::REME
 /// journalled, but nothing in this build activates it.
 const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 snapshots; a format-3 migration candidate is prepared here but not activated; activation is tracked as ornadb-5il1.192";
 
+/// Remedy for a managed-path edit that recovery refused (ORNA-PUB-010). The edit
+/// stays on disk; the user either admits it or discards it, then retries.
+const MANAGED_EDIT_HELP: &str = "to keep the edit, `git add` the path, run `orna commit -m MESSAGE`, then retry `orna publish`; to discard it, run `git checkout -- <path>`, then retry `orna publish`";
+
 /// ORNA-PUB-012: names the read-only legacy format, states that nothing was
 /// written, and gives the remedy that fits the worktree's migration state.
 fn legacy_read_only_refusal(
@@ -571,8 +575,13 @@ pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage
     let detail = match error {
         E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
         E::ManagedWorktreeConflict => {
-            "a managed path was edited after capture; keep or discard that edit, then retry"
-                .to_owned()
+            return Diagnostic::target_with_detail(
+                "E2300",
+                title,
+                MANAGED_EDIT_HELP,
+                "a managed path was edited after capture; the edit is retained on disk and HEAD was not changed"
+                    .to_owned(),
+            );
         }
         E::RecoveryIndexConflict => {
             "index and worktree match neither recorded state; resolve the conflict before retrying"
@@ -657,6 +666,22 @@ mod tests {
                 ("warehouse.Event".to_owned(), 1)
             ]
         );
+    }
+
+    #[test]
+    fn managed_edit_refusal_names_keep_and_discard_remedies() {
+        let diagnostic = describe_storage_failure(
+            "pending publication could not be recovered",
+            &orna_storage_v1::Error::ManagedWorktreeConflict,
+        );
+        assert_eq!(diagnostic.code, "E2300");
+        assert_eq!(diagnostic.help, MANAGED_EDIT_HELP);
+        assert!(diagnostic.help.contains("`git add`"));
+        assert!(diagnostic.help.contains("`orna commit -m MESSAGE`"));
+        assert!(diagnostic.help.contains("`git checkout -- <path>`"));
+        assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
+            detail.contains("the edit is retained on disk and HEAD was not changed")
+        }));
     }
 
     #[test]
