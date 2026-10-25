@@ -2751,15 +2751,12 @@ fn standard_import_bindings(
     preludes: &BTreeMap<String, BTreeSet<String>>,
     items: &[Item],
 ) -> Result<BTreeMap<String, String>, ApplicationError> {
-    let mut aliases = BTreeMap::<String, String>::new();
-    let mut bind = |alias: &str, target: String| -> Result<(), ApplicationError> {
-        if let Some(previous) = aliases.insert(alias.to_owned(), target.clone())
-            && previous != target
-        {
-            return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
-        }
-        Ok(())
-    };
+    // Explicit names are collected apart from wildcard and prelude bindings:
+    // an explicit import takes precedence over a wildcard that exposes the same
+    // name, and wildcards are ambiguous only when they disagree about a name no
+    // explicit import binds (ORNA-IMPORT-007). Import order never selects a winner.
+    let mut explicit = BTreeMap::<String, String>::new();
+    let mut wildcard = BTreeMap::<String, BTreeSet<String>>::new();
     for item in items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
@@ -2777,7 +2774,7 @@ fn standard_import_bindings(
                 for name in names {
                     let target = format!("{namespace}.{}", name.name);
                     if exports.public.contains(&target) {
-                        bind(&name.name, target)?;
+                        bind_explicit(&mut explicit, &name.name, target)?;
                     } else if exports.non_function.contains(&target) {
                         return Err(ApplicationError::UnsupportedImport(format!(
                             "non-function import `{target}` is not supported on this route"
@@ -2787,21 +2784,60 @@ fn standard_import_bindings(
                     }
                 }
             }
-            UseTail::Glob { .. } => bind_public_exports(&namespace, exports, &mut bind)?,
+            UseTail::Glob { .. } => {
+                bind_public_exports(&namespace, exports, &mut |alias: &str, target: String| {
+                    wildcard.entry(alias.to_owned()).or_default().insert(target);
+                    Ok(())
+                })?;
+            }
             UseTail::Alias { name, .. } if name.as_str() == "_" => {
                 for prelude in preludes.get(&namespace).into_iter().flatten() {
                     let target = format!("{namespace}.{prelude}");
                     if exports.public.contains(&target) {
-                        bind(prelude.as_str(), target)?;
+                        wildcard
+                            .entry(prelude.clone())
+                            .or_default()
+                            .insert(target);
                     }
                 }
             }
-            // `use std.x as y` binds a module alias, which this route does not
-            // resolve; it binds no unqualified names.
-            UseTail::None | UseTail::Alias { .. } => {}
+            // A bare `use std.x;` or `use std.x as y` names a module, which this
+            // route cannot resolve; refuse it at admission rather than letting a
+            // qualified call fail later at evaluation.
+            UseTail::None | UseTail::Alias { .. } => {
+                return Err(ApplicationError::UnsupportedImport(
+                    "qualified std module alias not supported on this route".to_owned(),
+                ));
+            }
         }
     }
-    Ok(aliases)
+    for (alias, targets) in wildcard {
+        if explicit.contains_key(&alias) {
+            continue;
+        }
+        if targets.len() > 1 {
+            return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+        }
+        if let Some(target) = targets.into_iter().next() {
+            explicit.insert(alias, target);
+        }
+    }
+    Ok(explicit)
+}
+
+/// Binds one explicitly named import. Two explicit imports of one name to
+/// different functions are ambiguous.
+fn bind_explicit(
+    explicit: &mut BTreeMap<String, String>,
+    alias: &str,
+    target: String,
+) -> Result<(), ApplicationError> {
+    if let Some(previous) = explicit.insert(alias.to_owned(), target.clone())
+        && previous != target
+    {
+        return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+    }
+    Ok(())
 }
 
 /// Binds every public function declared directly in `namespace`.
@@ -4020,6 +4056,124 @@ mod tests {
             )
             .expect_err("a private helper is not importable (ORNA-IMPORT-004)");
         assert!(std_import_codes(error).contains(&DIAG_IMPORT.to_owned()));
+    }
+
+    /// Runs the authority binder directly, bypassing the semantic layer, so the
+    /// assertion depends on the authority check alone.
+    fn direct_std_bindings(
+        public: &[&str],
+        non_function: &[&str],
+        source: &str,
+    ) -> Result<BTreeMap<String, String>, ApplicationError> {
+        let public = public.iter().map(|name| (*name).to_owned()).collect::<BTreeSet<_>>();
+        let non_function = non_function
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let exports = StandardExports {
+            public: &public,
+            non_function: &non_function,
+        };
+        let parsed = parse_module_with_file(source, "main.orna".to_owned());
+        assert!(parsed.is_ok(), "test source must parse");
+        standard_import_bindings(&exports, &BTreeMap::new(), &parsed.value.items)
+    }
+
+    #[test]
+    fn direct_binder_refuses_a_private_explicit_import() {
+        let error = direct_std_bindings(
+            &["std.math.increment"],
+            &[],
+            "use std.math.{helper};\npub fn answer(): Int = 1;\n",
+        )
+        .expect_err("a private helper is not in the public exports");
+        assert_eq!(std_import_codes(error), vec![DIAG_IMPORT.to_owned()]);
+    }
+
+    #[test]
+    fn direct_binder_glob_binds_public_exports_only() {
+        let bindings = direct_std_bindings(
+            &["std.math.increment"],
+            &[],
+            "use std.math.*;\npub fn answer(): Int = 1;\n",
+        )
+        .expect("glob binds public functions");
+        assert_eq!(bindings.keys().map(String::as_str).collect::<Vec<_>>(), vec!["increment"]);
+    }
+
+    #[test]
+    fn explicit_import_takes_precedence_over_a_glob_in_either_order() {
+        let public = ["std.math.f", "std.b.f"];
+        for source in [
+            "use std.math.{f};\nuse std.b.*;\npub fn answer(): Int = 1;\n",
+            "use std.b.*;\nuse std.math.{f};\npub fn answer(): Int = 1;\n",
+        ] {
+            let bindings = direct_std_bindings(&public, &[], source)
+                .expect("explicit import wins over the glob");
+            assert_eq!(bindings.get("f").map(String::as_str), Some("std.math.f"));
+        }
+    }
+
+    #[test]
+    fn two_globs_exposing_one_name_are_ambiguous_in_either_order() {
+        let public = ["std.a.f", "std.b.f"];
+        for source in [
+            "use std.a.*;\nuse std.b.*;\npub fn answer(): Int = 1;\n",
+            "use std.b.*;\nuse std.a.*;\npub fn answer(): Int = 1;\n",
+        ] {
+            let error = direct_std_bindings(&public, &[], source)
+                .expect_err("two wildcards disagree about f");
+            assert_eq!(std_import_codes(error), vec![DIAG_AMBIGUOUS.to_owned()]);
+        }
+    }
+
+    #[test]
+    fn two_explicit_imports_of_one_name_stay_ambiguous_despite_a_glob() {
+        let error = direct_std_bindings(
+            &["std.a.f", "std.b.f", "std.c.f"],
+            &[],
+            "use std.a.{f};\nuse std.b.{f};\nuse std.c.*;\npub fn answer(): Int = 1;\n",
+        )
+        .expect_err("two explicit imports disagree about f");
+        assert_eq!(std_import_codes(error), vec![DIAG_AMBIGUOUS.to_owned()]);
+    }
+
+    #[test]
+    fn module_alias_imports_are_refused_at_admission() {
+        for source in [
+            "use std.math;\npub fn answer(): Int = 1;\n",
+            "use std.math as m;\npub fn answer(): Int = 1;\n",
+        ] {
+            let error = direct_std_bindings(&["std.math.increment"], &[], source)
+                .expect_err("a module alias binds nothing on this route");
+            match error {
+                ApplicationError::UnsupportedImport(message) => assert_eq!(
+                    message,
+                    "qualified std module alias not supported on this route"
+                ),
+                other => panic!("expected an unsupported-import refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn std_body_unqualified_call_never_resolves_to_a_user_function() {
+        // `g` is not defined by the pinned std module; the user's `g` must not
+        // capture the std body's unqualified call (ORNA-IMPORT-006 isolation).
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = g(value);\n",
+        )]);
+        let source = "use std.math.{increment};\npub fn g(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n";
+        // The std body must not capture the user's `g`: admission refuses, or the
+        // evaluated result is anything other than the user function's 101.
+        let refused = match authority.admit_module("main.orna", source, "answer") {
+            Err(_) => true,
+            Ok(admitted) => authority
+                .evaluate(&admitted, &Environment::new())
+                .map_or(true, |value| value != int_value(101)),
+        };
+        assert!(refused, "std body unqualified `g` resolved to the user function");
     }
 
     #[test]
