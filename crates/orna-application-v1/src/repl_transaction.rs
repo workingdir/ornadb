@@ -521,6 +521,20 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         self.handle_table_effect(callee, arguments)
     }
 
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        EffectHandler::admitted_relation_source(&self.mutations, name)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        EffectHandler::scan_relation_page(&mut self.mutations, source, after, limit, budget)
+    }
+
     fn is_ovb2_binding(&self) -> bool {
         true
     }
