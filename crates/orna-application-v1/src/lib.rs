@@ -70,6 +70,8 @@ pub fn remote_analysis_request(
 mod repl_transaction;
 mod browser_profile;
 mod table_reference;
+mod table_component_object;
+use table_component_object::{TableComponent, table_component_object_id};
 pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::ReplTransactionScope;
 mod format3_store;
@@ -2700,9 +2702,21 @@ fn catalog_table_rows(
         .map(|object_id| {
             let object = object_reference(database_id, object_id.bytes(), activation.clone())
                 .map_err(invalid_table_metadata)?;
+            let key_object = object_reference(
+                database_id,
+                table_component_object_id(object_id, TableComponent::Key),
+                activation.clone(),
+            )
+            .map_err(invalid_table_metadata)?;
+            let storage_object = object_reference(
+                database_id,
+                table_component_object_id(object_id, TableComponent::Storage),
+                activation.clone(),
+            )
+            .map_err(invalid_table_metadata)?;
             let reference = table_reference(object.clone()).map_err(invalid_table_metadata)?;
-            let key = key_reference(object.clone()).map_err(invalid_table_metadata)?;
-            let storage = storage_reference(object.clone()).map_err(invalid_table_metadata)?;
+            let key = key_reference(key_object).map_err(invalid_table_metadata)?;
+            let storage = storage_reference(storage_object).map_err(invalid_table_metadata)?;
             let fields = vec![
                 ("reference", catalog_reference_field(reference.as_row_ref())?),
                 ("object", catalog_reference_field(object.as_row_ref())?),

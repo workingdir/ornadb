@@ -148,6 +148,16 @@ impl SystemProviderLinkage {
     pub fn is_linked(&self, member: SystemSurfaceMember<'_>) -> bool {
         self.links.iter().any(|link| link.member == member)
     }
+
+    /// True when a production host other than `excluded` links a provider for
+    /// `member`. A host that serves no activation table snapshot excludes
+    /// [`SystemProviderHost::ActivationTableSnapshot`] so it never admits a
+    /// member only that host can execute (ORNA-SYS-008).
+    pub fn is_linked_except(&self, member: SystemSurfaceMember<'_>, excluded: SystemProviderHost) -> bool {
+        self.links
+            .iter()
+            .any(|link| link.member == member && link.host != excluded)
+    }
 }
 
 /// The production provider linkage. Host-registry callables are derived from
@@ -294,5 +304,22 @@ mod tests {
         ] {
             assert!(linkage.is_linked(member), "{member:?}");
         }
+    }
+
+    #[test]
+    fn snapshot_only_members_are_not_linked_when_their_host_is_excluded() {
+        let linkage = system_provider_linkage();
+        let snapshot_only = SystemSurfaceMember::Relation("sys.catalog.tables");
+        assert!(linkage.is_linked(snapshot_only));
+        assert!(linkage.is_linked_except(snapshot_only, SystemProviderHost::HostOperationRegistry));
+        assert!(!linkage.is_linked_except(
+            snapshot_only,
+            SystemProviderHost::ActivationTableSnapshot,
+        ));
+        let always_linked = SystemSurfaceMember::Callable("sys.rt.info");
+        assert!(linkage.is_linked_except(
+            always_linked,
+            SystemProviderHost::ActivationTableSnapshot,
+        ));
     }
 }

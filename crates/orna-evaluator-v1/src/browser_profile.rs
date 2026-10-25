@@ -68,7 +68,7 @@ pub fn execute_browser_profile(
     let analysis = analyze_with_providers(
         &[ModuleInput::new(PROFILE_SOURCE_PATH, source.to_owned())],
         &Catalogue::authoritative_core(),
-        SystemProviders::Production,
+        SystemProviders::ProductionWithoutActivationSnapshot,
     );
     if !analysis.is_ok() {
         let code = analysis

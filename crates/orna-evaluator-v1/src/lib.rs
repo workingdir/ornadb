@@ -1193,7 +1193,10 @@ pub trait EffectHandler {
 
     /// Validate a relation source without enumerating rows. Runtime handlers
     /// use this to preserve relation visibility when a plan such as `take(0)`
-    /// can return without requesting its first page.
+    /// can return without requesting its first page. The default accepts every
+    /// source, so a handler that serves relations but does not override this
+    /// does not reject an unknown source here; its `scan_relation_page` remains
+    /// the authority for whether a source exists.
     fn validate_relation_source(&mut self, _source: &str) -> Result<(), EvaluationError> {
         Ok(())
     }
