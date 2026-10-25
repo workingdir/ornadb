@@ -10046,15 +10046,14 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
 
 /// Stops Git's repository discovery at the worktree's parent directory so a
 /// corrupt worktree `.git` cannot fall through to an enclosing repository.
+/// The directory is made absolute first, so a relative path cannot yield an
+/// empty or relative ceiling.
 pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
-    if let Some(parent) = worktree.parent() {
+    let absolute = std::path::absolute(worktree)
+        .or_else(|_| worktree.canonicalize())
+        .unwrap_or_else(|_| worktree.to_path_buf());
+    if let Some(parent) = absolute.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
-    }
-    // An explicit git dir makes a corrupt HEAD fail closed instead of being
-    // re-discovered from an enclosing repository.
-    let git_dir = worktree.join(".git");
-    if git_dir.is_dir() {
-        command.env("GIT_DIR", git_dir);
     }
 }
 
@@ -12894,5 +12893,25 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+}
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::bind_git_discovery_to_worktree;
+    use std::process::Command;
+
+    #[test]
+    fn discovery_bind_makes_a_relative_ceiling_absolute() {
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, std::path::Path::new("relative/child"));
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, std::path::absolute("relative").unwrap());
     }
 }
