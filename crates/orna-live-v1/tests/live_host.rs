@@ -8812,6 +8812,42 @@ fn expired_session_answers_410_with_wire_session_expired() {
     );
 }
 
+/// 30-protocol §Session creation and ownership and portable codes: the
+/// WebSocket upgrade path reaches the same expired-boundary mapping as HTTP
+/// resume, so an elapsed session answers 410 with `wire.session_expired`
+/// before any reservation or pending upgrade is created.
+#[test]
+fn expired_session_websocket_upgrade_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let refused = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 100)
+        .unwrap_err();
+    assert_eq!(refused.status, 410);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
 /// 30-protocol §Protocol messages (ORNA-PROTO admission): when the per-session
 /// application work bound is full, a well-formed Eval is refused before any
 /// request state exists and receives a correlated `wire.limit` diagnostic on
