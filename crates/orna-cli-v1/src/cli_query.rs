@@ -19,7 +19,7 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::key_candidates;
+use crate::cli_row_key::{composite_key_error, key_candidates};
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
 };
@@ -117,9 +117,9 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 until = Some(parse_bound_key(value)?);
             }
             "--kind" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--kind needs a value", "usage: --kind MIME")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--kind needs a value", "usage: --kind MIME"))?;
                 predicate = predicate.with_media_type(value);
                 has_predicate = true;
             }
@@ -131,9 +131,9 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
                 has_predicate = true;
             }
             "--suffix" => {
-                let value = words.next().ok_or_else(|| {
-                    query_error("--suffix needs a value", "usage: --suffix HINT")
-                })?;
+                let value = words
+                    .next()
+                    .ok_or_else(|| query_error("--suffix needs a value", "usage: --suffix HINT"))?;
                 predicate = predicate.with_suffix(value);
                 has_predicate = true;
             }
@@ -226,14 +226,16 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
         return Ok(TypedKey::Text(text.to_owned()));
     }
     if let Some(number) = value.strip_prefix("int:") {
-        return number.parse::<i64>().map(TypedKey::Int).map_err(|_| {
-            query_error("Range integer key is not an i64", format!("got {value:?}"))
-        });
+        return number
+            .parse::<i64>()
+            .map(TypedKey::Int)
+            .map_err(|_| query_error("Range integer key is not an i64", format!("got {value:?}")));
     }
     if let Some(number) = value.strip_prefix("uint:") {
-        return number.parse::<u64>().map(TypedKey::UInt).map_err(|_| {
-            query_error("Range integer key is not a u64", format!("got {value:?}"))
-        });
+        return number
+            .parse::<u64>()
+            .map(TypedKey::UInt)
+            .map_err(|_| query_error("Range integer key is not a u64", format!("got {value:?}")));
     }
     if let Some(hex) = value.strip_prefix("bytes:") {
         if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -325,6 +327,15 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 format!("{error:?}"),
             )
         })?;
+    // The committed descriptor declares each primary-key component's type. A
+    // `--key` spelling is parsed as that type, and a composite key is refused
+    // with the typed diagnostic that names the successor bead.
+    let key_types = table
+        .descriptor()
+        .primary_key_primitive_types(*table.relation_id())
+        .map_err(|error| {
+            query_error("Table primary key could not be read", format!("{error:?}"))
+        })?;
     let row_map = format
         .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -342,8 +353,11 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // rather than a reinterpretation of the query.
     let rows = match options.key {
         Some(key) => {
+            let [key_type] = key_types.as_slice() else {
+                return Err(composite_key_error());
+            };
             let mut found = None;
-            for candidate in key_candidates(key)? {
+            for candidate in key_candidates(key, key_type.as_deref())? {
                 found = graph
                     .lookup_row(&candidate, &scope)
                     .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
@@ -365,7 +379,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             } else {
                 let range =
                     KeyRange::new(options.from.clone(), options.until.clone(), options.limit)
-                        .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+                        .map_err(|error| {
+                            query_error("Row range is invalid", format!("{error:?}"))
+                        })?;
                 graph.range_rows(&range, &scope).map_err(|error| {
                     query_error("Row range could not be read", format!("{error:?}"))
                 })?
@@ -401,10 +417,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // candidate that does not match is dropped rather than reported, and the
     // plan below states which coordinates answered it.
     let candidates = listings.len();
-    let subject = options.field.map_or_else(
-        || "all fields".to_owned(),
-        |field| format!("field {field}"),
-    );
+    let subject = options
+        .field
+        .map_or_else(|| "all fields".to_owned(), |field| format!("field {field}"));
     listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
     let matched = listings.len();
     listings.truncate(options.limit);
@@ -527,8 +542,10 @@ fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
         TypedKey::Tuple(_) | TypedKey::Value(_) => {
             return Err(query_error(
                 "Predicate scan cannot page this key type",
-                format!("key {key:?} has no successor in the row seam; narrow with --from/--until"),
-            ))
+                format!(
+                    "key {key:?} has no successor in the row seam (bead ornadb-5il1.461); narrow with --from/--until"
+                ),
+            ));
         }
     })
 }
@@ -613,11 +630,7 @@ fn render_key(key: &TypedKey) -> String {
         TypedKey::Bool(value) => value.to_string(),
         TypedKey::Null => "-".to_owned(),
         TypedKey::Bytes(bytes) => render_bytes(bytes),
-        TypedKey::Tuple(values) => values
-            .iter()
-            .map(render_key)
-            .collect::<Vec<_>>()
-            .join(","),
+        TypedKey::Tuple(values) => values.iter().map(render_key).collect::<Vec<_>>().join(","),
         TypedKey::Value(value) => value
             .canonical_text()
             .unwrap_or_else(|| format!("cbor:{}", hex(value.canonical_bytes()))),
@@ -674,9 +687,7 @@ fn query_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        parse_options, parse_relation_id, render_key, QueryFormat, DEFAULT_QUERY_LIMIT,
-    };
+    use super::{DEFAULT_QUERY_LIMIT, QueryFormat, parse_options, parse_relation_id, render_key};
     use crate::Exit;
     use orna_repository_v1::TypedKey;
 
@@ -736,7 +747,6 @@ mod tests {
         assert_eq!(parsed.key, Some("song"));
         assert_eq!(parsed.field, Some(0));
     }
-
 
     #[test]
     fn rendered_keys_follow_the_spelling_the_row_carries() {
@@ -804,4 +814,4 @@ mod tests {
         assert!(parse_bound_key("uint:-1").is_err());
         assert!(parse_bound_key("plain").is_err());
     }
- }
+}
