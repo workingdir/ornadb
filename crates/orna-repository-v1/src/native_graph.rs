@@ -7916,6 +7916,93 @@ mod persisted_orp_tests {
         );
     }
 
+    /// A cache hit is admitted exactly like a miss. Both charge the blob's
+    /// metadata to the same quota, so a repeated read cannot pass a budget that
+    /// its first read exhausted.
+    #[test]
+    fn a_cache_hit_is_charged_metadata_like_a_miss() {
+        let (directory, graph) = capture_test_context();
+        let content = b"quota charged on hit and miss\n";
+        let hex = write_blob_for_digest_test(directory.path(), content);
+        let oid = NativeOid::from_hex(graph.algorithm, &hex).expect("object id");
+        let scope = graph.open_read_scope().expect("read scope");
+        let size = content.len() as u64;
+        let objects_used = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let metadata_used = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        // The quota admits exactly one read's metadata, shared by both reads.
+        let mut first = ObjectBudget::new(
+            16,
+            16,
+            Arc::clone(&objects_used),
+            size,
+            Arc::clone(&metadata_used),
+        );
+        assert_eq!(
+            graph
+                .read_git_object(NativeObjectKind::Blob, &oid, 1024, &scope, &mut first)
+                .expect("the miss is admitted"),
+            content
+        );
+        let hits_before = graph.node_cache_hits();
+        let mut second = ObjectBudget::new(16, 16, objects_used, size, metadata_used);
+        assert!(matches!(
+            graph.read_git_object(NativeObjectKind::Blob, &oid, 1024, &scope, &mut second),
+            Err(GraphError::MetadataQuotaExceeded)
+        ));
+        assert!(
+            graph.node_cache_hits() > hits_before,
+            "the second read must be the cache hit that is charged"
+        );
+    }
+
+    /// A loose object whose bytes were replaced by another object's still
+    /// decodes, so the digest check is the only guard before the caller sees
+    /// the bytes. The batch path must refuse them.
+    #[test]
+    fn a_batch_read_whose_bytes_miss_the_requested_digest_fails_closed() {
+        let (directory, _graph) = capture_test_context();
+        let root = directory.path();
+        let requested = write_blob_for_digest_test(root, b"aaaa\n");
+        let other = write_blob_for_digest_test(root, b"bbbb\n");
+        let loose = |hex: &str| root.join(".git/objects").join(&hex[..2]).join(&hex[2..]);
+        std::fs::remove_file(loose(&requested)).expect("remove the loose object");
+        std::fs::copy(loose(&other), loose(&requested)).expect("swap in the other object");
+        let repository = crate::Repository::discover(root).expect("open repository");
+        let requested = NativeOid::from_hex(GitHashAlgorithm::Sha1, &requested).expect("object id");
+        assert!(matches!(
+            read_checked_object(
+                &repository,
+                GitHashAlgorithm::Sha1,
+                NativeObjectKind::Blob,
+                &requested,
+                |_| Ok(()),
+            ),
+            Err(GraphError::GitObjectHashMismatch)
+        ));
+    }
+
+    /// Writes one blob with git and returns its object id as hex.
+    fn write_blob_for_digest_test(root: &std::path::Path, content: &[u8]) -> String {
+        use std::io::Write as _;
+        let mut child = std::process::Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn git hash-object");
+        child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(content)
+            .expect("write blob");
+        String::from_utf8(child.wait_with_output().expect("hash-object").stdout)
+            .expect("utf-8 object id")
+            .trim()
+            .to_owned()
+    }
+
     fn capture_test_context() -> (tempfile::TempDir, NativeGraphContext) {
         let directory = tempfile::tempdir().expect("create capture repository");
         let graph = capture_context_in(directory.path());
@@ -13613,7 +13700,10 @@ impl NodeCache {
 
 #[cfg(test)]
 mod node_cache_tests {
-    use super::{GitHashAlgorithm, NODE_CACHE_MAX_ENTRIES, NativeObjectKind, NativeOid, NodeCache};
+    use super::{
+        GitHashAlgorithm, NODE_CACHE_MAX_BYTES, NODE_CACHE_MAX_ENTRIES, NativeObjectKind,
+        NativeOid, NodeCache,
+    };
 
     fn sha1(bytes: [u8; 20]) -> NativeOid {
         NativeOid::new(GitHashAlgorithm::Sha1, bytes).expect("a 20-byte SHA-1 id")
@@ -13664,6 +13754,33 @@ mod node_cache_tests {
         assert_eq!(cache.entries.len(), NODE_CACHE_MAX_ENTRIES);
         assert!(cache.get(NativeObjectKind::Blob, &indexed(1)).is_none());
         assert!(cache.get(NativeObjectKind::Blob, &indexed(0)).is_some());
+    }
+
+    #[test]
+    fn the_byte_cap_evicts_least_recent_entries_until_the_bytes_fit() {
+        let mut cache = NodeCache::default();
+        let half = NODE_CACHE_MAX_BYTES / 2;
+        cache.insert(NativeObjectKind::Blob, &indexed(1), vec![0; half]);
+        cache.insert(NativeObjectKind::Blob, &indexed(2), vec![0; half]);
+        assert_eq!(cache.bytes, NODE_CACHE_MAX_BYTES);
+        cache.insert(NativeObjectKind::Blob, &indexed(3), vec![0; half]);
+        assert!(cache.bytes <= NODE_CACHE_MAX_BYTES);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(1)).is_none());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(2)).is_some());
+        assert!(cache.get(NativeObjectKind::Blob, &indexed(3)).is_some());
+    }
+
+    #[test]
+    fn an_entry_larger_than_the_byte_cap_is_never_cached() {
+        let mut cache = NodeCache::default();
+        cache.insert(
+            NativeObjectKind::Blob,
+            &indexed(1),
+            vec![0; NODE_CACHE_MAX_BYTES + 1],
+        );
+        assert!(cache.entries.is_empty());
+        assert_eq!(cache.bytes, 0);
     }
 }
 
