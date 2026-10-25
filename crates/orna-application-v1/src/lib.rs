@@ -792,12 +792,14 @@ impl ApplicationAuthority {
     }
 }
 
-/// Declares the effect set of a source evaluation (REQUEST-1 step 5). An
-/// evaluation with a system host attached may reach host effects outside the
-/// table transaction and declares them possible. One without a host can
-/// perform only Orna table writes, and declares no external effects.
-pub(crate) fn declared_effects(sys_host_attached: bool) -> ActivationEffectReport {
-    ActivationEffectReport::declare(if sys_host_attached {
+/// Declares the effect set of an evaluation (REQUEST-1 step 5). The caller
+/// states whether its bindings may reach state outside Orna's table
+/// transaction (ORNA-CAP-005): a system host attachment or a bound
+/// `SysHostBindingRegistry` (see `may_reach_external_state`). Only an
+/// evaluation with neither performs Orna table writes alone, and only it
+/// declares no external effects.
+pub(crate) fn declared_effects(may_reach_external_state: bool) -> ActivationEffectReport {
+    ActivationEffectReport::declare(if may_reach_external_state {
         DeclaredEffectSet::ExternalPossible
     } else {
         DeclaredEffectSet::None
