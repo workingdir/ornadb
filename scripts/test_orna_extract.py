@@ -592,21 +592,125 @@ class CommandLineTests(unittest.TestCase):
             extract(self.root, "HEAD", self.root / "out", {})
 
 
-class IndependenceTests(unittest.TestCase):
-    """The extractor must stay outside every orna crate: stdlib imports only."""
+# Modules that can load or run code the guard does not read.
+FORBIDDEN_MODULES = frozenset({"builtins", "ctypes", "importlib", "multiprocessing", "pkgutil", "pty", "runpy"})
+# Names that run source text or import by name, whether called or aliased.
+DYNAMIC_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
+# Subprocess attributes that spawn nothing and may appear without a call.
+SUBPROCESS_CONSTANTS = frozenset({"PIPE", "DEVNULL", "STDOUT", "TimeoutExpired", "CalledProcessError"})
 
-    def test_the_extractor_imports_only_the_standard_library(self) -> None:
-        tree = ast.parse((REPO_ROOT / "scripts/orna_extract.py").read_text(encoding="utf-8"))
-        imported: set[str] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                imported.update(alias.name.split(".")[0] for alias in node.names)
-            elif isinstance(node, ast.ImportFrom):
-                self.assertEqual(node.level, 0, "the extractor has no relative imports")
-                imported.add((node.module or "").split(".")[0])
-        non_stdlib = sorted(name for name in imported if name not in sys.stdlib_module_names)
-        self.assertEqual(non_stdlib, [], "the extractor depends on non-stdlib modules")
-        self.assertFalse(any(name.startswith("orna") for name in imported), "the extractor depends on an orna crate")
+
+def _module_violations(name: str, line: int) -> list[str]:
+    if not name:
+        return []
+    top = name.split(".")[0]
+    problems = []
+    if top not in sys.stdlib_module_names:
+        problems.append(f"line {line}: non-stdlib module {name!r}")
+    if top.startswith("orna"):
+        problems.append(f"line {line}: orna module {name!r}")
+    if top in FORBIDDEN_MODULES:
+        problems.append(f"line {line}: module {name!r} can load or run code the guard does not read")
+    return problems
+
+
+def _is_process_function(attr: str) -> bool:
+    return attr.startswith(("exec", "spawn", "fork")) or attr in {"system", "popen", "kill", "killpg", "startfile"}
+
+
+def _subprocess_call_violations(call: ast.Call) -> list[str]:
+    line = call.lineno
+    argv = call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "args"), None)
+    if not isinstance(argv, ast.List) or not argv.elts:
+        return [f"line {line}: subprocess argv must be a literal list"]
+    problems = []
+    first = argv.elts[0]
+    if not (isinstance(first, ast.Constant) and first.value == "git"):
+        problems.append(f"line {line}: subprocess may only run git")
+    for element in argv.elts:
+        if isinstance(element, ast.Constant) and isinstance(element.value, str) and "orna" in element.value.lower():
+            problems.append(f"line {line}: subprocess argv names orna")
+    return problems
+
+
+def independence_violations(source: str) -> list[str]:
+    """Return every construct that could make the extractor depend on an orna crate or run the orna binary.
+
+    Checked: imports (stdlib only, no relative, no orna, no code-loading modules); dynamic
+    import and exec/eval/compile by name; os process functions; subprocess used only as a
+    direct call whose argv is a literal list starting with "git" and naming no orna. Not
+    checked: values produced by variables or getattr, and reflection beyond those names.
+    """
+    tree = ast.parse(source)
+    problems: list[str] = []
+    module_values = {id(node.value) for node in ast.walk(tree) if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)}
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    for node in ast.walk(tree):
+        line = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                problems += _module_violations(alias.name, line)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                problems.append(f"line {line}: relative import")
+            module = node.module or ""
+            problems += _module_violations(module, line)
+            if module in {"os", "subprocess"}:
+                problems.append(f"line {line}: 'from {module} import ...' hides calls; use 'import {module}'")
+        elif isinstance(node, ast.Name):
+            if node.id in DYNAMIC_NAMES:
+                problems.append(f"line {line}: {node.id} runs or imports by name")
+            if node.id in {"os", "subprocess"} and id(node) not in module_values:
+                problems.append(f"line {line}: bare reference to {node.id!r} can alias process calls")
+        elif isinstance(node, ast.Attribute):
+            if isinstance(node.value, ast.Name) and node.value.id == "os" and _is_process_function(node.attr):
+                problems.append(f"line {line}: os.{node.attr} runs a process")
+            if node.attr in {"import_module", "__import__"}:
+                problems.append(f"line {line}: dynamic import via .{node.attr}")
+            if isinstance(node.value, ast.Name) and node.value.id == "subprocess":
+                if node.attr not in SUBPROCESS_CONSTANTS and id(node) not in called:
+                    problems.append(f"line {line}: subprocess.{node.attr} must be called directly")
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if isinstance(node.func.value, ast.Name) and node.func.value.id == "subprocess":
+                problems += _subprocess_call_violations(node)
+    return problems
+
+
+class IndependenceTests(unittest.TestCase):
+    """The extractor stays outside every orna crate and never runs the orna binary."""
+
+    def setUp(self) -> None:
+        self.source = (REPO_ROOT / "scripts/orna_extract.py").read_text(encoding="utf-8")
+
+    def test_the_extractor_passes_the_guard(self) -> None:
+        self.assertEqual(independence_violations(self.source), [])
+
+    def test_the_guard_admits_a_literal_git_argv(self) -> None:
+        self.assertEqual(independence_violations('import subprocess\nsubprocess.run(["git", "-C", "r", "status"])\n'), [])
+
+    def test_the_guard_refuses_each_known_hole(self) -> None:
+        holes = {
+            "non-stdlib import": "import requests\n",
+            "orna import": "import orna_cli_v1\n",
+            "relative import": "from . import sibling\n",
+            "dynamic import_module": "import importlib as il\nil.import_module('orna_cli_v1')\n",
+            "__import__ call": "__import__('orna_cli_v1')\n",
+            "exec of source": "exec('import orna_cli_v1')\n",
+            "eval by name": "f = eval\n",
+            "ctypes import": "import ctypes\n",
+            "os.system": "import os\nos.system('orna export x')\n",
+            "os.execvp": "import os\nos.execvp('orna', ['orna'])\n",
+            "from os import system": "from os import system\n",
+            "from subprocess import run": "from subprocess import run\n",
+            "subprocess.run of orna": "import subprocess\nsubprocess.run(['orna', 'export', 'x'])\n",
+            "subprocess argv naming orna": "import subprocess\nsubprocess.run(['git', 'orna'])\n",
+            "subprocess with variable argv": "import subprocess\nsubprocess.Popen(COMMAND)\n",
+            "uncalled subprocess alias": "import subprocess\nrun = subprocess.run\n",
+            "bare os alias": "import os\nshell = os\n",
+        }
+        for label, extra in holes.items():
+            with self.subTest(hole=label):
+                self.assertTrue(independence_violations(self.source + "\n" + extra), label)
 
 
 if __name__ == "__main__":
