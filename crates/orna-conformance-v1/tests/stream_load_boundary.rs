@@ -106,12 +106,20 @@ async fn loading_and_semantic_admission_do_not_start_a_literal_stream() {
             .is_empty()
     );
 
+    // The primary handle owns the worktree owner lock, so a dispatch runtime
+    // would be Secondary and could not create writer lease [75] (ORNA-TURSO-005).
+    // Release the primary handle, let the runner open as the lock owner, then
+    // reopen the state for the post-dispatch observations.
+    drop(state);
     assert!(matches!(
         evaluator
             .execute_source(&repository, identity, [75; 16], [73; 32], &source)
             .await,
         Ok(StageOutcome::Passed)
     ));
+    let state = RuntimeState::open(&repository, identity, [73; 32])
+        .await
+        .expect("reopened runtime state");
     assert_eq!(
         state.latest_checkpoint().await.unwrap().unwrap().generation,
         2
