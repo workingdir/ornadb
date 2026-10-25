@@ -8,7 +8,7 @@
 //! at that request's HEAD commit, and the committed rows are overlaid with the
 //! CWD generation the runtime captures for that one activation (ORNA-TXN-005).
 //! Durable CWD changes are visible; the partial writes of an uncommitted
-//! activation are not (ORNA-TXN-006). Without that entry the server keeps its
+//! activation are not (ORNA-TXN-005). Without that entry the server keeps its
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
@@ -119,11 +119,7 @@ impl ServeApp {
             .authority
             .admit_module(SERVE_MODULE_PATH, source.clone(), SERVE_ENTRY)
             .map_err(|_| "serve.entry_unavailable")?;
-        let names = base
-            .table_schemas()
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let names = base.table_schemas().keys().cloned().collect::<Vec<_>>();
         if names.is_empty() {
             return self
                 .authority
@@ -286,4 +282,40 @@ pub(super) fn missing_entry_diagnostic() -> Diagnostic {
         "no serving entry: main.orna does not declare `pub fn serve()`",
         "add `pub fn serve()` to main.orna to serve `/`; Git transport remains available",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one_table(entries: Vec<(Vec<u8>, Vec<u8>)>) -> RuntimeTableRows {
+        [("Note".to_owned(), entries)].into()
+    }
+
+    #[test]
+    fn committed_read_at_the_row_bound_is_served_and_past_it_refused() {
+        let max_rows = Limits::default().max_collection_items;
+        let rows_of = |count: usize| {
+            one_table(
+                (0..count)
+                    .map(|index| (index.to_be_bytes().to_vec(), Vec::new()))
+                    .collect(),
+            )
+        };
+        assert_eq!(check_committed_read_limits(&rows_of(max_rows)), Ok(()));
+        assert_eq!(
+            check_committed_read_limits(&rows_of(max_rows + 1)),
+            Err("serve.table_read_limit")
+        );
+    }
+
+    #[test]
+    fn committed_read_past_the_byte_bound_is_refused() {
+        let max_bytes = orna_project_v1::ProjectLimits::default().max_source_bytes;
+        let rows = one_table(vec![(b"k".to_vec(), vec![0; max_bytes])]);
+        assert_eq!(
+            check_committed_read_limits(&rows),
+            Err("serve.table_read_limit")
+        );
+    }
 }
