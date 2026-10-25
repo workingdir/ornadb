@@ -286,8 +286,8 @@ pub(super) fn run_mount_cwd(endpoint: &Endpoint, mountpoint: &Path) -> Result<()
             )
         })?;
     release_dead_mount(&repository, mountpoint)?;
-    let view =
-        MountView::attach(&repository, mountpoint, commit.as_str()).map_err(attach_refusal)?;
+    let view = MountView::attach_writable(&repository, mountpoint, commit.as_str())
+        .map_err(attach_refusal)?;
     let status = match view.verify_record() {
         Ok(status) => status,
         Err(error) => {
@@ -1190,8 +1190,9 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
 }
 
 fn human_row(status: &MountStatus) -> String {
+    let access = if status.is_writable() { "writable" } else { "read-only" };
     format!(
-        "{} snapshot {} format {} legacy {} read-only",
+        "{} snapshot {} format {} legacy {} {access}",
         status.mountpoint().display(),
         status.snapshot_hex(),
         status.repository_format_number(),
@@ -1200,13 +1201,47 @@ fn human_row(status: &MountStatus) -> String {
 }
 
 fn status_json(status: &MountStatus) -> String {
+    let (drafts, draft_error) = status_drafts(status);
     mount_row_json(
         status.mountpoint(),
         &status.snapshot_hex(),
         &status.view_hex(),
         status.repository_format_number(),
         status.is_legacy_format(),
+        status.is_writable(),
+        &drafts,
+        draft_error.as_deref(),
     )
+}
+
+/// The unresolved drafts of a writable mount, as `(path, detail)` pairs. The
+/// detail carries the exact Orna cause code and any retained draft id. A
+/// writable mount whose drafts cannot be listed reports the reason instead of
+/// failing the whole status.
+#[cfg(target_os = "linux")]
+fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
+    if !status.is_writable() {
+        return (Vec::new(), None);
+    }
+    match crate::fuse_mount::unresolved_draft_list(status.mountpoint()) {
+        Ok(list) => (
+            list.lines()
+                .filter_map(|line| line.split_once('\t'))
+                .map(|(path, detail)| (path.to_owned(), detail.to_owned()))
+                .collect(),
+            None,
+        ),
+        Err(error) => (Vec::new(), Some(error)),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
+    if status.is_writable() {
+        (Vec::new(), Some("live draft listing requires Linux FUSE".to_owned()))
+    } else {
+        (Vec::new(), None)
+    }
 }
 
 /// One status object with the documented keys. The mountpoint is JSON-escaped
@@ -1218,14 +1253,36 @@ fn mount_row_json(
     view_hex: &str,
     format: u8,
     legacy: bool,
+    writable: bool,
+    drafts: &[(String, String)],
+    draft_error: Option<&str>,
 ) -> String {
+    let drafts = drafts
+        .iter()
+        .map(|(path, detail)| {
+            format!(
+                "{{\"path\":\"{}\",\"detail\":\"{}\"}}",
+                escape_json(path),
+                escape_json(detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let draft_error = match draft_error {
+        Some(error) => format!("\"{}\"", escape_json(error)),
+        None => "null".to_owned(),
+    };
     format!(
-        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"read_only\":true}}",
+        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"unresolved_drafts\":[{}],\"draft_error\":{}}}",
         escape_json(&mountpoint.to_string_lossy()),
         snapshot_hex,
         view_hex,
         format,
         legacy,
+        writable,
+        !writable,
+        drafts,
+        draft_error,
     )
 }
 
@@ -1254,16 +1311,30 @@ mod tests {
 
     #[test]
     fn status_json_has_exactly_the_documented_keys() {
-        let object = mount_row_json(Path::new("/mnt/old"), "aa", "bb", 1, true);
+        let object = mount_row_json(Path::new("/mnt/old"), "aa", "bb", 1, true, false, &[], None);
         assert_eq!(
             object,
-            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"read_only\":true}"
+            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"writable\":false,\"read_only\":true,\"unresolved_drafts\":[],\"draft_error\":null}"
         );
     }
 
     #[test]
+    fn mount_status_json_reports_writable_cwd_and_refusal_codes() {
+        let drafts = vec![(
+            "Music/london/data.orna".to_owned(),
+            "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
+        )];
+        let object =
+            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &drafts, None);
+        assert!(object.contains("\"writable\":true,\"read_only\":false"), "{object}");
+        assert!(object.contains("sys.vfs.stale_edit"), "{object}");
+        assert!(object.contains("candidate retained as draft d1"), "{object}");
+        assert!(object.contains("\"draft_error\":null"), "{object}");
+    }
+
+    #[test]
     fn status_json_escapes_a_hostile_mountpoint() {
-        let object = mount_row_json(Path::new("/mnt/a\"b\\c"), "aa", "bb", 3, false);
+        let object = mount_row_json(Path::new("/mnt/a\"b\\c"), "aa", "bb", 3, false, false, &[], None);
         assert!(object.contains("\\\""), "quote is escaped: {object}");
         assert!(object.contains("\\\\"), "backslash is escaped: {object}");
         assert!(
