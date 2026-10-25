@@ -2101,3 +2101,61 @@ mod tests {
         assert!(!valid_snapshot_bundle("/etc/passwd"));
     }
 }
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::{git_output_stdin, is_repository, verify_blob};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A parent repository holding one six-byte blob, and a nested repository
+    /// with a corrupt HEAD that does not contain that blob.
+    fn corrupt_child_of_repository_with_blob() -> (tempfile::TempDir, PathBuf, String) {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        std::fs::write(parent.path().join("payload"), b"pinned").unwrap();
+        let oid = git(parent.path(), &["hash-object", "-w", "payload"]);
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-q"]);
+        std::fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
+        (parent, child, oid)
+    }
+
+    #[test]
+    fn verify_blob_does_not_read_an_enclosing_repository() {
+        let (parent, child, oid) = corrupt_child_of_repository_with_blob();
+        verify_blob(parent.path(), &oid, 6).unwrap();
+        assert!(verify_blob(&child, &oid, 6).is_err());
+    }
+
+    #[test]
+    fn git_output_stdin_does_not_read_an_enclosing_repository() {
+        let (parent, child, oid) = corrupt_child_of_repository_with_blob();
+        assert!(git_output_stdin(parent.path(), &["cat-file", "-e", oid.as_str()], None).is_ok());
+        assert!(git_output_stdin(&child, &["cat-file", "-e", oid.as_str()], None).is_err());
+    }
+
+    #[test]
+    fn is_repository_does_not_adopt_a_plain_subdirectory_of_a_repository() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        let subdirectory = parent.path().join("plain");
+        std::fs::create_dir(&subdirectory).unwrap();
+        assert!(!is_repository(&subdirectory));
+        // A child with its own .git entry counts as a repository by presence;
+        // its corrupt HEAD then fails every later git call closed.
+        let (_parent, child, _oid) = corrupt_child_of_repository_with_blob();
+        assert!(is_repository(&child));
+    }
+}
