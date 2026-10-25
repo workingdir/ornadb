@@ -514,30 +514,52 @@ fn a_composite_key_predicate_scan_pages_every_row() {
     let directory = TempDir::new().expect("a temporary directory");
     let (root, relation) = committed_table(
         &directory,
-        "pub table Stock(location: Str, sku: Str) { quantity: Int, }\n",
+        "pub table Stock(location: Str, sku: Str) { quantity: Int, content: Blob, }\n",
         "Stock",
     );
-    let inserts = (0..300)
-        .map(|index| {
-            format!(
-                r#"main.Stock.insert({{ location: "north", sku: "widget {index:03}", quantity: {index} }})"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert_success(&orna_repl(&root, &inserts), "REPL composite inserts");
-    publish(&root, "Add three hundred stock rows");
+    let media_root = format!("{:?}", root.to_string_lossy().as_ref());
+    // The REPL admits one effectful request per invocation, so each blob-bearing
+    // row is its own single-unit input: capture, annotate, insert, publish.
+    // Rows 200..300 are annotated text/plain and match the predicate; rows
+    // 0..200 are not. The matches therefore start before the 256-row page
+    // boundary and continue past it.
+    for index in 0..300 {
+        let name = format!("tone{index:03}.txt");
+        let mime = if index >= 200 { "text/plain" } else { "application/octet-stream" };
+        std::fs::write(root.join(&name), vec![b'r'; 64]).expect("write the captured file");
+        let input = format!(
+            r#"let raw = sys.blob.capture_file({media_root}, "{name}", 4096);
+let content = sys.blob.annotate(raw, "{mime}");
+main.Stock.insert({{ location: "north", sku: "widget {index:03}", quantity: {index}, content: content }})"#
+        );
+        assert_success(&orna_repl(&root, &input), "REPL composite insert");
+        publish(&root, &format!("Add stock row {index:03}"));
+    }
 
+    // All 300 rows are scanned in ordered pages of 256. Exactly the 100 rows
+    // from index 200 match, so the listing is not truncated and must report
+    // every matching key once, in key order, across the 256-row boundary.
     let scanned = json(
         &orna(
             &root,
-            &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
+            &["query", relation.as_str(), "--kind", "text/plain", "--limit", "256", "--format", "json"],
         ),
         "orna query composite predicate scan",
     );
     assert_eq!(scanned["rows"], 300, "{scanned}");
-    assert_eq!(scanned["plan"]["candidates"], 0, "{scanned}");
-    assert_eq!(scanned["blobs"], 0, "{scanned}");
+    assert_eq!(scanned["plan"]["candidates"], 300, "{scanned}");
+    assert_eq!(scanned["plan"]["matched"], 100, "{scanned}");
+    assert_eq!(scanned["blobs"], 100, "{scanned}");
+    let listed: Vec<String> = scanned["listings"]
+        .as_array()
+        .expect("the listing is an array")
+        .iter()
+        .map(|entry| entry["key"].as_str().expect("a rendered key").to_owned())
+        .collect();
+    let expected: Vec<String> = (200..300)
+        .map(|index| format!("north,widget {index:03}"))
+        .collect();
+    assert_eq!(listed, expected, "every matching key, once, in key order");
 }
 
 /// A bound whose spelling does not match the table's `Int` primary key is
