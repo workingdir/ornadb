@@ -22,7 +22,8 @@ use orna_live_v1::{
     LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_project_v1::{
-    AdmittedSourceRow, LoadedProject, ResolvedTableSchema, admitted_table_schemas,
+    AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
+    admitted_table_schemas,
 };
 use orna_protocol_v1::{
     Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
@@ -582,27 +583,15 @@ impl ApplicationAuthority {
         handler.into_staged_activation(value, None, effects)
     }
 
-    /// Evaluates table mutations against one activation-pinned table snapshot.
-    /// This is required for operations whose result depends on the previous
-    /// row value (`update`, patching `upsert`, and `rekey`). The returned work
-    /// can only be staged against the same captured generation.
-    /// `publication_rows` carries the durable publication snapshot for the
-    /// same activation when the entry scans `sys` relations, mirroring
-    /// [`Self::evaluate_staged_with_publication_rows`].
-    pub fn evaluate_staged_with_table_snapshot(
-        &self,
-        application: &AdmittedApplication,
-        arguments: &Environment,
-        snapshot: &RuntimeTableActivationSnapshot,
-        publication_rows: Option<RuntimePublicationMetadataRows>,
-    ) -> Result<StagedActivation, ApplicationError> {
-        self.evaluate_staged_with_table_snapshot_rows(
-            application,
-            arguments,
-            snapshot,
-            snapshot.table_rows().clone(),
-            publication_rows,
-        )
+    /// The bound every committed table read observes: a table may hold at most
+    /// the evaluator's collection limit of rows, and the admitted rows' key and
+    /// stored tuple bytes across the read may not exceed the project source byte
+    /// limit. The read refuses the first row past either bound before retaining it.
+    pub fn committed_read_limits() -> CommittedReadLimits {
+        CommittedReadLimits {
+            max_rows_per_table: Limits::default().max_collection_items,
+            max_bytes: ProjectLimits::default().max_source_bytes,
+        }
     }
 
     /// Evaluates against `snapshot`'s activation with `rows` as the table
@@ -627,21 +616,6 @@ impl ApplicationAuthority {
             publication_rows,
             Some(snapshot.context().capture().generation_digest()),
         )
-    }
-
-    /// Evaluates admitted source over committed `HEAD` rows alone. Unlike
-    /// [`Self::evaluate_staged_with_table_snapshot`], no unpublished runtime tail
-    /// is overlaid: the rows are exactly the committed base the caller read, so
-    /// uncommitted writes of other activations are never observed (ORNA-TXN-006).
-    /// `publication_rows` mirrors [`Self::evaluate_staged_with_publication_rows`].
-    pub fn evaluate_staged_over_committed_rows(
-        &self,
-        application: &AdmittedApplication,
-        arguments: &Environment,
-        rows: RuntimeTableRows,
-        publication_rows: Option<RuntimePublicationMetadataRows>,
-    ) -> Result<StagedActivation, ApplicationError> {
-        self.evaluate_staged_over_table_rows(application, arguments, rows, publication_rows, None)
     }
 
     fn evaluate_staged_over_table_rows(
@@ -13756,10 +13730,11 @@ pub fn main(): Int {
             &NoFault,
             |snapshot| {
                 let evaluated = authority
-                    .evaluate_staged_with_table_snapshot(
+                    .evaluate_staged_with_table_snapshot_rows(
                         &application,
                         &Environment::new(),
                         snapshot,
+                        snapshot.table_rows().clone(),
                         None,
                     )
                     .map_err(|error| error.to_string());
