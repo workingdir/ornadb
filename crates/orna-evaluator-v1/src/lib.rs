@@ -942,13 +942,20 @@ impl Functions {
     }
 
     /// Merges `other`'s own functions and aliases into this table; a same-key
-    /// entry from `other` replaces this table's. The standard layer is adopted
-    /// only when this table has none.
+    /// entry from `other` replaces this table's. A standard layer is adopted
+    /// when this table has none; a second, distinct standard layer is a
+    /// programming error and panics rather than being silently dropped.
     pub fn extend(&mut self, other: Functions) {
         self.local.extend(other.local);
         self.local_aliases.extend(other.local_aliases);
-        if self.standard.is_none() {
-            self.standard = other.standard;
+        if let Some(other_layer) = other.standard {
+            match &self.standard {
+                None => self.standard = Some(other_layer),
+                Some(layer) => assert!(
+                    Arc::ptr_eq(layer, &other_layer),
+                    "Functions::extend received a second, distinct standard layer"
+                ),
+            }
         }
     }
 }
