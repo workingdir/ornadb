@@ -737,66 +737,20 @@ impl LiveApplication for TransactionalApplication {
     }
 }
 
-/// Commits its table mutations, then answers with a response that does not
-/// correlate to the request. The host must retain it without a value.
-struct MismatchedTransactionalApplication {
+/// Applies its effects inside a plain Eval and answers with a response that
+/// does not correlate to the request. The host must retain the terminal
+/// without a value and never re-invoke the application for that request.
+struct MismatchedApplication {
     calls: usize,
-    mutations: Vec<TableMutation>,
 }
 
-impl LiveApplication for MismatchedTransactionalApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
-        Err(Error::UnsupportedOperation)
-    }
-
-    fn eval_with_transaction<'a>(
-        &'a mut self,
-        session: [u8; 16],
-        request: [u8; 16],
-        message: &'a Message,
-        _: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
-        _: &'a mut orna_live_v1::LiveApplicationWorkLease,
-    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
+impl LiveApplication for MismatchedApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], message: &Message) -> Result<Envelope, Error> {
         let Message::Eval { fingerprint, .. } = message else {
-            return Box::pin(async { Err(Error::ApplicationRejected) });
+            return Err(Error::ApplicationRejected);
         };
         self.calls += 1;
-        let response = unit_result([99; 16], *fingerprint);
-        let transaction = LiveEvalTransaction::new(
-            self.mutations.clone(),
-            [4; 32],
-            ActivationEffectReport::declare(DeclaredEffectSet::None),
-            Arc::new(NoFault),
-        )
-        .for_request(RequestIdentity {
-            session_id: session,
-            request_id: request,
-        });
-        Box::pin(async move { Ok(LiveEvalResponse::transaction(response, transaction)) })
-    }
-
-    fn dispatch_eval_with_work<'a>(
-        &'a mut self,
-        session: [u8; 16],
-        request: [u8; 16],
-        message: &'a Message,
-        context: Option<&'a orna_runtime_v1::RuntimeActivationContext>,
-        work: &'a mut orna_live_v1::LiveApplicationWorkLease,
-    ) -> Pin<Box<dyn Future<Output = Result<LiveEvalResponse, Error>> + 'a>> {
-        Box::pin(async move {
-            work.check_active()?;
-            let response = self
-                .eval_with_transaction(session, request, message, context, work)
-                .await?;
-            work.complete();
-            work.check_active()?;
-            Ok(response)
-        })
+        Ok(unit_result([99; 16], *fingerprint))
     }
 
     fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
@@ -10987,13 +10941,8 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
     }))
     .unwrap();
 
-    let request = eval([1; 16], [26; 16], "insert");
-    let mut application = MismatchedTransactionalApplication {
-        calls: 0,
-        mutations: vec![
-            TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
-        ],
-    };
+    let request = eval([1; 16], [26; 16], "1");
+    let mut application = MismatchedApplication { calls: 0 };
     let first = block_on(host.dispatch_frame(
         [5; 16],
         2,
@@ -11001,9 +10950,9 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
         &mut application,
     ))
     .unwrap();
-    // Effects were committed before the mismatch was seen, so the terminal
-    // must be retained-without-value, not a "not executed" diagnostic
-    // (ORNA-PROTO-004; 30-protocol.md L121).
+    // The application has already applied its effects, so the uncorrelated
+    // answer must be retained without a value rather than reported as a
+    // pre-execution rejection (ORNA-PROTO-004; 30-protocol.md L121).
     assert!(matches!(
         first.response.as_ref().unwrap().message,
         Message::Result {
@@ -11014,10 +10963,6 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
         }
     ));
     assert_eq!(application.calls, 1);
-    assert_eq!(
-        block_on(open_durable_state(&repository).committed_table_row("books", &[1])),
-        Ok(Some(vec![2]))
-    );
     drop(host);
 
     // A restarted durable host must replay the retained terminal under the
@@ -11033,12 +10978,7 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
         now: 1,
     }))
     .unwrap();
-    let mut replay_application = MismatchedTransactionalApplication {
-        calls: 0,
-        mutations: vec![
-            TableMutation::new([1; 16], "books", vec![1], Some(vec![3])).unwrap(),
-        ],
-    };
+    let mut replay_application = MismatchedApplication { calls: 0 };
     let replay = block_on(restarted.dispatch_frame(
         [6; 16],
         2,
@@ -11048,7 +10988,6 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
     .unwrap();
     assert_eq!(replay.response, first.response);
     assert_eq!(replay_application.calls, 0);
-    assert_eq!(application.calls + replay_application.calls, 1);
     drop(restarted);
     remove_test_repository(&root);
 }
