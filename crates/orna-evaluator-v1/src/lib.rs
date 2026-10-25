@@ -549,6 +549,66 @@ fn system_enum_constant(expression: &Expr, scope: &Scope) -> Option<(String, Str
     orna_semantic_v1::system_enum_constant(&segments)
 }
 
+/// Replaces every format-3 Blob reference in a raw REPL result with its
+/// payload-free summary. Map entries are re-sorted by encoded key because a
+/// summarised key may no longer sort where its reference did.
+fn summarise_rov3_blobs(raw: Raw) -> Result<Raw, EvaluationError> {
+    Ok(match raw {
+        reference @ Raw::Tag(ROV3_BLOB_TAG, _) => rov3_blob_summary(&reference)?,
+        Raw::Tag(tag, payload) => Raw::Tag(tag, Box::new(summarise_rov3_blobs(*payload)?)),
+        Raw::Array(values) => Raw::Array(
+            values
+                .into_iter()
+                .map(summarise_rov3_blobs)
+                .collect::<Result<_, _>>()?,
+        ),
+        Raw::Map(entries) => {
+            let mut entries = entries
+                .into_iter()
+                .map(|(key, value)| {
+                    let key = summarise_rov3_blobs(key)?;
+                    let value = summarise_rov3_blobs(value)?;
+                    let encoded_key = CanonicalValue::new(key.clone())
+                        .map_err(|_| error("ORNA-EVAL-VALUE"))?
+                        .encode()
+                        .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                    Ok((encoded_key, key, value))
+                })
+                .collect::<Result<Vec<_>, EvaluationError>>()?;
+            entries.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+            Raw::Map(
+                entries
+                    .into_iter()
+                    .map(|(_, key, value)| (key, value))
+                    .collect(),
+            )
+        }
+        other => other,
+    })
+}
+
+/// The payload-free REPL summary of one format-3 Blob reference: its
+/// committed identity and annotation. The descriptor OID is not presented.
+fn rov3_blob_summary(reference: &Raw) -> Result<Raw, EvaluationError> {
+    let metadata =
+        orna_value_v1::blob_metadata_from_raw(reference).map_err(|_| error("ORNA-EVAL-VALUE"))?;
+    Ok(Raw::Map(vec![
+        (Raw::Text("type".to_owned()), Raw::Text("Blob".to_owned())),
+        (Raw::Text("length".to_owned()), Raw::Int(metadata.length().into())),
+        (Raw::Text("sha256".to_owned()), Raw::Bytes(metadata.sha256().to_vec())),
+        (
+            Raw::Text("suffix".to_owned()),
+            metadata
+                .suffix()
+                .map_or(Raw::Null, |suffix| Raw::Text(suffix.to_owned())),
+        ),
+        (
+            Raw::Text("media_type".to_owned()),
+            Raw::Text(metadata.media_type().to_owned()),
+        ),
+    ]))
+}
+
 fn object_id_raw(object_id: [u8; 16]) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(object_id.to_vec())))
 }
@@ -3599,6 +3659,13 @@ impl Value {
             return Err(failure);
         }
         CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+    /// REPL result boundary; see [`Value::canonical`]. A format-3 Blob is
+    /// presented as its payload-free summary, so the result stays canonical
+    /// without copying the reference's bytes or descriptor across the boundary.
+    fn canonical_repl_result(self) -> Result<CanonicalValue, EvaluationError> {
+        CanonicalValue::new(summarise_rov3_blobs(self.raw()?)?)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
     fn raw(self) -> Result<Raw, EvaluationError> {
         Ok(match self {
@@ -19219,6 +19286,109 @@ mod blob_equality_tests {
                     upper_inclusive: true,
                 },
             )
+            .unwrap()
+        );
+    }
+
+    fn rov3_blob_value(payload: &[u8]) -> Value {
+        let database = [1; 16];
+        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
+            std::sync::Arc::new(PayloadResolver {
+                payload: payload.to_vec(),
+                reads: std::sync::atomic::AtomicUsize::new(0),
+            });
+        let context = Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let reference = context
+            .reference(
+                orna_value_v1::ContentIdentity::from_bytes(payload),
+                orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+            )
+            .unwrap();
+        let blob = orna_value_v1::Blob::from_reference_with_annotation(
+            reference,
+            "application/octet-stream",
+            None,
+        )
+        .unwrap();
+        Value::ContextualBlob(ContextValue::from_blob(&blob, ValueFormat::Rov3).unwrap())
+    }
+
+    /// The payload-free summary a format-3 Blob presents at the REPL boundary.
+    fn blob_summary_raw(payload: &[u8]) -> Raw {
+        let identity = orna_value_v1::ContentIdentity::from_bytes(payload);
+        Raw::Map(vec![
+            (Raw::Text("type".to_owned()), Raw::Text("Blob".to_owned())),
+            (Raw::Text("length".to_owned()), Raw::Int(identity.length().into())),
+            (Raw::Text("sha256".to_owned()), Raw::Bytes(identity.sha256().to_vec())),
+            (Raw::Text("suffix".to_owned()), Raw::Null),
+            (
+                Raw::Text("media_type".to_owned()),
+                Raw::Text("application/octet-stream".to_owned()),
+            ),
+        ])
+    }
+
+    fn canonical_summary(value: Value) -> CanonicalValue {
+        value
+            .canonical_repl_result()
+            .unwrap_or_else(|error| panic!("REPL result: {}", error.code()))
+    }
+
+    #[test]
+    fn repl_result_reports_rov3_blob_as_payload_free_summary() {
+        let payload: &[u8] = b"payload";
+        let canonical = canonical_summary(rov3_blob_value(payload));
+        assert_eq!(
+            canonical,
+            CanonicalValue::new(blob_summary_raw(payload)).unwrap()
+        );
+        let encoded = canonical.encode().unwrap();
+        assert!(!encoded.windows(payload.len()).any(|window| window == payload));
+    }
+
+    #[test]
+    fn repl_result_summarises_nested_rov3_blobs_in_canonical_order() {
+        let payload: &[u8] = b"payload";
+        let summary = blob_summary_raw(payload);
+        // A tuple or list carries the blob as an ordinary element.
+        assert_eq!(
+            canonical_summary(Value::Tuple(vec![
+                Value::Int(1.into()),
+                rov3_blob_value(payload),
+            ])),
+            CanonicalValue::new(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), summary.clone()])),
+            ))
+            .unwrap()
+        );
+        assert_eq!(
+            canonical_summary(Value::List(vec![rov3_blob_value(payload)].into())),
+            CanonicalValue::new(Raw::Array(vec![summary.clone()])).unwrap()
+        );
+        // Record fields keep canonical key order, and the summarised result
+        // must still validate as a canonical map.
+        let record = Value::Record(std::collections::BTreeMap::from([
+            ("b".to_owned(), rov3_blob_value(payload)),
+            ("a".to_owned(), Value::Int(1.into())),
+        ]));
+        assert_eq!(
+            canonical_summary(record),
+            CanonicalValue::new(Raw::Map(vec![
+                (Raw::Text("a".to_owned()), Raw::Int(1.into())),
+                (Raw::Text("b".to_owned()), summary),
+            ]))
             .unwrap()
         );
     }
