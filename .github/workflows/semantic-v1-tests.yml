@@ -36,10 +36,10 @@ jobs:
       # both fail this job.
       # The list may only shrink. Raising SEMANTIC_KNOWN_RED_MAX requires owner
       # approval stated in the PR description.
-      # SEMANTIC_KNOWN_RED_MAX raised 35->40 for ornadb-0im9 (5 tests: root
-      # intrinsic calls lack argument-type checks). Must shrink back to 35 when
-      # ornadb-0im9 lands; any further raise needs owner approval in the PR.
+      # SEMANTIC_KNOWN_RED_MAX is 35. ornadb-0im9 (root intrinsic argument-type
+      # checks) landed for its five tests by qualifying their inputs as
+      # std.collection.<op>; any further raise needs owner approval in the PR.
       - name: Check semantic v1 tests against the known-red list
         env:
-          SEMANTIC_KNOWN_RED_MAX: "40"
+          SEMANTIC_KNOWN_RED_MAX: "35"
         run: scripts/check-semantic-known-red.sh
