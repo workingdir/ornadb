@@ -395,6 +395,43 @@ fn complete_copy_relative_dependency_does_not_fall_through_to_the_parent() {
     assert!(status.success(), "relative dependency export failed: {status}");
 }
 
+/// Relative-path fall-through at the real entry point: the working directory is a
+/// healthy repository and the relative dependency directory is a child whose
+/// `HEAD` is corrupt. Discovery must fail closed rather than adopt the parent.
+#[test]
+fn complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent() {
+    const CHILD: &str = "ORNA_COMPLETE_COPY_CORRUPT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = PathBuf::from(std::env::var_os(CHILD).expect("child root"));
+        let project = root.join("library");
+        let archive = root.join("corrupt-archive");
+        let repository = Repository::discover(&project).expect("discover superproject");
+        let sources = [DependencySource {
+            path: "deps/std".to_owned(),
+            directory: PathBuf::from("std-dependency"),
+        }];
+        std::env::set_current_dir(&root).expect("enter healthy parent");
+        let result = export_complete_copy(&repository, "HEAD", &archive, &sources);
+        assert!(result.is_err(), "corrupt relative child must not adopt parent");
+        return;
+    }
+
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(&project, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(root.path(), &["init", "-q"]);
+    fs::write(dependency.join(".git").join("HEAD"), b"garbage\n").expect("corrupt child HEAD");
+    let status = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD, root.path())
+        .status()
+        .expect("run child export");
+    assert!(status.success(), "corrupt relative dependency export did not fail closed: {status}");
+}
+
 #[test]
 fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     let root = TempDir::new().expect("create fixture root");

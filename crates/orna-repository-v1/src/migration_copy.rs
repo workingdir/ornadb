@@ -1706,4 +1706,14 @@ mod tests {
         assert!(require_migration_index_pin(&repository, EMPTY_TREE).is_err());
         assert!(pin_migration_index(&repository, EMPTY_TREE).is_err());
     }
+
+    #[test]
+    fn copy_index_blobs_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(parent.path());
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        git(&destination, &["init", "-q"]);
+        assert!(super::copy_index_blobs(&child, &destination).is_err());
+    }
 }
