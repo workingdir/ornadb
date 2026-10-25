@@ -664,7 +664,8 @@ pub fn export_complete_copy(
 /// commit it replaced can both be read offline from one archive (Gate F: both
 /// snapshots reconstruct with the original remotes disabled).
 ///
-/// Every member must be an admitted format-3 snapshot of the same repository.
+/// Every member must be an admitted snapshot of the same repository: a
+/// legacy format-1/2 commit or a format-3 commit with complete roots.
 /// A gitlink whose pinned commit is not reachable from the primary member is
 /// resolved from the member that does pin it, so a snapshot that predates a
 /// dependency bump can still be exported with its own dependency commit.
@@ -685,16 +686,17 @@ pub fn export_complete_copy_of(
         let commit = repository
             .resolve_snapshot(selector)
             .map_err(|_| CompleteCopyError::UnresolvedSnapshot)?;
-        // Proving the pinned snapshot admits format-3 metadata proves its schema
-        // and committed store roots before any object is copied, so a text tree
-        // without its row/graph closure cannot be exported as a complete copy.
+        // Admitting the pinned snapshot proves its recorded format and, for
+        // format 3, its schema and committed store roots before any object is
+        // copied, so a text tree without its row/graph closure cannot be
+        // exported as a complete copy.
         let pin = repository
             .pin_snapshot(commit.as_str())
             .map_err(|_| CompleteCopyError::UnresolvedSnapshot)?;
         let format = repository
             .open_format_context_at(&pin)
             .map_err(|_| CompleteCopyError::NotAFormat3Snapshot)?;
-        if format.validate_schema_root().is_err() || format.validate_store_root().is_err() {
+        if !snapshot_roots_admitted(&format) {
             return Err(CompleteCopyError::NotAFormat3Snapshot);
         }
         let name = commit.as_str().to_owned();
@@ -908,7 +910,7 @@ fn restore_complete_copy_from_manifest(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_format3_snapshot(restored, &member.commit)?;
+        verify_admitted_snapshot(restored, &member.commit)?;
     }
 
     for dependency in &manifest.dependencies {
@@ -972,7 +974,7 @@ pub fn materialize_complete_copy(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_format3_snapshot(copy, &member.commit)?;
+        verify_admitted_snapshot(copy, &member.commit)?;
     }
     checkout(copy, &manifest.snapshot)?;
     for dependency in &manifest.dependencies {
@@ -1501,11 +1503,12 @@ fn verify_recorded_closure(
     Ok(())
 }
 
-/// Re-admits a copied snapshot's format-3 schema and store roots from its own
-/// object database. Generic Git closure checks alone do not prove that the
-/// reconstructed commit still opens as the format-3 repository the exporter
-/// promised.
-fn verify_format3_snapshot(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
+/// Re-admits a copied snapshot from its own object database. Generic Git
+/// closure checks alone do not prove that the reconstructed commit still opens
+/// as the repository the exporter promised: a format-3 member must present its
+/// schema and store roots, and a legacy member must still admit its recorded
+/// format record.
+fn verify_admitted_snapshot(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
     let snapshot_scope = format!("snapshot {commit}");
     let repository =
         Repository::discover(directory).map_err(|_| CompleteCopyError::IntegrityMismatch {
@@ -1519,20 +1522,28 @@ fn verify_format3_snapshot(directory: &Path, commit: &str) -> Result<(), Complet
             })?;
     let format = repository.open_format_context_at(&pin).map_err(|_| {
         CompleteCopyError::IntegrityMismatch {
-            scope: format!("{snapshot_scope}: format-3 metadata"),
+            scope: format!("{snapshot_scope}: format metadata"),
         }
     })?;
-    format
-        .validate_schema_root()
-        .map_err(|_| CompleteCopyError::IntegrityMismatch {
-            scope: format!("{snapshot_scope}: schema root"),
-        })?;
-    format
-        .validate_store_root()
-        .map_err(|_| CompleteCopyError::IntegrityMismatch {
-            scope: format!("{snapshot_scope}: store root"),
-        })?;
+    if !snapshot_roots_admitted(&format) {
+        return Err(CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: format roots"),
+        });
+    }
     Ok(())
+}
+
+/// Whether a snapshot's roots are complete for its recorded format. Legacy
+/// format-1/2 members keep their rows as committed legacy files, so only the
+/// recorded format record is required; format-3 members need their schema and
+/// committed store roots as well.
+fn snapshot_roots_admitted(format: &crate::RepositoryFormatContext) -> bool {
+    match format.repository_format() {
+        crate::RepositoryFormat::Legacy1 | crate::RepositoryFormat::Legacy2 => true,
+        crate::RepositoryFormat::Format3 => {
+            format.validate_schema_root().is_ok() && format.validate_store_root().is_ok()
+        }
+    }
 }
 
 /// Streams one blob out of the object database and re-hashes it.

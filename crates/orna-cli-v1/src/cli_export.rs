@@ -249,7 +249,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
     let title: &'static str = match error {
         CompleteCopyError::TargetNotEmpty => "Destination is not empty",
         CompleteCopyError::UnresolvedSnapshot => "--at did not resolve to a commit",
-        CompleteCopyError::NotAFormat3Snapshot => "Snapshot is not a format-3 repository snapshot",
+        CompleteCopyError::NotAFormat3Snapshot => "Snapshot is not an admitted repository snapshot",
         CompleteCopyError::MissingDependencyOrigin { .. } => {
             "A pinned dependency has no recorded origin"
         }
@@ -266,7 +266,7 @@ fn describe_export_failure(error: &CompleteCopyError) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2000",
         title,
-        "export from a format-3 repository and keep every pinned dependency available",
+        "export from an admitted repository snapshot and keep every pinned dependency available",
         error.to_string(),
     )
 }
