@@ -203,6 +203,7 @@ impl ObjectReader {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
@@ -540,6 +541,7 @@ impl Session {
         let mut command = Command::new("git");
         command.current_dir(worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, worktree);
         // Set after scrubbing, which removes inherited replace-object settings.
         command
             .env("GIT_NO_LAZY_FETCH", "1")
@@ -1422,5 +1424,30 @@ mod tests {
             objects.check_expansion("0123456789abcdef0123456789abcdef01234567", ""),
             Err(RepositoryError::GitOperationFailed)
         ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod corrupt_root_tests {
+    use super::*;
+
+    #[test]
+    fn object_reader_algorithm_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        assert!(ObjectReader::new(child).algorithm().is_err());
+    }
+
+    #[test]
+    fn object_reader_session_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        let fails_closed = match Session::start(&child) {
+            Err(_) => true,
+            Ok(mut session) => session
+                .request("info", "HEAD", GitHashAlgorithm::Sha1)
+                .is_err(),
+        };
+        assert!(fails_closed);
     }
 }

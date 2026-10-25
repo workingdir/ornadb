@@ -2217,10 +2217,10 @@ fn run_pure_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    // Single-module projects that import pinned standard modules keep the
-    // authority route only when they need publication metadata; the authority
-    // admits only the user module and cannot load standard bodies. Pure ones take
-    // the bounded path below, which loads those bodies through the verified profile.
+    // Single-module projects that import pinned standard modules take the
+    // authority route only when they need publication metadata. Every other
+    // standard-importing project takes the bounded path below, which loads the
+    // reachable standard bodies through the verified profile.
     let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
@@ -2232,8 +2232,18 @@ fn run_pure_invocation(
             module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
-            let authority =
-                ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
+            let authority = ApplicationAuthority::new(
+                orna_semantic_v1::Catalogue::authoritative_core(),
+                Limits::default(),
+            )
+            .with_loaded_standard(&project)
+            .map_err(|_| {
+                Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                )
+            })?;
             let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
