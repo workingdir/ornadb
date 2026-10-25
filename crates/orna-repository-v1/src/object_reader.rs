@@ -947,6 +947,91 @@ mod tests {
         );
     }
 
+    /// Blob reads, which the walk uses for every chunk, must also share the one
+    /// process; a walk that only lists trees would not prove that.
+    #[test]
+    fn a_multi_object_walk_reads_blobs_through_the_same_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        for _ in 0..8 {
+            assert_eq!(
+                objects.read_blob(&blob, 1024).expect("read the blob"),
+                b"pub fn main() {}\n"
+            );
+            let header = objects
+                .info(&blob)
+                .expect("info the blob")
+                .expect("the blob exists");
+            assert_eq!(
+                objects
+                    .read_exact(&blob, &header, algorithm)
+                    .expect("read the blob exactly"),
+                b"pub fn main() {}\n"
+            );
+        }
+        assert_eq!(objects.process_starts(), 1, "blob reads reuse one process");
+    }
+
+    /// A reader process that died is discarded rather than left in use: the
+    /// read reports an error instead of hanging on a closed pipe, and the next
+    /// read starts a fresh process.
+    #[test]
+    fn a_dead_reader_process_is_discarded_and_the_next_read_restarts_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("first read"),
+            b"pub fn main() {}\n"
+        );
+        let pid = objects.process_id().expect("a live reader process");
+        let killed = Command::new("sh")
+            .args(["-c", &format!("kill -9 {pid}")])
+            .status()
+            .expect("send SIGKILL");
+        assert!(killed.success());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_blob(&blob, 1024).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a read on a dead reader returns instead of hanging");
+            assert!(failed, "a dead reader cannot serve a read");
+        });
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
+    /// A caller header that disagrees with git's header is refused before any
+    /// bytes are read, and the reader is restarted so it stays in step.
+    #[test]
+    fn a_header_that_disagrees_with_git_is_refused_and_the_reader_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = objects
+            .info(&blob)
+            .expect("info the blob")
+            .expect("the blob exists");
+        let mut wrong: super::ObjectHeader = header.clone();
+        wrong.size += 1;
+        assert!(objects.read_exact(&blob, &wrong, algorithm).is_err());
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
     #[test]
     fn a_failed_read_restarts_the_reader_without_desynchronising_it() {
         let (directory, repository) = repository();
