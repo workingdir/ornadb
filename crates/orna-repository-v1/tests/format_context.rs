@@ -410,6 +410,11 @@ fn legacy_marker_beside_store_is_mixed_formats() {
                 opened.open_format_context_at_selector(&head).unwrap_err(),
                 expected
             );
+            assert_eq!(
+                opened.require_known_head_format().unwrap_err(),
+                expected,
+                "runtime admission refuses the mixed HEAD as ORNA-REPO-CONTEXT-004"
+            );
 
             let compact = repository(database, Some(record), false);
             let rows = compact.path().join(LEGACY_ROW_STORAGE);
