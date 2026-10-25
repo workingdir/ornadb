@@ -170,6 +170,7 @@ async fn commit_capture_inner(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -179,16 +180,19 @@ async fn commit_capture_inner(
     }
 }
 /// One source row's named Blob captures and whether publication inserts or replaces it.
+///
+/// `source_row` is the row's complete source document. Format 3 keeps rows
+/// only in `.orna/store` (ORNA-REPO-004), so no committed file supplies it.
 #[derive(Clone, Copy)]
 pub struct SourceCaptureRow<'a> {
     pub key: &'a str,
     pub blob_fields: &'a [(&'a str, &'a str)],
-    pub source_row: Option<&'a str>,
+    pub source_row: &'a str,
     pub ordinal: u8,
     pub insert_only: bool,
 }
 
-/// Publishes every source row by its canonical mutation key and committed path.
+/// Publishes every source row by its canonical mutation key and table path.
 pub async fn commit_source_captures(
     repository: &Repository,
     state: &RuntimeState,
@@ -238,17 +242,7 @@ pub async fn commit_source_captures_for_table(
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
         let logical_path = format!("{table_name}/{}.orna", capture.key);
-        let row_source = match capture.source_row {
-            Some(row_source) => row_source.to_owned(),
-            None => {
-                let committed_row = repository
-                    .read_committed_file(&commit, &logical_path, 1 << 20)
-                    .expect("the committed project contains this source row");
-                std::str::from_utf8(&committed_row)
-                    .expect("the committed source row is valid UTF-8")
-                    .to_owned()
-            }
-        };
+        let row_source = capture.source_row;
         let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
         for (field_name, expression) in capture.blob_fields {
             let value = evaluate_expression_ovb2_with_effects(
@@ -360,6 +354,7 @@ pub async fn commit_source_captures_for_table(
             [ordinal.wrapping_add(4); 32],
             TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -432,17 +427,7 @@ pub async fn commit_source_replacement_through_save_admission(
         .expect("begin the save admission for the captured row");
     let coordinates = admission.coordinates();
     let logical_path = format!("{table_name}/{}.orna", capture.key);
-    let row_source = match capture.source_row {
-        Some(row_source) => row_source.to_owned(),
-        None => {
-            let committed_row = repository
-                .read_committed_file(&commit, &logical_path, 1 << 20)
-                .expect("the committed project contains this source row");
-            std::str::from_utf8(&committed_row)
-                .expect("the committed source row is valid UTF-8")
-                .to_owned()
-        }
-    };
+    let row_source = capture.source_row;
     let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
     for (field_name, expression) in capture.blob_fields {
         let value = evaluate_expression_ovb2_with_effects(

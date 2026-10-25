@@ -405,7 +405,7 @@ impl AdmittedReplSession {
             Ok(admission) => admission,
             Err(error) => return Err(self.publish_failure(error)),
         };
-        if !admission.effects.effects.is_empty() {
+        if admission.effects.is_effectful() {
             return Err(self.publish_failure(effect_rejection(&admission.effects)));
         }
         let mut runtime = self.runtime.clone();
@@ -472,7 +472,7 @@ impl AdmittedReplSession {
     pub fn stage_activation(&self, source: &str) -> Result<StagedReplActivation, ReplError> {
         let input = self.parse(source)?;
         let admission = self.stage_input(&input, source)?;
-        if admission.effects.effects.is_empty() {
+        if !admission.effects.is_effectful() {
             return Err(ReplError::fixed("ORNA-REPL-EFFECT"));
         }
         let result_type = admission.ty.clone();
@@ -518,7 +518,7 @@ impl AdmittedReplSession {
         let mut candidate = self.clone();
         // This admitted-input path has no source text, so diagnostics carry no spans.
         let admission = candidate.stage_input(input, "")?;
-        if !admission.effects.effects.is_empty() {
+        if admission.effects.is_effectful() {
             return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = candidate.runtime.clone();
@@ -546,7 +546,7 @@ impl AdmittedReplSession {
             return Err(ReplError::fixed("ORNA-EVAL-UNSUPPORTED"));
         }
         let admission = self.stage_input(&input, source)?;
-        if !admission.effects.effects.is_empty() {
+        if admission.effects.is_effectful() {
             return Err(effect_rejection(&admission.effects));
         }
         let mut runtime = self.runtime.clone();
@@ -1005,12 +1005,11 @@ fn semantic_error(diagnostics: Vec<orna_foundation_v1::Diagnostic>) -> ReplError
 /// The rejection for input that performs effects in a session that never
 /// runs them. Names the effects, so the person can see what made it effectful.
 pub fn effect_rejection(effects: &EffectSummary) -> ReplError {
-    let names = effects
-        .effects
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>()
-        .join(", ");
+    let mut names: Vec<&str> = effects.effects.iter().map(|kind| kind.as_str()).collect();
+    if effects.opaque {
+        names.push("opaque");
+    }
+    let names = names.join(", ");
     let mut error = ReplError::redacted("ORNA-REPL-EFFECT");
     error.detail = Some(Box::new(ReplDetail {
         code: "ORNA-REPL-EFFECT".to_owned(),
@@ -1272,7 +1271,7 @@ mod tests {
 
         assert!(matches!(staged.input(), ReplInput::Expression(_)));
         assert!(staged.result_type().is_some());
-        assert!(staged.effects().effects.contains("network"));
+        assert!(staged.effects().effects.contains(&orna_semantic_v1::EffectKind::Network));
         assert!(staged.effects().may_fail);
 
         assert_eq!(

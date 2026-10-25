@@ -8,39 +8,46 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
-    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget,
-    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
-    invoke_named_with_effects, invoke_named_with_sys_host_context,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation,
+    StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
     reference_standard_profile, reference_standard_sources,
 };
-use orna_foundation_v1::{CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText};
-use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
+use orna_foundation_v1::{
+    CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys,
+};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
 };
-use orna_project_v1::{AdmittedSourceRow, LoadedProject, ResolvedTableSchema};
+use orna_project_v1::{
+    AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
+    admitted_table_schemas,
+};
 use orna_protocol_v1::{
-    Envelope, Message, PatchList, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey,
-    ResultStatus,
+    Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
 };
 use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
+    ActivationEffectReport, DeclaredEffectSet, RuntimeTableRows,
+    StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
-    Catalogue, ModuleInput, Namespace, SymbolKind, SystemProviders, TableSchema, analyze_with_providers,
+    Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace, StandardCatalogueError,
+    StandardDependencyProfile, SystemProviders, TableSchema, analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    TableMember, parse_module_with_file, parse_repl,
+    TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
 };
+use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
 pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
@@ -62,8 +69,9 @@ pub fn remote_analysis_request(
 
 mod repl_transaction;
 mod browser_profile;
+mod table_reference;
 pub use browser_profile::execute_browser_profile;
-pub use repl_transaction::ReplTransactionScope;
+pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
 mod format3_store;
 pub use format3_store::{Format3TableSchemaError, StagedRelations, build_format3_store_relations};
 
@@ -103,6 +111,8 @@ pub enum ApplicationError {
     /// Async runtime effects are supported only as the activation's terminal
     /// result, so their real result is available before the activation commits.
     UnsupportedSourceEffectPlacement,
+    /// An import names a public declaration kind this route cannot bind yet.
+    UnsupportedImport(String),
 }
 
 impl fmt::Display for ApplicationError {
@@ -135,6 +145,7 @@ impl fmt::Display for ApplicationError {
             Self::UnsupportedSourceEffectPlacement => formatter.write_str(
                 "runtime-backed source effects must be the activation's terminal result",
             ),
+            Self::UnsupportedImport(message) => formatter.write_str(message),
         }
     }
 }
@@ -199,13 +210,145 @@ pub struct ApplicationAuthority {
     catalogue: Catalogue,
     limits: Limits,
     sys_host: Option<SysHostContext>,
+    standard_functions: Arc<StandardLayer>,
+    /// Qualified keys (`std.<module>.<name>`) of standard functions declared `pub`.
+    /// Only these may be bound by `use std.<module>.{…}`, `*`, or `as _` (ORNA-IMPORT-004).
+    standard_public: BTreeSet<String>,
+    /// Prelude names each pinned standard module records for `as _` (ORNA-IMPORT-005).
+    standard_preludes: BTreeMap<String, BTreeSet<String>>,
+    /// Qualified keys of public non-function standard declarations. These are
+    /// recognised so that importing them fails with a specific diagnostic.
+    standard_non_function: BTreeSet<String>,
 }
 
 impl ApplicationAuthority {
     /// Creates an authority with an explicit declaration catalogue and limits.
     #[must_use]
     pub fn new(catalogue: Catalogue, limits: Limits) -> Self {
-        Self { catalogue, limits, sys_host: None }
+        Self {
+            catalogue,
+            limits,
+            sys_host: None,
+            standard_functions: Arc::default(),
+            standard_public: BTreeSet::new(),
+            standard_preludes: BTreeMap::new(),
+            standard_non_function: BTreeSet::new(),
+        }
+    }
+
+    /// Pins the standard dependency this authority admits against. Every source
+    /// is verified against `profile` before any body is retained. The catalogue
+    /// gains the verified declarations, and each standard function becomes
+    /// callable from an admitted module through its `use std.<module>.{name}`
+    /// import.
+    pub fn with_standard_sources(
+        mut self,
+        profile: &StandardDependencyProfile,
+        sources: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, StandardCatalogueError> {
+        let mut sources = sources.into_iter().collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+        self.catalogue = self
+            .catalogue
+            .with_standard_sources(profile, sources.clone())?;
+        let mut functions = BTreeMap::<String, PureFunction>::new();
+        let mut public = BTreeSet::new();
+        let mut non_function = BTreeSet::new();
+        let mut module_imports = Vec::<(String, Vec<Item>)>::new();
+        for (logical_path, source) in sources {
+            let parsed = parse_module_with_file(&source, logical_path.clone());
+            if !parsed.is_ok() {
+                return Err(StandardCatalogueError::InvalidSource);
+            }
+            let namespace = module_namespace(&logical_path).0.join(".");
+            let imports = parsed
+                .value
+                .items
+                .iter()
+                .filter(|item| matches!(item.declaration, Declaration::Use { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            module_imports.push((namespace.clone(), imports));
+            for item in parsed.value.items {
+                let is_public = matches!(item.visibility, Visibility::Public { .. });
+                // Functions execute. Private functions stay in the map so that
+                // calls from inside their own module still resolve, but only
+                // public ones may be imported. Other standard declarations are
+                // catalogue-only and were already verified by the semantic catalogue.
+                let name = match item.declaration {
+                    Declaration::Function { signature, body } => {
+                        let key = format!("{namespace}.{}", signature.name);
+                        if functions.contains_key(&key) {
+                            return Err(StandardCatalogueError::DuplicateDeclaration);
+                        }
+                        if is_public {
+                            public.insert(key.clone());
+                        }
+                        functions.insert(
+                            key,
+                            PureFunction {
+                                parameters: signature.parameters,
+                                body,
+                                environment: Environment::new(),
+                            },
+                        );
+                        continue;
+                    }
+                    Declaration::Table { name, .. }
+                    | Declaration::Protocol { name, .. }
+                    | Declaration::Enum { name, .. }
+                    | Declaration::Dimension { name, .. }
+                    | Declaration::Unit { name, .. }
+                    | Declaration::Type { name, .. } => name,
+                    Declaration::Use { .. }
+                    | Declaration::Assertion { .. }
+                    | Declaration::Let { .. } => continue,
+                };
+                if is_public {
+                    non_function.insert(format!("{namespace}.{name}"));
+                }
+            }
+        }
+        let exports = StandardExports {
+            public: &public,
+            non_function: &non_function,
+        };
+        // `as _` binds only the prelude names each pinned module records
+        // (ORNA-IMPORT-005), keyed by that module's namespace.
+        let preludes = profile
+            .module_prelude_exports()
+            .iter()
+            .map(|(logical_path, names)| {
+                (module_namespace(logical_path).0.join("."), names.clone())
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut aliases = BTreeMap::<String, String>::new();
+        for (namespace, imports) in &module_imports {
+            let bindings = standard_import_bindings(&exports, &preludes, imports)
+                .map_err(|_| StandardCatalogueError::InvalidSource)?;
+            for (alias, target) in bindings {
+                aliases.insert(module_function_alias_key(namespace, &alias), target);
+            }
+        }
+        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases));
+        self.standard_public = public;
+        self.standard_non_function = non_function;
+        self.standard_preludes = preludes;
+        Ok(self)
+    }
+
+    /// Applies the standard dependency captured by `project`, when it has one.
+    /// A project without a captured dependency leaves the authority unchanged.
+    pub fn with_loaded_standard(
+        self,
+        project: &LoadedProject,
+    ) -> Result<Self, StandardCatalogueError> {
+        match project.standard_profile() {
+            Some(profile) => {
+                self.with_standard_sources(profile, project.standard_sources().iter().cloned())
+            }
+            None => Ok(self),
+        }
     }
 
     /// Attaches the host-owned activation facts that `sys.rt.info()` reads for
@@ -258,7 +401,7 @@ impl ApplicationAuthority {
             ));
         }
 
-        let mut functions = Functions::new();
+        let mut functions = Functions::with_standard(Arc::clone(&self.standard_functions));
         let table_insert_defaults = table_insert_defaults(&parsed.value.items);
         for item in &parsed.value.items {
             if let Declaration::Function { signature, body } = &item.declaration {
@@ -272,7 +415,22 @@ impl ApplicationAuthority {
                 );
             }
         }
-        if !functions.contains_key(&entry) {
+        let exports = StandardExports {
+            public: &self.standard_public,
+            non_function: &self.standard_non_function,
+        };
+        for (alias, target) in standard_import_bindings(
+            &exports,
+            &self.standard_preludes,
+            &parsed.value.items,
+        )? {
+            // A user function keeps its own name; the import alias is bound only where it is free.
+            if functions.contains_key(&alias) || !functions.contains_key(&target) {
+                continue;
+            }
+            functions.insert_alias(alias, target);
+        }
+        if functions.get_entry(&entry).is_none() {
             return Err(ApplicationError::MissingEntry(entry));
         }
         let admitted_namespace = module_namespace(&logical_path);
@@ -421,25 +579,58 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        handler.into_staged_activation(value, None)
+        let effects = handler.effect_report();
+        handler.into_staged_activation(value, None, effects)
     }
 
-    /// Evaluates table mutations against one activation-pinned table snapshot.
-    /// This is required for operations whose result depends on the previous
-    /// row value (`update`, patching `upsert`, and `rekey`). The returned work
-    /// can only be staged against the same captured generation.
-    pub fn evaluate_staged_with_table_snapshot(
+    /// The bound every committed table read observes: a table may hold at most
+    /// the evaluator's collection limit of rows, and the admitted rows' key and
+    /// stored tuple bytes across the read may not exceed the project source byte
+    /// limit. The read refuses the first row past either bound before retaining it.
+    pub fn committed_read_limits() -> CommittedReadLimits {
+        CommittedReadLimits {
+            max_rows_per_table: Limits::default().max_collection_items,
+            max_bytes: ProjectLimits::default().max_source_bytes,
+        }
+    }
+
+    /// Evaluates against `snapshot`'s activation with `rows` as the table
+    /// contents. The caller supplies the rows in evaluator form (the form the
+    /// admitted schemas expect), typically the snapshot's merged committed and
+    /// live rows converted once at the project boundary. The returned work is
+    /// still staged against the snapshot's captured generation.
+    pub fn evaluate_staged_with_table_snapshot_rows(
         &self,
         application: &AdmittedApplication,
         arguments: &Environment,
         snapshot: &RuntimeTableActivationSnapshot,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let table_object_ids = application_table_object_ids(application);
+        validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
+        self.evaluate_staged_over_table_rows(
+            application,
+            arguments,
+            rows,
+            publication_rows,
+            Some(snapshot.context().capture().generation_digest()),
+        )
+    }
+
+    fn evaluate_staged_over_table_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+        snapshot_generation: Option<[u8; 32]>,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
-        validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
         let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
-            snapshot.table_rows().clone(),
+            rows,
             table_object_ids,
         )?
         .with_insert_defaults(
@@ -448,6 +639,7 @@ impl ApplicationAuthority {
             application.limits,
         )
         .with_sys_host_context(self.sys_host.clone());
+        handler.publication_rows = publication_rows;
         let value = invoke_named_with_effects(
             &application.entry,
             &application.functions,
@@ -458,10 +650,8 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        handler.into_staged_activation(
-            value,
-            Some(snapshot.context().capture().generation_digest()),
-        )
+        let effects = handler.effect_report();
+        handler.into_staged_activation(value, snapshot_generation, effects)
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
@@ -497,7 +687,8 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        handler.into_staged_activation(value, None)
+        let effects = handler.effect_report();
+        handler.into_staged_activation(value, None, effects)
     }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
@@ -587,7 +778,7 @@ impl ApplicationAuthority {
                 .await
                 .map_err(ApplicationError::SourceEffectFailed)?;
         }
-        mutations.into_staged_activation(value, None)
+        mutations.into_staged_activation(value, None, ActivationEffectReport::ExternalPossible)
     }
 
     /// Computes the canonical digest for staged table work in one captured
@@ -648,20 +839,25 @@ impl ApplicationAuthority {
         &self,
         context: RuntimeActivationContext,
         mutation: TableMutation,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        self.stage_mutations(context, vec![mutation])
+        self.stage_mutations(context, vec![mutation], effects)
     }
 
     /// Stages an ordered mutation batch for one captured activation. An empty
     /// batch is rejected by the runtime boundary; pure activations never
-    /// enter this path.
+    /// enter this path. `effects` is the mandatory effect report of REQUEST-1 step 5,
+    /// built with
+    /// [`ActivationEffectReport::declare`]: only a declaration of no external
+    /// effects grants the Orna-controlled marker.
     pub fn stage_mutations(
         &self,
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
         let digest = Self::canonical_digest(&context, &mutations)?;
-        StagedTableActivation::from_source(context, mutations, digest, Arc::new(NoFault))
+        StagedTableActivation::from_source(context, mutations, digest, Arc::new(NoFault), effects)
             .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
     }
 
@@ -670,8 +866,11 @@ impl ApplicationAuthority {
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
         request: Option<RequestIdentity>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        self.stage_source_mutations_with_provenance(context, mutations, request, &[], &[])
+        self.stage_source_mutations_with_provenance(
+            context, mutations, request, &[], &[], effects,
+        )
     }
 
     fn stage_source_mutations_with_provenance(
@@ -681,6 +880,7 @@ impl ApplicationAuthority {
         request: Option<RequestIdentity>,
         source_row_schemas: &[SourceRowSchemaProvenance],
         protected_field_pins: &[RetainedSourceBlobPin],
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
         if source_row_schemas
             .iter()
@@ -764,8 +964,22 @@ impl ApplicationAuthority {
                 Ok(rebuilt)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.stage_mutations(context, mutations)
+        self.stage_mutations(context, mutations, effects)
     }
+}
+
+/// Declares the effect set of an evaluation (REQUEST-1 step 5). The caller
+/// states whether its bindings may reach state outside Orna's table
+/// transaction (ORNA-CAP-005): a system host attachment or a bound
+/// `SysHostBindingRegistry` (see `may_reach_external_state`). Only an
+/// evaluation with neither performs Orna table writes alone, and only it
+/// declares no external effects.
+pub(crate) fn declared_effects(may_reach_external_state: bool) -> ActivationEffectReport {
+    ActivationEffectReport::declare(if may_reach_external_state {
+        DeclaredEffectSet::ExternalPossible
+    } else {
+        DeclaredEffectSet::None
+    })
 }
 
 /// The evaluated result of one admitted source activation together with the
@@ -777,6 +991,7 @@ pub struct StagedActivation {
     snapshot_generation: Option<[u8; 32]>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    effects: ActivationEffectReport,
 }
 
 /// Schema artifact retained for the repository's expected-schema admission.
@@ -964,6 +1179,12 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
 }
 
 impl StagedActivation {
+    /// The effect report this activation declared when it was evaluated.
+    #[must_use]
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
+    }
+
     #[must_use]
     pub fn value(&self) -> &CanonicalValue {
         &self.value
@@ -995,6 +1216,7 @@ impl StagedActivation {
         Option<[u8; 32]>,
         Vec<SourceRowSchemaProvenance>,
         Vec<RetainedSourceBlobPin>,
+        ActivationEffectReport,
     ) {
         (
             self.value,
@@ -1002,6 +1224,7 @@ impl StagedActivation {
             self.snapshot_generation,
             self.source_row_schemas,
             self.protected_field_pins,
+            self.effects,
         )
     }
 
@@ -1052,6 +1275,7 @@ impl StagedActivation {
             request,
             &self.source_row_schemas,
             &self.protected_field_pins,
+            self.effects.clone(),
         )
     }
 }
@@ -1368,11 +1592,17 @@ impl SourceMutationEffectHandler {
         Ok(())
     }
 
+    /// The effect report for this handler's evaluation: see [`declared_effects`].
+    pub(crate) fn effect_report(&self) -> ActivationEffectReport {
+        declared_effects(self.sys_host.is_some())
+    }
+
     /// Finishes evaluation while retaining source schema and protected pins.
     pub fn into_staged_activation(
         self,
         value: CanonicalValue,
         snapshot_generation: Option<[u8; 32]>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedActivation, ApplicationError> {
         self.validate_mutations()?;
         Ok(StagedActivation {
@@ -1381,6 +1611,7 @@ impl SourceMutationEffectHandler {
             snapshot_generation,
             source_row_schemas: self.source_row_schemas,
             protected_field_pins: self.protected_field_pins,
+            effects,
         })
     }
 
@@ -1529,6 +1760,72 @@ impl SourceMutationEffectHandler {
             .and_then(|captured| captured.get(table))
             .and_then(|rows| rows.get(key))
             .cloned())
+    }
+
+    /// Serves one bounded page of an admitted table in ascending logical primary-key
+    /// order (ORNA-ORDER-001, ORNA-ROW-002): the activation snapshot merged with this
+    /// activation's writes, so a row written earlier in the activation reads back through
+    /// the same relation (ORNA-QUERY-005). Canonical key bytes identify rows but are not
+    /// in table order, so the cursor is the big-endian ordinal of the next live row in
+    /// that order. Ordinals increase bytewise, as the evaluator requires of cursors.
+    /// The order is recomputed per page.
+    fn table_relation_page(
+        &self,
+        table: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<RelationPage, EvaluationError> {
+        let captured = self
+            .captured_rows
+            .as_ref()
+            .and_then(|rows| rows.get(table))
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+        // An overlay entry shadows the captured row with the same key; a tombstone frees it.
+        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> =
+            captured.iter().map(|(key, row)| (key, Some(row))).collect();
+        for (key, row) in self.overlay.get(table).into_iter().flatten() {
+            merged.insert(key, row.as_ref());
+        }
+        let mut live = Vec::with_capacity(merged.len());
+        for (key, row) in merged {
+            let Some(row) = row else {
+                continue;
+            };
+            let logical = orna_foundation_v1::Value::decode(key)
+                .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+            live.push((logical, row));
+        }
+        let mut comparison_failed = false;
+        live.sort_by(|(left, _), (right, _)| {
+            compare_primary_keys(left, right).unwrap_or_else(|_| {
+                comparison_failed = true;
+                Ordering::Equal
+            })
+        });
+        if comparison_failed {
+            return Err(Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"));
+        }
+        let start = match after {
+            None => 0,
+            Some(cursor) => {
+                let bytes: [u8; 8] = cursor
+                    .try_into()
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+                usize::try_from(u64::from_be_bytes(bytes))
+                    .map_err(|_| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?
+            }
+        }
+        .min(live.len());
+        let end = start.saturating_add(limit).min(live.len());
+        let mut rows = Vec::with_capacity(end - start);
+        for (_, row) in &live[start..end] {
+            budget.debit(1)?;
+            rows.push(CanonicalValue::clone(row));
+        }
+        let next =
+            (end < live.len() && !rows.is_empty()).then(|| (end as u64).to_be_bytes().to_vec());
+        Ok(RelationPage { rows, next })
     }
 
     fn admitted_table_name(&self, path: &str) -> Option<&str> {
@@ -2009,7 +2306,7 @@ fn source_function_path(expression: &Expr) -> Option<String> {
 fn validate_terminal_runtime_effect(
     application: &AdmittedApplication,
 ) -> Result<(), ApplicationError> {
-    for (name, function) in &application.functions {
+    for (name, function) in application.functions.iter() {
         let count = runtime_effect_call_count(&function.body);
         if name == &application.entry {
             if count > 0 && (count != 1 || !is_terminal_runtime_effect_call(&function.body)) {
@@ -2340,6 +2637,13 @@ impl EffectHandler for SourceMutationEffectHandler {
         self.handle(callee, arguments)
     }
 
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        // Table reads need the activation snapshot; without one the name keeps
+        // its ordinary resolution instead of pointing at unreadable rows.
+        self.captured_rows.as_ref()?;
+        self.admitted_table_name(name).map(str::to_owned)
+    }
+
     fn scan_relation_page(
         &mut self,
         source: &str,
@@ -2352,6 +2656,9 @@ impl EffectHandler for SourceMutationEffectHandler {
                 rows: Vec::new(),
                 next: None,
             }));
+        }
+        if self.tables.contains_key(source) {
+            return self.table_relation_page(source, after, limit, budget).map(Some);
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
@@ -2409,23 +2716,6 @@ fn encoded_table_key(components: &[CanonicalValue]) -> Result<Vec<u8>, Evaluatio
         .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-KEY"))
         .and_then(|key| encoded_key(&key)),
     }
-}
-
-fn admitted_table_schemas(
-    header: &orna_semantic_v1::ModuleHeader,
-) -> BTreeMap<String, TableSchema> {
-    header
-        .symbols
-        .iter()
-        .filter(|(_, symbol)| symbol.kind == SymbolKind::Table)
-        .filter_map(|(name, symbol)| {
-            symbol
-                .table_schema
-                .clone()
-                .filter(|schema| schema.admission.is_some())
-                .map(|schema| (name.clone(), schema))
-        })
-        .collect()
 }
 
 fn application_table_schemas(application: &AdmittedApplication) -> BTreeMap<String, TableSchema> {
@@ -2507,6 +2797,137 @@ fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
     defaults
 }
 
+/// Public standard exports of the pinned dependency, keyed by qualified name.
+struct StandardExports<'exports> {
+    /// Qualified keys of `pub` standard functions (the only importable functions).
+    public: &'exports BTreeSet<String>,
+    /// Qualified keys of `pub` standard types, constants and other non-function declarations.
+    non_function: &'exports BTreeSet<String>,
+}
+
+/// Computes the unqualified names bound by `use std.<module>.{name}`,
+/// `use std.<module>.*` and `use std.<module>.. as _` declarations, as alias to
+/// qualified target. Only a public function of the pinned module may be bound
+/// (ORNA-IMPORT-004): a private function is refused with `DIAG_IMPORT`, and a
+/// public non-function is refused with a dedicated unsupported-import error.
+/// A glob binds every public function of the module (ORNA-IMPORT-003). An
+/// `as _` form binds only the prelude names the pinned module records
+/// (ORNA-IMPORT-005).
+/// One unqualified name may not bind two
+/// different functions (`DIAG_AMBIGUOUS`). The caller decides whether an alias
+/// is shadowed by a user function.
+fn standard_import_bindings(
+    exports: &StandardExports<'_>,
+    preludes: &BTreeMap<String, BTreeSet<String>>,
+    items: &[Item],
+) -> Result<BTreeMap<String, String>, ApplicationError> {
+    // Explicit names are collected apart from wildcard and prelude bindings:
+    // an explicit import takes precedence over a wildcard that exposes the same
+    // name, and wildcards are ambiguous only when they disagree about a name no
+    // explicit import binds (ORNA-IMPORT-007). Import order never selects a winner.
+    let mut explicit = BTreeMap::<String, String>::new();
+    let mut wildcard = BTreeMap::<String, BTreeSet<String>>::new();
+    for item in items {
+        let Declaration::Use { path, tail } = &item.declaration else {
+            continue;
+        };
+        if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+            continue;
+        }
+        let namespace = path
+            .iter()
+            .map(|segment| segment.name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        match tail {
+            UseTail::Names(names) => {
+                for name in names {
+                    let target = format!("{namespace}.{}", name.name);
+                    if exports.public.contains(&target) {
+                        bind_explicit(&mut explicit, &name.name, target)?;
+                    } else if exports.non_function.contains(&target) {
+                        return Err(ApplicationError::UnsupportedImport(format!(
+                            "non-function import `{target}` is not supported on this route"
+                        )));
+                    } else {
+                        return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+                    }
+                }
+            }
+            UseTail::Glob { .. } => {
+                bind_public_exports(&namespace, exports, &mut |alias: &str, target: String| {
+                    wildcard.entry(alias.to_owned()).or_default().insert(target);
+                    Ok(())
+                })?;
+            }
+            UseTail::Alias { name, .. } if name.as_str() == "_" => {
+                for prelude in preludes.get(&namespace).into_iter().flatten() {
+                    let target = format!("{namespace}.{prelude}");
+                    if exports.public.contains(&target) {
+                        wildcard
+                            .entry(prelude.clone())
+                            .or_default()
+                            .insert(target);
+                    }
+                }
+            }
+            // A bare `use std.x;` or `use std.x as y` names a module, which this
+            // route cannot resolve; refuse it at admission rather than letting a
+            // qualified call fail later at evaluation.
+            UseTail::None | UseTail::Alias { .. } => {
+                return Err(ApplicationError::UnsupportedImport(
+                    "qualified std module alias not supported on this route".to_owned(),
+                ));
+            }
+        }
+    }
+    for (alias, targets) in wildcard {
+        if explicit.contains_key(&alias) {
+            continue;
+        }
+        if targets.len() > 1 {
+            return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+        }
+        if let Some(target) = targets.into_iter().next() {
+            explicit.insert(alias, target);
+        }
+    }
+    Ok(explicit)
+}
+
+/// Binds one explicitly named import. Two explicit imports of one name to
+/// different functions are ambiguous.
+fn bind_explicit(
+    explicit: &mut BTreeMap<String, String>,
+    alias: &str,
+    target: String,
+) -> Result<(), ApplicationError> {
+    if let Some(previous) = explicit.insert(alias.to_owned(), target.clone())
+        && previous != target
+    {
+        return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+    }
+    Ok(())
+}
+
+/// Binds every public function declared directly in `namespace`.
+fn bind_public_exports(
+    namespace: &str,
+    exports: &StandardExports<'_>,
+    bind: &mut impl FnMut(&str, String) -> Result<(), ApplicationError>,
+) -> Result<(), ApplicationError> {
+    let prefix = format!("{namespace}.");
+    for target in exports.public {
+        let Some(name) = target.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !name.contains('.') {
+            bind(name, target.clone())?;
+        }
+    }
+    Ok(())
+}
+
 fn module_namespace(logical_path: &str) -> Namespace {
     // Analysis also returns catalogue and standard-library headers; select
     // the original admitted module instead of whichever namespace sorts first.
@@ -2546,17 +2967,29 @@ struct ApplicationReplSession {
 /// validation and owns every durable commit. With a captured activation
 /// context the adapter returns a staged [`LiveEvalTransaction`]; without one,
 /// admitted source effects fail closed instead of silently executing writes.
+///
+/// Every Eval is one input to the session's REPL (30-protocol: "An eval
+/// source is exactly one REPL input"), unless the trusted host explicitly
+/// selected a complete application module with [`Self::with_module`]. The
+/// Eval text never chooses between the two.
 #[derive(Clone, Debug)]
 pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     project: Option<LoadedProject>,
-    logical_path: String,
-    entry: String,
+    eval_module: Option<EvalModule>,
     sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
+}
+
+/// The complete application module a trusted host selected for Eval
+/// admission with [`ApplicationLiveAdapter::with_module`].
+#[derive(Clone, Debug)]
+struct EvalModule {
+    logical_path: String,
+    entry: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2590,14 +3023,13 @@ struct ApplicationWatch {
 }
 
 impl ApplicationLiveAdapter {
-    /// Creates an adapter for the deterministic remote-evaluation module.
+    /// Creates an adapter that submits each Eval to its session's REPL.
     #[must_use]
     pub fn new(authority: ApplicationAuthority) -> Self {
         Self {
             authority,
             project: None,
-            logical_path: "remote_eval.orna".to_owned(),
-            entry: "main".to_owned(),
+            eval_module: None,
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             run_events: Arc::new(Mutex::new(BTreeMap::new())),
             watches: Arc::new(Mutex::new(BTreeMap::new())),
@@ -2652,47 +3084,37 @@ impl ApplicationLiveAdapter {
         repl.submit_with_sys_host_bindings(source, &mut bindings)
     }
 
-    /// Sets the logical module path and entry used for future Eval messages.
+    /// Admits every future Eval message as one complete application module at
+    /// `logical_path` and runs its `entry`, instead of submitting it to the
+    /// session REPL. This is an explicit choice of the trusted host that
+    /// constructs the adapter; it is never inferred from the Eval text, so a
+    /// console input that declares a function named like an entry stays an
+    /// ordinary REPL declaration.
     #[must_use]
     pub fn with_module(
         mut self,
         logical_path: impl Into<String>,
         entry: impl Into<String>,
     ) -> Self {
-        self.logical_path = logical_path.into();
-        self.entry = entry.into();
+        self.eval_module = Some(EvalModule {
+            logical_path: logical_path.into(),
+            entry: entry.into(),
+        });
         self
     }
 
-    /// Admits the Eval message's source through the authority.
+    /// Admits the Eval message's source as the host-selected module.
     fn evaluate_eval_message(&self, message: &Message) -> Result<AdmittedApplication, LiveError> {
-        let Message::Eval { source, .. } = message else {
+        let (Message::Eval { source, .. }, Some(module)) = (message, &self.eval_module) else {
             return Err(LiveError::ApplicationRejected);
         };
         self.authority
             .admit_module(
-                self.logical_path.clone(),
+                module.logical_path.clone(),
                 source.clone(),
-                self.entry.clone(),
+                module.entry.clone(),
             )
             .map_err(LiveError::from)
-    }
-
-    /// Keeps the existing complete-module entry point for clients that send
-    /// an admitted application module. Ordinary Eval input uses the per-session
-    /// ephemeral REPL below.
-    fn is_module_entry(&self, message: &Message) -> bool {
-        let Message::Eval { source, .. } = message else {
-            return false;
-        };
-        let parsed = parse_module_with_file(source, self.logical_path.clone());
-        parsed.is_ok()
-            && parsed.value.items.iter().any(|item| {
-                matches!(
-                    &item.declaration,
-                    Declaration::Function { signature, .. } if signature.name == self.entry
-                )
-            })
     }
 
     /// Creates a REPL session bound to the database and repository identity the
@@ -2751,12 +3173,30 @@ impl ApplicationLiveAdapter {
             .insert(session, ApplicationReplSession { repl });
     }
 
-    fn repl_table_schemas(&self) -> BTreeMap<String, TableSchema> {
-        analyze_with_providers(&[], &self.authority.catalogue, SystemProviders::Production)
-            .modules
-            .values()
-            .flat_map(admitted_table_schemas)
-            .collect()
+    /// The write schemas of the tables a served REPL input may mutate. The
+    /// session REPL is seeded from the loaded project, so the project's own
+    /// tables are admitted alongside the catalogue's, as the local REPL
+    /// admits them. A table name declared twice fails closed instead of one
+    /// declaration silently replacing the other.
+    fn repl_table_schemas(&self) -> Result<BTreeMap<String, TableSchema>, ApplicationError> {
+        let modules = self
+            .project
+            .as_ref()
+            .map_or(&[][..], LoadedProject::modules);
+        let analysis = analyze_with_providers(
+            modules,
+            &self.authority.catalogue,
+            SystemProviders::Production,
+        );
+        let mut tables = BTreeMap::new();
+        for module in analysis.modules.values() {
+            for (name, schema) in admitted_table_schemas(module) {
+                if tables.insert(name, schema).is_some() {
+                    return Err(ApplicationError::InvalidTableMetadata);
+                }
+            }
+        }
+        Ok(tables)
     }
 
     /// Builds the success envelope for one evaluated request.
@@ -2972,7 +3412,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         request: [u8; 16],
         message: &Message,
     ) -> std::result::Result<Envelope, LiveError> {
-        if !self.is_module_entry(message) {
+        if self.eval_module.is_none() {
             let Message::Eval { source, .. } = message else {
                 return Err(LiveError::ApplicationRejected);
             };
@@ -2986,8 +3426,10 @@ impl LiveApplication for ApplicationLiveAdapter {
                     return Err(LiveError::from(ApplicationError::Evaluation(code)));
                 }
             };
-            let value = result
-                .unwrap_or_else(|| CanonicalValue::new(OvbRaw::Null).expect("null is canonical"));
+            // A declaration, binding or import yields no value; its result is
+            // typed Unit, because a success result always carries a complete
+            // typed value and a bare null is not one (30-protocol).
+            let value = result.unwrap_or_else(CanonicalValue::unit);
             self.publish_repl_candidate(session, repl);
             self.record_run_success(session, value.clone());
             return self.success_envelope(request, eval_fingerprint(message)?, value);
@@ -3007,7 +3449,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         _work: &'a mut LiveApplicationWorkLease,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
-            if !self.is_module_entry(message) {
+            if self.eval_module.is_none() {
                 let Message::Eval { source, .. } = message else {
                     return Err(LiveError::ApplicationRejected);
                 };
@@ -3018,9 +3460,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         .submit_repl_input(&mut repl, source)
                     {
                         Ok(value) => {
-                            let value = value.unwrap_or_else(|| {
-                                CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
-                            });
+                            let value = value.unwrap_or_else(CanonicalValue::unit);
                             self.publish_repl_candidate(session, repl);
                             self.record_run_success(session, value.clone());
                             let envelope =
@@ -3044,7 +3484,9 @@ impl LiveApplication for ApplicationLiveAdapter {
                         return Err(LiveError::from(ApplicationError::Evaluation(code)));
                     }
                 };
-                let mut handler = SourceMutationEffectHandler::new(self.repl_table_schemas());
+                let mut handler = SourceMutationEffectHandler::new(
+                    self.repl_table_schemas().map_err(LiveError::from)?,
+                );
                 // The REPL serves `sys.explain` from the activation's pinned CWD
                 // snapshot (ORNA-SYS-008), as the module activation does. A pure
                 // evaluation has no activation context, so no catalogue is pinned
@@ -3069,10 +3511,9 @@ impl LiveApplication for ApplicationLiveAdapter {
                             return Err(LiveError::from(ApplicationError::Evaluation(code)));
                         }
                     };
+                let effects = handler.effect_report();
                 let mutations = handler.into_mutations().map_err(LiveError::from)?;
-                let value = value.unwrap_or_else(|| {
-                    CanonicalValue::new(OvbRaw::Null).expect("null is canonical")
-                });
+                let value = value.unwrap_or_else(CanonicalValue::unit);
                 let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
                 if mutations.is_empty() {
                     self.publish_repl_candidate(session, successor);
@@ -3096,6 +3537,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         session_id: session,
                         request_id: request,
                     }),
+                    effects,
                 )?;
                 let identity = RequestIdentity {
                     session_id: session,
@@ -3112,6 +3554,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(identity)
@@ -3156,6 +3599,7 @@ impl LiveApplication for ApplicationLiveAdapter {
             let transaction = LiveEvalTransaction::new(
                 activation.mutations().to_vec(),
                 activation.next_digest(),
+                activation.effects(),
                 Arc::new(NoFault),
             )
             .for_request(RequestIdentity {
@@ -3198,7 +3642,7 @@ impl LiveApplication for ApplicationLiveAdapter {
         effects: Option<&'a dyn LiveAdminEffectDispatcher>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<LiveEvalResponse, LiveError>> + 'a>> {
         Box::pin(async move {
-            if !self.is_module_entry(message) {
+            if self.eval_module.is_none() {
                 return self
                     .dispatch_eval_with_work(session, request, message, context, work)
                     .await;
@@ -3237,6 +3681,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(RequestIdentity {
@@ -3320,32 +3765,19 @@ impl LiveApplication for ApplicationLiveAdapter {
         let state = watches
             .get_mut(&key)
             .ok_or(LiveError::ApplicationRejected)?;
-        // This application adapter has no dependency scheduler yet. An
-        // explicit resync re-evaluates the read-only expression. When the
-        // renderer-neutral tree changes, publish a root replacement delta;
-        // unchanged trees retain the complete-snapshot fallback.
+        // This application adapter has no dependency scheduler yet, so an
+        // explicit resync re-evaluates the read-only expression. A client
+        // resyncs because it lost its base revision, so the answer is always
+        // the latest full snapshot under the resync's own request ID
+        // (30-protocol message registry, type 2). A changed tree advances the
+        // watch revision; an unchanged tree repeats the current snapshot.
         let present = self.watch_value(session, &state.source)?;
         if present != state.present {
-            let base_revision = state.revision;
-            let new_revision = state
+            state.revision = state
                 .revision
                 .checked_add(1)
                 .ok_or(LiveError::ApplicationRejected)?;
-            let patches =
-                PatchList::replace_root(&present).map_err(|_| LiveError::ApplicationRejected)?;
-            state.revision = new_revision;
             state.present = present;
-            return Ok(Envelope {
-                request: None,
-                watch: Some(watch),
-                message: Message::Delta {
-                    base_revision,
-                    new_revision,
-                    patches,
-                    snapshot: state.snapshot.clone(),
-                },
-                extensions: BTreeMap::new(),
-            });
         }
         Ok(self.live_snapshot(request, watch, state))
     }
@@ -3460,6 +3892,14 @@ impl AdmittedApplication {
         self.requires_publication_metadata
     }
 
+    /// Returns whether the entry can reach an admitted table by name. An entry
+    /// that cannot reach a table evaluates without committed table state.
+    #[must_use]
+    pub fn entry_references_tables(&self) -> bool {
+        let tables: BTreeSet<&str> = self.table_schemas.keys().map(String::as_str).collect();
+        table_reference::entry_references_tables(&self.functions, &self.entry, &tables)
+    }
+
     #[must_use]
     pub fn logical_path(&self) -> &str {
         &self.logical_path
@@ -3507,6 +3947,22 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_sys_host_registry_never_declares_controlled_only() {
+        // Regression: REPL `std.io.fs.write_text` reaches the filesystem through a
+        // bound registry, so declaring `None` would write a controlled-rollback marker.
+        let registry = orna_evaluator_v1::SysHostBindingRegistry::default();
+        assert!(registry.may_reach_external_state());
+        assert!(matches!(
+            declared_effects(registry.may_reach_external_state()),
+            ActivationEffectReport::ExternalPossible
+        ));
+        assert!(matches!(
+            declared_effects(false),
+            ActivationEffectReport::ControlledOnly(_)
+        ));
+    }
 
     #[test]
     fn remote_analysis_is_denied_by_default_without_disclosure() {
@@ -3557,6 +4013,385 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    fn std_import_authority_with(
+        standard: &[(&str, &str)],
+        configure: impl FnOnce(StandardDependencyProfile) -> StandardDependencyProfile,
+        limits: Limits,
+    ) -> ApplicationAuthority {
+        let sources = standard
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+            .collect::<Vec<_>>();
+        let profile = configure(
+            StandardDependencyProfile::from_sources("std-import-binding", sources.clone())
+                .expect("standard profile"),
+        );
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&profile, sources.clone())
+            .expect("standard catalogue");
+        ApplicationAuthority::new(catalogue, limits)
+            .with_standard_sources(&profile, sources)
+            .expect("standard function bodies")
+    }
+
+    fn std_import_authority(standard: &[(&str, &str)]) -> ApplicationAuthority {
+        std_import_authority_with(standard, |profile| profile, Limits::default())
+    }
+
+    /// True only when the source is admitted and its entry evaluates without error.
+    fn std_import_admits_and_runs(authority: &ApplicationAuthority, source: &str) -> bool {
+        match authority.admit_module("main.orna", source, "answer") {
+            Err(_) => false,
+            Ok(admitted) => authority.evaluate(&admitted, &Environment::new()).is_ok(),
+        }
+    }
+
+    fn std_import_codes(error: ApplicationError) -> Vec<String> {
+        match error {
+            ApplicationError::Semantic(codes) => codes,
+            other => panic!("expected a semantic refusal, got {other:?}"),
+        }
+    }
+
+    fn int_value(value: i64) -> orna_foundation_v1::Value {
+        orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
+            num_bigint::BigInt::from(value),
+        ))
+        .expect("canonical integer")
+    }
+
+    #[test]
+    fn std_import_user_function_wins_over_import_alias() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let source = "use std.math.{increment};\npub fn increment(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n";
+        let admitted = authority
+            .admit_module("main.orna", source, "answer")
+            .expect("user function keeps its own name");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(101));
+    }
+
+    #[test]
+    fn std_import_of_a_missing_name_is_refused_with_import_diagnostic() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{missing};\npub fn answer(): Int = 1;\n",
+                "answer",
+            )
+            .expect_err("a name absent from the pinned module is refused");
+        assert!(std_import_codes(error).contains(&DIAG_IMPORT.to_owned()));
+    }
+
+    #[test]
+    fn std_import_of_one_name_from_two_functions_is_refused_as_ambiguous() {
+        let authority = std_import_authority(&[
+            (
+                "std/math.orna",
+                "pub fn increment(value: Int): Int = value + 1;\n",
+            ),
+            (
+                "std/other.orna",
+                "pub fn increment(value: Int): Int = value + 2;\n",
+            ),
+        ]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{increment};\nuse std.other.{increment};\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect_err("one unqualified name may not bind two functions");
+        assert!(std_import_codes(error).contains(&DIAG_AMBIGUOUS.to_owned()));
+    }
+
+    #[test]
+    fn std_glob_import_binds_every_public_function_of_the_module() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.*;\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect("glob import binds the public function");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("glob-bound entry should execute");
+        assert_eq!(result, int_value(2));
+    }
+
+    #[test]
+    fn std_import_of_a_private_function_is_refused_with_import_diagnostic() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "fn helper(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = helper(value);\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{helper};\npub fn answer(): Int = helper(1);\n",
+                "answer",
+            )
+            .expect_err("a private helper is not importable (ORNA-IMPORT-004)");
+        assert!(std_import_codes(error).contains(&DIAG_IMPORT.to_owned()));
+    }
+
+    /// Runs the authority binder directly, bypassing the semantic layer, so the
+    /// assertion depends on the authority check alone.
+    fn direct_std_bindings(
+        public: &[&str],
+        non_function: &[&str],
+        source: &str,
+    ) -> Result<BTreeMap<String, String>, ApplicationError> {
+        let public = public.iter().map(|name| (*name).to_owned()).collect::<BTreeSet<_>>();
+        let non_function = non_function
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
+        let exports = StandardExports {
+            public: &public,
+            non_function: &non_function,
+        };
+        let parsed = parse_module_with_file(source, "main.orna".to_owned());
+        assert!(parsed.is_ok(), "test source must parse");
+        standard_import_bindings(&exports, &BTreeMap::new(), &parsed.value.items)
+    }
+
+    #[test]
+    fn direct_binder_refuses_a_private_explicit_import() {
+        let error = direct_std_bindings(
+            &["std.math.increment"],
+            &[],
+            "use std.math.{helper};\npub fn answer(): Int = 1;\n",
+        )
+        .expect_err("a private helper is not in the public exports");
+        assert_eq!(std_import_codes(error), vec![DIAG_IMPORT.to_owned()]);
+    }
+
+    #[test]
+    fn direct_binder_glob_binds_public_exports_only() {
+        let bindings = direct_std_bindings(
+            &["std.math.increment"],
+            &[],
+            "use std.math.*;\npub fn answer(): Int = 1;\n",
+        )
+        .expect("glob binds public functions");
+        assert_eq!(bindings.keys().map(String::as_str).collect::<Vec<_>>(), vec!["increment"]);
+    }
+
+    #[test]
+    fn explicit_import_takes_precedence_over_a_glob_in_either_order() {
+        let public = ["std.math.f", "std.b.f"];
+        for source in [
+            "use std.math.{f};\nuse std.b.*;\npub fn answer(): Int = 1;\n",
+            "use std.b.*;\nuse std.math.{f};\npub fn answer(): Int = 1;\n",
+        ] {
+            let bindings = direct_std_bindings(&public, &[], source)
+                .expect("explicit import wins over the glob");
+            assert_eq!(bindings.get("f").map(String::as_str), Some("std.math.f"));
+        }
+    }
+
+    #[test]
+    fn two_globs_exposing_one_name_are_ambiguous_in_either_order() {
+        let public = ["std.a.f", "std.b.f"];
+        for source in [
+            "use std.a.*;\nuse std.b.*;\npub fn answer(): Int = 1;\n",
+            "use std.b.*;\nuse std.a.*;\npub fn answer(): Int = 1;\n",
+        ] {
+            let error = direct_std_bindings(&public, &[], source)
+                .expect_err("two wildcards disagree about f");
+            assert_eq!(std_import_codes(error), vec![DIAG_AMBIGUOUS.to_owned()]);
+        }
+    }
+
+    #[test]
+    fn two_explicit_imports_of_one_name_stay_ambiguous_despite_a_glob() {
+        let error = direct_std_bindings(
+            &["std.a.f", "std.b.f", "std.c.f"],
+            &[],
+            "use std.a.{f};\nuse std.b.{f};\nuse std.c.*;\npub fn answer(): Int = 1;\n",
+        )
+        .expect_err("two explicit imports disagree about f");
+        assert_eq!(std_import_codes(error), vec![DIAG_AMBIGUOUS.to_owned()]);
+    }
+
+    #[test]
+    fn module_alias_imports_are_refused_at_admission() {
+        for source in [
+            "use std.math;\npub fn answer(): Int = 1;\n",
+            "use std.math as m;\npub fn answer(): Int = 1;\n",
+        ] {
+            let error = direct_std_bindings(&["std.math.increment"], &[], source)
+                .expect_err("a module alias binds nothing on this route");
+            match error {
+                ApplicationError::UnsupportedImport(message) => assert_eq!(
+                    message,
+                    "qualified std module alias not supported on this route"
+                ),
+                other => panic!("expected an unsupported-import refusal, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn std_body_unqualified_call_never_resolves_to_a_user_function() {
+        // `g` is not defined by the pinned std module; the user's `g` must not
+        // capture the std body's unqualified call (ORNA-IMPORT-006 isolation).
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = g(value);\n",
+        )]);
+        let source = "use std.math.{increment};\npub fn g(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n";
+        let admitted = authority
+            .admit_module("main.orna", source, "answer")
+            .expect("admission succeeds; the std body's `g` must not bind to the user function");
+        authority
+            .evaluate(&admitted, &Environment::new())
+            .expect_err("std body's unqualified `g` must not evaluate to the user function");
+    }
+
+    #[test]
+    fn std_import_of_a_public_non_function_is_refused_as_unsupported() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub type Count = Int;\npub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{Count};\npub fn answer(): Int = 1;\n",
+                "answer",
+            )
+            .expect_err("non-function imports are not supported on this route");
+        assert!(matches!(error, ApplicationError::UnsupportedImport(_)));
+    }
+
+    #[test]
+    fn std_functions_are_shared_across_admissions_not_cloned() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let baseline = Arc::strong_count(&authority.standard_functions);
+        let first = authority
+            .admit_module(
+                "first.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect("first admission");
+        let second = authority
+            .admit_module(
+                "second.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(2);\n",
+                "answer",
+            )
+            .expect("second admission");
+        // Each admitted table holds one handle to the same layer; no admission
+        // deep-copies the standard bodies (M3).
+        assert_eq!(
+            Arc::strong_count(&authority.standard_functions),
+            baseline + 2
+        );
+        drop((first, second));
+        assert_eq!(Arc::strong_count(&authority.standard_functions), baseline);
+    }
+
+    #[test]
+    fn std_functions_do_not_consume_the_admitted_activation_budget() {
+        let mut standard = String::new();
+        for index in 0..8 {
+            standard.push_str(&format!(
+                "pub fn unrelated{index}(value: Int): Int = value + {index};\n"
+            ));
+        }
+        standard.push_str("pub fn increment(value: Int): Int = value + 1;\n");
+        let limits = Limits {
+            max_collection_items: 2,
+            ..Limits::default()
+        };
+        let authority = std_import_authority_with(
+            &[("std/math.orna", standard.as_str())],
+            |profile| profile,
+            limits,
+        );
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(41);\n",
+                "answer",
+            )
+            .expect("nine unrelated standard functions must not count against the budget");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(42));
+    }
+
+    #[test]
+    fn std_prelude_import_binds_exactly_the_recorded_prelude_exports() {
+        let standard = "pub fn increment(value: Int): Int = value + 1;\npub fn decrement(value: Int): Int = value - 1;\n";
+        let authority = std_import_authority_with(
+            &[("std/math.orna", standard)],
+            |profile| profile.with_module_prelude_exports("std/math.orna", ["increment"]),
+            Limits::default(),
+        );
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math as _;\npub fn answer(): Int = increment(41);\n",
+                "answer",
+            )
+            .expect("a recorded prelude export is bound by `as _`");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(42));
+        // `decrement` is public but not a recorded prelude export (ORNA-IMPORT-005).
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math as _;\npub fn answer(): Int = decrement(41);\n",
+        ));
+    }
+
+    #[test]
+    fn std_prelude_import_binds_nothing_for_a_module_without_recorded_exports() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math as _;\npub fn answer(): Int = increment(41);\n",
+        ));
+    }
+
+    #[test]
+    fn std_glob_import_does_not_bind_private_functions() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "fn helper(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = helper(value);\n",
+        )]);
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math.*;\npub fn answer(): Int = helper(1);\n",
+        ));
+    }
+
     #[test]
     fn name_only_publication_admission_constructs_handler_without_recursion() {
         let rows = RuntimePublicationMetadataRows {
@@ -3572,7 +4407,10 @@ mod tests {
     fn live_adapter_evaluates_eval_and_preserves_result_identity() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
-        let mut adapter = ApplicationLiveAdapter::new(authority);
+        // Admitting the Eval as a complete module is the host's explicit
+        // choice; the Eval text never selects it (A14-04).
+        let mut adapter =
+            ApplicationLiveAdapter::new(authority).with_module("remote_eval.orna", "main");
         let request = [8; 16];
         let fingerprint = [9; 32];
         let message = Message::Eval {
@@ -3615,6 +4453,52 @@ mod tests {
                 .expect("canonical integer"),
             )
         );
+    }
+
+    /// ORNA-EVAL-006 and 30-protocol ("An eval source is exactly one REPL
+    /// input"), A14-04: without a host-selected module, console input that
+    /// declares a function named like an entry is an ordinary REPL
+    /// declaration. It yields Unit, persists for the session and runs only
+    /// when called. Before, the adapter admitted any input declaring `main`
+    /// as a one-shot module and returned its result.
+    #[test]
+    fn default_adapter_keeps_a_console_entry_function_as_a_repl_declaration() {
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let mut adapter = ApplicationLiveAdapter::new(authority);
+        let declared = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [8; 16],
+            &eval_message(
+                include_str!("../tests/fixtures/source-admission-main.orna"),
+                [9; 32],
+            ),
+        )
+        .expect("the session REPL admits the declaration");
+        assert!(matches!(
+            &declared.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::unit()
+        ));
+        let called = LiveApplication::eval(
+            &mut adapter,
+            [7; 16],
+            [10; 16],
+            &eval_message("main()", [11; 32]),
+        )
+        .expect("the declared function persists for the session");
+        assert!(matches!(
+            &called.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            } if *value == CanonicalValue::new(OvbRaw::Int(41.into())).unwrap()
+        ));
     }
 
     #[test]
@@ -3684,7 +4568,7 @@ mod tests {
     }
 
     #[test]
-    fn served_repl_publishes_values_and_line_column_errors_as_present_deltas() {
+    fn served_repl_publishes_values_and_line_column_errors_in_resync_snapshots() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let mut adapter =
@@ -3728,21 +4612,8 @@ mod tests {
             ),
         )
         .expect("project-free input evaluates in the admitted REPL");
-        let value_delta =
-            LiveApplication::resync(&mut adapter, session, [75; 16], watch, &Message::Resync)
-                .expect("successful runs update the event watch");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = value_delta.message
-        else {
-            panic!("new run event is a presentation delta");
-        };
-        let present = present
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("the delta applies to the initial tree");
+        let (revision, present) = resync_snapshot(&mut adapter, session, [75; 16], watch);
+        assert_eq!(revision, 1, "a changed tree advances the watch revision");
         assert_eq!(
             present,
             expected_run_events(&[expected_run_event(1, true, 42, None)])
@@ -3766,21 +4637,8 @@ mod tests {
             ),
             Err(LiveError::ApplicationRejected)
         );
-        let error_delta =
-            LiveApplication::resync(&mut adapter, session, [78; 16], watch, &Message::Resync)
-                .expect("failed runs update the event watch");
-        let Message::Delta {
-            base_revision: 1,
-            new_revision: 2,
-            patches,
-            ..
-        } = error_delta.message
-        else {
-            panic!("failed run event is a presentation delta");
-        };
-        let present = present
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("the second delta applies to the updated tree");
+        let (revision, present) = resync_snapshot(&mut adapter, session, [78; 16], watch);
+        assert_eq!(revision, 2);
         assert_eq!(
             present,
             expected_run_events(&[
@@ -3791,7 +4649,7 @@ mod tests {
     }
 
     #[test]
-    fn served_repl_typed_run_event_deltas_are_isolated_across_presentations_and_live_sessions() {
+    fn served_repl_typed_run_event_snapshots_are_isolated_across_presentations_and_live_sessions() {
         let authority =
             ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
         let mut adapter =
@@ -3878,46 +4736,16 @@ mod tests {
             ),
         )
         .expect("first session evaluates independently");
-        let delta_a =
-            LiveApplication::resync(&mut adapter, session_a, [77; 16], watch_a, &Message::Resync)
-                .expect("first session sees its typed event delta");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_a.message
-        else {
-            panic!("first session event is a revision-one delta");
-        };
-        let present_a = initial_present_a
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("first session delta applies to its typed snapshot");
         let expected_a = expected_run_events(&[expected_run_event(1, true, 42, None)]);
-        assert_eq!(present_a, expected_a);
-
-        let delta_a_second = LiveApplication::resync(
-            &mut adapter,
-            session_a,
-            [85; 16],
-            watch_a_second,
-            &Message::Resync,
-        )
-        .expect("first session's second watch advances independently");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_a_second.message
-        else {
-            panic!("first session's second watch gets its own revision-one delta");
-        };
         assert_eq!(
-            initial_present_a_second
-                .apply_patches(&patches, orna_protocol_v1::Limits::default())
-                .expect("second first-session delta applies to its own snapshot"),
-            expected_a
+            resync_snapshot(&mut adapter, session_a, [77; 16], watch_a),
+            (1, expected_a.clone()),
+            "first session sees its typed event in a revision-one snapshot"
+        );
+        assert_eq!(
+            resync_snapshot(&mut adapter, session_a, [85; 16], watch_a_second),
+            (1, expected_a.clone()),
+            "first session's second watch advances independently"
         );
 
         let unchanged_b =
@@ -3958,45 +4786,15 @@ mod tests {
             ),
         )
         .expect("second session evaluates independently");
-        let delta_b =
-            LiveApplication::resync(&mut adapter, session_b, [81; 16], watch_b, &Message::Resync)
-                .expect("second session sees its own typed event delta");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_b.message
-        else {
-            panic!("second session event is a revision-one delta");
-        };
-        let present_b = initial_present_b
-            .apply_patches(&patches, orna_protocol_v1::Limits::default())
-            .expect("second session delta applies to its typed snapshot");
-        assert_eq!(present_b, expected_a);
-
-        let delta_b_second = LiveApplication::resync(
-            &mut adapter,
-            session_b,
-            [87; 16],
-            watch_b_second,
-            &Message::Resync,
-        )
-        .expect("second session's second watch advances independently");
-        let Message::Delta {
-            base_revision: 0,
-            new_revision: 1,
-            patches,
-            ..
-        } = delta_b_second.message
-        else {
-            panic!("second session's second watch gets its own revision-one delta");
-        };
         assert_eq!(
-            initial_present_b_second
-                .apply_patches(&patches, orna_protocol_v1::Limits::default())
-                .expect("second session's second delta applies to its own snapshot"),
-            expected_a
+            resync_snapshot(&mut adapter, session_b, [81; 16], watch_b),
+            (1, expected_a.clone()),
+            "second session sees its own typed event in a revision-one snapshot"
+        );
+        assert_eq!(
+            resync_snapshot(&mut adapter, session_b, [87; 16], watch_b_second),
+            (1, expected_a.clone()),
+            "second session's second watch advances independently"
         );
 
         let unchanged_a =
@@ -4100,6 +4898,65 @@ mod tests {
         fs::remove_dir_all(root).expect("test project is removed");
     }
 
+    /// G-2: the served REPL's write schemas union the catalogue's tables with
+    /// the loaded project's. A project table that reuses a catalogue table
+    /// name fails closed with `InvalidTableMetadata` instead of one declaration
+    /// silently replacing the other.
+    #[test]
+    fn served_repl_table_schemas_reject_a_project_table_named_like_a_catalogue_table() {
+        use orna_repository_v1::Repository;
+        use orna_semantic_v1::StandardDependencyProfile;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-served-repl-collision-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        let project_source = "pub table Note(id: Int) { text: Str, }\n";
+        fs::write(root.join("main.orna"), project_source).expect("project fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let catalogue_source = "pub table Note(id: Int) { text: Str, }\n";
+        let profile = StandardDependencyProfile::from_sources(
+            "std-snapshot-collision",
+            [("std/store.orna".into(), catalogue_source.into())],
+        )
+        .expect("standard profile");
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(
+                &profile,
+                [("std/store.orna".into(), catalogue_source.into())],
+            )
+            .expect("standard catalogue");
+        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            catalogue,
+            Limits::default(),
+        ))
+        .with_loaded_project(project);
+        let result = adapter.repl_table_schemas();
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+        assert_eq!(
+            result.map(|tables| tables.keys().cloned().collect::<Vec<_>>()),
+            Err(ApplicationError::InvalidTableMetadata),
+        );
+    }
+
     fn expected_run_event(
         sequence: u64,
         succeeded: bool,
@@ -4160,6 +5017,34 @@ mod tests {
             events.to_vec(),
         )
         .unwrap()
+    }
+
+    /// Resyncs `watch` and returns the revision and tree of the answer, which
+    /// must be the watch's latest full snapshot under the resync's own
+    /// request ID (30-protocol message registry, type 2;
+    /// A13-live-serving-08). A delta would assume a base the resyncing client
+    /// has lost.
+    fn resync_snapshot(
+        adapter: &mut ApplicationLiveAdapter,
+        session: [u8; 16],
+        request: [u8; 16],
+        watch: [u8; 16],
+    ) -> (u64, PresentNode) {
+        let response = LiveApplication::resync(adapter, session, request, watch, &Message::Resync)
+            .expect("an explicit resync is answered");
+        assert_eq!(
+            response.request,
+            Some(request),
+            "the snapshot names its resync"
+        );
+        assert_eq!(response.watch, Some(watch));
+        let Message::Snapshot {
+            revision, present, ..
+        } = response.message
+        else {
+            panic!("an explicit resync is answered with a full snapshot");
+        };
+        (revision, present)
     }
 
     #[test]
@@ -4300,7 +5185,9 @@ mod tests {
         };
         assert_eq!(status, ResultStatus::Success);
         assert_eq!(returned_fingerprint, fingerprint);
-        assert_eq!(value, Some(CanonicalValue::new(OvbRaw::Null).unwrap()));
+        // A declaration's success result is typed Unit; a bare null is not a
+        // complete typed value and cannot be encoded (30-protocol).
+        assert_eq!(value, Some(CanonicalValue::unit()));
 
         drop(context);
         drop(state);
@@ -12780,6 +13667,88 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[test]
+    fn activation_reads_its_own_insert_before_commit() {
+        // ORNA-TXN-005 (10-execution.md:17): the activation observes its own
+        // successful writes before commit. The count read must see the row inserted
+        // above, and exactly one mutation stages.
+        use futures::executor::block_on;
+        use orna_repository_v1::Repository;
+        use orna_runtime_v1::{
+            ActivationWork, NoFault, RuntimeIdentity, RuntimeState, run_table_activation,
+        };
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orna-read-your-write-{}-{timestamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init starts");
+        assert!(status.success(), "git init creates the runtime repository");
+        let repository = Repository::discover(&root).expect("temporary Git repository");
+        let state = block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [51; 16],
+                repository_id: [52; 16],
+            },
+            [53; 32],
+        ))
+        .expect("runtime state opens");
+        let lease = block_on(state.acquire_lease([54; 16])).expect("writer lease acquired");
+
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "main.orna",
+                r#"pub table notes(id: Int) { text: Str, }
+
+pub fn main(): Int {
+  notes.insert({id: 7, text: "written"});
+  notes | count()
+}
+"#,
+                "main",
+            )
+            .expect("read-your-write source is admitted");
+        let digest = [7u8; 32];
+        block_on(run_table_activation(
+            &state,
+            lease,
+            &["notes"],
+            &NoFault,
+            |snapshot| {
+                let evaluated = authority
+                    .evaluate_staged_with_table_snapshot_rows(
+                        &application,
+                        &Environment::new(),
+                        snapshot,
+                        snapshot.table_rows().clone(),
+                        None,
+                    )
+                    .map_err(|error| error.to_string());
+                async move {
+                    let staged = evaluated?;
+                    assert_eq!(staged.mutations().len(), 1, "exactly one insert stages");
+                    assert_eq!(staged.value().raw(), &OvbRaw::Int(1.into()));
+                    Ok::<_, String>(ActivationWork::new(staged.mutations().to_vec(), digest, ()))
+                }
+            },
+        ))
+        .expect("source reads its own insert before commit");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

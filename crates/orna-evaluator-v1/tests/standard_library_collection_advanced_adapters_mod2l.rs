@@ -6,7 +6,7 @@ use orna_value_v1::Raw;
 const MODULES: [&str; 2] = ["std/collection.orna", "std/collection/advanced.orna"];
 
 fn session() -> AdmittedReplSession {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();
