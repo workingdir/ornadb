@@ -5,6 +5,9 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The language server's semantic rename keeps a table or field's object identity
+  in the staged format-3 store, and reports a failed identity read or save as an
+  error to the client instead of skipping it (`ornadb-5il1.414`).
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
