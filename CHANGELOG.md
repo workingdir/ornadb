@@ -6,6 +6,7 @@ been published.
 
 ## Unreleased
 - One-shot `orna invoke` reads committed table rows at `HEAD`, binding each table to its committed identity (`10-execution.md`). A table-reading entry requires a committed project; without one it fails with `table reads need a committed project`. A mutating one-shot `invoke` fails closed with `table mutations`. `sys.rt.info` and `sys.Storage` are available inside table-reading entries. A one-shot read completes while another process holds the runtime owner lock, as a secondary participant. REPL expressions over committed table rows (for example `main.music | count()`) read the committed rows at `HEAD`.
+- Known limit: a table-reading entry in a multi-module project is not routed through the committed-table read path and is not failing closed. `orna invoke` completes with `invocation completed` and prints no value, so whether it reads committed rows is unverified. A fail-closed gate for multi-module projects that declare tables is not yet implemented.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
