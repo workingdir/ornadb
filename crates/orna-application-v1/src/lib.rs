@@ -17,7 +17,6 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{
     CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys,
 };
-use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use orna_live_v1::{
     Error as LiveError, LiveAdminEffectDispatcher, LiveApplication, LiveApplicationWorkLease,
     LiveEvalResponse, LiveEvalTransaction,
@@ -41,6 +40,7 @@ use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
     TableMember, parse_module_with_file, parse_repl,
 };
+use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
 pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use std::{
@@ -1561,10 +1561,8 @@ impl SourceMutationEffectHandler {
             .and_then(|rows| rows.get(table))
             .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
         // An overlay entry shadows the captured row with the same key; a tombstone frees it.
-        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> = captured
-            .iter()
-            .map(|(key, row)| (key, Some(row)))
-            .collect();
+        let mut merged: BTreeMap<&Vec<u8>, Option<&CanonicalValue>> =
+            captured.iter().map(|(key, row)| (key, Some(row))).collect();
         for (key, row) in self.overlay.get(table).into_iter().flatten() {
             merged.insert(key, row.as_ref());
         }
@@ -12917,6 +12915,87 @@ mod tests {
                 }
             })
         }
+    }
+
+    #[test]
+    fn activation_reads_its_own_insert_before_commit() {
+        // ORNA-TXN-005 (10-execution.md:17): the activation observes its own
+        // successful writes before commit. The count read must see the row inserted
+        // above, and exactly one mutation stages.
+        use futures::executor::block_on;
+        use orna_repository_v1::Repository;
+        use orna_runtime_v1::{
+            ActivationWork, NoFault, RuntimeIdentity, RuntimeState, run_table_activation,
+        };
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after Unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "orna-read-your-write-{}-{timestamp}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).expect("temporary repository directory");
+        let status = std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&root)
+            .status()
+            .expect("git init starts");
+        assert!(status.success(), "git init creates the runtime repository");
+        let repository = Repository::discover(&root).expect("temporary Git repository");
+        let state = block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [51; 16],
+                repository_id: [52; 16],
+            },
+            [53; 32],
+        ))
+        .expect("runtime state opens");
+        let lease = block_on(state.acquire_lease([54; 16])).expect("writer lease acquired");
+
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module(
+                "main.orna",
+                r#"pub table notes(id: Int) { text: Str, }
+
+pub fn main(): Int {
+  notes.insert({id: 7, text: "written"});
+  notes | count()
+}
+"#,
+                "main",
+            )
+            .expect("read-your-write source is admitted");
+        let digest = [7u8; 32];
+        block_on(run_table_activation(
+            &state,
+            lease,
+            &["notes"],
+            &NoFault,
+            |snapshot| {
+                let evaluated = authority
+                    .evaluate_staged_with_table_snapshot(
+                        &application,
+                        &Environment::new(),
+                        snapshot,
+                        None,
+                    )
+                    .map_err(|error| error.to_string());
+                async move {
+                    let staged = evaluated?;
+                    assert_eq!(staged.mutations().len(), 1, "exactly one insert stages");
+                    assert_eq!(staged.value().raw(), &OvbRaw::Int(1.into()));
+                    Ok::<_, String>(ActivationWork::new(staged.mutations().to_vec(), digest, ()))
+                }
+            },
+        ))
+        .expect("source reads its own insert before commit");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
