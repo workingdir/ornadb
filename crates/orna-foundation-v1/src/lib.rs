@@ -134,6 +134,12 @@ pub enum ObjectKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DefinitionKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TableKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum KeyKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum StorageKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypeKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TraceKind {}
@@ -172,6 +178,9 @@ pub type SnapshotRef = TypedRowRef<SnapshotKind>;
 pub type DiagnosticRef = TypedRowRef<DiagnosticKind>;
 pub type ObjectRef = TypedRowRef<ObjectKind>;
 pub type DefinitionRef = TypedRowRef<DefinitionKind>;
+pub type TableRef = TypedRowRef<TableKind>;
+pub type KeyRef = TypedRowRef<KeyKind>;
+pub type StorageRef = TypedRowRef<StorageKind>;
 pub type TypeRef = TypedRowRef<TypeKind>;
 pub type TraceRef = TypedRowRef<TraceKind>;
 /// Typed `sys.RowRef<sys.Assertion>` marker. This is not proof that the
@@ -313,6 +322,18 @@ pub const SYS_SNAPSHOT_TABLE_ID: [u8; 16] = [
 pub const SYS_INVOCATION_ARGUMENT_TABLE_ID: [u8; 16] = [
     0x4b, 0x17, 0x8d, 0x20, 0x6f, 0x91, 0x44, 0x72, 0xa8, 0x3e, 0x10, 0xc5, 0x59, 0xd2, 0x84, 0x04,
 ];
+pub const SYS_TABLE_TABLE_ID: [u8; 16] = [
+    0x3c, 0xa0, 0x14, 0x6e, 0x52, 0x9b, 0x4e, 0x27, 0x8f, 0x61, 0xd4, 0x03, 0x7a, 0xe8, 0x15, 0x02,
+];
+pub const SYS_DEFINITION_TABLE_ID: [u8; 16] = [
+    0x9d, 0x42, 0x7e, 0x15, 0xb8, 0x0a, 0x4c, 0x63, 0xa6, 0x2f, 0xe1, 0x70, 0x38, 0xc9, 0x5b, 0x0d,
+];
+pub const SYS_KEY_TABLE_ID: [u8; 16] = [
+    0x5e, 0x11, 0xc7, 0x8a, 0x2d, 0x74, 0x40, 0xb9, 0x9c, 0x06, 0x67, 0xf3, 0x84, 0x1a, 0xd2, 0x08,
+];
+pub const SYS_STORAGE_TABLE_ID: [u8; 16] = [
+    0xe2, 0x73, 0x0b, 0x4f, 0x96, 0xc1, 0x48, 0xd5, 0xb0, 0x3d, 0x1f, 0x8e, 0x52, 0xa7, 0x6c, 0x0a,
+];
 
 /// Constructs a checked `sys.TypeRef` from the exact `sys.Type` natural key
 /// (`object`). The reference remains coordinate data only: it neither proves
@@ -327,6 +348,47 @@ pub fn type_reference(object: ObjectRef) -> Result<TypeRef, SystemReferenceError
 /// or authority.
 pub fn function_reference(object: ObjectRef) -> Result<FunctionRef, SystemReferenceError> {
     catalogue_reference(SYS_FUNCTION_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.TableRef` from the exact `sys.Table` natural key
+/// (`object`). The reference is coordinate data only: it neither proves that
+/// the object is a table nor establishes row existence or authority.
+pub fn table_reference(object: ObjectRef) -> Result<TableRef, SystemReferenceError> {
+    catalogue_reference(SYS_TABLE_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.KeyRef` from the exact `sys.Key` natural key
+/// (`object`). The reference is coordinate data only and grants no authority.
+pub fn key_reference(object: ObjectRef) -> Result<KeyRef, SystemReferenceError> {
+    catalogue_reference(SYS_KEY_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.StorageRef` from the exact `sys.Storage` natural
+/// key (`object`). The reference is coordinate data only and grants no
+/// authority over the storage it names.
+pub fn storage_reference(object: ObjectRef) -> Result<StorageRef, SystemReferenceError> {
+    catalogue_reference(SYS_STORAGE_TABLE_ID, object)
+}
+
+/// Constructs a checked `sys.DefinitionRef` from the exact `sys.Definition`
+/// natural key (`id`). The definition ID is a tag-37 UUID-shaped identity and
+/// is pinned to the supplied snapshot. The reference is coordinate data only.
+pub fn definition_reference(
+    database_id: [u8; 16],
+    definition_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+) -> Result<DefinitionRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    let key = OvbRaw::Array(vec![
+        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(definition_id.to_vec()))),
+        snapshot.raw(),
+    ]);
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_DEFINITION_TABLE_ID,
+        key,
+        snapshot,
+    }))
 }
 
 /// Constructs a checked `sys.SnapshotRef` from the exact `sys.Snapshot`
