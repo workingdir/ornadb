@@ -13,6 +13,9 @@
 //! has stopped, because the transport drains a session in one step. The
 //! session's socket workers are joined after the lock is released.
 
+#[path = "cli_serve_app.rs"]
+mod cli_serve_app;
+
 use super::*;
 use orna_application_v1::ApplicationLiveAdapter;
 use orna_live_v1::{
@@ -22,7 +25,7 @@ use orna_live_v1::{
 };
 use orna_protocol_v1::{Envelope, Limits as ProtocolLimits, Message, PresentationContext};
 use orna_repository_v1::{
-    CommittedBranch, CommittedLogEntry, CommittedTreeEntryKind, GitCommitRef, ManagedPath,
+    CommittedTreeEntryKind, GitCommitRef, ManagedPath,
     Repository, RuntimeGeneration,
 };
 use orna_security_v1::{
@@ -231,6 +234,9 @@ struct ServeState {
     /// The evaluator. It has its own lock so evaluation never blocks session
     /// requests or other sockets' frame admission.
     application: Mutex<ApplicationLiveAdapter>,
+    /// The admitted `serve` entry that answers `/`; `None` when the project
+    /// declares no serving entry.
+    app: Option<Mutex<cli_serve_app::ServeApp>>,
     workers: WebSocketWorkers,
     /// Connections being served, bounded by [`ServeOptions::max_connections`]
     /// (see [`ConnectionSlot`]).
@@ -473,6 +479,15 @@ pub(super) fn run(endpoint: &Endpoint, port: u16, allow_push: bool) -> Result<()
             ..ServeOptions::default()
         },
     )?;
+    if state.app.is_none() {
+        // Without a serving entry the Git transport still serves; `/` is absent.
+        let _ = write_diagnostic(
+            &mut io::stderr().lock(),
+            &cli_serve_app::missing_entry_diagnostic(),
+            false,
+            false,
+        );
+    }
     writeln!(
         io::stdout().lock(),
         "Serving {} at http://{} (loopback{})",
@@ -503,6 +518,8 @@ struct ServedClone {
     identity: RuntimeIdentity,
     catalogue: orna_semantic_v1::Catalogue,
     project: Option<orna_project_v1::LoadedProject>,
+    /// The admitted `serve` entry, or `None` when the project declares none.
+    app: Option<cli_serve_app::ServeApp>,
     /// The clone's durable runtime. The live host owns it, so each live
     /// request is durably admitted and an Eval's writes commit together with
     /// its terminal outcome (30-protocol REQUEST-1).
@@ -524,6 +541,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
     // run only after an explicit query or live Eval request reaches a route.
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
+    let app = cli_serve_app::ServeApp::admit(&project, &catalogue)?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     // The served runtime uses this process's owner. A later process takes the
     // lease over with a bumped epoch once it holds the runtime owner lock, so a
@@ -557,6 +575,7 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         identity,
         catalogue,
         project: Some(project),
+        app,
         runtime,
     })
 }
@@ -571,6 +590,7 @@ fn new_serve_state(
         identity,
         catalogue,
         project,
+        app,
         runtime,
     } = clone;
     let loopback = LoopbackAuthority {
@@ -651,6 +671,7 @@ fn new_serve_state(
             deletion: LocalSessionDeletion,
         }),
         application: Mutex::new(application),
+        app: app.map(Mutex::new),
         workers: WebSocketWorkers::default(),
         connections: AtomicUsize::new(0),
     })
@@ -933,6 +954,9 @@ fn serve_connection(stream: TcpStream, state: &ServeState) -> io::Result<()> {
     let mut stream = reader.into_inner();
     if request.path.starts_with("/orna/session") {
         return serve_session_http_request(&mut stream, request, state);
+    }
+    if let Some(response) = cli_serve_app::serving_entry_route(state.app.as_ref(), &request) {
+        return write_response(&mut stream, response, transfer);
     }
     let response = host_route(
         &state.root,
@@ -1343,77 +1367,9 @@ fn git_listing_route(root: &Path, request: &Request) -> Option<Response> {
         return None;
     }
     match request.path.as_str() {
-        "/" => Some(commit_log_page(root)),
         path if path.starts_with("/tree/") => Some(tree_page(root, &path[6..])),
         path if path.starts_with("/blob/") => Some(blob_page(root, &path[6..])),
         _ => None,
-    }
-}
-
-fn commit_log_page(root: &Path) -> Response {
-    let Ok(repository) = Repository::discover(root) else {
-        return unavailable_response();
-    };
-    let Ok(entries) = repository.committed_history(MAX_LISTING_COMMITS) else {
-        return unavailable_response();
-    };
-    let rows = entries.iter().map(commit_log_node).collect::<Vec<_>>();
-    let commits = if rows.is_empty() {
-        InspectionNode::Text("No commits in this repository.".into())
-    } else {
-        InspectionNode::OrderedList(rows)
-    };
-    let Ok(branches) = repository.local_branches(MAX_LISTING_BRANCHES) else {
-        return unavailable_response();
-    };
-    let branch_rows = branches.iter().map(branch_node).collect::<Vec<_>>();
-    let branches = if branch_rows.is_empty() {
-        InspectionNode::Text("No local branches in this repository.".into())
-    } else {
-        InspectionNode::List(branch_rows)
-    };
-    let content = InspectionNode::Record(vec![
-        ("Recent commits".into(), commits),
-        ("Branches".into(), branches),
-    ]);
-    render_home_document(&content)
-}
-
-
-const MAX_LISTING_BRANCHES: usize = 100;
-
-fn commit_log_node(entry: &CommittedLogEntry) -> InspectionNode {
-    let commit = entry.commit().as_str();
-    let href = format!("/tree/{commit}/");
-    let subject = if entry.subject().is_empty() {
-        "(no subject)"
-    } else {
-        entry.subject()
-    };
-    InspectionNode::Record(vec![
-        (
-            "subject".into(),
-            InspectionNode::Link {
-                label: subject.to_owned(),
-                href,
-            },
-        ),
-        ("commit".into(), InspectionNode::Text(commit.to_owned())),
-        (
-            "author".into(),
-            InspectionNode::Text(entry.author().to_owned()),
-        ),
-        (
-            "committed".into(),
-            InspectionNode::Text(entry.committed_at().to_owned()),
-        ),
-    ])
-}
-
-fn branch_node(branch: &CommittedBranch) -> InspectionNode {
-    InspectionNode::Link {
-        label: branch.name().to_owned(),
-        href: format!("/tree/{}/", branch.commit().as_str()),
     }
 }
 
@@ -1722,17 +1678,6 @@ fn render_inspection_document(
     page.push_str("<main><h1>");
     page.push_str(&html_escape(title));
     page.push_str("</h1>");
-    render_inspection_node(content, &mut page);
-    page.push_str("</main></body></html>");
-    Response::new(200, "text/html; charset=utf-8", page.into_bytes())
-}
-
-fn render_home_document(content: &InspectionNode) -> Response {
-    let mut page = String::from(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>Orna</title>",
-    );
-    page.push_str(LISTING_STYLE);
-    page.push_str("</head><body><main><h1>Orna database</h1>");
     render_inspection_node(content, &mut page);
     page.push_str("</main></body></html>");
     Response::new(200, "text/html; charset=utf-8", page.into_bytes())
@@ -2602,9 +2547,8 @@ mod tests {
                 body: Vec::new(),
             },
         );
-        assert_eq!(home.status, 200);
-        let home = String::from_utf8(home.body).expect("commit listing HTML");
-        assert!(home.contains("No commits in this repository."));
+        assert_eq!(home.status, 404, "no native root page without serve");
+        assert!(!String::from_utf8_lossy(&home.body).contains("No commits in this repository."));
         let query = host_route(
             directory.path(),
             identity,
@@ -2748,18 +2692,11 @@ mod tests {
             .expect("listing commit");
         let commit_id = commit.as_str();
 
-        let log = listing_page(directory.path(), "/");
-        assert_eq!(log.status, 200);
-        assert_eq!(log.content_type, "text/html; charset=utf-8");
-        let log = String::from_utf8(log.body).expect("commit log HTML");
-        assert!(log.contains("render &lt;listing&gt; safely"));
-        assert!(log.contains(&format!("/tree/{commit_id}/")));
-        assert!(log.contains("Branches"));
-        assert!(log.contains("archive"));
-        assert!(log.contains("listing"));
-        assert!(log.contains("kierandrewett"));
-        assert!(!log.contains("uncommitted.txt"));
-        assert!(!log.contains("<header"));
+        let root = listing_page(directory.path(), "/");
+        assert_eq!(root.status, 404, "no native root page without serve");
+        let root = String::from_utf8(root.body).expect("root body");
+        assert!(!root.contains("render &lt;listing&gt; safely"));
+        assert!(!root.contains("Branches"));
 
         let tree = listing_page(directory.path(), &format!("/tree/{commit_id}/"));
         assert_eq!(tree.status, 200);
@@ -3271,7 +3208,9 @@ mod tests {
             format!("LOCALHOST:{port}"),
             format!("[::1]:{port}"),
         ] {
-            assert_eq!(home(&host).status, 200, "{host} names this listener");
+            let accepted = home(&host);
+            assert_eq!(accepted.status, 404, "{host} names this listener");
+            assert_eq!(accepted.body, r#"{"error":"not_found"}"#);
         }
         for host in [
             rebound.clone(),
@@ -3669,7 +3608,7 @@ mod tests {
         loop {
             let reply = home();
             if reply.status != 503 {
-                assert_eq!(reply.status, 200, "{}", reply.body);
+                assert_eq!(reply.status, 404, "{}", reply.body);
                 break;
             }
             assert!(
@@ -4226,6 +4165,7 @@ mod tests {
             identity,
             catalogue: orna_semantic_v1::Catalogue::authoritative_core(),
             project: None,
+            app: None,
             runtime,
         }
     }
