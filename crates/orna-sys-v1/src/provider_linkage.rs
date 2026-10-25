@@ -48,6 +48,9 @@ pub enum SystemProviderHost {
     /// The `orna run` and `orna serve` hosts read the rows from runtime
     /// publication metadata.
     PublicationMetadata,
+    /// The `orna run` and `orna serve` hosts page the rows of the activation's
+    /// admitted table snapshot.
+    ActivationTableSnapshot,
 }
 
 /// One member and the production boundary that links its provider.
@@ -58,7 +61,7 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 10] = [
+const DECLARED_LINKS: [SystemProviderLink; 11] = [
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
@@ -119,6 +122,13 @@ const DECLARED_LINKS: [SystemProviderLink; 10] = [
     SystemProviderLink {
         member: SystemSurfaceMember::Relation("sys.Storage"),
         host: SystemProviderHost::PublicationMetadata,
+    },
+    // `orna-evaluator-v1` recognises the grouped catalogue handle as a relation
+    // source; the run and serve hosts page it from the activation table
+    // snapshot, so admission only links it on those hosts.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Relation("sys.catalog.tables"),
+        host: SystemProviderHost::ActivationTableSnapshot,
     },
 ];
 

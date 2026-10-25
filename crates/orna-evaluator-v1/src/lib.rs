@@ -15534,6 +15534,7 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
     match function_name(expression)?.as_str() {
         "sys.Storage" => Some("sys.Storage"),
         "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
+        "sys.catalog.tables" => Some("sys.catalog.tables"),
         _ => None,
     }
 }

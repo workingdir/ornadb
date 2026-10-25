@@ -6,6 +6,9 @@ been published.
 
 ## Unreleased
 
+### Added
+- `sys.catalog.tables` is a relation over the activation's committed tables. Each committed table with a committed identity yields one row with `reference`, `object`, `key`, and `storage` references plus `row_count` (null) and `row_count_exact` (false). The rows come from the activation snapshot through `ApplicationAuthority::evaluate_staged_with_table_snapshot`; a table without a committed identity has no row (bead `ornadb-5il1.385`, `Orna-1.1.0` `sys.Table`). Not yet served: the async activation path, and the `definition`, `columns`, `assertions`, and `references` fields, which have no authoritative source here and are omitted.
+
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
