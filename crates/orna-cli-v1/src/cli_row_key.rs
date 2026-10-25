@@ -94,21 +94,6 @@ pub(super) fn key_candidates(
     Ok(candidates)
 }
 
-/// The typed refusal for a predicate scan over a composite (tuple) primary
-/// key. Such a scan pages the table by successor keys, and a tuple key has no
-/// successor in the row seam yet, so it needs the successor API tracked by
-/// `ornadb-5il1.461`. Plain listings, `--key` and bounded ranges over a
-/// composite key are not refused.
-pub(super) fn composite_key_error() -> Diagnostic {
-    key_error(
-        "Predicate scan over a composite primary key is not supported yet",
-        "the table's primary key has more than one component; a predicate scan pages \
-         the rows and needs the row-map successor API tracked by bead ornadb-5il1.461. \
-         Drop --kind, --not-kind, --suffix, --min-length and --max-length to list the rows \
-         in range with --limit",
-    )
-}
-
 /// Refuses a `--from`/`--until` bound whose spelling does not match a single
 /// primary-key component of type `key_type`. A bound of the wrong type orders
 /// against the keys in the wrong rank, so it would answer empty or wrong
@@ -122,8 +107,7 @@ pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Resu
             return Err(key_error(
                 "Range bound cannot address this primary key",
                 format!(
-                    "the primary key is {}, which --from/--until cannot express yet; \
-                     tracked by bead ornadb-5il1.461",
+                    "the primary key is {}, which --from/--until cannot express yet (tracked by ornadb-5il1.461)",
                     key_type.unwrap_or("not a primitive type")
                 ),
             ));
@@ -154,8 +138,8 @@ pub(super) fn composite_bound_error() -> Diagnostic {
     key_error(
         "Range bound cannot address a composite primary key",
         "the primary key has several components; --from/--until spell a single \
-         primitive key only, so bounds are refused (bead ornadb-5il1.461 tracks \
-         composite addressing); drop --from/--until and filter the listing instead",
+         primitive key only, so bounds are refused; drop --from/--until and \
+         filter the listing instead (tracked by ornadb-5il1.461)",
     )
 }
 
@@ -169,7 +153,7 @@ pub(super) fn check_point_key_type(key_type: Option<&str>) -> Result<(), Diagnos
             "Row key type cannot be addressed by --key yet",
             format!(
                 "the primary key is {}; --key spells Int, UInt and Str keys only, so this \
-                 key is not addressable from the CLI yet (bead ornadb-5il1.461)",
+                 key is not addressable from the CLI yet (tracked by ornadb-5il1.461)",
                 key_type.unwrap_or("not a primitive type")
             ),
         )),
@@ -178,7 +162,7 @@ pub(super) fn check_point_key_type(key_type: Option<&str>) -> Result<(), Diagnos
 
 fn key_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     // The human renderer shows the title and help but not `detail`, so the
-    // detail (the valid spelling or the successor bead) is carried in the title.
+    // detail (the valid spelling) is carried in the title.
     let detail = detail.into();
     let mut diagnostic = Diagnostic::target_with_detail(
         "E2000",
@@ -240,12 +224,6 @@ mod tests {
             vec![TypedKey::UInt(42)]
         );
         assert!(key_candidates("-7", Some("UInt")).is_err());
-    }
-
-    #[test]
-    fn a_composite_key_is_refused_with_the_successor_bead() {
-        let error = super::composite_key_error();
-        assert!(format!("{error:?}").contains("ornadb-5il1.461"));
     }
 
     #[test]
