@@ -16939,7 +16939,7 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     let unprofiled = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sort_by(values, value => value);",
+            include_str!("fixtures/inline-semantic_graph/d58035e5f3f6.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17285,7 +17285,7 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(rows: [Int]) = std.collection.every(rows, value => true);",
+            include_str!("fixtures/inline-semantic_graph/ccadb756aac0.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17389,7 +17389,7 @@ fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/8fac65264f2b.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17494,7 +17494,7 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.min(values);",
+            include_str!("fixtures/inline-semantic_graph/a161fc681171.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17660,7 +17660,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let qualified = analyze_with_catalogue(
         &[ModuleInput::new(
             "unprofiled.orna",
-            "fn bad(values: [Float]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
@@ -17685,7 +17685,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let incompatible = analyze_with_catalogue(
         &[ModuleInput::new(
             "incompatible.orna",
-            "fn bad(values: [Float]) = std.collection.sum(values);",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
         )],
         &incompatible_catalogue,
     );
@@ -18725,113 +18725,5 @@ fn paired_rollback_identity_survives_repeated_sparse_compaction_rejections() {
         witness,
         selectors(&["600", "611", "621", "632", "633", "641", "642", "651"]),
         "nested witness pins from rejected pairs and sparse rows survive tuple rollback"
-    );
-}
-
-#[test]
-fn finite_list_sort_by_qualified_unprofiled_name_is_unresolved() {
-    let qualified = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sort_by(values, value => value);",
-        )],
-        &Catalogue::authoritative_core(),
-    );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
-    );
-}
-
-#[test]
-fn finite_list_every_qualified_unprofiled_name_is_unresolved() {
-    let qualified = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "unprofiled.orna",
-            "fn bad(rows: [Int]) = std.collection.every(rows, value => true);",
-        )],
-        &Catalogue::authoritative_core(),
-    );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
-    );
-}
-
-#[test]
-fn finite_list_sum_qualified_unprofiled_name_is_unresolved() {
-    let qualified = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.sum(values);",
-        )],
-        &Catalogue::authoritative_core(),
-    );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
-    );
-}
-
-#[test]
-fn finite_list_min_qualified_unprofiled_name_is_unresolved() {
-    let qualified = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "unprofiled.orna",
-            "fn bad(values: [Int]) = std.collection.min(values);",
-        )],
-        &Catalogue::authoritative_core(),
-    );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
-    );
-}
-
-#[test]
-fn finite_list_float_sum_qualified_unprofiled_name_is_unresolved() {
-    let qualified = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "unprofiled.orna",
-            "fn bad(values: [Float]) = std.collection.sum(values);",
-        )],
-        &Catalogue::authoritative_core(),
-    );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
-    );
-}
-
-#[test]
-fn finite_list_float_sum_qualified_incompatible_profile_is_type_error() {
-    let incompatible_source = include_str!("fixtures/inline-semantic_graph/e0b8483cc8bc.orna");
-    let incompatible_profile = StandardDependencyProfile::from_sources(
-        "orna.std/v1-incompatible-float-collection",
-        [("std/collection.orna".into(), incompatible_source.into())],
-    )
-    .expect("incompatible float collection profile");
-    let incompatible_catalogue = Catalogue::authoritative_core()
-        .with_standard_sources(
-            &incompatible_profile,
-            [("std/collection.orna".into(), incompatible_source.into())],
-        )
-        .expect("verified incompatible float collection catalogue");
-    let incompatible = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "incompatible.orna",
-            "use std.collection;\npub fn total(values: [Float]) = collection.sum(values);",
-        )],
-        &incompatible_catalogue,
-    );
-    assert!(
-        has(&incompatible, DIAG_TYPE),
-        "{:?}",
-        incompatible.diagnostics
     );
 }
