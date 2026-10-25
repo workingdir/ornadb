@@ -25,8 +25,6 @@ use crate::{editor_ranges, hierarchy, inlay, semantic};
 use lsp_server::{
     Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError,
 };
-use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
-use orna_repository_v1::{Repository, RepositoryFormat};
 use lsp_types::{
     CallHierarchyOptions, CallHierarchyServerCapability, CodeAction, CodeActionKind,
     CodeActionOptions, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
@@ -51,6 +49,8 @@ use lsp_types::{
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
+use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
+use orna_repository_v1::{Repository, RepositoryFormat};
 
 /// Transport threads for the server's standard input and output streams.
 ///
@@ -262,7 +262,9 @@ impl ServerState {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// A request that cannot be served, with a reason for the user
@@ -846,12 +848,8 @@ fn request_references(
     let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let locations = analysis::references(
-        &workspace,
-        module,
-        byte,
-        params.context.include_declaration,
-    );
+    let locations =
+        analysis::references(&workspace, module, byte, params.context.include_declaration);
     Ok(serde_json::to_value(locations)?)
 }
 
@@ -911,41 +909,73 @@ fn identity_rename_for_request(
     position: Position,
     new_name: &str,
 ) -> Result<Option<ObjectIdentityRename>, String> {
-    let Some(document) = state.document(uri) else { return Ok(None); };
-    let Ok(url) = url::Url::parse(uri.as_str()) else { return Ok(None); };
-    let Ok(path) = url.to_file_path() else { return Ok(None); };
+    let Some(document) = state.document(uri) else {
+        return Ok(None);
+    };
+    let Ok(url) = url::Url::parse(uri.as_str()) else {
+        return Ok(None);
+    };
+    let Ok(path) = url.to_file_path() else {
+        return Ok(None);
+    };
     // Outside a repository there is no identity store to keep.
-    let Ok(repository) = Repository::discover(&path) else { return Ok(None); };
-    let Ok(relative) = path.strip_prefix(repository.worktree()) else { return Ok(None); };
+    let Ok(repository) = Repository::discover(&path) else {
+        return Ok(None);
+    };
+    let Ok(relative) = path.strip_prefix(repository.worktree()) else {
+        return Ok(None);
+    };
     let logical_path = relative.to_string_lossy().replace('\\', "/");
-    let Some(old_name) = identifier_at(&document.text, position) else { return Ok(None); };
+    let Some(old_name) = identifier_at(&document.text, position) else {
+        return Ok(None);
+    };
     let namespace = module_namespace(&logical_path);
-    let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
+    let qualify = |name: &str| {
+        if namespace.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{namespace}.{name}")
+        }
+    };
     let table = qualify(&old_name);
     let pending_renames = lock(&state.pending_identity_renames);
     let pending = pending_renames.get(uri).map(Vec::as_slice).unwrap_or(&[]);
 
-    if pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).any(|rename| {
-        rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table
-    }) {
-        return Ok(Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name))));
+    if pending
+        .iter()
+        .filter_map(|chain| chain.last().map(|step| &step.rename))
+        .any(|rename| rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table)
+    {
+        return Ok(Some(ObjectIdentityRename::new(
+            ObjectKind::Table,
+            table,
+            qualify(new_name),
+        )));
     }
 
     let suffix = format!(".{old_name}");
-    let pending_fields = pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).filter(|rename| {
-        let target = rename.new_qualified_name();
-        rename.kind() == ObjectKind::Field
-            && target.ends_with(&suffix)
-            && target[..target.len() - suffix.len()].starts_with(&namespace)
-    }).collect::<Vec<_>>();
+    let pending_fields = pending
+        .iter()
+        .filter_map(|chain| chain.last().map(|step| &step.rename))
+        .filter(|rename| {
+            let target = rename.new_qualified_name();
+            rename.kind() == ObjectKind::Field
+                && target.ends_with(&suffix)
+                && target[..target.len() - suffix.len()].starts_with(&namespace)
+        })
+        .collect::<Vec<_>>();
     if pending_fields.len() > 1 {
-        return Err(format!("the field name {old_name} matches several pending renames"));
+        return Err(format!(
+            "the field name {old_name} matches several pending renames"
+        ));
     }
     if let Some(rename) = pending_fields.first() {
         let current = rename.new_qualified_name();
         let parent = &current[..current.len() - old_name.len()];
         return Ok(Some(ObjectIdentityRename::new(
-            ObjectKind::Field, current, format!("{parent}{new_name}"),
+            ObjectKind::Field,
+            current,
+            format!("{parent}{new_name}"),
         )));
     }
 
@@ -953,14 +983,25 @@ fn identity_rename_for_request(
         return Err("the staged object identities are missing".to_owned());
     };
     if previous.id(ObjectKind::Table, &table).is_some() {
-        return Ok(Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name))));
+        return Ok(Some(ObjectIdentityRename::new(
+            ObjectKind::Table,
+            table,
+            qualify(new_name),
+        )));
     }
     let mut matches = previous.records().iter().filter(|record| {
-        !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
-            && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
+        !record.is_retired()
+            && record.kind() == ObjectKind::Field
+            && record.qualified_name().ends_with(&suffix)
+            && record.qualified_name()[..record.qualified_name().len() - suffix.len()]
+                .starts_with(&namespace)
     });
-    let Some(record) = matches.next() else { return Ok(None); };
-    if matches.next().is_some() { return Err(format!("the field name {old_name} matches several fields")); }
+    let Some(record) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(format!("the field name {old_name} matches several fields"));
+    }
     let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
     Ok(Some(ObjectIdentityRename::new(
         ObjectKind::Field,
@@ -1022,9 +1063,13 @@ fn identity_not_carried(reason: &str) -> String {
 /// Every pending rename that cannot be carried is returned as an error for the
 /// caller to report; the saved text is saved either way.
 fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<(), String> {
-    let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else { return Ok(()); };
+    let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else {
+        return Ok(());
+    };
     let url = url::Url::parse(uri.as_str()).map_err(|error| format!("{error:?}"))?;
-    let path = url.to_file_path().map_err(|()| format!("{uri:?} is not a file"))?;
+    let path = url
+        .to_file_path()
+        .map_err(|()| format!("{uri:?} is not a file"))?;
     let Some(open) = state.documents.get(uri) else {
         return Err("the document is no longer open".to_owned());
     };
@@ -1052,30 +1097,38 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
     // applied step that reconciles against it is the one saved.
     // `Ok(None)`: no step of the chain reached the saved text, so the rename was
     // declined and there is no identity to carry.
-    let rename_for = |chain: &[PendingIdentityRename]| -> Result<Option<ObjectIdentityRename>, String> {
-        let Some(first) = chain.first() else { return Ok(None); };
-        let applied = chain
-            .iter()
-            .take_while(|step| step.applied_version.is_some_and(|version| version <= saved_version))
-            .collect::<Vec<_>>();
-        if applied.is_empty() { return Ok(None); }
-        let mut reason = format!(
-            "the saved source does not show the rename of {}",
-            first.rename.old_qualified_name()
-        );
-        for step in applied.into_iter().rev() {
-            let rename = ObjectIdentityRename::new(
-                first.rename.kind(),
-                first.rename.old_qualified_name(),
-                step.rename.new_qualified_name(),
-            );
-            match previous.with_renames(&modules, std::slice::from_ref(&rename)) {
-                Ok(_) => return Ok(Some(rename)),
-                Err(error) => reason = format!("{error:?}"),
+    let rename_for =
+        |chain: &[PendingIdentityRename]| -> Result<Option<ObjectIdentityRename>, String> {
+            let Some(first) = chain.first() else {
+                return Ok(None);
+            };
+            let applied = chain
+                .iter()
+                .take_while(|step| {
+                    step.applied_version
+                        .is_some_and(|version| version <= saved_version)
+                })
+                .collect::<Vec<_>>();
+            if applied.is_empty() {
+                return Ok(None);
             }
-        }
-        Err(reason)
-    };
+            let mut reason = format!(
+                "the saved source does not show the rename of {}",
+                first.rename.old_qualified_name()
+            );
+            for step in applied.into_iter().rev() {
+                let rename = ObjectIdentityRename::new(
+                    first.rename.kind(),
+                    first.rename.old_qualified_name(),
+                    step.rename.new_qualified_name(),
+                );
+                match previous.with_renames(&modules, std::slice::from_ref(&rename)) {
+                    Ok(_) => return Ok(Some(rename)),
+                    Err(error) => reason = format!("{error:?}"),
+                }
+            }
+            Err(reason)
+        };
     let mut applicable = Vec::new();
     let mut failures = Vec::new();
     for chain in &chains {
@@ -1112,7 +1165,9 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
 
 fn mark_applied_identity_rename(state: &RequestContext, uri: &Uri, version: i32, text: &str) {
     let mut pending = lock(&state.pending_identity_renames);
-    let Some(chains) = pending.get_mut(uri) else { return; };
+    let Some(chains) = pending.get_mut(uri) else {
+        return;
+    };
     for step in chains.iter_mut().flatten() {
         if version > step.requested_version && text == step.expected_text {
             step.applied_version = Some(version);
@@ -1121,32 +1176,56 @@ fn mark_applied_identity_rename(state: &RequestContext, uri: &Uri, version: i32,
 }
 
 fn module_namespace(path: &str) -> String {
-    let mut parts = path.strip_suffix(".orna").unwrap_or(path).split('/').collect::<Vec<_>>();
+    let mut parts = path
+        .strip_suffix(".orna")
+        .unwrap_or(path)
+        .split('/')
+        .collect::<Vec<_>>();
     let file = parts.pop().unwrap_or_default();
-    if file != "main" { parts.push(file); }
+    if file != "main" {
+        parts.push(file);
+    }
     parts.join(".")
 }
 
 fn identifier_at(source: &str, position: Position) -> Option<String> {
     let mapper = PositionMapper::new(source);
     let byte = mapper.byte_offset(position).min(source.len());
-    let start = source[..byte].char_indices().rev().find_map(|(index, ch)| (!is_identifier_char(ch)).then_some(index + ch.len_utf8())).unwrap_or(0);
-    let end = source[byte..].char_indices().find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(byte + offset)).unwrap_or(source.len());
+    let start = source[..byte]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (!is_identifier_char(ch)).then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let end = source[byte..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(byte + offset))
+        .unwrap_or(source.len());
     let identifier = source.get(start..end)?;
     (!identifier.is_empty()).then(|| identifier.to_owned())
 }
 
-fn is_identifier_char(ch: char) -> bool { ch == '_' || ch.is_alphanumeric() }
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
 
 fn apply_text_edits(source: &str, edits: &[TextEdit]) -> Option<String> {
     let mapper = PositionMapper::new(source);
-    let mut edits = edits.iter().map(|edit| {
-        Some((mapper.byte_offset(edit.range.start), mapper.byte_offset(edit.range.end), edit.new_text.as_str()))
-    }).collect::<Option<Vec<_>>>()?;
+    let mut edits = edits
+        .iter()
+        .map(|edit| {
+            Some((
+                mapper.byte_offset(edit.range.start),
+                mapper.byte_offset(edit.range.end),
+                edit.new_text.as_str(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
     let mut updated = source.to_owned();
     for (start, end, replacement) in edits {
-        if start > end || end > updated.len() { return None; }
+        if start > end || end > updated.len() {
+            return None;
+        }
         updated.replace_range(start..end, replacement);
     }
     Some(updated)
@@ -1161,7 +1240,8 @@ fn request_rename(
     let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Err(RequestFailed("cannot rename: the document is not open".to_owned()).into());
     };
-    let (renamable, edits) = rename::plan(&workspace, module, byte, &params.new_name).map_err(refused)?;
+    let (renamable, edits) =
+        rename::plan(&workspace, module, byte, &params.new_name).map_err(refused)?;
     if let Some(home) = state.documents.get(&uri).and_then(|open| open.home.clone()) {
         verify_project_check(state, &home, &workspace, &edits)?;
     }
@@ -1171,10 +1251,12 @@ fn request_rename(
     // identity that cannot be carried never fails an ordinary rename: the plain
     // workspace edit is returned with a warning.
     let identity = if carries_identity(&workspace, &renamable.target) {
-        identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or_else(|error| {
-            state.show_warning(&identity_not_carried(&error));
-            None
-        })
+        identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or_else(
+            |error| {
+                state.show_warning(&identity_not_carried(&error));
+                None
+            },
+        )
     } else {
         None
     };
@@ -1330,10 +1412,12 @@ fn request_prepare_rename(
     };
     let renamable = rename::prepare(&workspace, module, byte).map_err(refused)?;
     let mapper = PositionMapper::new(workspace.file(module).text());
-    Ok(serde_json::to_value(PrepareRenameResponse::RangeWithPlaceholder {
-        range: mapper.range(&renamable.span),
-        placeholder: renamable.placeholder,
-    })?)
+    Ok(serde_json::to_value(
+        PrepareRenameResponse::RangeWithPlaceholder {
+            range: mapper.range(&renamable.span),
+            placeholder: renamable.placeholder,
+        },
+    )?)
 }
 
 fn request_document_symbols(
@@ -1859,7 +1943,9 @@ fn request_document_diagnostic(
     let (_, params) = request.extract::<DocumentDiagnosticParams>("textDocument/diagnostic")?;
     let uri = params.text_document.uri;
     let (version, diagnostics) = diagnostics::document_report(&state.snapshot(), &uri)
-        .map_or((None, Vec::new()), |report| (report.version, report.diagnostics));
+        .map_or((None, Vec::new()), |report| {
+            (report.version, report.diagnostics)
+        });
     let result_id = diagnostic_result_id(&uri, version, &diagnostics);
     let report = if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
         DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
@@ -1930,12 +2016,8 @@ fn request_selection_ranges(
     };
     let file = open.analysis();
     let mapper = PositionMapper::new(file.text());
-    let ranges = editor_ranges::selection_ranges(
-        &file.parse.value,
-        file.text(),
-        &params.positions,
-        &mapper,
-    );
+    let ranges =
+        editor_ranges::selection_ranges(&file.parse.value, file.text(), &params.positions, &mapper);
     Ok(serde_json::to_value(ranges)?)
 }
 
@@ -2044,8 +2126,7 @@ mod rename_request_tests {
     const EXPRESSIONS_SOURCE: &str = include_str!("../tests/fixtures/expressions-v1.orna");
     const RENAME_TARGET_SOURCE: &str =
         include_str!("../tests/fixtures/rename-reserved-target-v1.orna");
-    const IDENTITY_SOURCE: &str =
-        include_str!("../tests/fixtures/identity-rename-follow-v1.orna");
+    const IDENTITY_SOURCE: &str = include_str!("../tests/fixtures/identity-rename-follow-v1.orna");
 
     fn open(uri: &Uri, text: &str) -> ServerState {
         let mut state = ServerState::new();
@@ -2113,7 +2194,9 @@ mod rename_request_tests {
 
     #[test]
     fn reserved_word_target_from_a_real_fixture_is_refused() {
-        let uri: Uri = "file:///workspace/rename-reserved-target-v1.orna".parse().unwrap();
+        let uri: Uri = "file:///workspace/rename-reserved-target-v1.orna"
+            .parse()
+            .unwrap();
         let mut state = open(&uri, RENAME_TARGET_SOURCE);
         let declared_byte = RENAME_TARGET_SOURCE.find("total(value").unwrap() + 1;
 
@@ -2131,13 +2214,19 @@ mod rename_request_tests {
 
     #[test]
     fn rename_then_query_keeps_one_identity_for_the_renamed_function() {
-        let uri: Uri = "file:///workspace/identity-rename-follow-v1.orna".parse().unwrap();
+        let uri: Uri = "file:///workspace/identity-rename-follow-v1.orna"
+            .parse()
+            .unwrap();
         let mut state = open(&uri, IDENTITY_SOURCE);
         let declared = IDENTITY_SOURCE.find("total(value").unwrap() + 1;
         let mut edits = rename(&mut state, &uri, declared, "sum")
             .expect("a plain identifier renames the function");
         let file_edits = edits.remove(&uri).unwrap();
-        assert_eq!(file_edits.len(), 2, "declaration and call are both rewritten");
+        assert_eq!(
+            file_edits.len(),
+            2,
+            "declaration and call are both rewritten"
+        );
         let renamed = apply_text_edits(IDENTITY_SOURCE, &file_edits).unwrap();
         assert_eq!(renamed, IDENTITY_SOURCE.replace("total", "sum"));
 
@@ -2170,7 +2259,11 @@ mod rename_request_tests {
 mod persisted_object_rename_tests {
     use super::*;
     use orna_semantic_v1::ModuleInput;
-    use std::{fs, path::{Path, PathBuf}, process::Command};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     fn notify(state: &mut ServerState, notification: Notification) {
         handle_notification(state, notification);
@@ -2204,23 +2297,34 @@ mod persisted_object_rename_tests {
         )
     }
     fn apply_rename(state: &mut ServerState, uri: &Uri, new_name: &str, version: i32) -> String {
-        let response = request_rename(&state.context, rename_request(uri.clone(), new_name)).unwrap();
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), new_name)).unwrap();
         let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         let source = state.context.document(uri).unwrap().text.clone();
         let edits = workspace_edit.changes.unwrap().remove(uri).unwrap();
         let renamed_source = apply_text_edits(&source, &edits).unwrap();
-        notify(state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": &renamed_source }],
-            }),
-        });
+        notify(
+            state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": &renamed_source }],
+                }),
+            },
+        );
         renamed_source
     }
 
     fn git(directory: &Path, args: &[&str]) {
-        assert!(Command::new("git").args(args).current_dir(directory).status().unwrap().success());
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(directory)
+                .status()
+                .unwrap()
+                .success()
+        );
     }
 
     /// A format-3 repository whose `main.orna` is committed as `source`, with no
@@ -2232,33 +2336,63 @@ mod persisted_object_rename_tests {
             .into_repository();
         let source_path = directory.path().join("main.orna");
         fs::write(&source_path, source).unwrap();
-        git(directory.path(), &["add", "main.orna", ".orna/database.orna"]);
-        git(directory.path(), &[
-            "-c", "user.name=orna-test", "-c", "user.email=orna-test@example.invalid",
-            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
-        ]);
+        git(
+            directory.path(),
+            &["add", "main.orna", ".orna/database.orna"],
+        );
+        git(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=orna-test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
         (directory, repository, source_path)
     }
 
     /// A format-3 repository whose index stages `main.orna` as `source`, with
     /// the identity inventory `orna commit` would stage for it.
-    fn format3_fixture(source: &str) -> (tempfile::TempDir, Repository, PathBuf, ObjectIdentityManifest) {
+    fn format3_fixture(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        Repository,
+        PathBuf,
+        ObjectIdentityManifest,
+    ) {
         let (directory, repository, source_path) = format3_committed(source);
         let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let initial =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
         let staged = repository.capture_staged_candidate().unwrap();
-        repository.stage_object_identities(&staged, &initial.to_stored(), &[]).unwrap();
+        repository
+            .stage_object_identities(&staged, &initial.to_stored(), &[])
+            .unwrap();
         (directory, repository, source_path, initial)
     }
 
     /// The identity inventory the staged index carries now.
     fn staged_manifest(repository: &Repository) -> ObjectIdentityManifest {
         let staged = repository.capture_staged_candidate().unwrap();
-        ObjectIdentityManifest::read_staged(repository, &staged).unwrap().unwrap()
+        ObjectIdentityManifest::read_staged(repository, &staged)
+            .unwrap()
+            .unwrap()
     }
 
     fn file_uri(path: &Path) -> Uri {
-        url::Url::from_file_path(path).unwrap().as_str().parse::<Uri>().unwrap()
+        url::Url::from_file_path(path)
+            .unwrap()
+            .as_str()
+            .parse::<Uri>()
+            .unwrap()
     }
 
     /// Records every message the server sends to its client.
@@ -2272,23 +2406,37 @@ mod persisted_object_rename_tests {
 
     /// The warnings shown to the client, as `window/showMessage`.
     fn shown_warnings(messages: &Mutex<Vec<Message>>) -> Vec<String> {
-        lock(messages).iter().filter_map(|message| match message {
-            Message::Notification(notification) if notification.method == "window/showMessage" => {
-                let params: lsp_types::ShowMessageParams =
-                    serde_json::from_value(notification.params.clone()).unwrap();
-                (params.typ == lsp_types::MessageType::WARNING).then_some(params.message)
-            }
-            _ => None,
-        }).collect()
+        lock(messages)
+            .iter()
+            .filter_map(|message| match message {
+                Message::Notification(notification)
+                    if notification.method == "window/showMessage" =>
+                {
+                    let params: lsp_types::ShowMessageParams =
+                        serde_json::from_value(notification.params.clone()).unwrap();
+                    (params.typ == lsp_types::MessageType::WARNING).then_some(params.message)
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Asserts exactly one warning was shown, carrying the rename code and remedy.
     fn assert_one_rename_warning(messages: &Mutex<Vec<Message>>, reason: &str) {
         let warnings = shown_warnings(messages);
         assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
-        assert!(warnings[0].starts_with("ORNA-LSP-RENAME-001"), "{warnings:?}");
-        assert!(warnings[0].contains(reason), "{warnings:?} should mention {reason}");
-        assert!(warnings[0].contains("orna mv"), "{warnings:?} should name the orna mv remedy");
+        assert!(
+            warnings[0].starts_with("ORNA-LSP-RENAME-001"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].contains(reason),
+            "{warnings:?} should mention {reason}"
+        );
+        assert!(
+            warnings[0].contains("orna mv"),
+            "{warnings:?} should name the orna mv remedy"
+        );
     }
 
     #[test]
@@ -2319,7 +2467,8 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        let declined_response = request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
+        let declined_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
         assert!(!declined_response.is_null());
         drop(declined_response);
         fs::write(&source_path, &saved_source).unwrap();
@@ -2340,14 +2489,18 @@ mod persisted_object_rename_tests {
 
         apply_rename(&mut state, &uri, "Archive", 2);
         let vault_source = apply_rename(&mut state, &uri, "Vault", 3);
-        let saved_source = format!("{vault_source}\npub table Archive(id: Str) {{ payload: Blob, }}");
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 4 },
-                "contentChanges": [{ "text": &saved_source }],
-            }),
-        });
+        let saved_source =
+            format!("{vault_source}\npub table Archive(id: Str) {{ payload: Blob, }}");
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 4 },
+                    "contentChanges": [{ "text": &saved_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
@@ -2366,17 +2519,21 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        let declined_response = request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
+        let declined_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
         assert!(!declined_response.is_null());
         drop(declined_response);
         let saved_source = format!("{saved_source}\npub table Vault(id: Str) {{ payload: Blob, }}");
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 3 },
-                "contentChanges": [{ "text": &saved_source }],
-            }),
-        });
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 3 },
+                    "contentChanges": [{ "text": &saved_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
@@ -2409,19 +2566,23 @@ mod persisted_object_rename_tests {
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
-        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert_eq!(staged_manifest(&repository), initial);
 
         let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         let edits = workspace_edit.changes.unwrap().remove(&uri).unwrap();
         let renamed_source = apply_text_edits(source, &edits).unwrap();
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 2 },
-                "contentChanges": [{ "text": renamed_source }],
-            }),
-        });
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": renamed_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &renamed_source).unwrap();
         did_save(&mut state, &uri);
 
@@ -2437,7 +2598,8 @@ mod persisted_object_rename_tests {
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
-        let lost_response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        let lost_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert!(!lost_response.is_null());
         drop(lost_response);
         assert_eq!(staged_manifest(&repository), initial);
@@ -2450,7 +2612,10 @@ mod persisted_object_rename_tests {
     fn rename_request_returns_the_plain_edit_when_staged_identities_are_unreadable() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
         let (directory, _repository, source_path, _initial) = format3_fixture(source);
-        git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
+        git(
+            directory.path(),
+            &["rm", "--cached", "-q", "-r", ".orna/store"],
+        );
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         let messages = capture_client(&mut state);
@@ -2459,7 +2624,10 @@ mod persisted_object_rename_tests {
         let response = request_rename(&state.context, rename_request(uri, "Archive"))
             .expect("an unreadable identity never fails an ordinary rename");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
-        assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
+        assert_eq!(
+            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
+            1
+        );
         assert_one_rename_warning(&messages, "object identity was not carried");
     }
 
@@ -2480,13 +2648,20 @@ mod persisted_object_rename_tests {
         // edit still returns, and the client is told the identity was not carried.
         assert_one_rename_warning(&messages, "object identity was not carried");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
-        assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
+        assert_eq!(
+            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
+            1
+        );
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
         // `apply_rename` issues a second rename request, which warns the same way.
         // The save adds no warning: no identity was recorded to carry.
-        assert_eq!(shown_warnings(&messages).len(), 2, "one warning per rename request, none on save");
+        assert_eq!(
+            shown_warnings(&messages).len(),
+            2,
+            "one warning per rename request, none on save"
+        );
         fs::remove_file(merge_head).unwrap();
         assert_eq!(staged_manifest(&repository), initial);
     }
@@ -2518,18 +2693,27 @@ mod persisted_object_rename_tests {
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
         let messages = capture_client(&mut state);
-        open_document(&mut state, &uri, &format!("{committed}pub table Draft(id: Str) {{ note: Str, }}\n"));
+        open_document(
+            &mut state,
+            &uri,
+            &format!("{committed}pub table Draft(id: Str) {{ note: Str, }}\n"),
+        );
 
         // No committed identity for `Draft`: the lookup is `Ok(None)`, so the
         // plain edit is returned and nothing is shown.
-        let response = request_rename(&state.context, rename_request_at(&uri, 1, 11, "Final")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 1, 11, "Final")).unwrap();
         assert!(edit_count(response) > 0);
-        assert!(shown_warnings(&messages).is_empty(), "an uncommitted table has no identity to carry");
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "an uncommitted table has no identity to carry"
+        );
     }
 
     #[test]
     fn ambiguous_field_rename_warns_when_a_committed_identity_exists() {
-        let source = "pub table Media(id: Str) { title: Str, }\npub table Music(id: Str) { title: Str, }\n";
+        let source =
+            "pub table Media(id: Str) { title: Str, }\npub table Music(id: Str) { title: Str, }\n";
         let (_directory, _repository, source_path, _initial) = format3_fixture(source);
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
@@ -2537,7 +2721,8 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         // Both tables hold a committed `title`, so the field cannot be matched to one identity.
-        let response = request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading")).unwrap();
         assert!(edit_count(response) > 0, "the plain edit still returns");
         assert_one_rename_warning(&messages, "matches several fields");
     }
@@ -2554,7 +2739,8 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         // Format 1 and 2 repositories have no object identities to carry.
-        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert_eq!(edit_count(response), 1);
         assert_one_rename_warning(&messages, "object identity was not carried");
     }
@@ -2568,7 +2754,8 @@ mod persisted_object_rename_tests {
         let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
-        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert_eq!(edit_count(response), 1);
         assert_one_rename_warning(&messages, "the staged object identities are missing");
     }
@@ -2583,9 +2770,13 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         // Column 15 is inside the parameter `value`, a local name with no identity.
-        let response = request_rename(&state.context, rename_request_at(&uri, 0, 15, "amount")).unwrap();
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 0, 15, "amount")).unwrap();
         assert!(edit_count(response) > 0);
-        assert!(shown_warnings(&messages).is_empty(), "a local rename carries no identity");
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a local rename carries no identity"
+        );
     }
 
     #[test]
@@ -2598,7 +2789,10 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
+        git(
+            directory.path(),
+            &["rm", "--cached", "-q", "-r", ".orna/store"],
+        );
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
@@ -2619,7 +2813,10 @@ mod persisted_object_rename_tests {
         drop(request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap());
         did_save(&mut state, &uri);
 
-        assert!(shown_warnings(&messages).is_empty(), "a declined rename is not a warning");
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a declined rename is not a warning"
+        );
     }
 
     #[test]
@@ -2632,7 +2829,11 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         apply_rename(&mut state, &uri, "Archive", 2);
-        fs::write(&source_path, "pub table Other(id: Str) { payload: Blob, }\n").unwrap();
+        fs::write(
+            &source_path,
+            "pub table Other(id: Str) { payload: Blob, }\n",
+        )
+        .unwrap();
         did_save(&mut state, &uri);
 
         assert_one_rename_warning(&messages, "differs from the editor buffer");
@@ -2650,7 +2851,9 @@ mod persisted_object_rename_tests {
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
         fs::write(&source_path, &saved_source).unwrap();
-        Arc::get_mut(&mut state.context.documents).expect("no other owner").remove(&uri);
+        Arc::get_mut(&mut state.context.documents)
+            .expect("no other owner")
+            .remove(&uri);
         did_save(&mut state, &uri);
 
         assert_one_rename_warning(&messages, "the document is no longer open");
@@ -2671,9 +2874,12 @@ mod persisted_object_rename_tests {
         // to that name collides and `with_renames` refuses it.
         let both = "pub table Media(id: Str) { payload: Blob, }\npub table Archive(id: Str) { payload: Blob, }\n";
         let module = ModuleInput::new("main.orna", both);
-        let widened = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let widened =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
         let staged = repository.capture_staged_candidate().unwrap();
-        repository.stage_object_identities(&staged, &widened.to_stored(), &[]).unwrap();
+        repository
+            .stage_object_identities(&staged, &widened.to_stored(), &[])
+            .unwrap();
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
@@ -2705,6 +2911,9 @@ mod persisted_object_rename_tests {
         let response = request_rename(&state.context, request).unwrap();
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         assert!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>() > 0);
-        assert!(shown_warnings(&messages).is_empty(), "a function rename carries no identity");
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a function rename carries no identity"
+        );
     }
 }
