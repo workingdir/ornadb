@@ -94,24 +94,88 @@ pub(super) fn key_candidates(
     Ok(candidates)
 }
 
-/// The typed refusal for a composite (tuple) primary key. Point keys and
-/// predicate scans over such a table need the successor API tracked by
-/// `ornadb-5il1.461`, which does not exist yet.
+/// The typed refusal for a predicate scan over a composite (tuple) primary
+/// key. Such a scan pages the table by successor keys, and a tuple key has no
+/// successor in the row seam yet, so it needs the successor API tracked by
+/// `ornadb-5il1.461`. Plain listings, `--key` and bounded ranges over a
+/// composite key are not refused.
 pub(super) fn composite_key_error() -> Diagnostic {
     key_error(
-        "Composite primary keys are not supported by ornadb-5il1.461 yet",
-        "the table's primary key has more than one component; tuple key lookup and \
-         paged predicate scans need the row-map successor API tracked by bead ornadb-5il1.461",
+        "Predicate scan over a composite primary key is not supported yet",
+        "the table's primary key has more than one component; a predicate scan pages \
+         the rows and needs the row-map successor API tracked by bead ornadb-5il1.461. \
+         Drop --kind, --not-kind, --suffix, --min-length and --max-length to list the rows \
+         in range with --limit",
     )
 }
 
+/// Refuses a `--from`/`--until` bound whose spelling does not match a single
+/// primary-key component of type `key_type`. A bound of the wrong type orders
+/// against the keys in the wrong rank, so it would answer empty or wrong
+/// rather than fail; it is refused instead.
+pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Result<(), Diagnostic> {
+    let valid = match key_type {
+        Some("Int") => "int:N",
+        Some("UInt") => "uint:N",
+        Some("Str") => "text:KEY or bytes:HEX",
+        _ => {
+            return Err(key_error(
+                "Range bound cannot address this primary key",
+                format!(
+                    "the primary key is {}, which --from/--until cannot express yet; \
+                     tracked by bead ornadb-5il1.461",
+                    key_type.unwrap_or("not a primitive type")
+                ),
+            ));
+        }
+    };
+    let matches = matches!(
+        (bound, key_type),
+        (TypedKey::Int(_), Some("Int"))
+            | (TypedKey::UInt(_), Some("UInt"))
+            | (TypedKey::Text(_) | TypedKey::Bytes(_), Some("Str"))
+    );
+    if matches {
+        return Ok(());
+    }
+    Err(key_error(
+        "Range bound does not match the table's primary key type",
+        format!(
+            "the table's primary key is {}; use {valid} for its bounds, not the spelling given",
+            key_type.unwrap_or("not a primitive type")
+        ),
+    ))
+}
+
+/// Refuses a `--key` lookup over a single primary-key component whose type
+/// `--key` cannot spell. Only `Int`, `UInt` and `Str` keys are addressable
+/// from the CLI; any other type would silently miss, so it is refused.
+pub(super) fn check_point_key_type(key_type: Option<&str>) -> Result<(), Diagnostic> {
+    match key_type {
+        Some("Int" | "UInt" | "Str") => Ok(()),
+        _ => Err(key_error(
+            "Row key type cannot be addressed by --key yet",
+            format!(
+                "the primary key is {}; --key spells Int, UInt and Str keys only, so this \
+                 key is not addressable from the CLI yet (bead ornadb-5il1.461)",
+                key_type.unwrap_or("not a primitive type")
+            ),
+        )),
+    }
+}
+
 fn key_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
-    Diagnostic::target_with_detail(
+    // The human renderer shows the title and help but not `detail`, so the
+    // detail (the valid spelling or the successor bead) is carried in the title.
+    let detail = detail.into();
+    let mut diagnostic = Diagnostic::target_with_detail(
         "E2000",
         title,
         "spell a text key as KEY_TEXT and a byte key as 0x followed by its hex digits",
-        detail.into(),
-    )
+        detail.clone(),
+    );
+    diagnostic.title = std::borrow::Cow::Owned(format!("{title}: {detail}"));
+    diagnostic
 }
 
 #[cfg(test)]
