@@ -8,6 +8,23 @@ been published.
 - `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one superseded-draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`; draft ORNA-OGB-008, superseded ID) with shortest-form, width and 2^63-1 bounds. Its inline golden vectors were hand-copied from the draft archive and compared manually; the archive comparison test runs only when `ORNA_DRAFT_ZIP` is set (it prints SKIPPED otherwise, and fails when `ORNA_REQUIRE_DRAFT_ZIP=1`). Read-only; not wired into any read path. Final-spec authority for reading retained bytes is ORNA-ROW-013 and ORNA-UPGRADE-002, which are not yet met.
 - `orna-repository-v1::format2_orr::decode_orr2_blob_field` decodes one superseded-draft format-2 ORR-2 Blob field value (draft ORNA-OGB-007): an exact `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }` record (no empty or trailing fields) or a legacy inline padded-Base64 string. Read-only; not wired into any read path; does not resolve `.orna/blobs` or produce an OVB-1 Blob.
 - `orna-repository-v1::format2_ogb::verify_ogb_root` read-only verifies a superseded-draft OGB-1 descriptor/index/chunk tree (draft ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. The caller supplies a verified object store; Git object IDs are not re-hashed. Missing objects are reported distinctly from corruption. Not wired into any read path; no writer or reader is activated.
+- The language server's semantic rename keeps a table or field's object identity.
+  Owner-visible behaviour: on save, the editor writes to the git index. The index
+  entry for `main.orna` is replaced with the whole saved file (not only the renamed
+  hunk), and the identity inventory and `.orna/store` are staged too, but only when
+  the `main.orna` index entry still equals HEAD's or the text the edit started from.
+  Otherwise nothing is staged and the warning asks for manual staging, so partial
+  `git add -p` work is never overwritten. Nothing is committed; `orna commit` then
+  keeps the identity, like `orna mv`. A field rename is not staged: it is refused with
+  the warning `ORNA-LSP-RENAME-001` ("schema evolution is not admitted") until schema
+  evolution is implemented (ORNA-EVOL-002). An identity that cannot be carried leaves
+  the rename applied and shows a warning with code `ORNA-LSP-RENAME-001` and the remedy
+  `orna mv` (`ornadb-5il1.414`). A rename applied to the buffer but not saved before
+  the document closes or reopens is reported as "the rename was not saved". Concurrent
+  inventory changes are guarded by the staged-store `StaleIndex` check. An outer
+  coordination lock was not added because the install path takes the same lock
+  non-blockingly: a re-entrant attempt fails with `RepositoryBusy`, so the install
+  would fail rather than deadlock.
 - Publication recovery re-verifies `.orna/store` payloads at the `IndexReconciled` stage before worktree materialisation, so a managed store edit made inside the `index` kill window is retained (E2300) and HEAD is not rewound. `publication_crash_matrix` gains a later-tail leg at every kill boundary (`prepared` included) and a managed-store kill-window leg (ornadb-5il1.406, ornadb-5il1.407).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
