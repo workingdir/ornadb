@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/top-level-on.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1005",
+  "message_contains": "`on` is not a declaration",
+  "status": "expected-not-executed"
+}

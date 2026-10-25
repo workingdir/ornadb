@@ -1,0 +1,1 @@
+pub currency GBP { code: "GBP", symbol: "£", minor_digits: 2 }

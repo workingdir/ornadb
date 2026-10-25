@@ -1,0 +1,12 @@
+pub enum Status {
+    draft,
+    published,
+    archived,
+}
+
+pub fn label(status: Status): Str =
+    case status {
+        Status.draft: "Draft",
+        Status.published: "Published",
+        Status.archived: "Archived",
+    };

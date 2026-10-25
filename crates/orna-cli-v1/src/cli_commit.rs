@@ -1,4 +1,13 @@
 //! Publishes the exact candidate admitted by an explicit review.
+//!
+//! `commit` "builds the staged candidate, validates it, creates its commit"
+//! (16-administration). Before review, the staged format-3 store is completed
+//! for the staged source: tables without a relation get one, and the
+//! committed identity inventory is reconciled into the store. An unborn
+//! branch's first commit creates the branch ref.
+
+use orna_repository_v1::FormatContextError;
+use orna_repository_v1::relation_admission::{OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError};
 
 use super::*;
 
@@ -10,11 +19,185 @@ fn usage() -> Diagnostic {
     )
 }
 
+const NOTHING_TO_COMMIT_TITLE: &str = "nothing is staged to commit";
+const NOTHING_TO_COMMIT_HELP: &str =
+    "stage changes with `orna add` or `git add`, then retry `orna commit -m MESSAGE`";
+
+/// The single diagnostic for a commit with no staged tree, shared by the index
+/// (`SysGitNothingToCommit`) and relation-admission (`EmptyIndex`) paths (F9).
+fn nothing_to_commit() -> Diagnostic {
+    Diagnostic::target("E2304", NOTHING_TO_COMMIT_TITLE, NOTHING_TO_COMMIT_HELP)
+}
+
 fn message(arguments: &[String]) -> Result<&str, Diagnostic> {
-    if arguments.len() != 2 || !matches!(arguments[0].as_str(), "-m" | "--message") || arguments[1].is_empty() {
+    if arguments.len() != 2
+        || !matches!(arguments[0].as_str(), "-m" | "--message")
+        || arguments[1].is_empty()
+    {
         return Err(usage());
     }
     Ok(&arguments[1])
+}
+
+fn staging_error(title: &'static str, detail: String) -> Diagnostic {
+    Diagnostic::target_with_detail(
+        "E2300",
+        title,
+        "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created",
+        detail,
+    )
+}
+
+/// The candidate tracks a path its recorded repository format does not
+/// admit: an `.orna/` entry other than `database.orna` and `store`, or a
+/// loose row file a format-3 candidate writes (ORNA-META-001, ORNA-REPO-004).
+/// Capture, the source loader and the commit gate all refuse it with format
+/// admission's own code (ORNA-REPO-CONTEXT-004) and the path in the title,
+/// since attached details are shown only with `--debug`.
+fn mixed_formats(error: &FormatContextError) -> Diagnostic {
+    Diagnostic {
+        code: error.code(),
+        title: Cow::Owned(error.to_string()),
+        help: "a format-3 snapshot tracks only `.orna/database.orna` and `.orna/store`, and rows change through `orna publish`; unstage that path with `git restore --staged PATH`, then retry; no commit was created",
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    }
+}
+
+/// The committed `HEAD` mixes formats, so `orna run` refuses before any runtime
+/// state is opened. Same code and title as [`mixed_formats`], but the remedy
+/// is true for a committed snapshot: unstaging does not change `HEAD`.
+pub(crate) fn mixed_formats_at_head(error: &FormatContextError) -> Diagnostic {
+    Diagnostic {
+        code: error.code(),
+        title: Cow::Owned(error.to_string()),
+        help: "the committed snapshot tracks a path a format-3 repository does not admit; commit a snapshot without that path (for example `git rm --cached PATH` then `git commit`), then retry; `orna run` reads the committed HEAD",
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    }
+}
+
+/// A retained publication or checkout recovery record owns the index, so
+/// staging refuses without touching it; the diagnostic names that condition
+/// and its remedy before any generic staging failure.
+fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagnostic {
+    use orna_repository_v1::RepositoryError;
+    match error {
+        RelationAdmissionError::Repository(RepositoryError::PublicationPending) => {
+            Diagnostic::target(
+                "E2300",
+                "an interrupted publication has not been recovered",
+                "run `orna publish` to finish recovery first, then retry `orna commit -m MESSAGE`; no commit was created",
+            )
+        }
+        RelationAdmissionError::Repository(RepositoryError::CheckoutRecoveryRequired) => {
+            Diagnostic::target(
+                "E2300",
+                "an interrupted checkout has not been recovered",
+                "resolve the interrupted checkout first, then retry `orna commit -m MESSAGE`; no commit was created",
+            )
+        }
+        other @ RelationAdmissionError::CommittedRelationUnstaged { .. } => {
+            Diagnostic::target_with_detail(
+                "E2302",
+                "staged candidate is not a valid format-3 snapshot",
+                "restore the staged `.orna` metadata, `.orna/store` and `main.orna`, then retry; no commit was created",
+                other.to_string(),
+            )
+        }
+        RelationAdmissionError::EmptyIndex => nothing_to_commit(),
+        RelationAdmissionError::Format(error @ FormatContextError::MixedFormats { .. }) => {
+            mixed_formats(&error)
+        }
+        other => staging_error(title, other.to_string()),
+    }
+}
+
+/// Admits every table of the staged source into the staged `.orna/store` and
+/// returns one line per table this commit admits, for printing once the
+/// commit exists.
+///
+/// The staged source is the index tree, not the worktree, so the store stays
+/// complete under the staged schema (ORNA-STAGE-002). Identities come from the
+/// inventory the staged tree already carries (the committed store, a store a
+/// failed earlier commit staged, or a legacy sidecar), so a retried commit
+/// keeps its IDs; new declarations get new IDs and removed ones retire
+/// (ORNA-OBJECT-001, ORNA-OBJECT-005).
+fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String>, Diagnostic> {
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
+    let project = orna_project_v1::ProjectLoader::default()
+        .load_private_candidate(repository, staged.candidate())
+        .map_err(|error| match error {
+            orna_project_v1::ProjectLoadError::FormatContext(
+                error @ FormatContextError::MixedFormats { .. },
+            ) => mixed_formats(&error),
+            error => staging_error("staged source could not be loaded", format!("{error:?}")),
+        })?;
+    let catalogue = semantic_catalogue(&project)?;
+    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    if !analysis.is_ok() {
+        return Err(Diagnostic::target(
+            "E2101",
+            "staged source semantic analysis failed",
+            "fix the first reported source contract error, stage it, then commit again",
+        ));
+    }
+    let previous = orna_project_v1::ObjectIdentityManifest::read_staged(repository, &staged)
+        .map_err(|error| {
+            staging_error(
+                "staged object identities could not be read",
+                format!("{error:?}"),
+            )
+        })?;
+    let identities =
+        orna_project_v1::ObjectIdentityManifest::reconcile(project.modules(), previous.as_ref())
+            .map_err(|error| {
+                staging_error(
+                    "staged object identities could not be reconciled",
+                    format!("{error:?}"),
+                )
+            })?;
+    let database_id = *staged.database_id().as_bytes();
+    let staged_relations = orna_application_v1::build_format3_store_relations(
+        &project,
+        &analysis,
+        &identities,
+        database_id,
+    )
+    .map_err(|error| {
+        staging_error(
+            "staged table schema could not be built",
+            format!("{}: {:?}", error.table(), error.error()),
+        )
+    })?;
+    let admission = repository
+        .stage_store_admission(
+            &staged,
+            staged_relations.relations(),
+            &identities.to_stored(),
+        )
+        .map_err(|error| {
+            relation_failure(error, "staged store could not admit the staged tables")
+        })?;
+    Ok(admission
+        .admitted()
+        .iter()
+        .filter(|relation| **relation != OBJECT_IDENTITY_RELATION_ID)
+        .map(|relation| {
+            let name = staged_relations.table_name(relation).unwrap_or("");
+            format!(
+                "admitted table {name} as relation {}",
+                orna_repository_v1::Uuid::from_bytes(*relation).simple()
+            )
+        })
+        .collect())
 }
 
 /// Reports one review or commit failure with its own code and remedy
@@ -35,6 +218,9 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             "Git author identity is not configured",
             "set `user.name` and `user.email` with `git config`, then retry; no commit was created",
         ),
+        RepositoryError::FormatContext(mixed @ FormatContextError::MixedFormats { .. }) => {
+            return mixed_formats(mixed);
+        }
         // sys.admin.assertion_failed
         RepositoryError::InvalidCommitCandidate => (
             "E2302",
@@ -50,8 +236,8 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
         // sys.git.nothing_to_commit
         RepositoryError::SysGitNothingToCommit => (
             "E2304",
-            "nothing is staged to commit",
-            "stage changes with `orna add` or `git add`, then retry `orna commit -m MESSAGE`",
+            NOTHING_TO_COMMIT_TITLE,
+            NOTHING_TO_COMMIT_HELP,
         ),
         _ => (
             "E2300",
@@ -73,32 +259,53 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             format!("{error:?}"),
         )
     })?;
+    repository
+        .require_configured_commit_identity()
+        .map_err(|error| failure(&error, "Git identity could not be checked"))?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| Diagnostic::target_with_detail(
-            "E2300", "local runtime could not be started", "retry `orna commit -m MESSAGE`", format!("{error:?}"),
-        ))?;
-    let state = runtime.block_on(RuntimeState::open(&repository, identity, initial_digest)).map_err(|error| {
-        Diagnostic::target_with_detail(
-            "E2300", "local runtime could not be opened", "repair the local Orna runtime state before committing", format!("{error:?}"),
-        )
-    })?;
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2300",
+                "local runtime could not be started",
+                "retry `orna commit -m MESSAGE`",
+                format!("{error:?}"),
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2300",
+                "local runtime could not be opened",
+                "repair the local Orna runtime state before committing",
+                format!("{error:?}"),
+            )
+        })?;
     // An interrupted publication is recovered before the index is reviewed:
     // recovery restores the exact state the review's intent is derived from,
     // and a stranded Orna index lock would otherwise block this commit.
     let pending = repository.read_publication_journal().map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300", "publication journal could not be read", "repair the local Orna publication state before committing", format!("{error:?}"),
+            "E2300",
+            "publication journal could not be read",
+            "repair the local Orna publication state before committing",
+            format!("{error:?}"),
         )
     })?;
     let reviewed = match pending.as_ref() {
-        Some(journal) => repository.publication_journal_is_reviewed(journal).map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2300", "publication journal could not be classified", "repair the local Orna publication state before committing", format!("{error:?}"),
-            )
-        })?,
+        Some(journal) => repository
+            .publication_journal_is_reviewed(journal)
+            .map_err(|error| {
+                Diagnostic::target_with_detail(
+                    "E2300",
+                    "publication journal could not be classified",
+                    "repair the local Orna publication state before committing",
+                    format!("{error:?}"),
+                )
+            })?,
         None => false,
     };
     if reviewed {
@@ -106,20 +313,33 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             Ok(_) | Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired) => {}
             Err(error) => {
                 return Err(Diagnostic::target_with_detail(
-                    "E2300", "pending reviewed commit could not be recovered", "repair the local Orna publication state and retry", format!("{error:?}"),
+                    "E2300",
+                    "pending reviewed commit could not be recovered",
+                    "repair the local Orna publication state and retry",
+                    format!("{error:?}"),
                 ));
             }
         }
     } else {
         runtime
-            .block_on(orna_storage_v1::RuntimePublicationCoordinator::recover(&repository, &state))
+            .block_on(orna_storage_v1::RuntimePublicationCoordinator::recover(
+                &repository,
+                &state,
+            ))
             .map_err(|error| {
-                super::cli_publish::describe_storage_failure("pending publication could not be recovered", &error)
+                super::cli_publish::describe_storage_failure(
+                    "pending publication could not be recovered",
+                    &error,
+                )
             })?;
     }
+    let admitted = stage_store(&repository)?;
     let capture = runtime.block_on(state.capture()).map_err(|error| {
         Diagnostic::target_with_detail(
-            "E2300", "runtime candidate could not be captured", "retry after the local runtime state is available", format!("{error:?}"),
+            "E2300",
+            "runtime candidate could not be captured",
+            "retry after the local runtime state is available",
+            format!("{error:?}"),
         )
     })?;
     let review = repository
@@ -128,6 +348,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     let commit = repository
         .commit_reviewed_candidate(&review, message)
         .map_err(|error| failure(&error, "reviewed candidate could not be committed"))?;
+    for line in admitted {
+        println!("{line}");
+    }
     println!("[{}] {message}", commit.as_str());
     Ok(())
 }

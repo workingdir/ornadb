@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "meaning": "Reviewed primary diagnostic metadata for every negative source fixture. These are expectations, not evidence of execution.",
   "fixtures": [
     {
@@ -264,7 +264,7 @@
       "path": "examples/invalid/legacy-postfix-question.orna",
       "failing_phase": "parse",
       "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
-      "message_contains": "postfix propagation `?` was removed; failures propagate automatically"
+      "message_contains": "remove postfix `?`; failure propagation is automatic"
     },
     {
       "path": "examples/invalid/legacy-refined-where.orna",

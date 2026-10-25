@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 fn initialized(source: &str) -> TempDir {
     let directory = tempfile::tempdir().expect("project directory");
-    let init = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let init = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -23,7 +23,7 @@ fn initialized(source: &str) -> TempDir {
 }
 
 fn orna(directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["--db", directory.to_str().expect("UTF-8 path")])
         .args(arguments)

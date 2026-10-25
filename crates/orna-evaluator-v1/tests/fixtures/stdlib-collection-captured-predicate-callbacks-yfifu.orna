@@ -21,11 +21,11 @@ if true {
     wanted = 9;
 
     [
-        collection_ops.filter([1, 2, 3], at_least) == [2, 3],
+        filter([1, 2, 3], at_least) == [2, 3],
         collection_ops.partition([1, 2, 3], at_least) == ([2, 3], [1]),
         collection_ops.split_when([1, 2, 3], is_delimiter) == [[1], [2, 3]],
-        collection_ops.every([1, 2, 3], above_minimum),
-        collection_ops.exists([1, 2, 3], is_wanted),
-        collection_ops.one([1, 2, 3], is_sought) == 2
+        every([1, 2, 3], above_minimum),
+        exists([1, 2, 3], is_wanted),
+        one([1, 2, 3], is_sought) == 2
     ]
 } else { [false, false, false, false, false, false] }
