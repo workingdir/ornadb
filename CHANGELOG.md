@@ -11,8 +11,15 @@ been published.
   spellings as integer keys after text and bytes. `orna history KEY` shares that
   spelling resolution, so an integer spelling also names the integer row there.
   A predicate scan over a primary key type it cannot page (anything other than
-  Int, UInt, text, bytes or Bool) is refused up front with the flags to drop, and
-  a page that ends at the greatest unsigned key is refused rather than truncated.
+  Int, Str or Bool) is refused up front with the flags to drop, and a page that
+  ends at the greatest unsigned key is refused rather than truncated. A predicate
+  scan over a composite (multi-component) primary key is refused, naming bead
+  ornadb-5il1.461 (tuple key paging) as the remedy; plain listings, `--key` and
+  unpredicated bounded ranges over a composite key are not refused. A
+  `--from`/`--until` bound whose spelling does not match a single `Int`, `UInt`
+  or `Str` primary key is refused naming the valid spelling instead of answering
+  empty, and `--key` on a key type it cannot spell (Decimal, Uuid, Date, Instant,
+  enum, table ref) is refused as not addressable yet (bead ornadb-5il1.461).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
