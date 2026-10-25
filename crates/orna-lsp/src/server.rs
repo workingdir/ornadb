@@ -2369,6 +2369,32 @@ mod persisted_object_rename_tests {
         assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
         assert!(shown_errors(&messages).is_empty(), "no identity to carry is not an error");
     }
+
+    #[test]
+    fn rename_during_a_merge_returns_the_plain_edit_and_keeps_identity() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, repository, source_path, initial) = format3_fixture(source);
+        let merge_head = directory.path().join(".git/MERGE_HEAD");
+        fs::write(&merge_head, "0000000000000000000000000000000000000000\n").unwrap();
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive"))
+            .expect("a merge in progress never fails an ordinary rename");
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+        // During a merge the rename finds no identity to carry (`Ok(None)`, as
+        // for an unreadable store), so the rename stays plain, no warning is
+        // shown, and the store is not written.
+        assert!(shown_errors(&messages).is_empty(), "no identity to carry is not an error");
+        fs::remove_file(merge_head).unwrap();
+        assert_eq!(staged_manifest(&repository), initial);
+    }
     #[test]
     fn failed_identity_persist_is_reported_to_client() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
