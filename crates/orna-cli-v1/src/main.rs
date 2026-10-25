@@ -2591,7 +2591,16 @@ fn committed_invocation_rows(
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
 ) -> Result<PinnedCommittedTables, Diagnostic> {
-    let (rows, storage_orders) = committed_rows_at(repository, commit, admitted, tables)?;
+    let (rows, storage_orders) = committed_rows_at(repository, commit, admitted, tables).map_err(
+        |error| match error {
+            CommittedRowsError::Limit => Diagnostic::target(
+                "E2200",
+                "committed table rows exceed the read bound",
+                "keep each table within the evaluator collection limit and the source byte limit",
+            ),
+            CommittedRowsError::Unavailable => committed_rows_read_error(),
+        },
+    )?;
     pin_committed_tables(runtime, state, rows, storage_orders)
         .map_err(|_| committed_rows_read_error())
 }
@@ -2618,18 +2627,27 @@ fn committed_rows_read_error() -> Diagnostic {
     )
 }
 
+/// Why the committed rows of the admitted tables could not be returned.
+enum CommittedRowsError {
+    /// The committed base could not be read or does not match the admitted schemas.
+    Unavailable,
+    /// The committed base holds more rows or bytes than the committed read bound allows.
+    Limit,
+}
+
 /// The stored tuples of every admitted table at `commit`, read from the
 /// committed format-3 base, with the stored field order each table lists.
-/// Shared by the one-shot invocation and `serve`.
+/// Shared by the one-shot invocation and `serve`. The read stops at the first
+/// row past `orna_application_v1::committed_read_limits`.
 fn committed_rows_at(
     repository: &orna_repository_v1::Repository,
     commit: &orna_repository_v1::GitCommitRef,
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
-) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), Diagnostic> {
+) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), CommittedRowsError> {
     let format = repository
         .open_pinned_format_context(commit.as_str())
-        .map_err(|_| committed_rows_read_error())?;
+        .map_err(|_| CommittedRowsError::Unavailable)?;
     let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
         .table_schemas()
         .iter()
@@ -2639,15 +2657,24 @@ fn committed_rows_at(
         .iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
         .collect();
-    let mut committed =
-        orna_project_v1::committed_tables(repository, &format, commit, &schemas, &table_ids)
-            .map_err(|_| committed_rows_read_error())?;
+    let mut committed = orna_project_v1::committed_tables(
+        repository,
+        &format,
+        commit,
+        &schemas,
+        &table_ids,
+        orna_application_v1::ApplicationAuthority::committed_read_limits(),
+    )
+    .map_err(|error| match error {
+        orna_project_v1::CommittedReadError::Limit { .. } => CommittedRowsError::Limit,
+        orna_project_v1::CommittedReadError::Storage(_) => CommittedRowsError::Unavailable,
+    })?;
     let mut rows = BTreeMap::new();
     let mut storage_orders = BTreeMap::new();
     for name in schemas.keys() {
         let table = committed
             .remove(name)
-            .ok_or_else(committed_rows_read_error)?;
+            .ok_or(CommittedRowsError::Unavailable)?;
         rows.insert(name.clone(), table.rows);
         storage_orders.insert(name.clone(), table.storage_order);
     }
