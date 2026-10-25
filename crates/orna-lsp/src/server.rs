@@ -2360,14 +2360,15 @@ mod persisted_object_rename_tests {
         git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
         let uri = file_uri(&source_path);
         let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
         open_document(&mut state, &uri, source);
 
         let response = request_rename(&state.context, rename_request(uri, "Archive"))
             .expect("an unreadable identity never fails an ordinary rename");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
+        assert!(shown_errors(&messages).is_empty(), "no identity to carry is not an error");
     }
-
     #[test]
     fn failed_identity_persist_is_reported_to_client() {
         let source = "pub table Media(id: Str) { payload: Blob, }";

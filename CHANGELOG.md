@@ -9,7 +9,10 @@ been published.
   on save, the renamed source and identity inventory are staged, uncommitted, like
   `orna mv` (reviewable with Git; `orna commit` keeps the identity). An identity
   that cannot be carried leaves the rename applied and shows a warning with code
-  `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`).
+  `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`). Concurrent
+  inventory changes are guarded by the staged-store `StaleIndex` check, not an outer
+  coordination lock: the install path already takes that lock, so an outer one would
+  self-deadlock.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
