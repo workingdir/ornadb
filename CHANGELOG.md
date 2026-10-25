@@ -8,7 +8,11 @@ been published.
 - `orna query` with a predicate now reads the whole `--from`/`--until` range in
   ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
   `--from`/`--until` accept `int:N` and `uint:N`, and `--key` tries integer
-  spellings as integer keys after text and bytes.
+  spellings as integer keys after text and bytes. `orna history KEY` shares that
+  spelling resolution, so an integer spelling also names the integer row there.
+  A predicate scan over a primary key type it cannot page (anything other than
+  Int, UInt, text, bytes or Bool) is refused up front with the flags to drop, and
+  a page that ends at the greatest unsigned key is refused rather than truncated.
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,

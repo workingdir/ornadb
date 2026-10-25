@@ -94,24 +94,30 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
             }
             "--from" => {
                 let value = words.next().ok_or_else(|| {
-                    query_error("--from needs a value", "usage: --from text:KEY|bytes:HEX")
+                    query_error(
+                        "--from needs a value",
+                        "usage: --from text:KEY|bytes:HEX|int:N|uint:N",
+                    )
                 })?;
                 if from.is_some() {
                     return Err(query_error(
                         "Query names one lower bound",
-                        "usage: --from text:KEY|bytes:HEX",
+                        "usage: --from text:KEY|bytes:HEX|int:N|uint:N",
                     ));
                 }
                 from = Some(parse_bound_key(value)?);
             }
             "--until" => {
                 let value = words.next().ok_or_else(|| {
-                    query_error("--until needs a value", "usage: --until text:KEY|bytes:HEX")
+                    query_error(
+                        "--until needs a value",
+                        "usage: --until text:KEY|bytes:HEX|int:N|uint:N",
+                    )
                 })?;
                 if until.is_some() {
                     return Err(query_error(
                         "Query names one upper bound",
-                        "usage: --until text:KEY|bytes:HEX",
+                        "usage: --until text:KEY|bytes:HEX|int:N|uint:N",
                     ));
                 }
                 until = Some(parse_bound_key(value)?);
@@ -197,7 +203,7 @@ fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let [relation] = positional[..] else {
         return Err(query_error(
             "Query expects a relation",
-            "usage: orna query <relation-hex> [--key KEY] [--from text:KEY|bytes:HEX] [--until text:KEY|bytes:HEX] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
+            "usage: orna query <relation-hex> [--key KEY] [--from text:KEY|bytes:HEX|int:N|uint:N] [--until text:KEY|bytes:HEX|int:N|uint:N] [--field N] [--at SELECTOR] [--kind MIME] [--not-kind MIME] [--suffix HINT] [--min-length BYTES] [--max-length BYTES] [--limit N] [--format human|json]",
         ));
     };
     if key.is_some() && (from.is_some() || until.is_some()) {
@@ -226,16 +232,26 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
         return Ok(TypedKey::Text(text.to_owned()));
     }
     if let Some(number) = value.strip_prefix("int:") {
-        return number
-            .parse::<i64>()
-            .map(TypedKey::Int)
-            .map_err(|_| query_error("Range integer key is not an i64", format!("got {value:?}")));
+        return number.parse::<i64>().map(TypedKey::Int).map_err(|_| {
+            query_error(
+                "Range integer key is not an i64",
+                format!(
+                    "got {value:?}; int: takes -9223372036854775808..=9223372036854775807, \
+                     use uint:N for 0..=18446744073709551615"
+                ),
+            )
+        });
     }
     if let Some(number) = value.strip_prefix("uint:") {
-        return number
-            .parse::<u64>()
-            .map(TypedKey::UInt)
-            .map_err(|_| query_error("Range integer key is not a u64", format!("got {value:?}")));
+        return number.parse::<u64>().map(TypedKey::UInt).map_err(|_| {
+            query_error(
+                "Range integer key is not a u64",
+                format!(
+                    "got {value:?}; uint: takes 0..=18446744073709551615, \
+                     use int:N for negative values"
+                ),
+            )
+        });
     }
     if let Some(hex) = value.strip_prefix("bytes:") {
         if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
@@ -357,6 +373,20 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         [key_type] => key_type.as_deref(),
         _ => return Err(composite_key_error()),
     };
+    // A predicate scan pages the table by successor keys, so it needs a key
+    // type with a successor. This is decided from the descriptor, not the row
+    // count, so a small table is refused the same way a large one is.
+    if options.has_predicate && options.key.is_none() && !is_pageable_key_type(key_type) {
+        return Err(query_error(
+            "Predicate scan cannot page this table's key type",
+            format!(
+                "the primary key is {}, which a predicate scan cannot page; \
+                 drop --kind, --not-kind, --suffix, --min-length and --max-length \
+                 to list the rows in range with --limit",
+                key_type.unwrap_or("not a primitive type")
+            ),
+        ));
+    }
     let rows = match options.key {
         Some(key) => {
             let mut found = None;
@@ -498,16 +528,39 @@ fn scan_all_rows(
     from: Option<TypedKey>,
     until: Option<TypedKey>,
 ) -> Result<Vec<AdmittedRow>, Diagnostic> {
+    scan_pages(
+        MAX_QUERY_LIMIT,
+        from,
+        until,
+        |range| {
+            graph
+                .range_rows(range, scope)
+                .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))
+        },
+        |row| row.key().clone(),
+    )
+}
+
+/// Pages `[from, until)` in ordered pages of `page_rows` keys. Each page
+/// resumes at the successor of the last key it returned, so no row is read
+/// twice and none is skipped. A full page whose last key has no successor
+/// cannot be resumed, so the scan is refused rather than ending early and
+/// silently dropping the rows that order after it.
+fn scan_pages<T>(
+    page_rows: usize,
+    from: Option<TypedKey>,
+    until: Option<TypedKey>,
+    mut read_page: impl FnMut(&KeyRange) -> Result<Vec<T>, Diagnostic>,
+    key_of: impl Fn(&T) -> TypedKey,
+) -> Result<Vec<T>, Diagnostic> {
     let mut rows = Vec::new();
     let mut lower = from;
     loop {
-        let range = KeyRange::new(lower.clone(), until.clone(), MAX_QUERY_LIMIT)
+        let range = KeyRange::new(lower.clone(), until.clone(), page_rows)
             .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
-        let page = graph
-            .range_rows(&range, scope)
-            .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?;
-        let short = page.len() < MAX_QUERY_LIMIT;
-        let Some(last) = page.last().map(|row| row.key().clone()) else {
+        let page = read_page(&range)?;
+        let short = page.len() < page_rows;
+        let Some(last) = page.last().map(&key_of) else {
             break;
         };
         rows.extend(page);
@@ -515,7 +568,14 @@ fn scan_all_rows(
             break;
         }
         let Some(next) = successor_key(&last)? else {
-            break;
+            return Err(query_error(
+                "Predicate scan cannot continue past its last key",
+                format!(
+                    "a full page of {page_rows} rows ends at key {last:?}, which has no successor; \
+                     rows ordering after it would be dropped, so the scan is refused. \
+                     Narrow the range with --from/--until, or drop the predicate flags to list rows with --limit"
+                ),
+            ));
         };
         if until.as_ref().is_some_and(|upper| next >= *upper) {
             break;
@@ -551,6 +611,16 @@ fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
             ));
         }
     })
+}
+
+/// Whether a predicate scan can page a table whose primary key has this
+/// primitive type name. Each name is a key type whose row keys have a
+/// successor in `successor_key`; a composite or non-primitive key has none.
+fn is_pageable_key_type(key_type: Option<&str>) -> bool {
+    matches!(
+        key_type,
+        Some("Int" | "UInt" | "Str" | "Text" | "Bytes" | "Bool")
+    )
 }
 
 /// The measured plan of one annotation predicate evaluation.
@@ -816,5 +886,109 @@ mod tests {
         assert!(parse_bound_key("int:x").is_err());
         assert!(parse_bound_key("uint:-1").is_err());
         assert!(parse_bound_key("plain").is_err());
+    }
+
+    /// Pages a sorted key set the way the graph does: each read serves the
+    /// keys in `[lower, upper)`, at most `page_rows` of them.
+    fn scan_fixture(
+        keys: &[TypedKey],
+        from: Option<TypedKey>,
+        until: Option<TypedKey>,
+        page_rows: usize,
+    ) -> Result<Vec<TypedKey>, super::Diagnostic> {
+        super::scan_pages(
+            page_rows,
+            from,
+            until,
+            |range| {
+                Ok(keys
+                    .iter()
+                    .filter(|key| range.lower_inclusive().is_none_or(|lower| *key >= lower))
+                    .filter(|key| range.upper_exclusive().is_none_or(|upper| *key < upper))
+                    .take(page_rows)
+                    .cloned()
+                    .collect())
+            },
+            |key| key.clone(),
+        )
+    }
+
+    #[test]
+    fn scan_pages_returns_every_key_at_each_production_page_boundary() {
+        for count in [0_i64, 1, 255, 256, 257, 512] {
+            let keys: Vec<TypedKey> = (0..count).map(TypedKey::Int).collect();
+            let scanned = scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap();
+            assert_eq!(scanned, keys, "count {count}");
+        }
+    }
+
+    #[test]
+    fn scan_pages_matches_a_single_read_at_small_page_sizes() {
+        let keys: Vec<TypedKey> = (0..8_i64).map(TypedKey::Int).collect();
+        for page_rows in [1_usize, 2, 3, 4, 5, 8] {
+            let scanned = scan_fixture(&keys, None, None, page_rows).unwrap();
+            assert_eq!(scanned, keys, "page {page_rows}");
+        }
+    }
+
+    #[test]
+    fn scan_pages_stops_at_an_upper_bound_that_falls_on_a_page_boundary() {
+        let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
+        let scanned = scan_fixture(
+            &keys,
+            Some(TypedKey::Int(0)),
+            Some(TypedKey::Int(256)),
+            super::MAX_QUERY_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(scanned, keys[..256].to_vec());
+    }
+
+    #[test]
+    fn scan_pages_reaches_a_match_held_only_by_a_later_page() {
+        let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
+        let scanned =
+            scan_fixture(&keys, Some(TypedKey::Int(250)), Some(TypedKey::Int(260)), 4).unwrap();
+        assert_eq!(scanned, (250..260).map(TypedKey::Int).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn scan_pages_yields_nothing_for_missing_keys() {
+        let keys: Vec<TypedKey> = (0..512_i64).map(TypedKey::Int).collect();
+        let past_end = scan_fixture(&keys, Some(TypedKey::Int(1000)), None, 256).unwrap();
+        assert!(past_end.is_empty());
+        let between =
+            scan_fixture(&keys, Some(TypedKey::Int(-5)), Some(TypedKey::Int(-1)), 256).unwrap();
+        assert!(between.is_empty());
+    }
+
+    #[test]
+    fn scan_pages_refuses_a_full_page_that_ends_at_the_greatest_unsigned_key() {
+        let keys: Vec<TypedKey> = (u64::MAX - 255..=u64::MAX).map(TypedKey::UInt).collect();
+        assert!(scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).is_err());
+        let short: Vec<TypedKey> = (u64::MAX - 2..=u64::MAX).map(TypedKey::UInt).collect();
+        assert_eq!(
+            scan_fixture(&short, None, None, super::MAX_QUERY_LIMIT).unwrap(),
+            short
+        );
+    }
+
+    #[test]
+    fn only_primitive_key_types_with_successors_are_pageable() {
+        use super::is_pageable_key_type;
+        for key_type in ["Int", "UInt", "Str", "Text", "Bytes", "Bool"] {
+            assert!(is_pageable_key_type(Some(key_type)), "{key_type}");
+        }
+        assert!(!is_pageable_key_type(Some("Uuid")));
+        assert!(!is_pageable_key_type(None));
+    }
+
+    #[test]
+    fn typed_bounds_name_the_remedy_for_out_of_range_integers() {
+        use super::parse_bound_key;
+        let wide = parse_bound_key("int:18446744073709551615").unwrap_err();
+        assert!(format!("{wide:?}").contains("uint:"), "{wide:?}");
+        let negative = parse_bound_key("uint:-1").unwrap_err();
+        assert!(format!("{negative:?}").contains("int:"), "{negative:?}");
     }
 }

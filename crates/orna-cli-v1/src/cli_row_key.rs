@@ -26,6 +26,11 @@ use super::Diagnostic;
 /// When the committed descriptor declares the primary key as one `Int` or
 /// `UInt` component, the spelling is parsed as that type only: an integer key
 /// is never reinterpreted as text or bytes.
+///
+/// `orna history KEY` resolves through this same function with no declared
+/// type, so an integer spelling also names the integer row there. That is
+/// deliberate: a row is named by one spelling across both verbs (see the
+/// module doc), and the change is recorded in the CHANGELOG.
 pub(super) fn key_candidates(
     value: &str,
     key_type: Option<&str>,
@@ -165,5 +170,18 @@ mod tests {
     fn a_composite_key_is_refused_with_the_successor_bead() {
         let error = super::composite_key_error();
         assert!(format!("{error:?}").contains("ornadb-5il1.461"));
+    }
+
+    #[test]
+    fn integer_spellings_name_the_integer_key_after_text_and_bytes() {
+        use super::key_candidates;
+        use orna_repository_v1::TypedKey;
+        let five = key_candidates("5", None).unwrap();
+        assert_eq!(five.last(), Some(&TypedKey::Int(5)), "{five:?}");
+        assert_eq!(five.first(), Some(&TypedKey::Text("5".to_owned())));
+        let negative = key_candidates("-3", None).unwrap();
+        assert_eq!(negative.last(), Some(&TypedKey::Int(-3)), "{negative:?}");
+        let large = key_candidates("18446744073709551615", None).unwrap();
+        assert_eq!(large.last(), Some(&TypedKey::UInt(u64::MAX)), "{large:?}");
     }
 }
