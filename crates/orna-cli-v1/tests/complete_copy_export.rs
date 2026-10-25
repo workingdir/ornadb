@@ -197,7 +197,14 @@ fn commit_snapshot_with_secondary_root(
 ) -> (String, String, String) {
     let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
     let schema_source = std::fs::read(project.join("main.orna")).unwrap();
-    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    // The chunk entry carries the chunk's SHA-256; the kind-6 node and the
+    // rows domains carry the format-3 schema identity.
+    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let schema_digest: [u8; 32] = Sha256::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_source)
+        .finalize()
+        .into();
 
     let chunk_oid = git_object(project, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
@@ -205,7 +212,7 @@ fn commit_snapshot_with_secondary_root(
     byte_index.extend_from_slice(&[0x81, 0x83]);
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
-    append_cbor_bytes(&mut byte_index, &schema_digest);
+    append_cbor_bytes(&mut byte_index, &chunk_digest);
     let byte_index_oid = native_fixture_node(project, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
     let mut schema = vec![0x85, 0x01, 0x06];

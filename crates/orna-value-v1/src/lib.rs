@@ -60,6 +60,7 @@ pub enum Error {
     InvalidOid,
     ContentUnavailable,
     ContentDigestMismatch,
+    ContentCollision,
     InvalidRange,
     MissingDescriptor,
     InvalidContext,
@@ -86,12 +87,14 @@ pub enum Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorCode {
     RoleMismatch,
+    UnsupportedValueProfile,
 }
 
 impl ErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RoleMismatch => "OVB2_ROLE_MISMATCH",
+            Self::UnsupportedValueProfile => "sys.codec.unsupported_value_profile",
         }
     }
 }
@@ -101,6 +104,7 @@ impl Error {
     pub const fn code(&self) -> Option<ErrorCode> {
         match self {
             Self::RoleMismatch { .. } => Some(ErrorCode::RoleMismatch),
+            Self::InvalidProfile => Some(ErrorCode::UnsupportedValueProfile),
             _ => None,
         }
     }
@@ -134,7 +138,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// Canonical CBOR's supported data model. `Tag` is public for schema and
 /// protocol adapters, but both construction and decoding validate the closed
 /// Orna tag registry before bytes may be emitted.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub enum Raw {
     Null,
     Bool(bool),
@@ -191,7 +195,7 @@ impl fmt::Debug for Raw {
 }
 
 /// A validated OVB-1 value.  The inner raw value is never exposed mutably.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, Hash)]
 pub struct Value(Raw);
 
 impl fmt::Debug for Value {
@@ -214,6 +218,22 @@ impl Value {
     }
     pub fn raw(&self) -> &Raw {
         &self.0
+    }
+    /// Builds the stored table-reference identity `[database, table, key]`
+    /// (tag 60021, ORNA-REF-001). The key must be one primary-key value; no row
+    /// or snapshot context is embedded.
+    pub fn table_reference(database_id: [u8; 16], table_id: [u8; 16], key: Raw) -> Result<Self> {
+        if !is_permitted_key(&key) {
+            return Err(Error::InvalidValue);
+        }
+        Self::new(Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![
+                uuid_raw(database_id),
+                uuid_raw(table_id),
+                key,
+            ])),
+        ))
     }
     pub fn encode(&self) -> Result<Vec<u8>> {
         encode_raw(&self.0)
@@ -1083,6 +1103,7 @@ impl Blob {
         })
     }
 
+
     pub fn from_semantic_commitment(
         identity: ContentIdentity,
         media_type: &str,
@@ -1271,8 +1292,36 @@ impl Blob {
         Ok(result)
     }
 
+    /// Two descriptor-backed blobs in one admitted context with equal layout OID
+    /// and equal identity are treated as equal content without streaming
+    /// (ORNA-BLOB-005). A layout OID identifies an encoding, not logical content,
+    /// so this is a trust assumption on the admitted context's resolver: the
+    /// shortcut skips the digest check, and the identity equality is the only
+    /// binding between the two references.
+    fn shares_descriptor_witness(&self, other: &Self) -> bool {
+        match (&self.content, &other.content, &self.context, &other.context) {
+            (
+                BlobContent::Descriptor(left),
+                BlobContent::Descriptor(right),
+                Some(left_context),
+                Some(right_context),
+            ) => left == right && Arc::ptr_eq(&left_context.inner, &right_context.inner),
+            _ => false,
+        }
+    }
+
     /// Compare exact bytes while ignoring annotation metadata.
     pub fn same_content(&self, other: &Self) -> Result<bool> {
+        self.same_content_checked(other, || Ok(()))
+    }
+
+    /// Like [`Blob::same_content`], but calls `checkpoint` before each streamed
+    /// chunk so callers can enforce cancellation and budgets (ORNA-BLOB-015).
+    pub fn same_content_checked(
+        &self,
+        other: &Self,
+        mut checkpoint: impl FnMut() -> Result<()>,
+    ) -> Result<bool> {
         if self.identity != other.identity {
             return Ok(false);
         }
@@ -1284,28 +1333,47 @@ impl Blob {
                 Err(Error::ContentDigestMismatch)
             };
         }
-        if same_content_source(&self.content, &other.content) {
+        if same_content_source(&self.content, &other.content) || self.shares_descriptor_witness(other) {
             return Ok(true);
         }
         let mut left_digest = Sha256::new();
         let mut right_digest = Sha256::new();
+        let mut differs = false;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit().min(other.read_chunk_limit());
         while offset < self.length() {
+            checkpoint()?;
             let size = (self.length() - offset).min(chunk_limit);
             let left = read_content_range(self, offset, size)?;
             let right = read_content_range(other, offset, size)?;
             if left != right {
-                return Err(Error::ContentDigestMismatch);
+                // Keep streaming: a single tampered side must be reported as
+                // corruption, not as a collision, so classification waits for
+                // both full digests (see `exact_content_outcome`).
+                differs = true;
             }
             left_digest.update(&left);
             right_digest.update(&right);
             offset = offset.checked_add(size).ok_or(Error::Limit)?;
         }
-        let left = left_digest.finalize();
-        let right = right_digest.finalize();
-        if left[..] != self.identity.sha256 || right[..] != self.identity.sha256 {
+        let left_verified = left_digest.finalize()[..] == self.identity.sha256;
+        let right_verified = right_digest.finalize()[..] == self.identity.sha256;
+        Self::exact_content_outcome(differs, left_verified, right_verified)
+    }
+
+    /// Classify a full streamed comparison. A digest failure on either side is
+    /// corruption and wins over byte differences; only two verified digests with
+    /// differing bytes prove a collision (ORNA-BLOB-005).
+    fn exact_content_outcome(
+        differs: bool,
+        left_verified: bool,
+        right_verified: bool,
+    ) -> Result<bool> {
+        if !left_verified || !right_verified {
             return Err(Error::ContentDigestMismatch);
+        }
+        if differs {
+            return Err(Error::ContentCollision);
         }
         Ok(true)
     }
@@ -2529,6 +2597,46 @@ fn is_primary_key_component(raw: &Raw) -> bool {
     )
 }
 
+/// Strict identity rule for [`Value::table_reference`] and for decoded 60021
+/// keys: the permitted-key clauses of 07-tables.md:272-281 applied recursively.
+/// A stored reference identity must be snapshot-free (08-relations.md:31), so
+/// pinned references (60010), Float and malformed 60008/60015/60021 keys are
+/// refused. The Unit key (60014, empty array) is admitted because a reference
+/// to a keyless table carries it (grammar/orna.ebnf:38-39; 29-formats.md:37;
+/// stored admission in `validate_table_reference_value`). Tuple primary keys
+/// keep base acceptance for pinned (60010) components; that is a deferred
+/// decision (see `table_reference_decode_rejects_non_permitted_key`).
+fn is_permitted_key(raw: &Raw) -> bool {
+    match raw {
+        Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
+        Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
+        Raw::Tag(60014, payload) => matches!(payload.as_ref(), Raw::Array(values) if values.is_empty()),
+        Raw::Tag(60008, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [type_id, variant_id, Raw::Null]
+                    if uuid_array(type_id).is_ok() && uuid_array(variant_id).is_ok()
+            )
+        ),
+        Raw::Tag(60015, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if !values.is_empty() && values.iter().all(is_permitted_key)
+        ),
+        Raw::Tag(60021, payload) => matches!(
+            payload.as_ref(),
+            Raw::Array(values) if matches!(
+                values.as_slice(),
+                [database_id, table_id, key]
+                    if uuid_array(database_id).is_ok()
+                        && uuid_array(table_id).is_ok()
+                        && is_permitted_key(key)
+            )
+        ),
+        _ => false,
+    }
+}
+
 fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
     let ordering = match (left, right) {
         (Raw::Bool(left), Raw::Bool(right)) => left.cmp(right),
@@ -2578,6 +2686,14 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
                 .then(compare_key_component(left_key, right_key)?)
                 .then(compare_raw_order(left_snapshot, right_snapshot)?)
         }
+        // Unit (60014) is the sole key of a keyless table (29-formats.md:37):
+        // one possible value, so two Units compare Equal.
+        (Raw::Tag(60014, left), Raw::Tag(60014, right)) => {
+            if !array(left)?.is_empty() || !array(right)?.is_empty() {
+                return Err(Error::InvalidValue);
+            }
+            Ordering::Equal
+        }
         (Raw::Tag(60015, left), Raw::Tag(60015, right)) => {
             compare_key_components(array(left)?, array(right)?)?
         }
@@ -2590,10 +2706,15 @@ fn compare_key_component(left: &Raw, right: &Raw) -> Result<Ordering> {
             let [right_db, right_table, right_key] = right.as_slice() else {
                 return Err(Error::InvalidValue);
             };
-            uuid_array(left_db)?
-                .cmp(&uuid_array(right_db)?)
-                .then(uuid_array(left_table)?.cmp(&uuid_array(right_table)?))
-                .then(compare_key_component(left_key, right_key)?)
+            if uuid_array(left_db)? != uuid_array(right_db)?
+                || uuid_array(left_table)? != uuid_array(right_table)?
+            {
+                // Spec-silent: 08-relations.md:31 defines identity equality for
+                // references but no ordering across tables. Reject rather than
+                // invent one.
+                return Err(Error::InvalidValue);
+            }
+            compare_key_component(left_key, right_key)?
         }
         _ => return Err(Error::InvalidValue),
     };
@@ -2608,6 +2729,36 @@ fn compare_key_components(left: &[Raw], right: &[Raw]) -> Result<Ordering> {
         }
     }
     Ok(left.len().cmp(&right.len()))
+}
+
+fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
+    match (left, right) {
+        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
+        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
+        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
+        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
+        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
+        (Raw::Array(left), Raw::Array(right)) => {
+            for (left, right) in left.iter().zip(right) {
+                let ordering = compare_raw_order(left, right)?;
+                if ordering != Ordering::Equal {
+                    return Ok(ordering);
+                }
+            }
+            Ok(left.len().cmp(&right.len()))
+        }
+        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
+            match left_tag {
+                60000 => compare_decimal_raw(
+                    &Raw::Tag(*left_tag, left.clone()),
+                    &Raw::Tag(*right_tag, right.clone()),
+                ),
+                60015 => compare_key_components(array(left)?, array(right)?),
+                _ => compare_raw_order(left, right),
+            }
+        }
+        _ => Err(Error::InvalidValue),
+    }
 }
 
 fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
@@ -2672,36 +2823,6 @@ fn compare_decimal_raw(left: &Raw, right: &Raw) -> Result<Ordering> {
     } else {
         ordering
     })
-}
-
-fn compare_raw_order(left: &Raw, right: &Raw) -> Result<Ordering> {
-    match (left, right) {
-        (Raw::Null, Raw::Null) => Ok(Ordering::Equal),
-        (Raw::Bool(left), Raw::Bool(right)) => Ok(left.cmp(right)),
-        (Raw::Int(left), Raw::Int(right)) => Ok(left.cmp(right)),
-        (Raw::Bytes(left), Raw::Bytes(right)) => Ok(left.cmp(right)),
-        (Raw::Text(left), Raw::Text(right)) => Ok(left.cmp(right)),
-        (Raw::Array(left), Raw::Array(right)) => {
-            for (left, right) in left.iter().zip(right) {
-                let ordering = compare_raw_order(left, right)?;
-                if ordering != Ordering::Equal {
-                    return Ok(ordering);
-                }
-            }
-            Ok(left.len().cmp(&right.len()))
-        }
-        (Raw::Tag(left_tag, left), Raw::Tag(right_tag, right)) if left_tag == right_tag => {
-            match left_tag {
-                60000 => compare_decimal_raw(
-                    &Raw::Tag(*left_tag, left.clone()),
-                    &Raw::Tag(*right_tag, right.clone()),
-                ),
-                60015 => compare_key_components(array(left)?, array(right)?),
-                _ => compare_raw_order(left, right),
-            }
-        }
-        _ => Err(Error::InvalidValue),
-    }
 }
 
 /// A type-directed failure from a canonical value decoder.
@@ -4357,7 +4478,11 @@ pub fn decode_canonical_storage_value(bytes: &[u8]) -> Result<Raw> {
     Ok(raw)
 }
 
-fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
+/// Encodes one value as the canonical CBOR a repository row stores, the
+/// inverse of [`decode_canonical_storage_value`]. Repository-profile tags pass
+/// through unvalidated; callers must validate the bytes against their
+/// authenticated row schema.
+pub fn encode_canonical_storage_value(raw: &Raw) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
     write_raw(raw, &mut bytes)?;
     Ok(bytes)
@@ -5297,6 +5422,11 @@ fn validate_tag(n: u64, v: &Raw) -> Result<()> {
             }
             uuid_array(&a[0])?;
             uuid_array(&a[1])?;
+            // ORNA-KEY-003/005 (07-tables.md:283-287): a reference key component
+            // must be a permitted key value, on decode as well as construction.
+            if !is_permitted_key(&a[2]) {
+                return Err(Error::InvalidTag);
+            }
         }
         60022 => {
             let a = array(v)?;
@@ -8278,6 +8408,38 @@ mod logical_primary_key_order_tests {
         assert!(compare_primary_keys(&malformed_enum, &payload_enum).is_err());
     }
 }
+#[cfg(test)]
+mod exact_content_outcome_tests {
+    use super::*;
+
+    // A collision needs two digest-valid sides with differing bytes, which
+    // SHA-256 forbids in practice; the classification is therefore exercised
+    // through this pure seam rather than through `same_content_checked`.
+    #[test]
+    fn verified_digests_with_differing_bytes_are_a_collision() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, true),
+            Err(Error::ContentCollision)
+        ));
+    }
+
+    #[test]
+    fn digest_failure_wins_over_differing_bytes() {
+        assert!(matches!(
+            Blob::exact_content_outcome(true, false, true),
+            Err(Error::ContentDigestMismatch)
+        ));
+        assert!(matches!(
+            Blob::exact_content_outcome(true, true, false),
+            Err(Error::ContentDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn verified_equal_bytes_are_equal() {
+        assert!(Blob::exact_content_outcome(false, true, true).unwrap());
+    }
+}
 
 #[cfg(test)]
 mod resolver_integrity_tests {
@@ -8431,6 +8593,43 @@ mod resolver_integrity_tests {
         assert_eq!(replaced.read(0, 0), Err(Error::MissingDescriptor));
         assert_eq!(resolver.reads.load(AtomicOrdering::SeqCst), 3);
         assert_eq!(resolver.bytes_read.load(AtomicOrdering::SeqCst), 2);
+    }
+
+    #[test]
+    fn same_content_over_admitted_references_compares_exact_bytes() {
+        let descriptor = NativeOid::from_bytes(&[6; 20]).unwrap();
+        let identity = ContentIdentity::from_bytes(b"abcdef");
+        let resolver = resolver(descriptor.clone(), identity, b"abcdef", b"abcdef");
+        let context = context(resolver);
+        let left = Blob::from_reference(context.reference(identity, descriptor.clone()).unwrap())
+            .unwrap();
+        let right = Blob::from_reference(context.reference(identity, descriptor).unwrap()).unwrap();
+
+        assert!(left.same_content(&right).unwrap());
+        assert!(left.same_content(&left).unwrap());
+    }
+
+    #[test]
+    fn same_content_rejects_tampered_bytes_under_an_admitted_identity() {
+        let identity = ContentIdentity::from_bytes(b"abc");
+        let good_descriptor = NativeOid::from_bytes(&[4; 20]).unwrap();
+        let tampered_descriptor = NativeOid::from_bytes(&[5; 20]).unwrap();
+        let good_resolver = resolver(good_descriptor.clone(), identity, b"abc", b"abc");
+        let tampered_resolver = resolver(tampered_descriptor.clone(), identity, b"axc", b"abc");
+        let good = Blob::from_reference(
+            context(good_resolver)
+                .reference(identity, good_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+        let tampered = Blob::from_reference(
+            context(tampered_resolver)
+                .reference(identity, tampered_descriptor)
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(good.same_content(&tampered), Err(Error::ContentDigestMismatch));
     }
 
     #[test]

@@ -218,6 +218,13 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
 }
 
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
+        return Diagnostic::target(
+            "E2100",
+            "committed source tree exceeds the fixed walk limit",
+            "reduce the committed tree's entry count, nesting depth or path length, then run check again",
+        );
+    }
     let invalid_unit = match &error {
         orna_project_v1::ProjectLoadError::InvalidModule {
             logical_path,
@@ -270,6 +277,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
+        },
+        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
+            code: "ORNA-S011-AMBIGUOUS",
+            title: "standard import name is ambiguous",
+            explanation:
+                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            help: "import the functions under distinct names or use their qualified paths",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
@@ -1692,7 +1706,7 @@ fn load_project_without_standard_rejection(
 fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    if project.standard_modules().is_empty() || project.standard_profile().is_some() {
+    if !project.has_uncaptured_standard_imports() {
         return Ok(());
     }
     Err(Diagnostic::target(
@@ -1705,19 +1719,13 @@ fn reject_uncaptured_standard_modules(
 fn semantic_catalogue(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
-    let catalogue = orna_semantic_v1::Catalogue::authoritative_core();
-    let Some(profile) = project.standard_profile() else {
-        return Ok(catalogue);
-    };
-    catalogue
-        .with_standard_sources(profile, project.standard_sources().iter().cloned())
-        .map_err(|_| {
-            Diagnostic::target(
-                "ORNA-S010-IMPORT",
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        })
+    project.production_catalogue().map_err(|_| {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    })
 }
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
@@ -1803,23 +1811,40 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
+/// The bounded pure path receives reachable standard modules through
+/// `load_standard_sources`, which verifies them against the captured profile.
+/// The project unit therefore carries neither those source units nor a
+/// standard dependency that the bounded evaluator would reject.
+fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let mut execution = execution_project(project);
+    execution
+        .modules
+        .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
+    execution.expectations.environment.stdlib = None;
+    execution
+}
+
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    orna_runtime_v1::repository_runtime_identity(repository).map_err(|_| {
-        Diagnostic::target(
+    orna_runtime_v1::repository_runtime_identity(repository).map_err(|error| match error {
+        orna_runtime_v1::RuntimeError::UnknownHeadFormat(refusal) => Diagnostic::target(
+            refusal.code(),
+            "repository format is unknown",
+            "the repository HEAD records a format this build does not know; use a build that supports it",
+        ),
+        _ => Diagnostic::target(
             "E2200",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
-        )
+        ),
     })
 }
 
-fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
-    // The embedded runtime persists one local writer lease in the worktree's
-    // private state. Reusing the repository-derived owner lets a later CLI
-    // process resume that same local owner without stealing an unknown lease.
-    identity.repository_id
+/// The writer owner for this process. A later process has a different owner, so
+/// it takes the lease over (bumping the epoch) and fences a killed writer's token.
+fn invocation_owner_id() -> [u8; 16] {
+    orna_runtime_v1::process_owner_id()
 }
 
 fn run_project_invocation(
@@ -1972,7 +1997,7 @@ fn run_project_invocation_with_arguments(
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2005,13 +2030,7 @@ fn run_project_invocation_with_arguments(
                     arguments,
                 ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            )
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
@@ -2028,7 +2047,7 @@ fn run_project_invocation_with_arguments(
                     "durable project invocation was rejected",
                     "the project transaction failed atomically; no partial changes were committed",
                 );
-                rejection.detail = Some(format!("failure code: {}", diagnostic.code()));
+                rejection.detail = Some(failure_detail(&diagnostic));
                 rejection
             }
         }),
@@ -2062,7 +2081,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2090,20 +2109,10 @@ fn run_project_stream_invocation_with_project(
                     root_entry,
                 ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            )
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project stream delivery failed",
-            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
-        )),
+        StageOutcome::Failed(diagnostic) => Err(stream_delivery_failed(&diagnostic)),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
@@ -2126,12 +2135,72 @@ fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Opt
         body: None,
     })
 }
+
+/// Carries the runtime failure's public code, or its non-disclosing display
+/// text, into the diagnostic detail. The detail is shown with `--debug` only
+/// (ORNA-UX-004 keeps technical causes out of the default rendering).
+fn runtime_failure_detail(error: &orna_runtime_v1::RuntimeError) -> String {
+    if let orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) = error {
+        return format!("runtime failure: {} ({})", refusal.code(), refusal.title());
+    }
+    let cause = error
+        .public_code()
+        .map_or_else(|| error.to_string(), str::to_owned);
+    format!("runtime failure: {cause}")
+}
+
+/// Renders the evaluator failure code with the codes of its nested causes.
+/// Messages and spans stay redacted at the evaluator boundary.
+fn failure_detail(diagnostic: &orna_foundation_v1::Diagnostic) -> String {
+    let causes = diagnostic.causes();
+    if causes.is_empty() {
+        return format!("failure code: {}", diagnostic.code());
+    }
+    let codes = causes
+        .iter()
+        .map(orna_foundation_v1::Diagnostic::code)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("failure code: {} (causes: {codes})", diagnostic.code())
+}
+
+/// Maps a failed durable project invocation to `E2200`. The runtime's public
+/// code, or its non-disclosing display text, is carried in the detail, which
+/// renders only with `--debug` (ORNA-UX-004). A legacy head refusal names its
+/// own remedy, because retrying the transaction cannot clear it.
+fn durable_invocation_failed(error: &orna_runtime_v1::RuntimeError) -> Diagnostic {
+    let help = match error {
+        orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) => refusal.remedy(),
+        _ => "retry the project transaction after checking its durable state",
+    };
+    let mut diagnostic = Diagnostic::target("E2200", "durable project invocation failed", help);
+    diagnostic.detail = Some(runtime_failure_detail(error));
+    diagnostic
+}
+
+/// Maps a stream delivery the runtime rolled back to `E2200`, carrying the
+/// evaluator failure code and its nested cause codes in the `--debug` detail.
+fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
+    let mut delivery = Diagnostic::target(
+        "E2200",
+        "durable project stream delivery failed",
+        "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
+    );
+    delivery.detail = Some(failure_detail(diagnostic));
+    delivery
+}
+
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    // Single-module projects that import pinned standard modules keep the
+    // authority route only when they need publication metadata; the authority
+    // admits only the user module and cannot load standard bodies. Pure ones take
+    // the bounded path below, which loads those bodies through the verified profile.
+    let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
@@ -2144,7 +2213,7 @@ fn run_pure_invocation(
         if identity.namespace() == namespace {
             let authority =
                 ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
-            let admitted = authority
+            let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
                     Diagnostic::target_with_detail(
@@ -2153,7 +2222,16 @@ fn run_pure_invocation(
                         "fix the first reported source contract error, then run check again",
                         error.to_string(),
                     )
-                })?;
+                });
+            let admitted = match admission {
+                Ok(admitted) => Some(admitted),
+                // The bounded path reports the analysis error for std-importing projects.
+                Err(_) if std_imports => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(admitted) = admitted
+                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+            {
             if admitted.requires_publication_metadata() {
                 let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
                     endpoint,
@@ -2199,6 +2277,7 @@ fn run_pure_invocation(
             }
             write_success_line("invocation completed", color_enabled)?;
             return Ok(());
+            }
         }
     }
     let catalogue = semantic_catalogue(&project)?;
@@ -2212,10 +2291,47 @@ fn run_pure_invocation(
     }
 
     let mut evaluator = BoundedEvaluator::default();
-    match evaluator.evaluate_project(&execution_project(&project)) {
+    if let Some(profile) = project.standard_profile() {
+        // Admission supplies the runtime-reachable closure (requested roots plus
+        // `main`) and the profile must accept exactly that key set, so every
+        // supplied module digest is verified before any body is evaluated.
+        let sources = project.standard_sources().to_vec();
+        match evaluator.load_standard_sources(profile, sources) {
+            StageOutcome::Passed => {}
+            StageOutcome::Cancelled(diagnostic) => {
+                return Err(cancellation_diagnostic(&diagnostic));
+            }
+            StageOutcome::Failed(diagnostic) => {
+                return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                    Diagnostic::target_with_detail(
+                        "ORNA-S010-IMPORT",
+                        "imported module is unavailable",
+                        "use a captured standard dependency or remove the import",
+                        format!("standard dependency load rejected with {}", diagnostic.code()),
+                    )
+                }));
+            }
+            StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                ));
+            }
+        }
+    }
+    match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+        StageOutcome::Failed(diagnostic) => {
+            return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "one-shot invocation requires an executable function-only project",
+                    "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
+                )
+            }));
+        }
+        StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
                 "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
@@ -2629,7 +2745,7 @@ fn run_repl_input(
                     .state
                     .as_ref()
                     .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id(transactions.identity)),
+                    .acquire_lease(invocation_owner_id()),
             )
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         transactions.lease = Some(lease);
@@ -4117,6 +4233,66 @@ mod tests {
         assert_eq!(
             String::from_utf8(colored).expect("diagnostic is UTF-8"),
             "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
+        );
+    }
+
+    #[test]
+    fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::AdminBusy);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: sys.admin.busy")
+        );
+
+        let mut plain = Vec::new();
+        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain write");
+        let plain = String::from_utf8(plain).expect("diagnostic is UTF-8");
+        assert!(!plain.contains("sys.admin.busy"), "plain output: {plain}");
+        assert!(!plain.contains("runtime failure"), "plain output: {plain}");
+
+        let mut debug = Vec::new();
+        write_diagnostic(&mut debug, &diagnostic, false, true).expect("debug write");
+        let debug = String::from_utf8(debug).expect("diagnostic is UTF-8");
+        assert!(
+            debug.contains("runtime failure: sys.admin.busy"),
+            "debug output: {debug}"
+        );
+    }
+
+    #[test]
+    fn durable_invocation_failure_without_public_code_carries_display_text() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::LeaseHeld);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: runtime writer is held")
+        );
+    }
+
+    #[test]
+    fn failure_detail_formats_attached_cause_codes() {
+        let severity = orna_foundation_v1::DiagnosticSeverity::Error;
+        let message = || orna_foundation_v1::SafeText::new("redacted").expect("safe text");
+        let cause = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("cause diagnostic");
+        let failure = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("failure diagnostic")
+        .with_cause(cause);
+
+        let delivery = stream_delivery_failed(&failure);
+        assert_eq!(delivery.code, "E2200");
+        assert_eq!(
+            delivery.detail.as_deref(),
+            Some("failure code: ORNA-EVAL-SURFACE (causes: ORNA-EVAL-DIVIDE-BY-ZERO)")
         );
     }
 
