@@ -5,13 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- A single-module project that imports `std` and `sys.Storage` now runs
-  `use std.<module>.{name}` calls through the production authority route
-  (`orna invoke`). The authority admits the captured standard
-  dependency's function bodies, so a standard function is callable from the
-  importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
-  Glob and alias standard imports bind no names on this route, so a call through
-  them stays an unresolved name rather than binding silently.
+- A project that imports `std` and `sys.Storage` now runs `use std.<module>.{name}`
+  calls through the production authority route (`orna invoke`). The route is taken
+  only when the project uses std and the admitted entry requires publication
+  metadata; other std projects keep their previous path. The authority admits the
+  captured standard dependency's function bodies, so a standard function is callable
+  from the importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
+  Glob imports (`use std.<module>.*`) bind the module's public exports; `use std.<module>
+  as _` binds only the names the module records in its prelude; a named alias binds no
+  names. A standard body calls its own module helpers, never a user function of the same name.
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
