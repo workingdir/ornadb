@@ -1179,3 +1179,122 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
         "streamed raw payload hash"
     );
 }
+
+/// Committed legacy format-1 fixture (`tests/fixtures/legacy-format1.bundle`).
+const LEGACY_BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
+
+/// Gate F (ACCEPTANCE.md:63-68): a complete copy of a workspace that holds a
+/// legacy format-1 snapshot and a migrated format-3 snapshot exports both
+/// members, and each reconstructs offline with its recorded format intact.
+#[test]
+fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
+    let parent = TempDir::new().unwrap();
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.path().join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "clone legacy bundle: {}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    // The original remote is disabled: nothing below may contact it.
+    git(&source, &["remote", "remove", "origin"]);
+    // HEAD pins `vendor/stdlib` with no recorded `.gitmodules` origin, which a
+    // complete copy must refuse (E2000). The parent snapshot predates that
+    // gitlink, so it is the legacy member whose closure is self-contained.
+    let legacy = String::from_utf8(git_output(&source, &["rev-parse", "HEAD~1"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // The migrated member is a format-3 snapshot whose objects are fetched into
+    // the same repository, so both snapshots live in one archive.
+    let (migrated_root, _format3, _relation_id) = empty_format3_repository();
+    let migrated_commit = String::from_utf8(git_output(
+        migrated_root.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    git(
+        &source,
+        &[
+            "fetch",
+            "--quiet",
+            migrated_root.path().to_str().unwrap(),
+            "HEAD:refs/heads/migrated",
+        ],
+    );
+
+    let archive = parent.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        &source,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            &legacy,
+            "--at",
+            &migrated_commit,
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of legacy and migrated members failed: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stdout(&exported).contains(&migrated_commit),
+        "export names the migrated member: {}",
+        stdout(&exported)
+    );
+
+    // Each member reconstructs offline; the copy keeps its recorded format.
+    for (commit, expected) in [
+        (
+            legacy.as_str(),
+            orna_repository_v1::RepositoryFormat::Legacy1,
+        ),
+        (
+            migrated_commit.as_str(),
+            orna_repository_v1::RepositoryFormat::Format3,
+        ),
+    ] {
+        let restored = parent.path().join(format!("restored-{commit}"));
+        let restored_path = restored.to_str().unwrap();
+        let reconstructed = run(
+            parent.path(),
+            &["export", archive_path, "--restore", restored_path, "--at", commit],
+        );
+        assert_eq!(
+            reconstructed.status.code(),
+            Some(0),
+            "restore of {commit} failed: {}",
+            stderr(&reconstructed)
+        );
+        let head = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(head, commit, "the copy's HEAD is the restored member");
+        let remotes = String::from_utf8(git_output(&restored, &["remote"], None)).unwrap();
+        assert_eq!(remotes.trim(), "", "the copy configures no remote");
+
+        let repository = orna_repository_v1::Repository::discover(&restored).unwrap();
+        let context = repository
+            .open_format_context_at_selector(commit)
+            .expect("restored member opens offline");
+        assert_eq!(context.repository_format(), expected);
+    }
+}

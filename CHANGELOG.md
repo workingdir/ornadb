@@ -5,6 +5,12 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A complete-copy export of a workspace with a legacy format-1/2 snapshot
+  now admits that snapshot by its recorded format record and exports it with
+  the migrated format-3 snapshot, and an offline restore re-admits each member
+  (Gate F, `ACCEPTANCE.md:63-68`, `40-upgrade-contract.md:62-66`). Format-3
+  members still require their schema and store roots. Earlier builds refused
+  every non-format-3 snapshot as a complete copy.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
