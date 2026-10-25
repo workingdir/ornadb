@@ -65,6 +65,20 @@ fn mixed_formats(error: &FormatContextError) -> Diagnostic {
     }
 }
 
+/// The committed `HEAD` mixes formats, so `orna run` refuses before any runtime
+/// state is opened. Same code and title as [`mixed_formats`], but the remedy
+/// is true for a committed snapshot: unstaging does not change `HEAD`.
+pub(crate) fn mixed_formats_at_head(error: &FormatContextError) -> Diagnostic {
+    Diagnostic {
+        code: error.code(),
+        title: Cow::Owned(error.to_string()),
+        help: "the committed snapshot tracks a path a format-3 repository does not admit; commit a snapshot without that path (for example `git rm --cached PATH` then `git commit`), then retry; `orna run` reads the committed HEAD",
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    }
+}
+
 /// A retained publication or checkout recovery record owns the index, so
 /// staging refuses without touching it; the diagnostic names that condition
 /// and its remedy before any generic staging failure.
