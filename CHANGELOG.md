@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
+  `Content-Security-Policy` (`default-src 'none'`, inline styles only,
+  `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` (ORNA-APP-012,
+  ORNA-APP-013). Oversize bodies on non-`/orna` routes answer 413 instead of
+  400, and the Origin/Host refusal now runs before the size check (bead
+  ornadb-5il1.387).
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
   41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,
