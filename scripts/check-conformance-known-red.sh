@@ -6,13 +6,17 @@
 # The bead id MUST match ^ornadb-[a-z0-9.-]+$ and appear in scripts/conformance-known-red-beads.txt.
 # The expected substring is the first message line of the test's panic (captured by --collect);
 # a listed test that fails with a different message fails the gate.
-# For every test target (lib plus each tests/*.rs) the gate:
+# For every test target (lib, the orna-conformance bin, each tests/*.rs) the gate:
 #   1. runs the target with --exact --skip for the listed names that belong to it;
 #      any failure there is a NEW failure not in the list and fails the gate;
 #   2. runs each listed name alone with --exact; a listed name that PASSES fails the
 #      gate, and a listed name whose output lacks its expected substring fails the
 #      gate. A listed name that matches no test in any target also fails the gate.
 # The list may hold at most CONFORMANCE_KNOWN_RED_MAX entries (set in the workflow).
+# Test names must be unique across targets; a duplicate fails the gate.
+# OWNER REVIEW: changes to CONFORMANCE_KNOWN_RED_MAX (in .github/workflows/conformance-v1-tests.yml),
+# to scripts/conformance-known-red.txt or scripts/conformance-known-red-beads.txt, and to this script
+# require owner review. The repo has no .github/CODEOWNERS, so this is enforced by review only.
 #
 # usage: scripts/check-conformance-known-red.sh [--collect]
 #   --collect  run every target without skips and print "name<TAB>expected substring"
@@ -29,22 +33,27 @@ CARGO=(cargo test --locked -p "$PKG")
 mode=check
 [ "${1:-}" = "--collect" ] && mode=collect
 
-build_log=$(mktemp)
-if ! cargo test --locked -p "$PKG" --no-run >"$build_log" 2>&1; then
-    cat "$build_log"
-    rm -f "$build_log"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+
+if ! cargo test --locked -p "$PKG" --no-run >"$tmpdir/build.log" 2>&1; then
+    cat "$tmpdir/build.log"
     echo "FAIL: $PKG test targets do not compile" >&2
     exit 1
 fi
-rm -f "$build_log"
 
-targets=(lib)
+# lib, the orna-conformance bin (its cfg(test) unit tests in src/main.rs), and each tests/*.rs.
+targets=(lib "bin:orna-conformance")
 for f in crates/$PKG/tests/*.rs; do
     targets+=("$(basename "$f" .rs)")
 done
 
 target_args() {
-    if [ "$1" = lib ]; then echo "--lib"; else echo "--test $1"; fi
+    case "$1" in
+        lib) echo "--lib" ;;
+        bin:*) echo "--bin ${1#bin:}" ;;
+        *) echo "--test $1" ;;
+    esac
 }
 
 # Names of every test in a target, one per line.
@@ -55,7 +64,7 @@ list_tests() {
 
 if [ "$mode" = collect ]; then
     for t in "${targets[@]}"; do
-        out=$(mktemp)
+        out="$tmpdir/collect.$t.out"
         # shellcheck disable=SC2046
         "${CARGO[@]}" $(target_args "$t") -- >"$out" 2>&1
         # Failing names, each with the first panic message line of its stdout block.
@@ -115,11 +124,19 @@ if [ "${#known[@]}" -gt "$CONFORMANCE_KNOWN_RED_MAX" ]; then
 fi
 
 declare -A owner=()
+dups=()
 for t in "${targets[@]}"; do
     while IFS= read -r n; do
+        if [ -n "${owner[$n]:-}" ]; then
+            dups+=("$n (in ${owner[$n]} and $t)")
+        fi
         owner["$n"]="$t"
     done < <(list_tests "$t")
 done
+if [ "${#dups[@]}" -gt 0 ]; then
+    printf 'FAIL: test name appears in more than one target (the gate maps each name to one target; rename one): %s\n' "${dups[@]}" >&2
+    errors=$((errors + 1))
+fi
 
 for k in "${known[@]}"; do
     if [ -z "${owner[$k]:-}" ]; then
@@ -134,7 +151,7 @@ for t in "${targets[@]}"; do
     for k in "${known[@]}"; do
         [ "${owner[$k]:-}" = "$t" ] && skips+=(--skip "$k")
     done
-    out=$(mktemp)
+    out="$tmpdir/step1.$t.out"
     # shellcheck disable=SC2046
     "${CARGO[@]}" $(target_args "$t") -- --exact "${skips[@]}" >"$out" 2>&1
     rc=$?
@@ -157,7 +174,7 @@ for i in "${!known[@]}"; do
     sub="${expect[$i]}"
     t="${owner[$k]:-}"
     [ -z "$t" ] && continue
-    out=$(mktemp)
+    out="$tmpdir/step2.$i.out"
     # shellcheck disable=SC2046
     if "${CARGO[@]}" $(target_args "$t") -- --exact "$k" >"$out" 2>&1; then
         echo "FAIL: listed test now PASSES (remove it from $LIST): $k" >&2
