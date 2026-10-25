@@ -41025,7 +41025,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn runtime_skip_lease_on_a_skipped_failure_is_a_failure_state_conflict() {
+    async fn runtime_skip_lease_on_a_skipped_failure_is_rejected_retry_not_allowed() {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let writer = state.acquire_lease(id(4)).await.unwrap();
