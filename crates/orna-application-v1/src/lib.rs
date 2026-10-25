@@ -3886,19 +3886,37 @@ mod tests {
         assert_eq!(result, expected);
     }
 
-    fn std_import_authority(standard: &[(&str, &str)]) -> ApplicationAuthority {
+    fn std_import_authority_with(
+        standard: &[(&str, &str)],
+        configure: impl FnOnce(StandardDependencyProfile) -> StandardDependencyProfile,
+        limits: Limits,
+    ) -> ApplicationAuthority {
         let sources = standard
             .iter()
             .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
             .collect::<Vec<_>>();
-        let profile = StandardDependencyProfile::from_sources("std-import-binding", sources.clone())
-            .expect("standard profile");
+        let profile = configure(
+            StandardDependencyProfile::from_sources("std-import-binding", sources.clone())
+                .expect("standard profile"),
+        );
         let catalogue = Catalogue::authoritative_core()
             .with_standard_sources(&profile, sources.clone())
             .expect("standard catalogue");
-        ApplicationAuthority::new(catalogue, Limits::default())
+        ApplicationAuthority::new(catalogue, limits)
             .with_standard_sources(&profile, sources)
             .expect("standard function bodies")
+    }
+
+    fn std_import_authority(standard: &[(&str, &str)]) -> ApplicationAuthority {
+        std_import_authority_with(standard, |profile| profile, Limits::default())
+    }
+
+    /// True only when the source is admitted and its entry evaluates without error.
+    fn std_import_admits_and_runs(authority: &ApplicationAuthority, source: &str) -> bool {
+        match authority.admit_module("main.orna", source, "answer") {
+            Err(_) => false,
+            Ok(admitted) => authority.evaluate(&admitted, &Environment::new()).is_ok(),
+        }
     }
 
     fn std_import_codes(error: ApplicationError) -> Vec<String> {
@@ -4037,6 +4055,115 @@ mod tests {
             .evaluate(&admitted, &Environment::new())
             .expect("entry should execute");
         assert_eq!(result, int_value(2));
+    }
+
+    #[test]
+    fn std_functions_are_shared_across_admissions_not_cloned() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let baseline = Arc::strong_count(&authority.standard_functions);
+        let first = authority
+            .admit_module(
+                "first.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect("first admission");
+        let second = authority
+            .admit_module(
+                "second.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(2);\n",
+                "answer",
+            )
+            .expect("second admission");
+        // Each admitted table holds one handle to the same layer; no admission
+        // deep-copies the standard bodies (M3).
+        assert_eq!(Arc::strong_count(&authority.standard_functions), baseline + 2);
+        drop((first, second));
+        assert_eq!(Arc::strong_count(&authority.standard_functions), baseline);
+    }
+
+    #[test]
+    fn std_functions_do_not_consume_the_admitted_activation_budget() {
+        let mut standard = String::new();
+        for index in 0..8 {
+            standard.push_str(&format!(
+                "pub fn unrelated{index}(value: Int): Int = value + {index};\n"
+            ));
+        }
+        standard.push_str("pub fn increment(value: Int): Int = value + 1;\n");
+        let limits = Limits {
+            max_collection_items: 2,
+            ..Limits::default()
+        };
+        let authority = std_import_authority_with(
+            &[("std/math.orna", standard.as_str())],
+            |profile| profile,
+            limits,
+        );
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{increment};\npub fn answer(): Int = increment(41);\n",
+                "answer",
+            )
+            .expect("nine unrelated standard functions must not count against the budget");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(42));
+    }
+
+    #[test]
+    fn std_prelude_import_binds_exactly_the_recorded_prelude_exports() {
+        let standard = "pub fn increment(value: Int): Int = value + 1;\npub fn decrement(value: Int): Int = value - 1;\n";
+        let authority = std_import_authority_with(
+            &[("std/math.orna", standard)],
+            |profile| profile.with_module_prelude_exports("std/math.orna", ["increment"]),
+            Limits::default(),
+        );
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math as _;\npub fn answer(): Int = increment(41);\n",
+                "answer",
+            )
+            .expect("a recorded prelude export is bound by `as _`");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(42));
+        // `decrement` is public but not a recorded prelude export (ORNA-IMPORT-005).
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math as _;\npub fn answer(): Int = decrement(41);\n",
+        ));
+    }
+
+    #[test]
+    fn std_prelude_import_binds_nothing_for_a_module_without_recorded_exports() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math as _;\npub fn answer(): Int = increment(41);\n",
+        ));
+    }
+
+    #[test]
+    fn std_glob_import_does_not_bind_private_functions() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "fn helper(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = helper(value);\n",
+        )]);
+        assert!(!std_import_admits_and_runs(
+            &authority,
+            "use std.math.*;\npub fn answer(): Int = helper(1);\n",
+        ));
     }
 
     #[test]
