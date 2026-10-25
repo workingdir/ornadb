@@ -7888,6 +7888,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command
     }
 
@@ -10042,6 +10043,14 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
+/// Stops Git's repository discovery at the worktree's parent directory so a
+/// corrupt worktree `.git` cannot fall through to an enclosing repository.
+pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
+    if let Some(parent) = worktree.parent() {
+        command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+}
+
 /// Prevent inherited Git routing from selecting a repository, worktree, or
 /// index other than the explicitly supplied command directory.
 pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
@@ -10707,6 +10716,53 @@ mod tests {
         // A corrupt HEAD makes git exit 128. The object may still exist, so
         // the answer is an error, never "absent" (which would skip the pin).
         fs::write(root.path().join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    /// A child repository nested inside a parent repository must not let a
+    /// corrupt child HEAD fall through to the parent. Git would then report the
+    /// child's pinned object as missing, and the publication pin check would
+    /// skip the pin (ORNA-PUB-006). The probe must fail closed instead.
+    #[test]
+    fn publication_probe_does_not_fall_through_a_corrupt_child_head() {
+        let parent = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(parent.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let child = parent.path().join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&child)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&child).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&child)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(repository.publication_object_present(&present).unwrap());
+
+        fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
         assert!(matches!(
             repository.publication_object_present(&present),
             Err(RepositoryError::GitOperationFailed)

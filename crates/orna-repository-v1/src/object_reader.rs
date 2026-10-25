@@ -193,6 +193,7 @@ impl ObjectReader {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
@@ -497,6 +498,7 @@ impl Session {
         let mut command = Command::new("git");
         command.current_dir(worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, worktree);
         // Set after scrubbing, which removes inherited replace-object settings.
         command
             .env("GIT_NO_LAZY_FETCH", "1")
