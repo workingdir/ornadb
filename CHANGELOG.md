@@ -5,6 +5,15 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna publish` gains four crash barriers behind the `crash-barriers` test
+  feature, and `publication_crash_matrix` kills the publisher at each one:
+  `ref-cas-pre-journal` (after the ref CAS, before `RefAdvanced` is durable),
+  `store-worktree` (after the `.orna/store` worktree rewrite, before the index
+  install), `worktree` (after managed-file materialisation, before
+  `WorktreeReconciled`) and `runtime-complete` (after the runtime tail is
+  consumed, before the repository journal is cleared). Restart verifies the
+  recovery-state table of ORNA-PUB-009 and ACCEPTANCE.md Gate D. No production
+  behaviour changes.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
