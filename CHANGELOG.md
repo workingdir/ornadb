@@ -20,6 +20,23 @@ been published.
   records external-effect uncertainty instead. A
   faulted `ExternalPossible` activation is not reported as rollback-proven
   (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
+- The language server's semantic rename keeps a table or field's object identity.
+  Owner-visible behaviour: on save, the editor writes to the git index. The index
+  entry for `main.orna` is replaced with the whole saved file (not only the renamed
+  hunk), and the identity inventory and `.orna/store` are staged too, but only when
+  the `main.orna` index entry still equals HEAD's or the text the edit started from.
+  Otherwise nothing is staged and the warning asks for manual staging, so partial
+  `git add -p` work is never overwritten. Nothing is committed; `orna commit` then
+  keeps the identity, like `orna mv`. A field rename is not staged: it is refused with
+  the warning `ORNA-LSP-RENAME-001` ("schema evolution is not admitted") until schema
+  evolution is implemented (ORNA-EVOL-002). An identity that cannot be carried leaves
+  the rename applied and shows a warning with code `ORNA-LSP-RENAME-001` and the remedy
+  `orna mv` (`ornadb-5il1.414`). A rename applied to the buffer but not saved before
+  the document closes or reopens is reported as "the rename was not saved". Concurrent
+  inventory changes are guarded by the staged-store `StaleIndex` check. An outer
+  coordination lock was not added because the install path takes the same lock
+  non-blockingly: a re-entrant attempt fails with `RepositoryBusy`, so the install
+  would fail rather than deadlock.
 - Publication recovery re-verifies `.orna/store` payloads at the `IndexReconciled` stage before worktree materialisation, so a managed store edit made inside the `index` kill window is retained (E2300) and HEAD is not rewound. `publication_crash_matrix` gains a later-tail leg at every kill boundary (`prepared` included) and a managed-store kill-window leg (ornadb-5il1.406, ornadb-5il1.407).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
