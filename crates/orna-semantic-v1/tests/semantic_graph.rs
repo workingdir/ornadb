@@ -16936,9 +16936,7 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
     assert!(!invalid.is_ok(), "{:?}", invalid.diagnostics);
 
-    // Bare root intrinsics are part of the root environment (09-standard-library
-    // L7) and resolve without a profile; qualified std.collection names still
-    // require one (see *_qualified_unprofiled_name_is_unresolved).
+    // Bare root intrinsics resolve without a profile (09-standard-library L7).
     let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
             "root-intrinsic.orna",
@@ -16947,6 +16945,14 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
         &Catalogue::authoritative_core(),
     );
     assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.sort_by(values, value => value);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 }
 
 #[test]
@@ -17317,6 +17323,14 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
         &Catalogue::authoritative_core(),
     );
     assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(rows: [Int]) = collection.every(rows, value => true);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let assertions = analyze(&[ModuleInput::new(
         "assertions.orna",
@@ -17417,6 +17431,14 @@ fn finite_list_sum_rejects_unsupported_kinds_and_arguments() {
         &Catalogue::authoritative_core(),
     );
     assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 }
 
 #[test]
@@ -17518,6 +17540,14 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
         &Catalogue::authoritative_core(),
     );
     assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.min(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let relation = analyze(&[ModuleInput::new(
         "relation-min-max.orna",
@@ -17680,6 +17710,14 @@ fn finite_list_float_aggregates_reject_mixed_inputs() {
         &Catalogue::authoritative_core(),
     );
     assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Float]) = collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
+    );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let incompatible_source = include_str!("fixtures/inline-semantic_graph/e0b8483cc8bc.orna");
     let incompatible_profile = StandardDependencyProfile::from_sources(
@@ -17704,6 +17742,20 @@ fn finite_list_float_aggregates_reject_mixed_inputs() {
         has(&incompatible, DIAG_TYPE),
         "{:?}",
         incompatible.diagnostics
+    );
+    // Root intrinsics do not come from the std profile (09-standard-library L7),
+    // so an incompatible std collection profile must not change a bare call.
+    let incompatible_bare = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "incompatible-bare.orna",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
+        )],
+        &incompatible_catalogue,
+    );
+    assert!(
+        incompatible_bare.is_ok(),
+        "{:?}",
+        incompatible_bare.diagnostics
     );
 }
 
