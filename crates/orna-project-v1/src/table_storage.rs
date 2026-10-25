@@ -148,22 +148,36 @@ pub fn evaluator_rows(
     table: &CommittedTable,
     schema: &TableSchema,
 ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
+    evaluator_rows_from_stored(schema, &table.storage_order, &table.rows)
+}
+
+/// Converts runtime `(key, stored tuple)` rows of one table into evaluator
+/// records, ordered by evaluator key. `storage_order` names the stored fields
+/// every tuple lists in order. Each present Blob field reads as its
+/// [`blob_placeholder`]. This is the single stored-to-evaluator conversion: a
+/// merged activation snapshot (committed base plus live tail) is converted
+/// through it once, at the application boundary.
+pub fn evaluator_rows_from_stored(
+    schema: &TableSchema,
+    storage_order: &[String],
+    rows: &[(Vec<u8>, Vec<u8>)],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
     let (key_names, text_primary_key) = evaluator_keying(schema)?;
-    let mut rows = BTreeMap::new();
-    for (runtime_key, storage_row) in &table.rows {
-        let storage_row = portable_storage_row(storage_row, &table.storage_order, schema)?;
+    let mut evaluator = BTreeMap::new();
+    for (runtime_key, storage_row) in rows {
+        let storage_row = portable_storage_row(storage_row, storage_order, schema)?;
         let (key_bytes, record) = evaluator_row_with_keying(
             &key_names,
             text_primary_key,
             runtime_key,
             &storage_row,
-            &table.storage_order,
+            storage_order,
         )?;
-        if rows.insert(key_bytes, record).is_some() {
+        if evaluator.insert(key_bytes, record).is_some() {
             return Err(TableStorageError);
         }
     }
-    Ok(rows.into_iter().collect())
+    Ok(evaluator.into_iter().collect())
 }
 
 /// The key-field names and text-key flag that evaluator records of `schema` use.

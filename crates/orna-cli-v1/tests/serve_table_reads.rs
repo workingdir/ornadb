@@ -21,7 +21,7 @@ const COUNT_SOURCE: &str =
 const WRITE_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note.insert({ id: \"write\", body: \"refused\" });\n";
 const MIXED_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub table Other(id: Str) { body: Str, }\n\npub fn serve() = Note | count();\n";
 const COUNT_PLUS_TEN_SOURCE: &str =
-    "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note | count() + 10;\n";
+    "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = (Note | count()) + 10;\n";
 
 /// Keeps the host's Git configuration and repository routing out of every
 /// process this test starts.
