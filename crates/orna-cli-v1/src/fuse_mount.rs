@@ -2841,6 +2841,23 @@ impl Filesystem for WorkspaceFilesystem {
         reply.error(Errno::EOPNOTSUPP);
     }
 
+    fn mkdir(
+        &self,
+        _request: &Request,
+        _parent: INodeNo,
+        _name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        // Plain mkdir does not invent schema or key semantics (profiles/vfs-1.md:113).
+        reply.error(refused_mutation_errno());
+    }
+
+    fn rmdir(&self, _request: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
+        reply.error(refused_mutation_errno());
+    }
+
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let mut state = self
             .state
