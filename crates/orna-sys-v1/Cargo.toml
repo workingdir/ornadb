@@ -19,6 +19,7 @@ test = false
 bench = false
 
 [dependencies]
+orna-foundation-v1 = { path = "../orna-foundation-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-sys-macros = { path = "../orna-sys-macros" }
 serde = { version = "1.0.229", features = ["derive"] }
@@ -41,4 +42,4 @@ serde_json = { version = "1.0.151", features = ["preserve_order"] }
 tempfile = "3.23.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "0.38.44", default-features = false, features = ["fs", "std"] }
+rustix = { version = "0.38.44", default-features = false, features = ["fs", "process", "std"] }

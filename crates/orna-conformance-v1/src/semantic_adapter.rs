@@ -40,14 +40,15 @@ use orna_runtime_v1::{
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
-    AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
-    StandardDependencyProfile, SystemProviders, analyze_with_providers,
+    AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders, analyze_with_providers,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
     AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
     CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
-    DiagnosticCode, FailureIdentity, FailureStatus, LeasePurpose, Position, SafeDiagnostic,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
+    SafeDiagnostic,
 };
 use orna_syntax_v1::{
     Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
@@ -769,7 +770,10 @@ impl BoundedEvaluator {
                 parse_as: "module_unit".into(),
                 source,
             };
-            match staged.evaluate_module(&unit) {
+            // Standard functions keep their module identity (`std.<module>.<name>`)
+            // so their bodies resolve sibling helpers and never shadow user names.
+            let namespace = module_namespace(&unit);
+            match staged.evaluate_module_with_namespace(&unit, namespace.as_deref()) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
@@ -999,6 +1003,9 @@ impl RuntimeEvaluator for BoundedEvaluator {
                 outcome => return outcome,
             }
         }
+        if let Err(outcome) = bind_standard_function_aliases(&mut staged.functions, project) {
+            return outcome;
+        }
         *self = staged;
         StageOutcome::Passed
     }
@@ -1052,6 +1059,84 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
     }
 }
+
+/// Binds unqualified names from `use std.<module>.{name}` declarations in the
+/// project's modules to the retained standard functions. User functions keep
+/// their own names. Glob and module-alias imports are refused explicitly, a
+/// braced name absent from the pinned module is an import error, and two
+/// modules binding one unqualified name to different targets are ambiguous.
+fn bind_standard_function_aliases(
+    functions: &mut BTreeMap<String, RetainedFunction>,
+    project: &ProjectUnit,
+) -> Result<(), StageOutcome<Diagnostic>> {
+    let mut aliases = BTreeMap::<String, String>::new();
+    for unit in &project.modules {
+        let parsed = parse_module(&unit.source);
+        for item in parsed.value.items {
+            let Declaration::Use { path, tail } = item.declaration else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let namespace = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let names = match tail {
+                orna_syntax_v1::UseTail::None => continue,
+                orna_syntax_v1::UseTail::Names(names) => names,
+                orna_syntax_v1::UseTail::Glob { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard glob imports are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+                orna_syntax_v1::UseTail::Alias { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard module aliases are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+            };
+            for name in names {
+                let target = format!("{namespace}.{}", name.name);
+                if !functions.contains_key(&target) {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "imported name is not exported by the pinned standard module",
+                    )));
+                }
+                if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
+                    && previous != target
+                {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_AMBIGUOUS,
+                        "standard imports bind one unqualified name to different functions",
+                    )));
+                }
+            }
+        }
+    }
+    for (alias, target) in aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            functions.entry(alias).or_insert(function);
+        }
+    }
+    Ok(())
+}
+
+fn standard_import_diagnostic(code: &str, message: &str) -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new(code).expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new(message).expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
 
 fn module_namespace(unit: &SourceUnit) -> Option<String> {
     let mut components = unit.source_id.split('/').collect::<Vec<_>>();
@@ -3605,13 +3690,13 @@ impl DurableTransactionalEvaluator {
                 )
                 .await
             }
-            Ok(StreamRunOutcome::Failed { .. }) => {
+            Ok(StreamRunOutcome::Failed { failure, .. }) => {
                 fail_observed_request_outcome(
                     &state,
                     request,
                     fingerprint,
                     writer,
-                    StageOutcome::Failed(stream_delivery_failure_diagnostic()),
+                    StageOutcome::Failed(stream_delivery_failure_diagnostic(&failure)),
                 )
                 .await
             }
@@ -4224,9 +4309,9 @@ impl DurableTransactionalEvaluator {
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
-            Ok(StreamRunOutcome::Failed { .. }) => {
-                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
-            }
+            Ok(StreamRunOutcome::Failed { failure, .. }) => Ok(StageOutcome::Failed(
+                stream_delivery_failure_diagnostic(&failure),
+            )),
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "literal list stream did not exhaust".into(),
             }),
@@ -4926,12 +5011,35 @@ fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnosti
     .redacted()
 }
 
-fn stream_delivery_failure_diagnostic() -> Diagnostic {
+fn stream_delivery_failure_diagnostic(failure: &FailureRecord) -> Diagnostic {
     Diagnostic::new(
         SafeText::new("ORNA-LIST-STREAM-DELIVERY").expect("static code"),
         DiagnosticSeverity::Error,
         SafeText::new("literal list stream delivery was retained after activation rollback")
             .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .with_cause(stream_failure_cause(failure.diagnostic.code))
+    .redacted()
+}
+
+/// The runtime's typed failure code, carried as a non-catalogue label for the
+/// `--debug` detail. The spec does not catalogue these variants, so the label
+/// deliberately does not use the `ORNA-` prefix and promotes no code.
+fn stream_failure_cause(code: DiagnosticCode) -> Diagnostic {
+    let label = match code {
+        DiagnosticCode::ProviderUnavailable => "stream-failure:provider-unavailable",
+        DiagnosticCode::DecodeRejected => "stream-failure:decode-rejected",
+        DiagnosticCode::ExecutionRejected => "stream-failure:execution-rejected",
+        DiagnosticCode::Cancelled => "stream-failure:cancelled",
+        DiagnosticCode::Internal => "stream-failure:internal",
+        DiagnosticCode::TableAssertionFalse => "stream-failure:table-assertion-false",
+        DiagnosticCode::StaleBaseline => "stream-failure:stale-baseline",
+    };
+    Diagnostic::new(
+        SafeText::new(label).expect("static label"),
+        DiagnosticSeverity::Error,
+        SafeText::redacted(),
     )
     .expect("valid diagnostic")
     .redacted()
@@ -6708,10 +6816,13 @@ fn is_standard_source(unit: &SourceUnit) -> bool {
 }
 
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
-    summary
-        .effects
-        .iter()
-        .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+    !summary.opaque
+        && summary.effects.iter().all(|effect| {
+            matches!(
+                effect,
+                orna_semantic_v1::EffectKind::TableRead | orna_semantic_v1::EffectKind::TableWrite
+            )
+        })
 }
 
 fn effect_admission_diagnostic() -> Diagnostic {
