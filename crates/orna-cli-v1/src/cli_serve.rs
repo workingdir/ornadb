@@ -592,7 +592,14 @@ fn admit_serving_entry(
             return (None, orna_semantic_v1::Catalogue::default(), None);
         }
     };
-    match cli_serve_app::ServeApp::admit(&project, &catalogue) {
+    let root = match local_project_path(endpoint) {
+        Ok(root) => root,
+        Err(diagnostic) => {
+            report_serving_diagnostic(&diagnostic);
+            return (Some(project), catalogue, None);
+        }
+    };
+    match cli_serve_app::ServeApp::admit(root, &project, &catalogue) {
         Ok(app) => {
             if app.is_none() {
                 // Without a serving entry the Git transport still serves; `/` is absent.

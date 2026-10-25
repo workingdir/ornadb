@@ -22,7 +22,8 @@ use orna_live_v1::{
     LiveEvalResponse, LiveEvalTransaction,
 };
 use orna_project_v1::{
-    AdmittedSourceRow, LoadedProject, ResolvedTableSchema, admitted_table_schemas,
+    AdmittedSourceRow, CommittedReadLimits, LoadedProject, ProjectLimits, ResolvedTableSchema,
+    admitted_table_schemas,
 };
 use orna_protocol_v1::{
     Envelope, Message, PresentIdentity, PresentKind, PresentNode, PresentPropertyKey, ResultStatus,
@@ -582,26 +583,54 @@ impl ApplicationAuthority {
         handler.into_staged_activation(value, None, effects)
     }
 
-    /// Evaluates table mutations against one activation-pinned table snapshot.
-    /// This is required for operations whose result depends on the previous
-    /// row value (`update`, patching `upsert`, and `rekey`). The returned work
-    /// can only be staged against the same captured generation.
-    /// `publication_rows` carries the durable publication snapshot for the
-    /// same activation when the entry scans `sys` relations, mirroring
-    /// [`Self::evaluate_staged_with_publication_rows`].
-    pub fn evaluate_staged_with_table_snapshot(
+    /// The bound every committed table read observes: a table may hold at most
+    /// the evaluator's collection limit of rows, and the admitted rows' key and
+    /// stored tuple bytes across the read may not exceed the project source byte
+    /// limit. The read refuses the first row past either bound before retaining it.
+    pub fn committed_read_limits() -> CommittedReadLimits {
+        CommittedReadLimits {
+            max_rows_per_table: Limits::default().max_collection_items,
+            max_bytes: ProjectLimits::default().max_source_bytes,
+        }
+    }
+
+    /// Evaluates against `snapshot`'s activation with `rows` as the table
+    /// contents. The caller supplies the rows in evaluator form (the form the
+    /// admitted schemas expect), typically the snapshot's merged committed and
+    /// live rows converted once at the project boundary. The returned work is
+    /// still staged against the snapshot's captured generation.
+    pub fn evaluate_staged_with_table_snapshot_rows(
         &self,
         application: &AdmittedApplication,
         arguments: &Environment,
         snapshot: &RuntimeTableActivationSnapshot,
+        rows: RuntimeTableRows,
         publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let table_object_ids = application_table_object_ids(application);
+        validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
+        self.evaluate_staged_over_table_rows(
+            application,
+            arguments,
+            rows,
+            publication_rows,
+            Some(snapshot.context().capture().generation_digest()),
+        )
+    }
+
+    fn evaluate_staged_over_table_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+        snapshot_generation: Option<[u8; 32]>,
     ) -> Result<StagedActivation, ApplicationError> {
         let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
-        validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
         let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
-            snapshot.table_rows().clone(),
+            rows,
             table_object_ids,
         )?
         .with_insert_defaults(
@@ -622,11 +651,7 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let effects = handler.effect_report();
-        handler.into_staged_activation(
-            value,
-            Some(snapshot.context().capture().generation_digest()),
-            effects,
-        )
+        handler.into_staged_activation(value, snapshot_generation, effects)
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
@@ -13705,10 +13730,11 @@ pub fn main(): Int {
             &NoFault,
             |snapshot| {
                 let evaluated = authority
-                    .evaluate_staged_with_table_snapshot(
+                    .evaluate_staged_with_table_snapshot_rows(
                         &application,
                         &Environment::new(),
                         snapshot,
+                        snapshot.table_rows().clone(),
                         None,
                     )
                     .map_err(|error| error.to_string());
