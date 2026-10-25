@@ -59,6 +59,16 @@ fn fresh_view(fixture: &EditorMount) -> String {
     std::fs::read_to_string(&fixture.data_path).expect("read accepted state through a new open")
 }
 
+fn assert_view_contains(fixture: &EditorMount, needle: &str) {
+    let view = fresh_view(fixture);
+    assert!(view.contains(needle), "accepted view lacks {needle:?}: {view:?}");
+}
+
+fn assert_view_lacks(fixture: &EditorMount, needle: &str) {
+    let view = fresh_view(fixture);
+    assert!(!view.contains(needle), "accepted view contains {needle:?}: {view:?}");
+}
+
 fn assert_errno(result: std::io::Result<()>, expected: i32, context: &str) {
     let error = result.expect_err(context);
     assert_eq!(error.raw_os_error(), Some(expected), "{context}: {error}");
@@ -144,7 +154,7 @@ async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
 
     replace_draft(&mut file, &row("Fsync accepted"));
     file.sync_all().expect("valid draft fsync is acknowledged");
-    assert!(fresh_view(&fixture).contains("Fsync accepted"));
+    assert_view_contains(&fixture, "Fsync accepted");
 
     replace_draft(&mut file, &invalid_row("Bad fsync draft"));
     assert_errno(
@@ -156,7 +166,7 @@ async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
         read_own_draft(&mut file).contains("Bad fsync draft"),
         "the rejected draft stays visible to its own handle",
     );
-    assert!(!fresh_view(&fixture).contains("Bad fsync draft"));
+    assert_view_lacks(&fixture, "Bad fsync draft");
     assert!(
         fresh_view(&fixture).contains("Fsync accepted"),
         "a new open reads accepted state, never the rejected draft",
@@ -175,7 +185,7 @@ async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {
     replace_draft(&mut file, &row("Datasync accepted"));
     file.sync_data()
         .expect("valid draft fdatasync is acknowledged");
-    assert!(fresh_view(&fixture).contains("Datasync accepted"));
+    assert_view_contains(&fixture, "Datasync accepted");
 
     replace_draft(&mut file, &invalid_row("Bad datasync draft"));
     assert_errno(
@@ -183,8 +193,8 @@ async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {
         EINVAL,
         "invalid draft fdatasync must fail with EINVAL",
     );
-    assert!(!fresh_view(&fixture).contains("Bad datasync draft"));
-    assert!(fresh_view(&fixture).contains("Datasync accepted"));
+    assert_view_lacks(&fixture, "Bad datasync draft");
+    assert_view_contains(&fixture, "Datasync accepted");
 }
 
 /// ORNA-VFS-008: repeated fsync/fdatasync/flush of one accepted candidate
@@ -224,7 +234,7 @@ async fn repeated_sync_and_flush_do_not_accept_the_candidate_twice() {
     later
         .sync_all()
         .expect("a handle opened after the first acceptance still syncs");
-    assert!(fresh_view(&fixture).contains("Later after repeats"));
+    assert_view_contains(&fixture, "Later after repeats");
 }
 
 /// ORNA-VFS-008: a dup shares one handle; syncing through either descriptor
@@ -241,17 +251,17 @@ async fn dup_descriptors_share_one_draft_and_one_acceptance() {
     replace_draft(&mut file, &row("Dup shared"));
     dup.sync_all()
         .expect("sync through the dup acknowledges the shared draft");
-    assert!(fresh_view(&fixture).contains("Dup shared"));
+    assert_view_contains(&fixture, "Dup shared");
     let mut later = open_rw(&fixture);
     file.sync_all()
         .expect("sync through the original is idempotent");
     drop(dup);
-    assert!(fresh_view(&fixture).contains("Dup shared"));
+    assert_view_contains(&fixture, "Dup shared");
     replace_draft(&mut later, &row("Dup later"));
     later
         .sync_all()
         .expect("a handle opened after the single acceptance still syncs");
-    assert!(fresh_view(&fixture).contains("Dup later"));
+    assert_view_contains(&fixture, "Dup later");
 }
 
 /// ORNA-VFS-007/008, EDIT-1 step 5: a close flush of a dirty draft attempts the
@@ -272,7 +282,7 @@ async fn close_flush_accepts_dirty_draft_once() {
         "the close flush of a dirty draft accepts it",
     );
     drop(file);
-    assert!(fresh_view(&fixture).contains("Closed dirty"));
+    assert_view_contains(&fixture, "Closed dirty");
     await_draft_guard(&fixture, b'0', "an accepted close leaves no draft guard").await;
     assert!(
         retained_drafts(&fixture.repository).is_empty(),
@@ -283,7 +293,7 @@ async fn close_flush_accepts_dirty_draft_once() {
     later
         .sync_all()
         .expect("a handle opened after the close acceptance still syncs");
-    assert!(fresh_view(&fixture).contains("After close"));
+    assert_view_contains(&fixture, "After close");
 }
 
 /// ORNA-VFS-007/009: a close flush whose acceptance is refused has its error
@@ -302,7 +312,7 @@ async fn ignored_close_error_leaves_row_unchanged_and_draft_retained() {
         fresh_view(&fixture).contains("Original"),
         "a refused close flush leaves the accepted row unchanged",
     );
-    assert!(!fresh_view(&fixture).contains("Refused on close"));
+    assert_view_lacks(&fixture, "Refused on close");
     assert!(
         retained_drafts(&fixture.repository)
             .iter()
@@ -334,7 +344,7 @@ async fn stale_close_flush_keeps_peer_row_and_retains_candidate() {
         fresh_view(&fixture).contains("Winner accepted"),
         "the peer's accepted row is kept",
     );
-    assert!(!fresh_view(&fixture).contains("Stale close draft"));
+    assert_view_lacks(&fixture, "Stale close draft");
     assert!(
         retained_drafts(&fixture.repository)
             .iter()
@@ -363,11 +373,15 @@ async fn stale_refusal_resolved_by_later_peer_accept_leaves_guard_clear_on_drop(
     replace_draft(&mut stale, &row("Stale refused"));
     let mut winner = open_rw(&fixture);
     replace_draft(&mut winner, &row("Winner accepted"));
-    winner
-        .sync_all()
-        .expect("the peer's fsync accepts its candidate");
+    if let Err(error) = winner.sync_all() {
+        panic!(
+            "peer fsync of the winner candidate failed (operation: fsync, errno {:?}): {error:?}",
+            error.raw_os_error()
+        );
+    }
     drop(winner);
-    assert!(stale.sync_all().is_err(), "a stale fsync is refused");
+    let stale_sync = stale.sync_all();
+    assert!(stale_sync.is_err(), "a stale fsync is refused: {stale_sync:?}");
     await_draft_guard(
         &fixture,
         b'1',
@@ -379,7 +393,7 @@ async fn stale_refusal_resolved_by_later_peer_accept_leaves_guard_clear_on_drop(
     fresh
         .sync_all()
         .expect("a fresh baseline accepts its candidate");
-    assert!(fresh_view(&fixture).contains("Fresh after refusal"));
+    assert_view_contains(&fixture, "Fresh after refusal");
     drop(fresh);
     drop(stale);
     await_draft_guard(
@@ -479,7 +493,7 @@ async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
         before_close,
         "closing after a rejected sync must not change the durable row",
     );
-    assert!(fresh_view(&fixture).contains("Original"));
+    assert_view_contains(&fixture, "Original");
 }
 
 /// ORNA-VFS-008: a child process that inherits the handle's open file
@@ -513,7 +527,7 @@ async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_
     );
     file.sync_all()
         .expect("parent sync acknowledges the child's write");
-    assert!(fresh_view(&fixture).contains("Inherited child"));
+    assert_view_contains(&fixture, "Inherited child");
 
     replace_draft(&mut file, &row("Parent unsynced"));
     drop(file);
@@ -547,7 +561,7 @@ async fn writes_after_sync_start_a_new_candidate_until_the_next_sync() {
         !accepted.contains("After second"),
         "an unsynced write after a sync is not acknowledged",
     );
-    assert!(fresh_view(&fixture).contains("After first"));
+    assert_view_contains(&fixture, "After first");
 
     file.sync_all()
         .expect("second sync acknowledges the new candidate");
@@ -597,12 +611,12 @@ async fn temporary_sync_is_not_acceptance_and_rename_applies_it() {
         !fresh_view(&fixture).contains("Temp synced"),
         "fsync(temp) must not be row acceptance",
     );
-    assert!(fresh_view(&fixture).contains("Original"));
+    assert_view_contains(&fixture, "Original");
 
     drop(scratch);
     std::fs::rename(&temporary, &fixture.data_path)
         .expect("rename applies the validated temporary");
-    assert!(fresh_view(&fixture).contains("Temp synced"));
+    assert_view_contains(&fixture, "Temp synced");
 }
 
 /// ORNA-VFS-009: a synced temporary that is abandoned instead of renamed never
@@ -641,8 +655,8 @@ async fn abandoned_synced_temporary_never_reaches_the_row() {
         "unlinking the abandoned temporary clears the draft guard",
     )
     .await;
-    assert!(fresh_view(&fixture).contains("Original"));
-    assert!(!fresh_view(&fixture).contains("Abandoned temp"));
+    assert_view_contains(&fixture, "Original");
+    assert_view_lacks(&fixture, "Abandoned temp");
 }
 
 /// ORNA-VFS-009: unlinking a clean scratch that is still open removes it from
@@ -725,7 +739,7 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
         .expect("fsync(temp) of the corrected bytes");
     drop(corrected);
     std::fs::rename(&temporary, &fixture.data_path).expect("corrected rename is accepted");
-    assert!(fresh_view(&fixture).contains("Rejected corrected"));
+    assert_view_contains(&fixture, "Rejected corrected");
     await_draft_guard(
         &fixture,
         b'0',
@@ -762,7 +776,7 @@ async fn rejected_rename_keeps_scratch_and_guard_until_a_corrected_rename() {
             .any(|draft| draft.contains("Rejected then removed")),
         "the removed scratch candidate is retained in recovery storage"
     );
-    assert!(fresh_view(&fixture).contains("Rejected corrected"));
+    assert_view_contains(&fixture, "Rejected corrected");
 }
 
 /// ORNA-VFS-008: a clean handle opened before another writer's accepted save
@@ -796,7 +810,7 @@ async fn stale_clean_handle_sync_succeeds_without_draft_state() {
         "dropping clean handles leaves no draft state",
     )
     .await;
-    assert!(fresh_view(&fixture).contains("Peer accepted"));
+    assert_view_contains(&fixture, "Peer accepted");
 }
 
 /// ORNA-VFS-008: a same-length ftruncate on an open handle is pending draft
@@ -828,5 +842,5 @@ async fn same_length_truncate_clears_guard_on_accepted_fsync_while_open() {
     );
     drop(file);
     await_draft_guard(&fixture, b'0', "closing the handle leaves no draft state").await;
-    assert!(fresh_view(&fixture).contains("Truncate same"));
+    assert_view_contains(&fixture, "Truncate same");
 }

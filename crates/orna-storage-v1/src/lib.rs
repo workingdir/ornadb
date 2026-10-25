@@ -1320,6 +1320,10 @@ impl RuntimePublicationCoordinator {
             .complete_publication(freeze, &commit)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
+        // Gate D boundary: the runtime tail is consumed but the repository
+        // journal still names WorktreeReconciled; recovery must complete the
+        // runtime step idempotently before clearing the journal (ORNA-PUB-006).
+        orna_repository_v1::publication_crash_barrier("runtime-complete");
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
             .map_err(|_| Error::RepositoryUnavailable)?;

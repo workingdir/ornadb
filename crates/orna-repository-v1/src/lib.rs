@@ -3258,6 +3258,9 @@ impl Repository {
                 candidate,
                 true,
             )?;
+            // Gate D boundary: the store worktree has been rewritten but the
+            // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
+            crate::publication_crash_barrier("store-worktree");
             self.configure_store_tree_skip_worktree(&candidate_index)?;
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
@@ -4790,6 +4793,10 @@ impl Repository {
             }
             return Err(error);
         }
+        // Gate D boundary: the ref CAS has succeeded but the RefAdvanced
+        // journal stage is not yet durable. Recovery sees a Prepared journal
+        // whose HEAD already names the candidate (ORNA-PUB-009, ORNA-PUB-005).
+        crate::publication_crash_barrier("ref-cas-pre-journal");
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
@@ -4810,6 +4817,9 @@ impl Repository {
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
+        // Gate D boundary: every managed entry has been materialised but the
+        // WorktreeReconciled stage is not yet recorded (ORNA-PUB-016).
+        crate::publication_crash_barrier("worktree");
 
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
         self.write_publication_journal_locked(journal)?;
