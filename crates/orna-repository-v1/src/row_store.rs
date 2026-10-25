@@ -166,11 +166,18 @@ impl RowMapVersion {
 }
 
 /// A bounded logical-key interval: inclusive lower bound, exclusive upper
-/// bound, and maximum number of returned rows.
+/// bound, an optional exclusive resume cursor, and maximum number of returned
+/// rows.
+///
+/// The resume cursor is what lets paging avoid successor keys: a page that
+/// ends at key `k` resumes with `k` as its cursor, and only keys strictly
+/// greater than `k` are returned. Keys are ordered by [`TypedKey`]'s total
+/// order, so this is correct for every key type, composite keys included.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyRange {
     lower_inclusive: Option<TypedKey>,
     upper_exclusive: Option<TypedKey>,
+    resume_after: Option<TypedKey>,
     limit: usize,
 }
 
@@ -193,6 +200,7 @@ impl KeyRange {
         Ok(Self {
             lower_inclusive,
             upper_exclusive,
+            resume_after: None,
             limit,
         })
     }
@@ -203,6 +211,28 @@ impl KeyRange {
 
     pub fn upper_exclusive(&self) -> Option<&TypedKey> {
         self.upper_exclusive.as_ref()
+    }
+
+    pub fn resume_after(&self) -> Option<&TypedKey> {
+        self.resume_after.as_ref()
+    }
+
+    /// Narrows the range to keys strictly greater than `key`. The cursor must
+    /// be a key of the range's type that lies below the upper bound.
+    pub fn with_resume_after(mut self, key: TypedKey) -> Result<Self, RowStoreError> {
+        let lower_ok = self
+            .lower_inclusive
+            .as_ref()
+            .is_none_or(|lower| lower.same_key_type(&key));
+        let upper_ok = self
+            .upper_exclusive
+            .as_ref()
+            .is_none_or(|upper| upper.same_key_type(&key) && key < *upper);
+        if !lower_ok || !upper_ok {
+            return Err(RowStoreError::InvalidKeyRange);
+        }
+        self.resume_after = Some(key);
+        Ok(self)
     }
 
     pub const fn limit(&self) -> usize {
@@ -494,6 +524,9 @@ impl RowMapSnapshot {
             .ok_or(RowStoreError::PersistedLookupRequiresGraphContext)?;
         let start = range.lower_inclusive.as_ref().map_or(0, |lower| {
             entries.partition_point(|entry| entry.key < *lower)
+        });
+        let start = range.resume_after.as_ref().map_or(start, |after| {
+            start.max(entries.partition_point(|entry| entry.key <= *after))
         });
         Ok(entries[start..]
             .iter()
