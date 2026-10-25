@@ -170,30 +170,13 @@ fn frozen_source_probe_cases_match_parser_acceptance() {
     }
 
     assert_eq!(cases.len(), 14);
-    let mut pinned_divergence = false;
     for (name, expected, source) in cases {
-        if name == "unparenthesised-pipeline-lambda" {
-            assert!(
-                expected == false,
-                "frozen reference source probe must continue to expect rejection"
-            );
-            assert!(
-                parse_module(&source).is_ok(),
-                "Rust parser behavior changed; re-evaluate the recorded ORNA-PIPE-005 divergence"
-            );
-            pinned_divergence = true;
-            println!(
-                "PINNED-DIVERGENCE {name}: frozen probe expects reject; Rust parser accepts"
-            );
-            continue;
-        }
         assert_eq!(
             parse_module(&source).is_ok(),
             expected,
             "bounded reference source probe {name}"
         );
     }
-    assert!(pinned_divergence);
 }
 
 #[test]
