@@ -8748,8 +8748,30 @@ mod tests {
                 watch: None,
                 message: Message::Result {
                     status: ResultStatus::Success,
-                    value: None,
+                    value: Some(CanonicalValue::unit()),
                     fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    struct WrongFingerprintApplication;
+
+    impl LiveApplication for WrongFingerprintApplication {
+        fn eval(&mut self, _: [u8; 16], request: [u8; 16], _: &Message) -> Result<Envelope> {
+            Ok(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0xee; 32],
                     diagnostic: None,
                 },
                 extensions: BTreeMap::new(),
@@ -9591,6 +9613,31 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(replay, response);
+    }
+
+    #[test]
+    fn applied_eval_with_fingerprint_mismatch_keeps_request_mismatch_diagnostic() {
+        let request = [6; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongFingerprintApplication;
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // A fingerprint mismatch is a correlated request_mismatch diagnostic,
+        // not a retained-without-value result: the response does not match the
+        // request it claims to answer.
+        assert_eq!(
+            response,
+            portable_diagnostic(request, None, "wire.request_mismatch").unwrap()
+        );
     }
 
     #[test]
