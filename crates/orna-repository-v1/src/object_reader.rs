@@ -1081,7 +1081,11 @@ mod tests {
             objects.read_blob(&blob, 1024).expect("restarted read"),
             b"pub fn main() {}\n"
         );
-        assert_eq!(objects.process_starts(), 1, "the next read started a fresh process");
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "the next read started a fresh process"
+        );
     }
 
     #[test]
