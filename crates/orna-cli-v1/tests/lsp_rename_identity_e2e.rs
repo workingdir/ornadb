@@ -24,6 +24,9 @@ const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
 /// The `orna-lsp` binary, built by this test once per test process with the
 /// same Cargo and target directory as the running test executable. `orna-lsp`
 /// is a separate package, so `cargo test -p orna-cli-v1` does not build it.
+/// The target directory is inferred from the test executable's location, which
+/// Cargo lays out as `target/<profile>/deps/`; any other layout fails the
+/// `expect` calls below rather than running a stale binary.
 fn orna_lsp_binary() -> &'static Path {
     static BINARY: LazyLock<PathBuf> = LazyLock::new(|| {
         let test_exe = std::env::current_exe().expect("the test executable path");
@@ -377,7 +380,7 @@ fn lsp_rename_then_commit_keeps_the_table_object_id() {
 }
 
 #[test]
-fn lsp_rename_field_stages_the_renamed_source_and_identity() {
+fn lsp_rename_field_is_not_staged_while_schema_evolution_is_not_admitted() {
     let directory = TempDir::new().expect("create the test directory");
     let root = initialized_database(&directory, MUSIC_SOURCE);
     commit_source(&root, "Declare Music");
@@ -390,41 +393,123 @@ fn lsp_rename_field_stages_the_renamed_source_and_identity() {
     let (renamed, shown) = rename_through_lsp(&root, MUSIC_SOURCE, 28, "heading");
     assert_eq!(renamed, "pub table Music(id: Str) { heading: Str, }\n");
     assert!(
-        shown.is_empty(),
-        "a field rename with identity carries no warning: {shown:?}"
+        shown
+            .iter()
+            .any(|message| message.starts_with("ORNA-LSP-RENAME-001")
+                && message.contains("schema evolution is not admitted")),
+        "the refused field rename is reported: {shown:?}"
     );
 
-    assert_eq!(git(&root, &["show", ":main.orna"]), renamed);
-    let staged = staged_identities(&root);
+    // Nothing is staged for the field rename: the index keeps HEAD's source and
+    // inventory, and the edited text stays in the worktree only.
+    assert_eq!(git(&root, &["show", ":main.orna"]), MUSIC_SOURCE);
+    assert_eq!(git(&root, &["diff", "--cached", "--name-only"]), "");
     assert_eq!(
-        staged.id(ObjectKind::Field, "Music.heading"),
+        staged_identities(&root).id(ObjectKind::Field, "Music.title"),
         Some(&title_id)
     );
-    assert_eq!(staged.id(ObjectKind::Field, "Music.title"), None);
 
-    // A column rename changes the committed schema of `Music`, and this build does
-    // not admit schema evolution (ORNA-EVOL-002 is not implemented), so `orna commit`
-    // refuses the staged field rename. The same refusal happens for a plain `git add`
-    // (see `plain_git_field_rename_commit_is_refused`). Nothing is committed and the
-    // staged source and inventory stay in the index.
-    let refused = commit_refusal(&root);
-    assert!(
-        refused.contains("schema evolution is not admitted"),
-        "refusal names schema evolution: {refused}"
-    );
+    // An unrelated commit still works: the refused rename does not block it.
+    fs::write(root.join("notes.txt"), "unrelated\n").expect("write the unrelated file");
+    git(&root, &["add", "notes.txt"]);
+    let committed = orna(&root, &["commit", "-m", "Add notes"]);
+    assert_success(&committed, "orna commit of an unrelated file");
     assert_eq!(
         head_identities(&root).id(ObjectKind::Field, "Music.title"),
         Some(&title_id)
     );
-    let cached = git(&root, &["diff", "--cached", "--name-only"]);
+}
+
+#[test]
+fn lsp_rename_applied_but_not_saved_is_reported_when_closed() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+
+    // The rename is applied to the buffer, never saved, and the document is
+    // closed: the identity is not carried, and the server says so.
+    let shown = rename_without_save_through_lsp(&root, MUSIC_SOURCE, 28, "heading");
     assert!(
-        cached.lines().any(|path| path == "main.orna"),
-        "main.orna stays staged after the refusal: {cached:?}"
+        shown
+            .iter()
+            .any(|message| message.starts_with("ORNA-LSP-RENAME-001")
+                && message.contains("the rename was not saved")),
+        "the unsaved rename is reported on close: {shown:?}"
     );
+    assert_eq!(git(&root, &["show", ":main.orna"]), MUSIC_SOURCE);
+}
+
+#[test]
+fn lsp_rename_does_not_overwrite_partial_staging_of_main_orna() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+
+    // The user staged a partial edit of `main.orna` and kept the worktree at the
+    // committed text. A table rename must not replace that staged entry.
+    let partial = "pub table Music(id: Str) { title: Str, notes: Str, }\n";
+    fs::write(root.join("main.orna"), partial).expect("write the partial edit");
+    git(&root, &["add", "main.orna"]);
+    fs::write(root.join("main.orna"), MUSIC_SOURCE).expect("restore the worktree");
+
+    let (renamed, shown) = rename_through_lsp(&root, MUSIC_SOURCE, 10, "Archive");
+    assert_eq!(renamed, "pub table Archive(id: Str) { title: Str, }\n");
     assert!(
-        cached.lines().count() > 1,
-        "the identity inventory stays staged beside it: {cached:?}"
+        shown
+            .iter()
+            .any(|message| message.starts_with("ORNA-LSP-RENAME-001")
+                && message.contains("differs from HEAD; stage manually")),
+        "the refused whole-file staging is reported: {shown:?}"
     );
+    assert_eq!(git(&root, &["show", ":main.orna"]), partial);
+    assert_eq!(
+        staged_identities(&root).id(ObjectKind::Table, "Music"),
+        head_identities(&root).id(ObjectKind::Table, "Music")
+    );
+}
+
+/// Applies the rename in an `orna-lsp` session, sends the applied text as a
+/// change, and closes the document without saving. Returns the warnings shown.
+fn rename_without_save_through_lsp(
+    root: &Path,
+    source: &str,
+    character: u64,
+    new_name: &str,
+) -> Vec<String> {
+    let uri = format!("file://{}", root.join("main.orna").display());
+    let mut client = Client::spawn(root);
+    client.request(
+        "initialize",
+        json!({ "processId": null, "rootUri": null, "capabilities": {} }),
+    );
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "orna", "version": 1, "text": source } }),
+    );
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": character },
+            "newName": new_name,
+        }),
+    );
+    let renamed = apply_edits(
+        source,
+        rename["changes"][&uri]
+            .as_array()
+            .expect("the rename edits main.orna"),
+    );
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": renamed }] }),
+    );
+    client.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": uri } }),
+    );
+    client.finish()
 }
 
 #[test]
