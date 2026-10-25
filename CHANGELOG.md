@@ -5,6 +5,10 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna query` with a predicate now reads the whole `--from`/`--until` range in
+  ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
+  `--from`/`--until` accept `int:N` and `uint:N`, and `--key` tries integer
+  spellings as integer keys after text and bytes.
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
   41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,

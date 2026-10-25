@@ -20,7 +20,9 @@
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
 use crate::cli_row_key::key_candidates;
-use orna_repository_v1::{KeyRange, Repository, TypedKey};
+use orna_repository_v1::{
+    AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
+};
 use orna_value_v1::BlobMetadataFilter;
 
 /// Most rows one listing reports when `--limit` is not given.
@@ -223,6 +225,16 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     if let Some(text) = value.strip_prefix("text:") {
         return Ok(TypedKey::Text(text.to_owned()));
     }
+    if let Some(number) = value.strip_prefix("int:") {
+        return number.parse::<i64>().map(TypedKey::Int).map_err(|_| {
+            query_error("Range integer key is not an i64", format!("got {value:?}"))
+        });
+    }
+    if let Some(number) = value.strip_prefix("uint:") {
+        return number.parse::<u64>().map(TypedKey::UInt).map_err(|_| {
+            query_error("Range integer key is not a u64", format!("got {value:?}"))
+        });
+    }
     if let Some(hex) = value.strip_prefix("bytes:") {
         if !hex.len().is_multiple_of(2) || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(query_error(
@@ -242,7 +254,7 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     }
     Err(query_error(
         "Range key is not typed",
-        format!("got {value:?}; use text:KEY or bytes:HEX"),
+        format!("got {value:?}; use text:KEY, bytes:HEX, int:N or uint:N"),
     ))
 }
 
@@ -343,18 +355,21 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
         None => {
             // Indexed bounds narrow candidates before metadata predicates.
-            // Scan the bounded candidate page first; `--limit` caps only the
-            // matching metadata entries presented to the caller.
-            let candidate_limit = if options.has_predicate {
-                MAX_QUERY_LIMIT
+            // Without a predicate, `--limit` bounds the one page read. With a
+            // predicate, every candidate in the bounded range must be
+            // evaluated, so the range is read in ordered pages of at most
+            // `MAX_QUERY_LIMIT` rows, each resuming after the last key
+            // seen, until a page is short or the upper bound is reached.
+            if options.has_predicate {
+                scan_all_rows(&graph, &scope, options.from.clone(), options.until.clone())?
             } else {
-                options.limit
-            };
-            let range = KeyRange::new(options.from.clone(), options.until.clone(), candidate_limit)
-                .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
-            graph
-                .range_rows(&range, &scope)
-                .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?
+                let range =
+                    KeyRange::new(options.from.clone(), options.until.clone(), options.limit)
+                        .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+                graph.range_rows(&range, &scope).map_err(|error| {
+                    query_error("Row range could not be read", format!("{error:?}"))
+                })?
+            }
         }
     };
     if options.key.is_some() && rows.is_empty() {
@@ -455,6 +470,67 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
     }
     Ok(())
+}
+
+/// Reads every row in `[from, until)` in ordered pages, so a predicate sees
+/// each candidate rather than only the first page.
+fn scan_all_rows(
+    graph: &NativeGraphContext,
+    scope: &RepositoryReadScope,
+    from: Option<TypedKey>,
+    until: Option<TypedKey>,
+) -> Result<Vec<AdmittedRow>, Diagnostic> {
+    let mut rows = Vec::new();
+    let mut lower = from;
+    loop {
+        let range = KeyRange::new(lower.clone(), until.clone(), MAX_QUERY_LIMIT)
+            .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+        let page = graph
+            .range_rows(&range, scope)
+            .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))?;
+        let short = page.len() < MAX_QUERY_LIMIT;
+        let Some(last) = page.last().map(|row| row.key().clone()) else {
+            break;
+        };
+        rows.extend(page);
+        if short {
+            break;
+        }
+        let Some(next) = successor_key(&last)? else {
+            break;
+        };
+        if until.as_ref().is_some_and(|upper| next >= *upper) {
+            break;
+        }
+        lower = Some(next);
+    }
+    Ok(rows)
+}
+
+/// The least key of the same type that orders after `key`, or `None` when
+/// `key` is the greatest key of its type. Composite and wide keys have no
+/// such successor in this seam, so a scan over them is refused rather than
+/// silently truncated.
+fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
+    Ok(match key {
+        TypedKey::Text(text) => Some(TypedKey::Text(format!("{text}\0"))),
+        TypedKey::Bytes(bytes) => {
+            let mut next = bytes.clone();
+            next.push(0);
+            Some(TypedKey::Bytes(next))
+        }
+        TypedKey::Int(value) if *value == i64::MAX => Some(TypedKey::UInt(1 << 63)),
+        TypedKey::Int(value) => Some(TypedKey::Int(value + 1)),
+        TypedKey::UInt(value) => value.checked_add(1).map(TypedKey::UInt),
+        TypedKey::Bool(false) => Some(TypedKey::Bool(true)),
+        TypedKey::Bool(true) | TypedKey::Null => None,
+        TypedKey::Tuple(_) | TypedKey::Value(_) => {
+            return Err(query_error(
+                "Predicate scan cannot page this key type",
+                format!("key {key:?} has no successor in the row seam; narrow with --from/--until"),
+            ))
+        }
+    })
 }
 
 /// The measured plan of one annotation predicate evaluation.
@@ -698,4 +774,34 @@ mod tests {
         let error = parse_relation_id("nope").unwrap_err();
         assert_eq!(error.exit, Exit::Target);
     }
-}
+
+    #[test]
+    fn successors_step_each_key_type_to_the_next_key_of_that_type() {
+        use super::successor_key;
+        assert_eq!(
+            successor_key(&TypedKey::Text("a".into())).unwrap(),
+            Some(TypedKey::Text("a\0".into()))
+        );
+        assert_eq!(
+            successor_key(&TypedKey::Bytes(vec![1])).unwrap(),
+            Some(TypedKey::Bytes(vec![1, 0]))
+        );
+        assert_eq!(
+            successor_key(&TypedKey::Int(i64::MAX)).unwrap(),
+            Some(TypedKey::UInt(1 << 63))
+        );
+        assert_eq!(successor_key(&TypedKey::UInt(u64::MAX)).unwrap(), None);
+        assert_eq!(successor_key(&TypedKey::Bool(true)).unwrap(), None);
+        assert!(successor_key(&TypedKey::Tuple(vec![])).is_err());
+    }
+
+    #[test]
+    fn typed_bounds_parse_integers_and_refuse_bad_spellings() {
+        use super::parse_bound_key;
+        assert_eq!(parse_bound_key("int:-3").unwrap(), TypedKey::Int(-3));
+        assert_eq!(parse_bound_key("uint:7").unwrap(), TypedKey::UInt(7));
+        assert!(parse_bound_key("int:x").is_err());
+        assert!(parse_bound_key("uint:-1").is_err());
+        assert!(parse_bound_key("plain").is_err());
+    }
+ }

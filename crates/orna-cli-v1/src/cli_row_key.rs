@@ -47,6 +47,13 @@ pub(super) fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
             .collect();
         candidates.push(TypedKey::Bytes(bytes));
     }
+    // An integer spelling also names the integer key it denotes. Text and
+    // bytes are tried first, so a row keyed by the spelling itself still wins.
+    if let Ok(number) = value.parse::<i64>() {
+        candidates.push(TypedKey::Int(number));
+    } else if let Ok(number) = value.parse::<u64>() {
+        candidates.push(TypedKey::UInt(number));
+    }
     Ok(candidates)
 }
 
