@@ -12,6 +12,20 @@ been published.
   importing module instead of failing with `E2200` (bead `ornadb-5il1.430`).
   Glob and alias standard imports bind no names on this route, so a call through
   them stays an unresolved name rather than binding silently.
+- `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
+  `Content-Security-Policy` (`default-src 'none'`, inline styles only,
+  `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` (ORNA-APP-012,
+  ORNA-APP-013). Oversize bodies on non-`/orna` routes answer 413 instead of
+  400, and the Origin/Host refusal now runs before the size check (bead
+  ornadb-5il1.387).
+- `orna mount status --json` now reports `writable`, `read_only`, `unresolved_drafts`
+  (each `{path, detail}`), and `draft_error`. The record of a `--cwd` mount now
+  stores `read_only false`, matching the FUSE session that was already writable;
+  the record and status previously reported it read-only. Records written by this
+  build carry a `read_only` value that older binaries reject as invalid (RecordInvalid).
+  The `--read-only` flag from profiles/vfs-1.md:20 is not implemented; every `--cwd`
+  mount is writable.
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
