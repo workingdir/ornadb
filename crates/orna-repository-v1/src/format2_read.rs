@@ -4,10 +4,11 @@
 //! A format-2 Blob field is either an ORR-2 value (a storage record or inline
 //! padded Base64) or a ROV-2 CBOR reference. A storage reference names a
 //! content root under `.orna/blobs/<2>/<62>/` in the pinned commit. This module
-//! is the repository read path for those fields: it pins one selector, admits
+//! is the Blob-field read API for those fields: it pins one selector, admits
 //! only a repository-format-2 commit, decodes the field, resolves the root
 //! through the repository's object reader, and verifies it with the OGB-1
-//! verifier before returning any bytes.
+//! verifier before returning any bytes. It is NOT yet called from a production
+//! row read path; the follow-up beads are cross-linked from ornadb-nne7.
 //!
 //! Format-1 and format-3 commits are refused here. The format-2 record is
 //! read-only: nothing in this module writes to the object database.
@@ -15,7 +16,9 @@
 use std::cell::RefCell;
 use std::fmt;
 
-use crate::format2_ogb::{OGB_MAX_CHUNK, OgbError, OgbObjects, OgbTreeEntry, read_ogb_root};
+use crate::format2_ogb::{
+    OGB_MAX_CHUNK, OGB_MAX_READ_CALL, OgbError, OgbObjects, OgbTreeEntry, read_ogb_root,
+};
 use crate::format2_orr::{Orr2BlobField, Orr2DecodeError, decode_orr2_blob_field};
 use crate::format2_rov::{Rov2Blob, Rov2DecodeError, decode_rov2_blob};
 use crate::native_graph::{hex_decode, hex_encode};
@@ -85,7 +88,7 @@ impl Repository {
     ///
     /// `field` is the stored text. An inline value returns its decoded bytes; a
     /// storage record resolves through `.orna/blobs/` in the pinned commit.
-    /// `max_len` bounds the returned content.
+    /// `max_len` bounds the returned content and never exceeds 8 MiB (ORNA-BLOB-011).
     pub fn read_format2_orr_blob(
         &self,
         selector: &str,
@@ -96,11 +99,9 @@ impl Repository {
         match decode_orr2_blob_field(field).map_err(Format2BlobError::OrrField)? {
             Orr2BlobField::Inline(bytes) => {
                 let total = bytes.len() as u64;
-                if total > max_len {
-                    return Err(Format2BlobError::Limit {
-                        total,
-                        limit: max_len,
-                    });
+                let limit = max_len.min(OGB_MAX_READ_CALL);
+                if total > limit {
+                    return Err(Format2BlobError::Limit { total, limit });
                 }
                 Ok(bytes)
             }
