@@ -987,6 +987,14 @@ pub trait EffectHandler {
         Ok(())
     }
 
+    /// Resolves a bare table name read as a relation (`Note | count`) to the
+    /// source name that [`EffectHandler::scan_relation_page`] serves. Returns
+    /// `None` when the handler admits no table of that name, so the name keeps
+    /// its ordinary resolution.
+    fn admitted_relation_source(&self, _name: &str) -> Option<String> {
+        None
+    }
+
     /// Supplies one bounded page for an evaluator-owned relation plan at its
     /// first observation. Existing handlers return `Ok(None)` by default so
     /// this remains a backward-compatible extension of the effect boundary.
@@ -1484,6 +1492,10 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
 
     fn validate_relation_source(&mut self, source: &str) -> Result<(), EvaluationError> {
         EffectHandler::validate_relation_source(self.handler, source)
+    }
+
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        EffectHandler::admitted_relation_source(&*self.handler, name)
     }
 
     fn scan_relation_page(
@@ -5621,6 +5633,35 @@ impl Context<'_, '_> {
             _ => Err(error("ORNA-EVAL-TYPE")),
         }
     }
+
+    /// A bare table name piped into a relation operation reads that table.
+    /// Locals, functions, aliases and namespace-qualified functions keep their
+    /// precedence over a table name, mirroring [`Expr::Name`] resolution in
+    /// [`Context::evaluate_node`].
+    fn admitted_table_relation(&self, lhs: &Expr, scope: &Scope) -> Option<String> {
+        let Expr::Name { text, .. } = lhs else {
+            return None;
+        };
+        if scope.0.contains_key(text) {
+            return None;
+        }
+        if !self.restrict_function_names && self.functions.contains_key(text) {
+            return None;
+        }
+        if self
+            .aliases
+            .and_then(|aliases| aliases.get(text))
+            .is_some_and(|name| self.functions.contains_key(name))
+        {
+            return None;
+        }
+        if let Some(namespace) = self.namespace.as_deref() {
+            if self.functions.contains_key(&format!("{namespace}.{text}")) {
+                return None;
+            }
+        }
+        self.effects.as_deref()?.admitted_relation_source(text)
+    }
     fn binary(
         &mut self,
         op: &str,
@@ -5655,7 +5696,10 @@ impl Context<'_, '_> {
             "|" => {
                 let input = match system_relation_source(lhs) {
                     Some(source) => Value::Relation(RelationPlan::new(source.to_owned())),
-                    None => self.evaluate(lhs, scope, depth + 1)?,
+                    None => match self.admitted_table_relation(lhs, scope) {
+                        Some(source) => Value::Relation(RelationPlan::new(source)),
+                        None => self.evaluate(lhs, scope, depth + 1)?,
+                    },
                 };
                 if self.transfer.is_some() {
                     return Ok(Value::Null);
