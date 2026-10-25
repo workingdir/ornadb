@@ -11476,6 +11476,47 @@ mod persisted_orp_tests {
         assert_eq!(read(&inside), keys[151..200].to_vec(), "bounded middle");
     }
 
+    /// A resume cursor is a full composite key, so it orders by its first
+    /// component before its second. A cursor whose first component sorts
+    /// below every row skips none of them, and one whose first component
+    /// sorts above every row skips all of them.
+    #[test]
+    fn composite_resume_cursor_orders_by_first_component_first() {
+        let (_directory, mut graph) = capture_test_context();
+        let keys: Vec<TypedKey> = (0..3)
+            .map(|index| {
+                TypedKey::Tuple(vec![
+                    TypedKey::Text("north".to_owned()),
+                    TypedKey::Text(format!("sku-{index:03}")),
+                ])
+            })
+            .collect();
+        publish_row_map(&mut graph, keys.clone());
+        let scope = graph.open_read_scope().expect("composite query scope");
+        let resumed = |after: TypedKey| -> Vec<TypedKey> {
+            let range = crate::row_store::KeyRange::new(None, None, 256)
+                .expect("valid page")
+                .with_resume_after(after)
+                .expect("cursor inside the map");
+            graph
+                .range_rows(&range, &scope)
+                .expect("read one row-map page")
+                .into_iter()
+                .map(|row| row.key().clone())
+                .collect()
+        };
+        let first_below = TypedKey::Tuple(vec![
+            TypedKey::Text("alpha".to_owned()),
+            TypedKey::Text("zzz".to_owned()),
+        ]);
+        assert_eq!(resumed(first_below), keys, "a first component below every row skips none");
+        let first_above = TypedKey::Tuple(vec![
+            TypedKey::Text("south".to_owned()),
+            TypedKey::Text("aaa".to_owned()),
+        ]);
+        assert!(resumed(first_above).is_empty(), "a first component above every row skips all");
+    }
+
     #[test]
     fn bounded_range_reads_the_first_child_above_its_upper_bound_only() {
         let (_directory, mut graph) = capture_test_context();
