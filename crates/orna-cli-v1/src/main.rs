@@ -2204,12 +2204,7 @@ fn multi_module_declares_tables(project: &orna_project_v1::LoadedProject) -> boo
                 .value
                 .items
                 .iter()
-                .any(|item| {
-                    matches!(
-                        item.declaration,
-                        orna_syntax_v1::Declaration::Table { .. }
-                    )
-                })
+                .any(|item| matches!(item.declaration, orna_syntax_v1::Declaration::Table { .. }))
         })
 }
 
@@ -2549,14 +2544,9 @@ fn committed_invocation_rows(
         .iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
         .collect();
-    let committed = orna_project_v1::committed_tables(
-        repository,
-        &format,
-        commit,
-        &schemas,
-        &table_ids,
-    )
-    .map_err(|_| read_error())?;
+    let committed =
+        orna_project_v1::committed_tables(repository, &format, commit, &schemas, &table_ids)
+            .map_err(|_| read_error())?;
     let mut rows = BTreeMap::new();
     for (name, schema) in &schemas {
         let table = committed.get(name).ok_or_else(read_error)?;
@@ -2661,14 +2651,8 @@ fn run_committed_table_invocation(
     } else {
         None
     };
-    let committed = committed_invocation_rows(
-        &repository,
-        &commit,
-        &runtime,
-        &state,
-        &admitted,
-        &tables,
-    )?;
+    let committed =
+        committed_invocation_rows(&repository, &commit, &runtime, &state, &admitted, &tables)?;
     let (_snapshot, activation) = evaluate_over_committed_tables(
         &runtime,
         &state,
