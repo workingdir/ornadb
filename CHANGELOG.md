@@ -23,6 +23,9 @@ been published.
   records external-effect uncertainty instead. A
   faulted `ExternalPossible` activation is not reported as rollback-proven
   (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
+- `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one superseded-draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`; draft ORNA-OGB-008, superseded ID) with shortest-form, width and 2^63-1 bounds. Its inline golden vectors were hand-copied from the draft archive and compared manually; the archive comparison test runs only when `ORNA_DRAFT_ZIP` is set (it prints SKIPPED otherwise, and fails when `ORNA_REQUIRE_DRAFT_ZIP=1`). Read-only; not wired into any read path. Final-spec authority for reading retained bytes is ORNA-ROW-013 and ORNA-UPGRADE-002, which are not yet met.
+- `orna-repository-v1::format2_orr::decode_orr2_blob_field` decodes one superseded-draft format-2 ORR-2 Blob field value (draft ORNA-OGB-007): an exact `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }` record (no empty or trailing fields) or a legacy inline padded-Base64 string. Read-only; not wired into any read path; does not resolve `.orna/blobs` or produce an OVB-1 Blob.
+- `orna-repository-v1::format2_ogb::verify_ogb_root` read-only verifies a superseded-draft OGB-1 descriptor/index/chunk tree (draft ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. The caller supplies a verified object store; Git object IDs are not re-hashed. Missing objects are reported distinctly from corruption. Not wired into any read path; no writer or reader is activated.
 - The language server's semantic rename keeps a table or field's object identity.
   Owner-visible behaviour: on save, the editor writes to the git index. The index
   entry for `main.orna` is replaced with the whole saved file (not only the renamed
