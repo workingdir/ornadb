@@ -8,10 +8,10 @@
 
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
-    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits, NominalDefinitions,
-    Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation, StepBudget,
-    SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
-    invoke_named_with_effects, invoke_named_with_sys_host_context,
+    AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
+    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation,
+    StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
+    invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
     reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
@@ -208,10 +208,12 @@ pub struct ApplicationAuthority {
     catalogue: Catalogue,
     limits: Limits,
     sys_host: Option<SysHostContext>,
-    standard_functions: Functions,
+    standard_functions: Arc<StandardLayer>,
     /// Qualified keys (`std.<module>.<name>`) of standard functions declared `pub`.
     /// Only these may be bound by `use std.<module>.{…}`, `*`, or `as _` (ORNA-IMPORT-004).
     standard_public: BTreeSet<String>,
+    /// Prelude names each pinned standard module records for `as _` (ORNA-IMPORT-005).
+    standard_preludes: BTreeMap<String, BTreeSet<String>>,
     /// Qualified keys of public non-function standard declarations. These are
     /// recognised so that importing them fails with a specific diagnostic.
     standard_non_function: BTreeSet<String>,
@@ -225,8 +227,9 @@ impl ApplicationAuthority {
             catalogue,
             limits,
             sys_host: None,
-            standard_functions: Functions::new(),
+            standard_functions: Arc::default(),
             standard_public: BTreeSet::new(),
+            standard_preludes: BTreeMap::new(),
             standard_non_function: BTreeSet::new(),
         }
     }
@@ -246,15 +249,24 @@ impl ApplicationAuthority {
         self.catalogue = self
             .catalogue
             .with_standard_sources(profile, sources.clone())?;
-        let mut functions = Functions::new();
+        let mut functions = BTreeMap::<String, PureFunction>::new();
         let mut public = BTreeSet::new();
         let mut non_function = BTreeSet::new();
+        let mut module_imports = Vec::<(String, Vec<Item>)>::new();
         for (logical_path, source) in sources {
             let parsed = parse_module_with_file(&source, logical_path.clone());
             if !parsed.is_ok() {
                 return Err(StandardCatalogueError::InvalidSource);
             }
             let namespace = module_namespace(&logical_path).0.join(".");
+            let imports = parsed
+                .value
+                .items
+                .iter()
+                .filter(|item| matches!(item.declaration, Declaration::Use { .. }))
+                .cloned()
+                .collect::<Vec<_>>();
+            module_imports.push((namespace.clone(), imports));
             for item in parsed.value.items {
                 let is_public = matches!(item.visibility, Visibility::Public { .. });
                 // Functions execute. Private functions stay in the map so that
@@ -295,9 +307,31 @@ impl ApplicationAuthority {
                 }
             }
         }
-        self.standard_functions = functions;
+        let exports = StandardExports {
+            public: &public,
+            non_function: &non_function,
+        };
+        // `as _` binds only the prelude names each pinned module records
+        // (ORNA-IMPORT-005), keyed by that module's namespace.
+        let preludes = profile
+            .module_prelude_exports()
+            .iter()
+            .map(|(logical_path, names)| {
+                (module_namespace(logical_path).0.join("."), names.clone())
+            })
+            .collect::<BTreeMap<_, _>>();
+        let mut aliases = BTreeMap::<String, String>::new();
+        for (namespace, imports) in &module_imports {
+            let bindings = standard_import_bindings(&exports, &preludes, imports)
+                .map_err(|_| StandardCatalogueError::InvalidSource)?;
+            for (alias, target) in bindings {
+                aliases.insert(module_function_alias_key(namespace, &alias), target);
+            }
+        }
+        self.standard_functions = Arc::new(StandardLayer::new(functions, aliases));
         self.standard_public = public;
         self.standard_non_function = non_function;
+        self.standard_preludes = preludes;
         Ok(self)
     }
 
@@ -365,7 +399,7 @@ impl ApplicationAuthority {
             ));
         }
 
-        let mut functions = self.standard_functions.clone();
+        let mut functions = Functions::with_standard(Arc::clone(&self.standard_functions));
         let table_insert_defaults = table_insert_defaults(&parsed.value.items);
         for item in &parsed.value.items {
             if let Declaration::Function { signature, body } = &item.declaration {
@@ -383,8 +417,18 @@ impl ApplicationAuthority {
             public: &self.standard_public,
             non_function: &self.standard_non_function,
         };
-        bind_standard_imports(&mut functions, exports, &parsed.value.items)?;
-        if !functions.contains_key(&entry) {
+        for (alias, target) in standard_import_bindings(
+            &exports,
+            &self.standard_preludes,
+            &parsed.value.items,
+        )? {
+            // A user function keeps its own name; the import alias is bound only where it is free.
+            if functions.contains_key(&alias) || !functions.contains_key(&target) {
+                continue;
+            }
+            functions.insert_alias(alias, target);
+        }
+        if functions.get_entry(&entry).is_none() {
             return Err(ApplicationError::MissingEntry(entry));
         }
         let admitted_namespace = module_namespace(&logical_path);
@@ -2192,7 +2236,7 @@ fn source_function_path(expression: &Expr) -> Option<String> {
 fn validate_terminal_runtime_effect(
     application: &AdmittedApplication,
 ) -> Result<(), ApplicationError> {
-    for (name, function) in &application.functions {
+    for (name, function) in application.functions.iter() {
         let count = runtime_effect_call_count(&function.body);
         if name == &application.entry {
             if count > 0 && (count != 1 || !is_terminal_runtime_effect_call(&function.body)) {
@@ -2691,20 +2735,22 @@ struct StandardExports<'exports> {
     non_function: &'exports BTreeSet<String>,
 }
 
-/// Binds unqualified names from `use std.<module>.{name}`, `use std.<module>.*`
-/// and `use std.<module>.. as _` declarations to public standard functions.
-/// A user function keeps its own name, and an alias is inserted only where no
-/// user function occupies the name. A named import must be a public function of
-/// the pinned module (ORNA-IMPORT-004); a private function is refused with
-/// `DIAG_IMPORT`, and a public non-function is refused with a dedicated
-/// unsupported-import error. Glob and `as _` forms bind every public function of
-/// the module (ORNA-IMPORT-003, ORNA-IMPORT-005). One unqualified name may not
-/// bind two different functions (`DIAG_AMBIGUOUS`).
-fn bind_standard_imports(
-    functions: &mut Functions,
-    exports: StandardExports<'_>,
+/// Computes the unqualified names bound by `use std.<module>.{name}`,
+/// `use std.<module>.*` and `use std.<module>.. as _` declarations, as alias to
+/// qualified target. Only a public function of the pinned module may be bound
+/// (ORNA-IMPORT-004): a private function is refused with `DIAG_IMPORT`, and a
+/// public non-function is refused with a dedicated unsupported-import error.
+/// A glob binds every public function of the module (ORNA-IMPORT-003). An
+/// `as _` form binds only the prelude names the pinned module records
+/// (ORNA-IMPORT-005).
+/// One unqualified name may not bind two
+/// different functions (`DIAG_AMBIGUOUS`). The caller decides whether an alias
+/// is shadowed by a user function.
+fn standard_import_bindings(
+    exports: &StandardExports<'_>,
+    preludes: &BTreeMap<String, BTreeSet<String>>,
     items: &[Item],
-) -> Result<(), ApplicationError> {
+) -> Result<BTreeMap<String, String>, ApplicationError> {
     let mut aliases = BTreeMap::<String, String>::new();
     let mut bind = |alias: &str, target: String| -> Result<(), ApplicationError> {
         if let Some(previous) = aliases.insert(alias.to_owned(), target.clone())
@@ -2741,21 +2787,21 @@ fn bind_standard_imports(
                     }
                 }
             }
-            UseTail::Glob { .. } => bind_public_exports(&namespace, &exports, &mut bind)?,
+            UseTail::Glob { .. } => bind_public_exports(&namespace, exports, &mut bind)?,
             UseTail::Alias { name, .. } if name.as_str() == "_" => {
-                bind_public_exports(&namespace, &exports, &mut bind)?;
+                for prelude in preludes.get(&namespace).into_iter().flatten() {
+                    let target = format!("{namespace}.{prelude}");
+                    if exports.public.contains(&target) {
+                        bind(prelude.as_str(), target)?;
+                    }
+                }
             }
             // `use std.x as y` binds a module alias, which this route does not
             // resolve; it binds no unqualified names.
             UseTail::None | UseTail::Alias { .. } => {}
         }
     }
-    for (alias, target) in aliases {
-        if let Some(function) = functions.get(&target).cloned() {
-            functions.entry(alias).or_insert(function);
-        }
-    }
-    Ok(())
+    Ok(aliases)
 }
 
 /// Binds every public function declared directly in `namespace`.
