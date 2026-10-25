@@ -855,19 +855,21 @@ fn relation_predicate_folds_preserve_paired_optional_values() {
     )));
 
     assert!(matches!(&outcome, StageOutcome::Passed), "{outcome:?}");
+    // Tuples are tag 60015 over an ordered array (spec 29-formats).
+    let tuple = |values: Vec<Raw>| Raw::Tag(60015, Box::new(Raw::Array(values)));
     let expected_keys = [
-        Raw::Array(vec![
+        tuple(vec![
             Raw::Null,
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
+            tuple(vec![Raw::Int(2.into()), Raw::Text("east".into())]),
         ]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
+        tuple(vec![
+            tuple(vec![Raw::Int(1.into()), Raw::Text("west".into())]),
             Raw::Null,
         ]),
-        Raw::Array(vec![Raw::Null, Raw::Null]),
-        Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
-            Raw::Array(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
+        tuple(vec![Raw::Null, Raw::Null]),
+        tuple(vec![
+            tuple(vec![Raw::Int(4.into()), Raw::Text("north".into())]),
+            tuple(vec![Raw::Int(5.into()), Raw::Text("south".into())]),
         ]),
     ];
     for (index, expected_key) in expected_keys.iter().enumerate() {
@@ -2644,7 +2646,7 @@ fn parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-S021-TYPE"
+                if diagnostic.code() == "E3002"
         ),
         "Decimal update key patch did not fail during source admission: {outcome:?}"
     );
@@ -2870,10 +2872,13 @@ fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
         "#,
     ));
 
+    // E2001 for a non-Decimal literal in a Decimal field is mapped BY ANALOGY to the spec's
+    // tests/expected-diagnostics/wrong-field-type.orna.json (primary_diagnostic E2001, field type
+    // mismatch). No Decimal-specific spec fixture was found.
     assert!(
         matches!(
             &outcome,
-            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "E2001"
         ),
         "invalid Decimal component did not fail during source admission: {outcome:?}"
     );
