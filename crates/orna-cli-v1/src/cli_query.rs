@@ -19,7 +19,7 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::{composite_key_error, key_candidates};
+use crate::cli_row_key::{check_bound_type, check_point_key_type, composite_key_error, key_candidates};
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
 };
@@ -344,14 +344,45 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             )
         })?;
     // The committed descriptor declares each primary-key component's type. A
-    // `--key` spelling is parsed as that type, and a composite key is refused
-    // with the typed diagnostic that names the successor bead.
+    // single component is the only key type a `--key` spelling or a typed
+    // bound can name; a composite key is untyped here and keeps the untyped
+    // spellings it has always had, so only a predicate scan over it (which must
+    // page) is refused.
     let key_types = table
         .descriptor()
         .primary_key_primitive_types(*table.relation_id())
         .map_err(|error| {
             query_error("Table primary key could not be read", format!("{error:?}"))
         })?;
+    let single_key = match key_types.as_slice() {
+        [key_type] => Some(key_type.as_deref()),
+        _ => None,
+    };
+    if let Some(key_type) = single_key {
+        for bound in options.from.iter().chain(options.until.iter()) {
+            check_bound_type(bound, key_type)?;
+        }
+    }
+    // A predicate scan pages the table by successor keys, so it needs a key
+    // type with a successor. This is decided from the descriptor, not the row
+    // count, so a small table is refused the same way a large one is.
+    if options.has_predicate && options.key.is_none() {
+        match single_key {
+            None => return Err(composite_key_error()),
+            Some(key_type) if !is_pageable_key_type(key_type) => {
+                return Err(query_error(
+                    "Predicate scan cannot page this table's key type",
+                    format!(
+                        "the primary key is {}, which a predicate scan cannot page; \
+                         drop --kind, --not-kind, --suffix, --min-length and --max-length \
+                         to list the rows in range with --limit",
+                        key_type.unwrap_or("not a primitive type")
+                    ),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
     let row_map = format
         .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -366,31 +397,19 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // keyed by canonical text, so the spelling printed by the listing is tried
     // as text and then as those same bytes. Both are bounded point reads of
     // the committed row map, and the row that answers is a real committed row
-    // rather than a reinterpretation of the query.
-    // A composite key has no single typed spelling, so every query form over
-    // such a table is refused, not only `--key`.
-    let key_type = match key_types.as_slice() {
-        [key_type] => key_type.as_deref(),
-        _ => return Err(composite_key_error()),
+    // rather than a reinterpretation of the query. A single-component key
+    // type that `--key` cannot spell is refused rather than missed.
+    let point_key_type = match single_key {
+        None => None,
+        Some(key_type) => {
+            check_point_key_type(key_type)?;
+            key_type
+        }
     };
-    // A predicate scan pages the table by successor keys, so it needs a key
-    // type with a successor. This is decided from the descriptor, not the row
-    // count, so a small table is refused the same way a large one is.
-    if options.has_predicate && options.key.is_none() && !is_pageable_key_type(key_type) {
-        return Err(query_error(
-            "Predicate scan cannot page this table's key type",
-            format!(
-                "the primary key is {}, which a predicate scan cannot page; \
-                 drop --kind, --not-kind, --suffix, --min-length and --max-length \
-                 to list the rows in range with --limit",
-                key_type.unwrap_or("not a primitive type")
-            ),
-        ));
-    }
     let rows = match options.key {
         Some(key) => {
             let mut found = None;
-            for candidate in key_candidates(key, key_type)? {
+            for candidate in key_candidates(key, point_key_type)? {
                 found = graph
                     .lookup_row(&candidate, &scope)
                     .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
@@ -614,13 +633,11 @@ fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
 }
 
 /// Whether a predicate scan can page a table whose primary key has this
-/// primitive type name. Each name is a key type whose row keys have a
-/// successor in `successor_key`; a composite or non-primitive key has none.
+/// primitive type name. Only the primitive key types the spec permits
+/// (`Int`, `Str`, `Bool`) have a successor in `successor_key` here; a
+/// composite, `Decimal`, `Uuid`, `Date`, `Instant`, enum or table-ref key does not.
 fn is_pageable_key_type(key_type: Option<&str>) -> bool {
-    matches!(
-        key_type,
-        Some("Int" | "UInt" | "Str" | "Text" | "Bytes" | "Bool")
-    )
+    matches!(key_type, Some("Int" | "Str" | "Bool"))
 }
 
 /// The measured plan of one annotation predicate evaluation.
@@ -974,12 +991,14 @@ mod tests {
     }
 
     #[test]
-    fn only_primitive_key_types_with_successors_are_pageable() {
+    fn only_spec_primitive_key_types_are_pageable() {
         use super::is_pageable_key_type;
-        for key_type in ["Int", "UInt", "Str", "Text", "Bytes", "Bool"] {
+        for key_type in ["Int", "Str", "Bool"] {
             assert!(is_pageable_key_type(Some(key_type)), "{key_type}");
         }
-        assert!(!is_pageable_key_type(Some("Uuid")));
+        for key_type in ["UInt", "Decimal", "Uuid", "Date", "Instant"] {
+            assert!(!is_pageable_key_type(Some(key_type)), "{key_type}");
+        }
         assert!(!is_pageable_key_type(None));
     }
 
