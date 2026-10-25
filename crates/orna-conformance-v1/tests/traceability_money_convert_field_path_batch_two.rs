@@ -54,7 +54,7 @@ fn money_002_cross_currency_addition_is_rejected() {
         include_str!("fixtures/semantic/traceability-money-cross-currency-add.orna"),
     );
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == "E5003"
             && diagnostic.message() == "cannot add different currencies without conversion"
     }));
     passed("ORNA-MONEY-002", "cross-currency-addition-type-error");
@@ -132,7 +132,12 @@ fn field_006_computed_field_cannot_be_supplied_to_insert() {
         "computed-insert.orna",
         include_str!("fixtures/semantic/traceability-field-computed-insert.orna"),
     );
-    assert!(type_error(&result), "{:?}", result.diagnostics);
+    // Spec 07-tables and manifest: computed insert is E3010, not a generic type error.
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == "E3010"),
+        "{:?}",
+        result.diagnostics
+    );
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message().contains("computed field")
     }));
@@ -150,7 +155,7 @@ fn field_008_computed_field_rejects_io_effect() {
         &Catalogue::authoritative_core(),
     );
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == "E3012"
             && diagnostic.message() == "computed field must be deterministic and row-local"
     }));
     passed("ORNA-FIELD-008", "computed-field-effect-type-error");

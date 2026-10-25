@@ -19,6 +19,24 @@ been published.
 - Format-2 Blob read API (not yet reachable from a production row read path): `Repository::read_format2_orr_blob` and `Repository::read_format2_rov_blob` pin one selector, admit only a repository-format-2 commit, decode an ORR-2 inline value or record or a ROV-2 CBOR reference (authority `ORNA-ROW-013`, `ORNA-UPGRADE-001`/`002`), and return bytes only after the OGB-1 content root under `.orna/blobs/<2>/<62>/` verifies against the recorded digest and length. Content per call is capped at 8 MiB (`ORNA-BLOB-011`); the effective limit is the smaller of the caller's limit and that cap. Format-1 and format-3 pins are refused. An absent root is reported as `RootMissing`, not as corruption; Git read failures are reported as `Git`. The ORR-2, ROV-2 and OGB-1 clause IDs in the code are superseded draft IDs, not final-spec clauses. Loose-row and compact-v2 physical row decoders are not part of this change. `ornadb-nne7` remains open.
 
 ### Fixes
+- Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)
+  for tuple-typed fields, where it previously failed with `ORNA-CONFORMANCE-ROW-TYPE`.
+  Stale conformance and application test expectations were migrated to
+  the current specification: semantic-adapter and valid-fixture diagnostics, money and
+  multiple-root codes (`E5003`/`E9102`), the computed-field committed-row schema digest
+  (`orna.schema.v3` domain, store-format-3 section 5), primary-key patch `E3002`, txn key and
+  decimal pins, the partial-mutation rollback entry, and `ORNA-ASSERT-021`/`030` catalogue
+  resolution. The `sys.SnapshotRef` semantic-adapter assertions are restored to the specification
+  `Named` result. That pair (`sys_snapshot_string_as_pinned_read`,
+  `sys_database_cwd_as_snapshot_ref_read`) stays red until `ornadb-hzt6` lands and is registered in
+  the conformance known-red gate of PR 9369 (merge order: PR 9370 first). The valid-fixture gaps
+  are tracked product gaps in `KNOWN_PRODUCT_GAPS` (`valid_fixtures.rs`), not known-red: each entry
+  records today's product diagnostics and its bead, and the test fails when product output changes
+  in either direction. Tracked product gaps: `jnf1` (failure-natural-key, stream-admin-repl,
+  finite-stream), `7owc` (table-key-default field access), `qx8l` (owner type-mismatch emits `E2001`
+  before `A091-004`), `yu0h` (unparenthesised pipeline lambda). `6aqk` (implicit
+  conversion chain reports `ORNA-S012-UNRESOLVED` instead of `ORNA091-E-CONVERSION-CHAIN`) is an
+  open product gap and is excluded from the closed-pass list.
 - REPL table inserts now run through the runtime request ledger: the request row is reserved and started with a request-scoped fingerprint, and the commit records a terminal outcome. A failure after an external sys binding was dispatched, including an evaluation failure that follows a write, finishes the REPL query as failed with `ORNA-REPL-EFFECT-UNCERTAIN`, because external effects may already have happened; the request row stays Running and is settled only by fenced takeover recovery, and the input is never replayed. An evaluation failure before any external binding keeps its evaluator code. A failure before the request starts leaves its row Reserved, and recovery does not settle that row (ornadb-buat).
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
