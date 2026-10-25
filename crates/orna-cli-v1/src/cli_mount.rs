@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn mount_status_json_reports_writable_cwd_and_refusal_codes() {
+    fn mount_row_json_formats_writable_and_draft_fields() {
         let drafts = vec![(
             "Music/london/data.orna".to_owned(),
             "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
