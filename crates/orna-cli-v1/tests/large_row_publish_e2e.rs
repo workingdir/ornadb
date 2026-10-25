@@ -601,3 +601,31 @@ fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
     );
     assert_eq!(scanned["rows"], 300, "{scanned}");
 }
+
+/// `orna history` resolves an integer-looking key with the spelling that
+/// `orna query --key` uses. The row lookup runs before the revision walk, so
+/// a committed `Int`-keyed row that the lookup finds is never reported as
+/// "Row is not committed". The walk itself needs a Blob-bearing row (a
+/// descriptor tree); that precondition is a separate, pre-existing limit and
+/// is deliberately not asserted here.
+#[test]
+fn history_resolves_an_integer_looking_key_to_its_committed_row() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Tick.insert({ id: 7, body: "seven" })"#),
+        "REPL integer insert",
+    );
+    publish(&root, "Add tick seven");
+
+    let history = orna(&root, &["history", relation.as_str(), "7", "--format", "json"]);
+    let stderr = transcript(&history);
+    assert!(
+        !stderr.contains("Row is not committed"),
+        "the integer spelling must resolve to the committed row:\n{stderr}"
+    );
+}
