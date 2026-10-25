@@ -19,7 +19,9 @@
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
-use crate::cli_row_key::{check_bound_type, check_point_key_type, composite_key_error, key_candidates};
+use crate::cli_row_key::{
+    check_bound_type, check_point_key_type, composite_bound_error, composite_key_error, key_candidates,
+};
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
 };
@@ -362,6 +364,8 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         for bound in options.from.iter().chain(options.until.iter()) {
             check_bound_type(bound, key_type)?;
         }
+    } else if options.from.is_some() || options.until.is_some() {
+        return Err(composite_bound_error());
     }
     // A predicate scan pages the table by successor keys, so it needs a key
     // type with a successor. This is decided from the descriptor, not the row
@@ -634,10 +638,10 @@ fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
 
 /// Whether a predicate scan can page a table whose primary key has this
 /// primitive type name. Only the primitive key types the spec permits
-/// (`Int`, `Str`, `Bool`) have a successor in `successor_key` here; a
-/// composite, `Decimal`, `Uuid`, `Date`, `Instant`, enum or table-ref key does not.
+/// (`Int`, `UInt`, `Str`) have a successor in `successor_key` here; a
+/// composite, `Bool`, `Decimal`, `Uuid`, `Date`, `Instant`, enum or table-ref key does not.
 fn is_pageable_key_type(key_type: Option<&str>) -> bool {
-    matches!(key_type, Some("Int" | "Str" | "Bool"))
+    matches!(key_type, Some("Int" | "UInt" | "Str"))
 }
 
 /// The measured plan of one annotation predicate evaluation.
@@ -993,10 +997,10 @@ mod tests {
     #[test]
     fn only_spec_primitive_key_types_are_pageable() {
         use super::is_pageable_key_type;
-        for key_type in ["Int", "Str", "Bool"] {
+        for key_type in ["Int", "UInt", "Str"] {
             assert!(is_pageable_key_type(Some(key_type)), "{key_type}");
         }
-        for key_type in ["UInt", "Decimal", "Uuid", "Date", "Instant"] {
+        for key_type in ["Bool", "Decimal", "Uuid", "Date", "Instant"] {
             assert!(!is_pageable_key_type(Some(key_type)), "{key_type}");
         }
         assert!(!is_pageable_key_type(None));

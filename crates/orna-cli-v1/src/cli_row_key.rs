@@ -117,7 +117,7 @@ pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Resu
     let valid = match key_type {
         Some("Int") => "int:N",
         Some("UInt") => "uint:N",
-        Some("Str") => "text:KEY or bytes:HEX",
+        Some("Str") => "text:KEY",
         _ => {
             return Err(key_error(
                 "Range bound cannot address this primary key",
@@ -133,7 +133,7 @@ pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Resu
         (bound, key_type),
         (TypedKey::Int(_), Some("Int"))
             | (TypedKey::UInt(_), Some("UInt"))
-            | (TypedKey::Text(_) | TypedKey::Bytes(_), Some("Str"))
+            | (TypedKey::Text(_), Some("Str"))
     );
     if matches {
         return Ok(());
@@ -145,6 +145,18 @@ pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Resu
             key_type.unwrap_or("not a primitive type")
         ),
     ))
+}
+
+/// Refuses any `--from`/`--until` bound on a composite primary key. A bound
+/// spells one primitive component, so over several components it has no
+/// defined order and is refused rather than answered.
+pub(super) fn composite_bound_error() -> Diagnostic {
+    key_error(
+        "Range bound cannot address a composite primary key",
+        "the primary key has several components; --from/--until spell a single \
+         primitive key only, so bounds are refused (bead ornadb-5il1.461 tracks \
+         composite addressing); drop --from/--until and filter the listing instead",
+    )
 }
 
 /// Refuses a `--key` lookup over a single primary-key component whose type
