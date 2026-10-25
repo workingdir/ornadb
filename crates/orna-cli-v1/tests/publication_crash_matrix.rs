@@ -2,7 +2,7 @@
 use std::{
     fs::File,
     ops::{Deref, DerefMut},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, Output},
     thread,
     time::{Duration, Instant},
@@ -1102,6 +1102,68 @@ async fn managed_store_edit_in_kill_window_is_retained_and_not_rewound() {
     }
 }
 
+
+/// Collects the managed store payload leaves (every regular file except `data`) below `dir`.
+fn store_payload_leaves(dir: &Path, out: &mut Vec<PathBuf>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            store_payload_leaves(&path, out);
+        } else if path.file_name().and_then(|name| name.to_str()) != Some("data") {
+            out.push(path);
+        }
+    }
+}
+
+/// W196 (a) / ORNA-PUB-010: an external edit to a managed store payload leaf made inside the
+/// kill window is refused as E2300, the edited bytes are retained, and HEAD is not rewound.
+#[tokio::test]
+async fn managed_store_payload_edit_in_kill_window_is_retained_and_not_rewound() {
+    let mut exercised = 0;
+    for boundary in ["ref-cas", "index-install", "index"] {
+        let (directory, _source, repository, state, _source_commit, _relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+        git(root, &["add", "--", "unrelated-tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "add unrelated tracked file"]);
+
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(marker.exists(), "child never reached {boundary}; status: {:?}", child.try_wait().unwrap());
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child unexpectedly returned at {boundary}");
+        std::fs::remove_file(&marker).unwrap();
+        drop(state);
+
+        let mut payloads = Vec::new();
+        store_payload_leaves(&root.join(".orna/store"), &mut payloads);
+        let Some(payload) = payloads.into_iter().next() else {
+            continue;
+        };
+        exercised += 1;
+        let original = std::fs::read(&payload).unwrap();
+        assert!(!original.is_empty(), "payload leaf has bytes to edit at {boundary}");
+        let mut edited = original.clone();
+        edited[0] ^= 0x01;
+        std::fs::write(&payload, &edited).unwrap();
+        let pre_head = head(&repository);
+
+        let rejected = cli(root, &["--debug", "publish"]);
+        assert!(!rejected.status.success(), "recovery accepted a payload edit at {boundary}");
+        let stderr = String::from_utf8_lossy(&rejected.stderr);
+        assert!(stderr.contains("E2300"), "payload edit at {boundary} not reported as E2300: {stderr}");
+        assert_eq!(head(&repository), pre_head, "HEAD moved by rejected recovery at {boundary}");
+        assert_eq!(std::fs::read(&payload).unwrap(), edited, "payload edit lost at {boundary}");
+    }
+    assert!(exercised > 0, "no boundary left a managed store payload leaf to edit");
+}
 
 /// W14-01 / ORNA-PUB-016: a `commit` killed after the Orna index lock is taken
 /// must not strand Git's index lock. The next commit reclaims the dead lock,
