@@ -17,6 +17,23 @@ pub struct ReplTransactionScope<'a> {
     pub request: RequestIdentity,
 }
 
+/// Failure from one evaluated REPL submission. `external_effects_possible`
+/// is true once any external sys binding was reached, so a failure after
+/// that point is not known to have left external state unchanged.
+pub struct ReplEvaluationFailure {
+    pub error: ApplicationError,
+    pub external_effects_possible: bool,
+}
+
+impl From<ApplicationError> for ReplEvaluationFailure {
+    fn from(error: ApplicationError) -> Self {
+        Self {
+            error,
+            external_effects_possible: false,
+        }
+    }
+}
+
 impl ApplicationAuthority {
     /// Evaluates one effectful REPL submission into an unpublished candidate.
     /// The caller must commit the returned activation before publishing the
@@ -27,7 +44,7 @@ impl ApplicationAuthority {
         staged: StagedReplActivation,
         scope: &ReplTransactionScope<'_>,
         bindings: &mut SysHostBindingRegistry,
-    ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ApplicationError> {
+    ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ReplEvaluationFailure> {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
         // The REPL host serves no publication relation, so its explain
         // catalogue pins the activation's project tables only.
@@ -53,10 +70,16 @@ impl ApplicationAuthority {
             scope,
             next_row_ordinal: 0,
             explain_catalogue,
+            external_dispatched: false,
         };
-        let (value, successor) = session
-            .evaluate_staged_with_effects(staged, &mut effects)
-            .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        let outcome = session.evaluate_staged_with_effects(staged, &mut effects);
+        let external_effects_possible = effects.external_dispatched;
+        let failure = move |error: ApplicationError| ReplEvaluationFailure {
+            error,
+            external_effects_possible,
+        };
+        let (value, successor) = outcome
+            .map_err(|error| failure(ApplicationError::EffectRejected(error.code().to_owned())))?;
         // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`. Persistence to the ledger is not wired (ornadb-rg5g).
         let declared = repl_declared_effects(effects.bindings);
         let activation = effects
@@ -65,8 +88,10 @@ impl ApplicationAuthority {
                 value.clone().unwrap_or_else(CanonicalValue::unit),
                 None,
                 declared,
-            )?;
-        let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)?;
+            )
+            .map_err(|error| failure(error.into()))?;
+        let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)
+            .map_err(|error| failure(error.into()))?;
         Ok((value, successor, activation))
     }
 }
@@ -257,9 +282,19 @@ struct ReplTransactionEffectHandler<'a, 'scope> {
     scope: &'a ReplTransactionScope<'scope>,
     next_row_ordinal: u64,
     explain_catalogue: orna_evaluator_v1::ActivationExplainCatalogue,
+    external_dispatched: bool,
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {
+    /// Records that a bound sys binding was reached. A call returning
+    /// `Ok(None)` declined the operation; any other outcome, including a
+    /// failure, may already have changed external state.
+    fn record_dispatch<T>(&mut self, result: &Result<Option<T>, EvaluationError>) {
+        if !matches!(result, Ok(None)) {
+            self.external_dispatched = true;
+        }
+    }
+
     fn handle_table_effect(
         &mut self,
         callee: &Expr,
@@ -393,7 +428,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
     }
 
     fn row_fields_for_admission(
-        &self,
+        &mut self,
         schema: &TableSchema,
         row: &CanonicalValue,
         prebound_blob_bindings: &mut BTreeMap<String, OrpBlobBinding>,
@@ -440,6 +475,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                             None => {
                                 let value_context = ContextValue::new(ValueFormat::Ovb2, blob.clone())
                                     .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                                self.external_dispatched = true;
                                 self.bindings.accept_captured_blob_for_row(&value_context)?
                             }
                         };
@@ -468,7 +504,9 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle(self.bindings, callee, arguments)? {
+        let result = EffectHandler::handle(self.bindings, callee, arguments);
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -480,13 +518,14 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_with_budget(
+        let result = EffectHandler::handle_with_budget(
             self.bindings,
             callee,
             arguments,
             budget,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -499,14 +538,15 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_registered_with_budget(
+        let result = EffectHandler::handle_registered_with_budget(
             self.bindings,
             operation,
             callee,
             arguments,
             budget,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -520,15 +560,16 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_registered_with_cancellation_and_budget(
+        let result = EffectHandler::handle_registered_with_cancellation_and_budget(
             self.bindings,
             operation,
             callee,
             arguments,
             budget,
             cancellation,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -642,6 +683,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
             }
             let value = in_profile_of(input_row, blob.clone())?;
+            self.external_dispatched = true;
             let binding = self.bindings.accept_captured_blob_for_row(&value)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
             blob_bindings.insert(field.clone(), binding);
@@ -676,7 +718,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
-            return Ovb2EffectHandler::handle(self.bindings, callee, arguments);
+            let result = Ovb2EffectHandler::handle(self.bindings, callee, arguments);
+            self.record_dispatch(&result);
+            return result;
         }
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
             return Ok(Some(value));
@@ -699,12 +743,14 @@ impl ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
-            return Ovb2EffectHandler::handle_with_budget(
+            let result = Ovb2EffectHandler::handle_with_budget(
                 self.bindings,
                 callee,
                 arguments,
                 budget,
             );
+            self.record_dispatch(&result);
+            return result;
         }
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
             return Ok(Some(value));
@@ -734,7 +780,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if operation == "sys.blob.capture_file" {
-            return Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
+            let result = Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
                 self.bindings,
                 operation,
                 callee,
@@ -742,6 +788,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 budget,
                 cancellation,
             );
+            self.record_dispatch(&result);
+            return result;
         }
 
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
