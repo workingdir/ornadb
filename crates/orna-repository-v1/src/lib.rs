@@ -31,6 +31,7 @@ mod blob_store;
 mod crash_barrier;
 mod compact;
 pub mod complete_copy;
+pub mod format2_rov;
 mod init;
 pub mod migration_copy;
 mod mount;
