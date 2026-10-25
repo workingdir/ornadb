@@ -44,6 +44,7 @@ use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use orna_application_v1::{
@@ -57,13 +58,14 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
-    PinnedCommittedRows, QueryObservationRegistration, RequestIdentity, RuntimeIdentity,
-    RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
-    RuntimeTableIdentity, TableObjectId, WriterLease,
+    FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
+    RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, StagedTableActivation, TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
 };
+use sha2::{Digest, Sha256};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -309,6 +311,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
             help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        },
+        "ORNA-REPL-EFFECT-UNCERTAIN" => DiagnosticDocumentation {
+            code: "ORNA-REPL-EFFECT-UNCERTAIN",
+            title: "REPL effect outcome is uncertain",
+            explanation:
+                "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
+            help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
         },
         "ORNA-REPL-AT" => DiagnosticDocumentation {
             code: "ORNA-REPL-AT",
@@ -2429,6 +2438,7 @@ struct ReplTransactions {
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
     host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
+    faults: Arc<dyn FaultInjector>,
     lease: Option<WriterLease>,
     // Drop the runtime owner lock only after capture candidates release their refs.
     state: Option<RuntimeState>,
@@ -2756,6 +2766,7 @@ fn repl_transactions(
         state: None,
         lease: None,
         host_bindings: Rc::new(RefCell::new(None)),
+        faults: Arc::new(NoFault),
     })
 }
 
@@ -2950,6 +2961,25 @@ fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
     }
 }
 
+/// Binds one REPL request row to its session, query, source text and the
+/// project digest it was evaluated against, so a replayed identity cannot
+/// adopt a different request's effects.
+fn repl_request_fingerprint(
+    session_id: [u8; 16],
+    query_id: [u8; 16],
+    source: &str,
+    initial_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.repl.request.v1");
+    hasher.update(session_id);
+    hasher.update(query_id);
+    hasher.update(initial_digest);
+    hasher.update(u64::try_from(source.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(source.as_bytes());
+    hasher.finalize().into()
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
@@ -3071,16 +3101,21 @@ fn run_repl_input(
             .runtime
             .block_on(state.finish_query_observation(writer, query_id, status))
             .map(|_| ())
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())
+            .map_err(|_| REPL_EFFECT_UNCERTAIN.to_owned())
     };
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
     let (value, successor, activation) = match evaluation {
         Ok(result) => result,
-        Err(error) => {
+        Err(failure) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error).into());
+            let message = if failure.external_effects_possible {
+                REPL_EFFECT_UNCERTAIN.to_owned()
+            } else {
+                repl_application_error(failure.error)
+            };
+            return Err(message.into());
         }
     };
     if activation.mutations().is_empty() {
@@ -3092,28 +3127,86 @@ fn run_repl_input(
         .stage_for_request(&transactions.authority, snapshot.context(), request)
     {
         Ok(activation) => activation,
-        Err(error) => {
+        Err(_) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error).into());
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
     };
+    // The application stages with NoFault; rebuild the identical unit carrying
+    // the runtime's injector so the request boundary owns the fault seam.
+    let request_staged = match StagedTableActivation::from_source(
+        activation.context().clone(),
+        activation.mutations().to_vec(),
+        activation.next_digest(),
+        Arc::clone(&transactions.faults),
+        activation.effects(),
+    ) {
+        Ok(staged) => staged,
+        Err(_) => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        }
+    };
+    let mut outcome_bytes = b"orna.repl.commit.v1".to_vec();
+    outcome_bytes.extend_from_slice(&query_id);
+    let outcome = match TerminalOutcome::new(outcome_bytes) {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        }
+    };
+    let fingerprint = repl_request_fingerprint(
+        transactions.session_id,
+        query_id,
+        source,
+        transactions.initial_digest,
+    );
+    let admission = match transactions
+        .runtime
+        .block_on(state.reserve_request_with_admission(request, fingerprint))
+    {
+        Ok((_, Some(admission))) => admission,
+        _ => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        }
+    };
+    if transactions
+        .runtime
+        .block_on(state.start_request_with_owner_and_admission(
+            request,
+            fingerprint,
+            writer,
+            admission,
+        ))
+        .is_err()
+    {
+        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+    }
     let committed = transactions
         .runtime
-        .block_on(state.commit_table_activation(
+        .block_on(state.commit_staged_table_request_activation(
             writer,
-            activation.context(),
-            activation.mutations(),
-            activation.next_digest(),
-            activation.faults(),
+            request,
+            fingerprint,
+            &request_staged,
+            outcome,
         ));
     if committed.is_err() {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
     finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
     *session = successor;
     Ok(value)
 }
+
+/// Reported when external effects may already have happened after evaluation
+/// and no terminal outcome is proven. The request row stays Running for fenced
+/// recovery; the input is never replayed.
+const REPL_EFFECT_UNCERTAIN: &str = "ORNA-REPL-EFFECT-UNCERTAIN";
 
 fn repl_application_error(error: ApplicationError) -> String {
     match error {
@@ -5375,5 +5468,167 @@ mod tests {
             advanced
         );
         assert!(git(&local, &["status", "--porcelain"]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod repl_request_effect_tests {
+    use super::*;
+    use crate::format3::format3_repository_for_table;
+    use orna_runtime_v1::{FaultPoint, RecoveryDisposition, RuntimeError};
+
+    const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+    const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
+
+    struct FailAt(FaultPoint);
+
+    impl FaultInjector for FailAt {
+        fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+            if point == self.0 {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn committed_repl_insert_finishes_its_request_row() {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        assert!(
+            run_repl_input(
+                repository.as_ref(),
+                Some(&mut transactions),
+                &mut session,
+                INSERT_LONDON,
+            )
+            .is_ok(),
+            "the REPL insert commits"
+        );
+        let state = transactions.state.as_ref().expect("runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(running.is_empty(), "a committed REPL insert leaves no running request");
+    }
+
+    /// Runs an insert whose commit fails at `point` and asserts the uncertain
+    /// diagnostic and the still-running request row, then that fenced recovery
+    /// settles it without proving a rollback.
+    fn assert_commit_fault_reports_uncertain(point: FaultPoint) {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        transactions.faults = Arc::new(FailAt(point));
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            INSERT_LONDON,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{point:?}: the injected fault fails the REPL request"));
+        assert_eq!(failure.code, "ORNA-REPL-EFFECT-UNCERTAIN", "{point:?}");
+
+        let state = transactions.state.as_ref().expect("runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert_eq!(
+            running.len(),
+            1,
+            "{point:?}: the failed commit leaves its own row running"
+        );
+        let row = &running[0];
+        let lost = transactions
+            .runtime
+            .block_on(state.request_owner(row.identity, row.fingerprint))
+            .expect("request owner")
+            .expect("the running row has an owner");
+        let fence = transactions
+            .runtime
+            .block_on(state.recover_abandoned(lost.owner_id, [0x52; 16]))
+            .expect("fence the abandoned writer");
+        let rollback = TerminalOutcome::new(b"orna.repl.rollback.v1".to_vec()).expect("outcome");
+        let uncertain = TerminalOutcome::new(b"orna.repl.uncertain.v1".to_vec()).expect("outcome");
+        let recovered = transactions
+            .runtime
+            .block_on(state.recover_running_request_with_outcomes(
+                row.identity,
+                row.fingerprint,
+                lost,
+                fence,
+                rollback,
+                uncertain,
+            ))
+            .expect("recover the running request");
+        assert_ne!(
+            recovered.disposition,
+            RecoveryDisposition::RollbackProven,
+            "{point:?}: a REPL activation declares ExternalPossible effects, so a rollback is never proven"
+        );
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain,
+            "{point:?}"
+        );
+        let after = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests after recovery");
+        assert!(
+            after.is_empty(),
+            "{point:?}: recovery settles the fenced request row"
+        );
+    }
+
+    #[test]
+    fn repl_commit_fault_reports_uncertain_and_keeps_its_request_row_running() {
+        for point in [
+            FaultPoint::BeforeTableWrite,
+            FaultPoint::AfterTableWrite,
+            FaultPoint::BeforeTerminalClaim,
+            FaultPoint::AfterTerminalClaim,
+        ] {
+            assert_commit_fault_reports_uncertain(point);
+        }
+    }
+
+    #[test]
+    fn repl_pure_evaluation_failure_keeps_its_evaluator_code() {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            "1 / 0",
+        )
+        .err()
+        .expect("the division by zero fails");
+        assert_eq!(
+            failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "a failure with no external effect keeps the evaluator code"
+        );
     }
 }
