@@ -4459,6 +4459,27 @@ impl SchemaDescriptor {
     ) -> Result<()> {
         validate_schema_stored_key(&self.0, relation_id, canonical_key)
     }
+
+    /// Names the primitive type of each primary-key component in key order
+    /// (for example `"Int"`, `"UInt"` or `"Str"`), so a caller can parse a key
+    /// spelling as the type the committed descriptor declares. A component
+    /// whose type is not a primitive name yields `None`.
+    pub fn primary_key_primitive_types(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<Vec<Option<String>>> {
+        let (key_types, _, _) = schema_stored_key_types(&self.0, relation_id)?;
+        key_types
+            .into_iter()
+            .map(|key_type| {
+                let node = array(key_type)?;
+                if node.len() != 2 || int_u64(&node[0])? != 0 {
+                    return Ok(None);
+                }
+                Ok(Some(text(&node[1])?.to_owned()))
+            })
+            .collect()
+    }
 }
 
 /// Decodes one canonical CBOR value stored in a repository row.

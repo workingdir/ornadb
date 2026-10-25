@@ -22,7 +22,39 @@ use super::Diagnostic;
 /// additionally names the bytes those digits spell. The candidates are tried in
 /// order by the caller, so the first row that answers is the one the spelling
 /// most directly names.
-pub(super) fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
+///
+/// When the committed descriptor declares the primary key as one `Int` or
+/// `UInt` component, the spelling is parsed as that type only: an integer key
+/// is never reinterpreted as text or bytes.
+pub(super) fn key_candidates(
+    value: &str,
+    key_type: Option<&str>,
+) -> Result<Vec<TypedKey>, Diagnostic> {
+    match key_type {
+        Some("Int") => {
+            return value
+                .parse::<i64>()
+                .map(|number| vec![TypedKey::Int(number)])
+                .map_err(|_| {
+                    key_error(
+                        "Row key is not an Int key",
+                        format!("got {value:?}; the table's primary key is Int"),
+                    )
+                });
+        }
+        Some("UInt") => {
+            return value
+                .parse::<u64>()
+                .map(|number| vec![TypedKey::UInt(number)])
+                .map_err(|_| {
+                    key_error(
+                        "Row key is not a UInt key",
+                        format!("got {value:?}; the table's primary key is UInt"),
+                    )
+                });
+        }
+        _ => {}
+    }
     let mut candidates = vec![
         TypedKey::Text(value.to_owned()),
         TypedKey::Bytes(value.as_bytes().to_vec()),
@@ -57,6 +89,17 @@ pub(super) fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
     Ok(candidates)
 }
 
+/// The typed refusal for a composite (tuple) primary key. Point keys and
+/// predicate scans over such a table need the successor API tracked by
+/// `ornadb-5il1.461`, which does not exist yet.
+pub(super) fn composite_key_error() -> Diagnostic {
+    key_error(
+        "Composite primary keys are not supported by this command yet",
+        "the table's primary key has more than one component; tuple key lookup and \
+         paged predicate scans need the row-map successor API tracked by bead ornadb-5il1.461",
+    )
+}
+
 fn key_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2000",
@@ -77,14 +120,14 @@ mod tests {
         // argument must find that row by the printed spelling as well as by its
         // own bytes.
         assert_eq!(
-            key_candidates("song").unwrap(),
+            key_candidates("song", None).unwrap(),
             vec![
                 TypedKey::Text("song".to_owned()),
                 TypedKey::Bytes(b"song".to_vec()),
             ]
         );
         assert_eq!(
-            key_candidates("0x736f6e67").unwrap(),
+            key_candidates("0x736f6e67", None).unwrap(),
             vec![
                 TypedKey::Text("0x736f6e67".to_owned()),
                 TypedKey::Bytes(b"0x736f6e67".to_vec()),
@@ -93,8 +136,34 @@ mod tests {
         );
         // An odd digit count or a non-hex digit is not a byte key, and is
         // refused rather than silently truncated into a different key.
-        assert!(key_candidates("0x736f6").is_err());
-        assert!(key_candidates("0xzz").is_err());
-        assert!(key_candidates("0x").is_err());
+        assert!(key_candidates("0x736f6", None).is_err());
+        assert!(key_candidates("0xzz", None).is_err());
+        assert!(key_candidates("0x", None).is_err());
+    }
+
+    #[test]
+    fn a_schema_typed_integer_key_is_parsed_as_that_type_only() {
+        // An Int primary key is named as Int and never as text or bytes, so a
+        // row keyed `42` is found and `forty-two` is refused, not reinterpreted.
+        assert_eq!(
+            key_candidates("42", Some("Int")).unwrap(),
+            vec![TypedKey::Int(42)]
+        );
+        assert_eq!(
+            key_candidates("-7", Some("Int")).unwrap(),
+            vec![TypedKey::Int(-7)]
+        );
+        assert!(key_candidates("forty-two", Some("Int")).is_err());
+        assert_eq!(
+            key_candidates("42", Some("UInt")).unwrap(),
+            vec![TypedKey::UInt(42)]
+        );
+        assert!(key_candidates("-7", Some("UInt")).is_err());
+    }
+
+    #[test]
+    fn a_composite_key_is_refused_with_the_successor_bead() {
+        let error = super::composite_key_error();
+        assert!(format!("{error:?}").contains("ornadb-5il1.461"));
     }
 }

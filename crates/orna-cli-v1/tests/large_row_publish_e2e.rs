@@ -112,6 +112,11 @@ fn assert_success(output: &Output, step: &str) {
 /// `source`, then the source staged with Git and committed with
 /// `orna commit`. Returns the root and the relation the commit admitted.
 fn committed_database(directory: &TempDir, source: &str) -> (PathBuf, String) {
+    committed_table(directory, source, "Note")
+}
+
+/// [`committed_database`] for the table named `table`.
+fn committed_table(directory: &TempDir, source: &str, table: &str) -> (PathBuf, String) {
     let root = directory.path().join("notes");
     let init = orna(
         directory.path(),
@@ -130,8 +135,8 @@ fn committed_database(directory: &TempDir, source: &str) -> (PathBuf, String) {
     assert_success(&committed, "orna commit");
     let relation = String::from_utf8_lossy(&committed.stdout)
         .lines()
-        .find_map(|line| line.strip_prefix("admitted table Note as relation "))
-        .expect("orna commit admits the Note table")
+        .find_map(|line| line.strip_prefix(&format!("admitted table {table} as relation ")))
+        .expect("orna commit admits the named table")
         .trim()
         .to_owned();
     (root, relation)
@@ -406,4 +411,47 @@ fn growing_a_row_rewrites_its_page_and_at_most_the_neighbour_it_shifts() {
         "a grown row rewrites its page and at most one neighbour: {rewritten} new, {removed} removed"
     );
     assert_eq!(table_row_count(&root, &relation), 600);
+}
+
+/// A table whose single primary-key component is `Int` is keyed by the
+/// integer the committed descriptor declares (store-format-3 section 5). A
+/// `--key` spelling is parsed as `Int`, so a row past the first page of 256 is
+/// found by its integer spelling, and a non-integer spelling is refused rather
+/// than read as text or bytes.
+#[test]
+fn an_int_keyed_table_is_queried_by_its_declared_integer_key() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    // A point lookup of a committed row exits 0; an absent row exits non-zero
+    // with "Row is not committed", so exit status alone proves the row is found.
+    let found = orna(
+        &root,
+        &["query", &relation, "--key", "299", "--format", "json"],
+    );
+    assert_success(&found, "orna query --key 299");
+    let refused = orna(
+        &root,
+        &["query", &relation, "--key", "tick", "--format", "json"],
+    );
+    assert!(
+        !refused.status.success(),
+        "a non-integer spelling is refused for an Int key:\n{}",
+        transcript(&refused)
+    );
+    assert!(
+        transcript(&refused).contains("Int"),
+        "the refusal names the declared Int type:\n{}",
+        transcript(&refused)
+    );
 }
