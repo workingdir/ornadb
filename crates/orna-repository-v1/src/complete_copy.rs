@@ -2150,4 +2150,47 @@ mod git_binding_tests {
         let (_parent, child, _oid) = corrupt_child_of_repository_with_blob();
         assert!(is_repository(&child));
     }
+
+    #[test]
+    fn symlink_to_a_plain_subdirectory_is_not_a_dependency_repository() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        let plain = parent.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let links = tempfile::TempDir::new().unwrap();
+        let dependency = links.path().join("dependency");
+        std::os::unix::fs::symlink(&plain, &dependency).unwrap();
+        assert!(!is_repository(&dependency));
+    }
+
+    #[test]
+    fn symlink_to_a_linked_worktree_is_a_healthy_dependency() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        git(
+            parent.path(),
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "root",
+            ],
+        );
+        let commit = git(parent.path(), &["rev-parse", "HEAD"]);
+        let worktrees = tempfile::TempDir::new().unwrap();
+        let linked = worktrees.path().join("linked");
+        git(
+            parent.path(),
+            &["worktree", "add", "-q", "--detach", linked.to_str().unwrap()],
+        );
+        let links = tempfile::TempDir::new().unwrap();
+        let dependency = links.path().join("dependency");
+        std::os::unix::fs::symlink(&linked, &dependency).unwrap();
+        assert!(is_repository(&dependency));
+        assert!(super::object_at(&dependency, &commit).unwrap().is_some());
+    }
 }
