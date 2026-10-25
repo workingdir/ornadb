@@ -10118,16 +10118,26 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
 /// so a symlinked root binds to the directory it really resolves to; a relative
 /// path cannot yield an empty or relative ceiling.
 pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
-    let resolved = worktree
-        .canonicalize()
-        .or_else(|_| std::path::absolute(worktree))
-        .unwrap_or_else(|_| worktree.to_path_buf());
-    if !resolved.join(".git").exists() {
-        return;
+    let resolved = canonical_or_absolute(worktree);
+    if resolved.join(".git").exists() {
+        bind_git_ceiling_above(command, &resolved);
     }
+}
+
+/// Stops Git's discovery at the parent of `directory` unconditionally. Use this
+/// where the caller requires `directory` itself to be a repository root: a plain
+/// subdirectory then yields no repository instead of its enclosing one.
+pub(crate) fn bind_git_ceiling_above(command: &mut Command, directory: &std::path::Path) {
+    let resolved = canonical_or_absolute(directory);
     if let Some(parent) = resolved.parent() {
         command.env("GIT_CEILING_DIRECTORIES", parent);
     }
+}
+
+fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Prevent inherited Git routing from selecting a repository, worktree, or
@@ -13112,5 +13122,42 @@ mod git_binding_tests {
                 .get_envs()
                 .all(|(name, _)| name != "GIT_CEILING_DIRECTORIES")
         );
+    }
+
+    /// A relative worktree path must still bind to an absolute ceiling. The root
+    /// is created inside the process directory so its path can be given relative.
+    #[test]
+    fn discovery_bind_absolutizes_a_relative_worktree_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::Builder::new().tempdir_in(&cwd).unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let relative = std::path::PathBuf::from(root.path().file_name().unwrap());
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &relative);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, cwd.canonicalize().unwrap());
+    }
+
+    /// The unconditional ceiling binds a plain directory's parent, with no `.git`.
+    #[test]
+    fn unconditional_ceiling_binds_a_plain_directory_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let mut command = Command::new("git");
+        super::bind_git_ceiling_above(&mut command, &plain);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
     }
 }
