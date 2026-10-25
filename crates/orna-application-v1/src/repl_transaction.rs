@@ -57,9 +57,15 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`. Persistence to the ledger is not wired (ornadb-rg5g).
+        let declared = repl_declared_effects(effects.bindings);
         let activation = effects
             .mutations
-            .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
+            .into_staged_activation(
+                value.clone().unwrap_or_else(CanonicalValue::unit),
+                None,
+                declared,
+            )?;
         let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)?;
         Ok((value, successor, activation))
     }
@@ -74,8 +80,14 @@ fn normalize_repl_mutations(
     committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
-    let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
-        activation.into_parts();
+    let (
+        value,
+        mutations,
+        snapshot_generation,
+        source_row_schemas,
+        protected_field_pins,
+        effects,
+    ) = activation.into_parts();
     // The stored tuple this activation has left at each key so far; `None`
     // marks a removed row, which then shadows the committed one.
     let mut written = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
@@ -146,6 +158,7 @@ fn normalize_repl_mutations(
         snapshot_generation,
         source_row_schemas,
         protected_field_pins,
+        effects,
     })
 }
 
@@ -892,5 +905,29 @@ fn restore_contextual_blob_values(
         *value = original.clone();
     }
     Ok(OvbRaw::Map(restored))
+}
+
+/// The effect set declared for one REPL transaction. Every REPL evaluation runs
+/// under a bound registry. `may_reach_external_state` is currently constant `true`
+/// (environment reads are always external), so this always yields `ExternalPossible`.
+/// The declaration is truthful, but the REPL commit path does not yet persist it to
+/// the request ledger (tracked by ornadb-rg5g); this helper only maps the registry
+/// answer to the declared effect set.
+pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
+    crate::declared_effects(bindings.may_reach_external_state())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repl_declared_effects_maps_bound_registry_to_external_possible() {
+        let bindings = SysHostBindingRegistry::default();
+        assert!(matches!(
+            repl_declared_effects(&bindings),
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
 }
 

@@ -31,7 +31,8 @@ use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCap
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
     RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
+    ActivationEffectReport, DeclaredEffectSet, RuntimeTableRows,
+    StagedTableActivation, TableMutation, TableObjectId,
 };
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace, StandardCatalogueError,
@@ -577,7 +578,8 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        handler.into_staged_activation(value, None)
+        let effects = handler.effect_report();
+        handler.into_staged_activation(value, None, effects)
     }
 
     /// Evaluates table mutations against one activation-pinned table snapshot.
@@ -619,9 +621,11 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
+        let effects = handler.effect_report();
         handler.into_staged_activation(
             value,
             Some(snapshot.context().capture().generation_digest()),
+            effects,
         )
     }
 
@@ -658,7 +662,8 @@ impl ApplicationAuthority {
         .map_err(|error: EvaluationError| {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
-        handler.into_staged_activation(value, None)
+        let effects = handler.effect_report();
+        handler.into_staged_activation(value, None, effects)
     }
 
     /// Evaluates admitted source while dispatching its terminal runtime effect
@@ -748,7 +753,7 @@ impl ApplicationAuthority {
                 .await
                 .map_err(ApplicationError::SourceEffectFailed)?;
         }
-        mutations.into_staged_activation(value, None)
+        mutations.into_staged_activation(value, None, ActivationEffectReport::ExternalPossible)
     }
 
     /// Computes the canonical digest for staged table work in one captured
@@ -809,20 +814,25 @@ impl ApplicationAuthority {
         &self,
         context: RuntimeActivationContext,
         mutation: TableMutation,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        self.stage_mutations(context, vec![mutation])
+        self.stage_mutations(context, vec![mutation], effects)
     }
 
     /// Stages an ordered mutation batch for one captured activation. An empty
     /// batch is rejected by the runtime boundary; pure activations never
-    /// enter this path.
+    /// enter this path. `effects` is the mandatory effect report of REQUEST-1 step 5,
+    /// built with
+    /// [`ActivationEffectReport::declare`]: only a declaration of no external
+    /// effects grants the Orna-controlled marker.
     pub fn stage_mutations(
         &self,
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
         let digest = Self::canonical_digest(&context, &mutations)?;
-        StagedTableActivation::from_source(context, mutations, digest, Arc::new(NoFault))
+        StagedTableActivation::from_source(context, mutations, digest, Arc::new(NoFault), effects)
             .map_err(|error: RuntimeError| ApplicationError::Runtime(error.to_string()))
     }
 
@@ -831,8 +841,11 @@ impl ApplicationAuthority {
         context: RuntimeActivationContext,
         mutations: Vec<TableMutation>,
         request: Option<RequestIdentity>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        self.stage_source_mutations_with_provenance(context, mutations, request, &[], &[])
+        self.stage_source_mutations_with_provenance(
+            context, mutations, request, &[], &[], effects,
+        )
     }
 
     fn stage_source_mutations_with_provenance(
@@ -842,6 +855,7 @@ impl ApplicationAuthority {
         request: Option<RequestIdentity>,
         source_row_schemas: &[SourceRowSchemaProvenance],
         protected_field_pins: &[RetainedSourceBlobPin],
+        effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
         if source_row_schemas
             .iter()
@@ -925,8 +939,22 @@ impl ApplicationAuthority {
                 Ok(rebuilt)
             })
             .collect::<Result<Vec<_>, _>>()?;
-        self.stage_mutations(context, mutations)
+        self.stage_mutations(context, mutations, effects)
     }
+}
+
+/// Declares the effect set of an evaluation (REQUEST-1 step 5). The caller
+/// states whether its bindings may reach state outside Orna's table
+/// transaction (ORNA-CAP-005): a system host attachment or a bound
+/// `SysHostBindingRegistry` (see `may_reach_external_state`). Only an
+/// evaluation with neither performs Orna table writes alone, and only it
+/// declares no external effects.
+pub(crate) fn declared_effects(may_reach_external_state: bool) -> ActivationEffectReport {
+    ActivationEffectReport::declare(if may_reach_external_state {
+        DeclaredEffectSet::ExternalPossible
+    } else {
+        DeclaredEffectSet::None
+    })
 }
 
 /// The evaluated result of one admitted source activation together with the
@@ -938,6 +966,7 @@ pub struct StagedActivation {
     snapshot_generation: Option<[u8; 32]>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
     protected_field_pins: Vec<RetainedSourceBlobPin>,
+    effects: ActivationEffectReport,
 }
 
 /// Schema artifact retained for the repository's expected-schema admission.
@@ -1125,6 +1154,12 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
 }
 
 impl StagedActivation {
+    /// The effect report this activation declared when it was evaluated.
+    #[must_use]
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
+    }
+
     #[must_use]
     pub fn value(&self) -> &CanonicalValue {
         &self.value
@@ -1156,6 +1191,7 @@ impl StagedActivation {
         Option<[u8; 32]>,
         Vec<SourceRowSchemaProvenance>,
         Vec<RetainedSourceBlobPin>,
+        ActivationEffectReport,
     ) {
         (
             self.value,
@@ -1163,6 +1199,7 @@ impl StagedActivation {
             self.snapshot_generation,
             self.source_row_schemas,
             self.protected_field_pins,
+            self.effects,
         )
     }
 
@@ -1213,6 +1250,7 @@ impl StagedActivation {
             request,
             &self.source_row_schemas,
             &self.protected_field_pins,
+            self.effects.clone(),
         )
     }
 }
@@ -1529,11 +1567,17 @@ impl SourceMutationEffectHandler {
         Ok(())
     }
 
+    /// The effect report for this handler's evaluation: see [`declared_effects`].
+    pub(crate) fn effect_report(&self) -> ActivationEffectReport {
+        declared_effects(self.sys_host.is_some())
+    }
+
     /// Finishes evaluation while retaining source schema and protected pins.
     pub fn into_staged_activation(
         self,
         value: CanonicalValue,
         snapshot_generation: Option<[u8; 32]>,
+        effects: ActivationEffectReport,
     ) -> Result<StagedActivation, ApplicationError> {
         self.validate_mutations()?;
         Ok(StagedActivation {
@@ -1542,6 +1586,7 @@ impl SourceMutationEffectHandler {
             snapshot_generation,
             source_row_schemas: self.source_row_schemas,
             protected_field_pins: self.protected_field_pins,
+            effects,
         })
     }
 
@@ -3441,6 +3486,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                             return Err(LiveError::from(ApplicationError::Evaluation(code)));
                         }
                     };
+                let effects = handler.effect_report();
                 let mutations = handler.into_mutations().map_err(LiveError::from)?;
                 let value = value.unwrap_or_else(CanonicalValue::unit);
                 let envelope = self.success_envelope(request, eval_fingerprint(message)?, value)?;
@@ -3466,6 +3512,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                         session_id: session,
                         request_id: request,
                     }),
+                    effects,
                 )?;
                 let identity = RequestIdentity {
                     session_id: session,
@@ -3482,6 +3529,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(identity)
@@ -3526,6 +3574,7 @@ impl LiveApplication for ApplicationLiveAdapter {
             let transaction = LiveEvalTransaction::new(
                 activation.mutations().to_vec(),
                 activation.next_digest(),
+                activation.effects(),
                 Arc::new(NoFault),
             )
             .for_request(RequestIdentity {
@@ -3607,6 +3656,7 @@ impl LiveApplication for ApplicationLiveAdapter {
                 let transaction = LiveEvalTransaction::new(
                     activation.mutations().to_vec(),
                     activation.next_digest(),
+                    activation.effects(),
                     Arc::new(NoFault),
                 )
                 .for_request(RequestIdentity {
@@ -3872,6 +3922,22 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bound_sys_host_registry_never_declares_controlled_only() {
+        // Regression: REPL `std.io.fs.write_text` reaches the filesystem through a
+        // bound registry, so declaring `None` would write a controlled-rollback marker.
+        let registry = orna_evaluator_v1::SysHostBindingRegistry::default();
+        assert!(registry.may_reach_external_state());
+        assert!(matches!(
+            declared_effects(registry.may_reach_external_state()),
+            ActivationEffectReport::ExternalPossible
+        ));
+        assert!(matches!(
+            declared_effects(false),
+            ActivationEffectReport::ControlledOnly(_)
+        ));
+    }
 
     #[test]
     fn remote_analysis_is_denied_by_default_without_disclosure() {

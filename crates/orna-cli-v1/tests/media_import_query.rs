@@ -737,6 +737,7 @@ async fn import_media(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &orna_runtime_v1::NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -1241,6 +1242,7 @@ async fn delete_media(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &orna_runtime_v1::NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -2258,6 +2260,7 @@ async fn commit_captured_binding(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
