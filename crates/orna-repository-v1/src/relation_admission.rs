@@ -1189,7 +1189,7 @@ impl Repository {
         tree: &IndexTreeRef,
         head: Option<&GitCommitRef>,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
-        let mut command = self.command();
+        let mut command = self.private_commit_command();
         command.args(["commit-tree", tree.as_str()]);
         if let Some(head) = head {
             command.args(["-p", head.as_str()]);
