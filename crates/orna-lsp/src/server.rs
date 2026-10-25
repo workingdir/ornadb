@@ -145,6 +145,8 @@ struct RequestContext {
     views: Arc<Views>,
     semantic_tokens: Arc<Mutex<SemanticTokenResults>>,
     pending_identity_renames: Arc<Mutex<PendingRenames>>,
+    /// Sends `window/showMessage` to the client from request workers.
+    client: Option<Arc<dyn Fn(Message) + Send + Sync>>,
 }
 
 /// The last semantic tokens sent for each document, for delta requests.
@@ -162,6 +164,20 @@ struct SemanticTokenSnapshot {
 impl RequestContext {
     fn document(&self, uri: &Uri) -> Option<&Document> {
         self.documents.get(uri).map(|open| &open.document)
+    }
+
+    /// Shows the client a warning the user must see, as `window/showMessage`.
+    fn show_warning(&self, message: &str) {
+        if let Some(client) = &self.client {
+            let params = lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::WARNING,
+                message: message.to_owned(),
+            };
+            client(Message::Notification(Notification {
+                method: "window/showMessage".to_owned(),
+                params: serde_json::to_value(params).unwrap_or_default(),
+            }));
+        }
     }
 
     /// The open documents, for diagnostics.
@@ -297,6 +313,7 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     state.client = Some(Arc::new(move |message| {
         let _ = sender.send(message);
     }));
+    state.context.client = state.client.clone();
 
     for message in &connection.receiver {
         match message {
@@ -974,7 +991,14 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
         .load(&repository)
         .map_err(|error| format!("{error:?}"))?;
     let modules = project.into_modules();
-    let previous = staged_identities(&repository)?
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| format!("{error:?}"))?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| format!("{error:?}"))?;
+    let previous = ObjectIdentityManifest::read_staged(&repository, &staged)
+        .map_err(|error| format!("{error:?}"))?
         .ok_or_else(|| "the staged object identities are missing".to_owned())?;
     let applicable = chains.into_iter().filter_map(|chain| {
         let first = chain.first()?;
@@ -1002,9 +1026,6 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
             .with_renames(&modules, std::slice::from_ref(rename))
             .map_err(|error| format!("{error:?}"))
     })?;
-    let staged = repository
-        .capture_staged_candidate()
-        .map_err(|error| format!("{error:?}"))?;
     let relative = path
         .strip_prefix(repository.worktree())
         .map_err(|error| format!("{error:?}"))?;
@@ -1070,14 +1091,24 @@ fn request_rename(
     let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Err(RequestFailed("cannot rename: the document is not open".to_owned()).into());
     };
-    let (_, edits) = rename::plan(&workspace, module, byte, &params.new_name).map_err(refused)?;
+    let (renamable, edits) = rename::plan(&workspace, module, byte, &params.new_name).map_err(refused)?;
     if let Some(home) = state.documents.get(&uri).and_then(|open| open.home.clone()) {
         verify_project_check(state, &home, &workspace, &edits)?;
     }
     let changes = workspace_changes(&workspace, &edits);
-    // An identity that cannot be read never fails an ordinary rename: the
-    // workspace edit is still returned and only the identity carry is skipped.
-    let identity = identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or(None);
+    // Local names are never recorded in the identity store, so only declared
+    // targets consult it. An identity that cannot be carried never fails an
+    // ordinary rename: the plain workspace edit is returned with a warning.
+    let identity = if matches!(renamable.target, crate::workspace::Target::Local { .. }) {
+        None
+    } else {
+        identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or_else(|error| {
+            state.show_warning(&format!(
+                "ORNA-LSP-RENAME-001: the rename was applied without carrying object identity ({error}); use orna mv to rename a table with its identity"
+            ));
+            None
+        })
+    };
     if let Some(rename) = identity
         && let Some(document) = state.document(&uri)
         && let Some(expected_text) = changes
@@ -2323,7 +2354,7 @@ mod persisted_object_rename_tests {
     }
 
     #[test]
-    fn rename_request_fails_when_staged_identities_are_unreadable() {
+    fn rename_request_returns_the_plain_edit_when_staged_identities_are_unreadable() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
         let (directory, _repository, source_path, _initial) = format3_fixture(source);
         git(directory.path(), &["rm", "--cached", "-q", "-r", ".orna/store"]);
@@ -2331,7 +2362,10 @@ mod persisted_object_rename_tests {
         let mut state = ServerState::new();
         open_document(&mut state, &uri, source);
 
-        assert!(request_rename(&state.context, rename_request(uri, "Archive")).is_err());
+        let response = request_rename(&state.context, rename_request(uri, "Archive"))
+            .expect("an unreadable identity never fails an ordinary rename");
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
     }
 
     #[test]
