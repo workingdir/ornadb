@@ -386,7 +386,7 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
             _ => false,
         },
         Type::Tuple(types) => match (value, expression) {
-            (Raw::Tag(60015, tagged), Expr::Tuple { elements, .. }) => match tagged.as_ref() {
+            (Raw::Tag(60015, tuple), Expr::Tuple { elements, .. }) => match tuple.as_ref() {
                 Raw::Array(values)
                     if values.len() == types.len() && elements.len() == types.len() =>
                 {
@@ -472,20 +472,22 @@ mod stored_reference_tests {
     }
 
     #[test]
-    fn tuple_field_admits_the_canonical_tagged_tuple_encoding() {
-        // Spec 29-formats: tuples are Tag(60015, Array) of ordered components.
-        let parsed = parse_row(r#"{ pair: (1, "a") }"#);
-        assert!(parsed.is_ok());
+    fn tuple_field_admits_only_the_tag_60015_array_encoding() {
+        // Spec 29-formats: tuples are Tag(60015, Array). A bare array in a tuple column is
+        // not that encoding and must be refused (matches_value false => ORNA-CONFORMANCE-ROW-TYPE).
+        let parsed = parse_row("{ coordinates: (51, \"north\") }");
         let Expr::Record { fields, .. } = &parsed.value else {
-            panic!("row body must parse as a record");
+            panic!("row fixture must parse as a record");
         };
+        let expression = &fields[0].value;
         let ty = Type::Tuple(vec![Type::Int, Type::Text]);
-        let tagged = Raw::Tag(
-            60015,
-            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())])),
+        let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
+        let tagged = Raw::Tag(60015, Box::new(bare.clone()));
+
+        assert!(matches_value(&tagged, &ty, expression));
+        assert!(
+            !matches_value(&bare, &ty, expression),
+            "a bare array in a tuple column must not admit"
         );
-        assert!(matches_value(&tagged, &ty, &fields[0].value));
-        let bare = Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]);
-        assert!(!matches_value(&bare, &ty, &fields[0].value));
     }
 }
