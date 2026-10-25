@@ -11515,7 +11515,9 @@ fn durable_dispatch_rejects_a_fenced_owner_before_cancellation_callback() {
         request_id: [65; 16],
     };
     let target_fingerprint = request_fingerprint(&eval([1; 16], [65; 16], "target"), [1; 16]);
-    let target_runtime = open_durable_state(&repository);
+    let target_runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let old = block_on(target_runtime.acquire_lease([66; 16])).unwrap();
     let (_, capability) =
         block_on(target_runtime.reserve_request_with_admission(target, target_fingerprint))
@@ -12723,7 +12725,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [3; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         third_identity,
         third_target_fingerprint,
@@ -13184,7 +13188,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [6; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         sixth_identity,
         sixth_target_fingerprint,
@@ -13397,7 +13403,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [7; 16],
         request_id: [92; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         seventh_identity,
         seventh_target_fingerprint,
@@ -13593,7 +13601,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         ));
     }
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         eighth_identity,
         eighth_target_fingerprint,
@@ -13736,7 +13746,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [9; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         ninth_identity,
         ninth_target_fingerprint,
@@ -14040,7 +14052,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == tenth_query_fingerprint
     ));
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         tenth_identity,
         tenth_target_fingerprint,
@@ -14273,7 +14287,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == eleventh_query_fingerprint
     ));
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         eleventh_identity,
         eleventh_target_fingerprint,
@@ -22102,10 +22118,12 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
 fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let (root, repository) = durable_repository();
     // The host takes the worktree owner lock, so its delete creates the writer
-    // lease. The reserving and late-admission runtime is a Secondary handle
-    // that cannot take the lease (ORNA-TURSO-005).
+    // lease. The reserving and late-admission handle is the host's owner-bound
+    // runtime; a Secondary handle cannot reserve (ORNA-TURSO-005).
     let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let initial = RequestIdentity {
         session_id: [1; 16],
         request_id: [102; 16],
