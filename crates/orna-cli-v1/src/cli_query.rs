@@ -351,13 +351,16 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // as text and then as those same bytes. Both are bounded point reads of
     // the committed row map, and the row that answers is a real committed row
     // rather than a reinterpretation of the query.
+    // A composite key has no single typed spelling, so every query form over
+    // such a table is refused, not only `--key`.
+    let key_type = match key_types.as_slice() {
+        [key_type] => key_type.as_deref(),
+        _ => return Err(composite_key_error()),
+    };
     let rows = match options.key {
         Some(key) => {
-            let [key_type] = key_types.as_slice() else {
-                return Err(composite_key_error());
-            };
             let mut found = None;
-            for candidate in key_candidates(key, key_type.as_deref())? {
+            for candidate in key_candidates(key, key_type)? {
                 found = graph
                     .lookup_row(&candidate, &scope)
                     .map_err(|error| query_error("Row lookup failed", format!("{error:?}")))?;
