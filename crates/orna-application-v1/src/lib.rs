@@ -45,6 +45,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     future::Future,
+    ops::Bound,
     pin::Pin,
     sync::{Arc, Mutex},
     time::UNIX_EPOCH,
@@ -1532,6 +1533,76 @@ impl SourceMutationEffectHandler {
             .cloned())
     }
 
+    /// Serves one bounded ascending page of an admitted table: the activation
+    /// snapshot merged with this activation's writes, so a row written earlier
+    /// in the activation reads back through the same relation (ORNA-QUERY-005).
+    /// Keys are canonical bytes, so ascending key order is ORNA-ORDER-001.
+    fn table_relation_page(
+        &self,
+        table: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<RelationPage, EvaluationError> {
+        let captured = self
+            .captured_rows
+            .as_ref()
+            .and_then(|rows| rows.get(table))
+            .ok_or_else(|| Self::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"))?;
+        let lower: Bound<&[u8]> = after.map_or(Bound::Unbounded, Bound::Excluded);
+        let mut captured_rows = captured
+            .range::<[u8], _>((lower, Bound::Unbounded))
+            .peekable();
+        let mut overlay_rows = self
+            .overlay
+            .get(table)
+            .into_iter()
+            .flat_map(|rows| rows.range::<[u8], _>((lower, Bound::Unbounded)))
+            .peekable();
+        let mut rows = Vec::new();
+        let mut last_key: Option<&Vec<u8>> = None;
+        loop {
+            let from_overlay = match (captured_rows.peek(), overlay_rows.peek()) {
+                (None, None) => break,
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                // An overlay entry shadows the captured row with the same key.
+                (Some((captured_key, _)), Some((overlay_key, _))) => overlay_key <= captured_key,
+            };
+            let (key, row) = if from_overlay {
+                let Some((key, row)) = overlay_rows.next() else {
+                    break;
+                };
+                if captured_rows
+                    .peek()
+                    .is_some_and(|(captured_key, _)| *captured_key == key)
+                {
+                    captured_rows.next();
+                }
+                (key, row.as_ref())
+            } else {
+                let Some((key, row)) = captured_rows.next() else {
+                    break;
+                };
+                (key, Some(row))
+            };
+            // A tombstone frees the key and contributes no row.
+            let Some(row) = row else {
+                continue;
+            };
+            if rows.len() == limit {
+                return Ok(RelationPage {
+                    rows,
+                    next: last_key.cloned(),
+                });
+            }
+            budget.debit(1)?;
+            rows.push(row.clone());
+            last_key = Some(key);
+        }
+        Ok(RelationPage { rows, next: None })
+    }
+
     fn admitted_table_name(&self, path: &str) -> Option<&str> {
         if let Some((name, _)) = self.tables.get_key_value(path) {
             return Some(name);
@@ -2341,6 +2412,13 @@ impl EffectHandler for SourceMutationEffectHandler {
         self.handle(callee, arguments)
     }
 
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        // Table reads need the activation snapshot; without one the name keeps
+        // its ordinary resolution instead of pointing at unreadable rows.
+        self.captured_rows.as_ref()?;
+        self.admitted_table_name(name).map(str::to_owned)
+    }
+
     fn scan_relation_page(
         &mut self,
         source: &str,
@@ -2353,6 +2431,9 @@ impl EffectHandler for SourceMutationEffectHandler {
                 rows: Vec::new(),
                 next: None,
             }));
+        }
+        if self.tables.contains_key(source) {
+            return self.table_relation_page(source, after, limit, budget).map(Some);
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
