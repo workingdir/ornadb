@@ -5,6 +5,33 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna query` with a predicate now reads the whole `--from`/`--until` range in
+  ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
+  `--from`/`--until` accept `int:N` (on an `Int` key), `uint:N` (on a `UInt` key)
+  and `text:KEY` (on a `Str` key), and `--key` tries integer spellings as integer
+  keys after text and bytes. `orna history KEY` shares that spelling resolution,
+  so an integer spelling also names the integer row there.
+  A predicate scan is paged for `Int`, `UInt` and `Str` primary keys. A predicate
+  scan over any other key type (Bool, Decimal, Uuid, Date, Instant, enum, table
+  ref) is refused up front with the flags to drop, and a page that ends at the
+  greatest unsigned key is refused rather than truncated. A predicate scan over a
+  composite (multi-component) primary key is refused, naming bead ornadb-5il1.461
+  (tuple key paging) as the remedy. Any `--from`/`--until` bound on a composite
+  key is refused, naming the same bead, because a single-component bound has no
+  defined order over the tuple. A bound whose spelling does not match a single
+  `Int`, `UInt` or `Str` primary key is refused naming the valid spelling
+  (`bytes:HEX` on a `Str` key is refused; use `text:KEY`) instead of answering
+  empty. `Bool` keys are not addressable by `--from`, `--until` or `--key`; both
+  are refused naming bead ornadb-5il1.461, and this change does not implement
+  them. `--key` on a key type it cannot spell (Decimal, Uuid, Date, Instant,
+  enum, table ref) is refused as not addressable yet (bead ornadb-5il1.461).
+  The `--format json` output of `orna query` with a predicate reports `rows` as
+  the number of committed rows read in the bounded range, and `blobs` as the
+  number of listings after the predicate; `plan.candidates` counts Blob-field
+  coordinates before the predicate and `plan.matched` counts those that passed.
+  Refusal and `orna history` error titles now carry their detail text
+  (`key_error` and `history_error`), so the human renderer shows the valid
+  spelling or bead named in the title; the title wording of those refusals changed.
 - `orna-repository-v1::format2_rov::decode_rov2_blob` decodes one superseded-draft format-2 ROV-2 storage reference (CBOR tag 60100 around `[sha256, length]`; draft ORNA-OGB-008, superseded ID) with shortest-form, width and 2^63-1 bounds. Its inline golden vectors were hand-copied from the draft archive and compared manually; the archive comparison test runs only when `ORNA_DRAFT_ZIP` is set (it prints SKIPPED otherwise, and fails when `ORNA_REQUIRE_DRAFT_ZIP=1`). Read-only; not wired into any read path. Final-spec authority for reading retained bytes is ORNA-ROW-013 and ORNA-UPGRADE-002, which are not yet met.
 - `orna-repository-v1::format2_orr::decode_orr2_blob_field` decodes one superseded-draft format-2 ORR-2 Blob field value (draft ORNA-OGB-007): an exact `{ blob: "sha256:<64 lowercase hex>", length: <decimal> }` record (no empty or trailing fields) or a legacy inline padded-Base64 string. Read-only; not wired into any read path; does not resolve `.orna/blobs` or produce an OVB-1 Blob.
 - `orna-repository-v1::format2_ogb::verify_ogb_root` read-only verifies a superseded-draft OGB-1 descriptor/index/chunk tree (draft ORNA-OGB-004/005): exact tree shape, modes, names, canonical CBOR, height/fanout bounds, chunk digests and content commitment, pinned to the draft `abc` vector. The caller supplies a verified object store; Git object IDs are not re-hashed. Missing objects are reported distinctly from corruption. Not wired into any read path; no writer or reader is activated.
