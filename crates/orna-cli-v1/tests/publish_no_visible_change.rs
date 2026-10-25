@@ -173,6 +173,7 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();

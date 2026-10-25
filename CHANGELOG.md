@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The controlled-transaction marker is now written only for activations whose
+  effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
+  only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
+  `ControlledEffectToken`; `ExternalPossible` (the `ActivationWork::new` default)
+  records external-effect uncertainty instead. A
+  faulted `ExternalPossible` activation is not reported as rollback-proven
+  (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
   feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
   `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
