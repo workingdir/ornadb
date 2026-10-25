@@ -3642,6 +3642,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bound_sys_host_registry_never_declares_controlled_only() {
+        // Regression: REPL `std.io.fs.write_text` reaches the filesystem through a
+        // bound registry, so declaring `None` would write a controlled-rollback marker.
+        let registry = orna_evaluator_v1::SysHostBindingRegistry::default();
+        assert!(registry.may_reach_external_state());
+        assert!(matches!(
+            declared_effects(registry.may_reach_external_state()),
+            ActivationEffectReport::ExternalPossible
+        ));
+        assert!(matches!(
+            declared_effects(false),
+            ActivationEffectReport::ControlledOnly(_)
+        ));
+    }
+
+    #[test]
     fn remote_analysis_is_denied_by_default_without_disclosure() {
         let denied = remote_analysis_request(RemoteAnalysisPolicy::default(), "snapshot:sha256:source-deps-resources-toolchain-abi", Vec::new());
         assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
