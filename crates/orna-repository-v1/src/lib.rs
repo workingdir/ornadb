@@ -7957,6 +7957,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command
     }
 
@@ -8258,6 +8259,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, directory);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -10111,6 +10113,36 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
+/// Stops Git's repository discovery at the parent of a repository root so a
+/// corrupt root `.git` cannot fall through to an enclosing repository. Only a
+/// directory that carries its own `.git` entry is a root; a plain subdirectory
+/// of a worktree (for example `.orna/` or `nested/`) must still discover the
+/// enclosing repository, so it is left unbound. The path is canonicalized first
+/// so a symlinked root binds to the directory it really resolves to; a relative
+/// path cannot yield an empty or relative ceiling.
+pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
+    let resolved = canonical_or_absolute(worktree);
+    if resolved.join(".git").exists() {
+        bind_git_ceiling_above(command, &resolved);
+    }
+}
+
+/// Stops Git's discovery at the parent of `directory` unconditionally. Use this
+/// where the caller requires `directory` itself to be a repository root: a plain
+/// subdirectory then yields no repository instead of its enclosing one.
+pub(crate) fn bind_git_ceiling_above(command: &mut Command, directory: &std::path::Path) {
+    let resolved = canonical_or_absolute(directory);
+    if let Some(parent) = resolved.parent() {
+        command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+}
+
+fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Prevent inherited Git routing from selecting a repository, worktree, or
 /// index other than the explicitly supplied command directory.
 pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
@@ -10673,6 +10705,87 @@ mod tests {
         assert_eq!(recovered.logical_rekeys(), &[event]);
     }
 
+    /// Builds `parent/healthy` as a real repository and `parent/healthy/child`
+    /// with a corrupt `HEAD`, so discovery from `child` must not reach `healthy`.
+    #[cfg(unix)]
+    pub(crate) fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
+        let healthy = root.join("healthy");
+        fs::create_dir_all(&healthy).unwrap();
+        let init = Command::new("git")
+            .current_dir(&healthy)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let child = healthy.join("child");
+        fs::create_dir_all(child.join(".git")).unwrap();
+        fs::write(child.join(".git").join("HEAD"), b"garbage\n").unwrap();
+        child
+    }
+
+    /// Runs `rev-parse HEAD` in `directory` under the production discovery bind.
+    #[cfg(unix)]
+    fn head_probe_succeeds_bound(directory: &Path) -> bool {
+        let mut command = Command::new("git");
+        command.current_dir(directory).args(["rev-parse", "HEAD"]);
+        super::scrub_git_routing_environment(&mut command);
+        super::bind_git_discovery_to_worktree(&mut command, directory);
+        command
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_symlinked_worktree_does_not_fall_through_to_real_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        let healthy = child.parent().unwrap();
+        let init = Command::new("git")
+            .current_dir(healthy)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "healthy",
+            ])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let plain = root.path().join("x");
+        fs::create_dir_all(&plain).unwrap();
+        let link = plain.join("L");
+        std::os::unix::fs::symlink(&child, &link).unwrap();
+        assert!(!head_probe_succeeds_bound(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_relative_path_to_corrupt_child_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let _child = corrupt_child_under_healthy_parent(root.path());
+        let previous = env::current_dir().unwrap();
+        env::set_current_dir(root.path()).unwrap();
+        let relative = Path::new("healthy").join("child");
+        let ok = head_probe_succeeds_bound(&relative);
+        env::set_current_dir(previous).unwrap();
+        assert!(!ok, "relative corrupt child must not adopt healthy parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_at_corrupt_root_under_healthy_parent_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        assert!(super::Repository::git_at(&child, ["rev-parse", "HEAD"]).is_err());
+    }
+
     /// Replaces one length-prefixed string in an encoded journal with another,
     /// keeping the surrounding wire format valid.
     pub(crate) fn splice_length_prefixed(
@@ -10776,6 +10889,53 @@ mod tests {
         // A corrupt HEAD makes git exit 128. The object may still exist, so
         // the answer is an error, never "absent" (which would skip the pin).
         fs::write(root.path().join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    /// A child repository nested inside a parent repository must not let a
+    /// corrupt child HEAD fall through to the parent. Git would then report the
+    /// child's pinned object as missing, and the publication pin check would
+    /// skip the pin (ORNA-PUB-006). The probe must fail closed instead.
+    #[test]
+    fn publication_probe_does_not_fall_through_a_corrupt_child_head() {
+        let parent = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(parent.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let child = parent.path().join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&child)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&child).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&child)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(repository.publication_object_present(&present).unwrap());
+
+        fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
         assert!(matches!(
             repository.publication_object_present(&present),
             Err(RepositoryError::GitOperationFailed)
@@ -12928,5 +13088,79 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+}
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::bind_git_discovery_to_worktree;
+    use std::process::Command;
+
+    #[test]
+    fn discovery_bind_makes_a_relative_ceiling_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &child);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discovery_bind_leaves_a_plain_subdirectory_free_to_discover_its_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join(".orna");
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &plain);
+        assert!(
+            command
+                .get_envs()
+                .all(|(name, _)| name != "GIT_CEILING_DIRECTORIES")
+        );
+    }
+
+    /// A relative worktree path must still bind to an absolute ceiling. The root
+    /// is created inside the process directory so its path can be given relative.
+    #[test]
+    fn discovery_bind_absolutizes_a_relative_worktree_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::Builder::new().tempdir_in(&cwd).unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let relative = std::path::PathBuf::from(root.path().file_name().unwrap());
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &relative);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, cwd.canonicalize().unwrap());
+    }
+
+    /// The unconditional ceiling binds a plain directory's parent, with no `.git`.
+    #[test]
+    fn unconditional_ceiling_binds_a_plain_directory_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let mut command = Command::new("git");
+        super::bind_git_ceiling_above(&mut command, &plain);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
     }
 }

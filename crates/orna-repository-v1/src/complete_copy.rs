@@ -1152,21 +1152,10 @@ fn dependency_directory(
 }
 
 fn is_repository(directory: &Path) -> bool {
-    if directory.join(".git").exists() {
-        return true;
-    }
-    let mut command = Command::new("git");
-    command
-        .current_dir(directory)
-        .args(["rev-parse", "--git-dir"]);
-    scrub_git_routing_environment(&mut command);
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    // Only a directory that carries its own `.git` entry is a repository root.
+    // Asking Git would let discovery climb into an enclosing repository and adopt
+    // a plain subdirectory.
+    directory.join(".git").exists()
 }
 
 /// Lists the committed gitlinks without consulting a checkout or remote.
@@ -1557,6 +1546,7 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
         .current_dir(directory)
         .args(["cat-file", "blob", oid]);
     scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, directory);
     // A recovery export is deliberately local-only: never lazily fetch missing
     // objects from a promisor remote recorded by the source repository.
     command.env("GIT_NO_LAZY_FETCH", "1");
@@ -1652,6 +1642,10 @@ fn encode_oid(digest: &[u8]) -> String {
 /// refs, index, and worktree are never written, so an export cannot move a
 /// branch, disturb an edit, or create a pin (ORNA-GIT-008).
 fn write_bundle(source: &Path, commit: &str, bundle: &Path) -> Result<(), CompleteCopyError> {
+    // The source is also passed to `git fetch` as an argument while Git runs
+    // inside it, so a relative path would be resolved twice. Make it absolute once.
+    let source = std::path::absolute(source)?;
+    let source = source.as_path();
     // Fetching a temporary branch into the staging repository both creates the
     // ref Git needs for bundling and pulls any objects the source's own
     // database holds only through a promisor or an alternate.
@@ -1847,6 +1841,7 @@ fn git_output_stdin(
     let mut command = Command::new("git");
     command.current_dir(directory).args(args);
     scrub_git_routing_environment(&mut command);
+    crate::bind_git_discovery_to_worktree(&mut command, directory);
     // Read only objects already present in this repository; the archive must
     // not depend on a configured remote being reachable.
     command.env("GIT_NO_LAZY_FETCH", "1");
@@ -2096,5 +2091,106 @@ mod tests {
         assert!(!valid_snapshot_bundle("snapshots/../../escape.bundle"));
         assert!(!valid_snapshot_bundle("snapshots/nested/ok.bundle"));
         assert!(!valid_snapshot_bundle("/etc/passwd"));
+    }
+}
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::{git_output_stdin, is_repository, verify_blob};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    fn git(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(directory)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A parent repository holding one six-byte blob, and a nested repository
+    /// with a corrupt HEAD that does not contain that blob.
+    fn corrupt_child_of_repository_with_blob() -> (tempfile::TempDir, PathBuf, String) {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        std::fs::write(parent.path().join("payload"), b"pinned").unwrap();
+        let oid = git(parent.path(), &["hash-object", "-w", "payload"]);
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-q"]);
+        std::fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
+        (parent, child, oid)
+    }
+
+    #[test]
+    fn verify_blob_does_not_read_an_enclosing_repository() {
+        let (parent, child, oid) = corrupt_child_of_repository_with_blob();
+        verify_blob(parent.path(), &oid, 6).unwrap();
+        assert!(verify_blob(&child, &oid, 6).is_err());
+    }
+
+    #[test]
+    fn git_output_stdin_does_not_read_an_enclosing_repository() {
+        let (parent, child, oid) = corrupt_child_of_repository_with_blob();
+        assert!(git_output_stdin(parent.path(), &["cat-file", "-e", oid.as_str()], None).is_ok());
+        assert!(git_output_stdin(&child, &["cat-file", "-e", oid.as_str()], None).is_err());
+    }
+
+    #[test]
+    fn is_repository_does_not_adopt_a_plain_subdirectory_of_a_repository() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        let subdirectory = parent.path().join("plain");
+        std::fs::create_dir(&subdirectory).unwrap();
+        assert!(!is_repository(&subdirectory));
+        // A child with its own .git entry counts as a repository by presence;
+        // its corrupt HEAD then fails every later git call closed.
+        let (_parent, child, _oid) = corrupt_child_of_repository_with_blob();
+        assert!(is_repository(&child));
+    }
+
+    #[test]
+    fn symlink_to_a_plain_subdirectory_is_not_a_dependency_repository() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        let plain = parent.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let links = tempfile::TempDir::new().unwrap();
+        let dependency = links.path().join("dependency");
+        std::os::unix::fs::symlink(&plain, &dependency).unwrap();
+        assert!(!is_repository(&dependency));
+    }
+
+    #[test]
+    fn symlink_to_a_linked_worktree_is_a_healthy_dependency() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        git(
+            parent.path(),
+            &[
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "root",
+            ],
+        );
+        let commit = git(parent.path(), &["rev-parse", "HEAD"]);
+        let worktrees = tempfile::TempDir::new().unwrap();
+        let linked = worktrees.path().join("linked");
+        git(
+            parent.path(),
+            &["worktree", "add", "-q", "--detach", linked.to_str().unwrap()],
+        );
+        let links = tempfile::TempDir::new().unwrap();
+        let dependency = links.path().join("dependency");
+        std::os::unix::fs::symlink(&linked, &dependency).unwrap();
+        assert!(is_repository(&dependency));
+        assert!(super::object_at(&dependency, &commit).unwrap().is_some());
     }
 }
