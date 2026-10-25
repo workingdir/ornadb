@@ -7,19 +7,31 @@ been published.
 ## Unreleased
 - `orna query` with a predicate now reads the whole `--from`/`--until` range in
   ordered pages instead of evaluating only the first 256 rows (ORNA-ROW-009);
-  `--from`/`--until` accept `int:N` and `uint:N`, and `--key` tries integer
-  spellings as integer keys after text and bytes. `orna history KEY` shares that
-  spelling resolution, so an integer spelling also names the integer row there.
-  A predicate scan over a primary key type it cannot page (anything other than
-  Int, Str or Bool) is refused up front with the flags to drop, and a page that
-  ends at the greatest unsigned key is refused rather than truncated. A predicate
-  scan over a composite (multi-component) primary key is refused, naming bead
-  ornadb-5il1.461 (tuple key paging) as the remedy; plain listings, `--key` and
-  unpredicated bounded ranges over a composite key are not refused. A
-  `--from`/`--until` bound whose spelling does not match a single `Int`, `UInt`
-  or `Str` primary key is refused naming the valid spelling instead of answering
-  empty, and `--key` on a key type it cannot spell (Decimal, Uuid, Date, Instant,
+  `--from`/`--until` accept `int:N` (on an `Int` key), `uint:N` (on a `UInt` key)
+  and `text:KEY` (on a `Str` key), and `--key` tries integer spellings as integer
+  keys after text and bytes. `orna history KEY` shares that spelling resolution,
+  so an integer spelling also names the integer row there.
+  A predicate scan is paged for `Int`, `UInt` and `Str` primary keys. A predicate
+  scan over any other key type (Bool, Decimal, Uuid, Date, Instant, enum, table
+  ref) is refused up front with the flags to drop, and a page that ends at the
+  greatest unsigned key is refused rather than truncated. A predicate scan over a
+  composite (multi-component) primary key is refused, naming bead ornadb-5il1.461
+  (tuple key paging) as the remedy. Any `--from`/`--until` bound on a composite
+  key is refused, naming the same bead, because a single-component bound has no
+  defined order over the tuple. A bound whose spelling does not match a single
+  `Int`, `UInt` or `Str` primary key is refused naming the valid spelling
+  (`bytes:HEX` on a `Str` key is refused; use `text:KEY`) instead of answering
+  empty. `Bool` keys are not addressable by `--from`, `--until` or `--key`; both
+  are refused naming bead ornadb-5il1.461, and this change does not implement
+  them. `--key` on a key type it cannot spell (Decimal, Uuid, Date, Instant,
   enum, table ref) is refused as not addressable yet (bead ornadb-5il1.461).
+  The `--format json` output of `orna query` with a predicate reports `rows` as
+  the number of committed rows read in the bounded range, and `blobs` as the
+  number of listings after the predicate; `plan.candidates` counts Blob-field
+  coordinates before the predicate and `plan.matched` counts those that passed.
+  Refusal and `orna history` error titles now carry their detail text
+  (`key_error` and `history_error`), so the human renderer shows the valid
+  spelling or bead named in the title; the title wording of those refusals changed.
 - The language server's semantic rename keeps a table or field's object identity.
   Owner-visible behaviour: on save, the editor writes to the git index. The index
   entry for `main.orna` is replaced with the whole saved file (not only the renamed
