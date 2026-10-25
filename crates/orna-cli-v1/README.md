@@ -112,6 +112,12 @@ one resolved commit. `orna mount status`
 reports attached views in human or `--json` form. Host FUSE mounts are supported
 on Linux only.
 
+`orna mount status --json` emits one object per attached view with the keys
+`mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
+`unresolved_drafts` (an array of `{"path","detail"}` for each unresolved draft of a
+writable mount), and `draft_error` (a string when drafts could not be listed, else
+`null`). `read_only` is always the negation of `writable`.
+
 ## Boundary
 
 Execution currently uses the bounded pure evaluator. Unsupported declarations
