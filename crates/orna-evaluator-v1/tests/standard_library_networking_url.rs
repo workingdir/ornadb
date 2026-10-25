@@ -40,7 +40,7 @@ fn pinned_functions() -> Functions {
             }
         }
     }
-    functions
+    functions.into_iter().collect()
 }
 
 #[test]
