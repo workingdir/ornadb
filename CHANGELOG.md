@@ -12,6 +12,11 @@ been published.
   ORNA-APP-013). Oversize bodies on non-`/orna` routes answer 413 instead of
   400, and the Origin/Host refusal now runs before the size check (bead
   ornadb-5il1.387).
+- Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
+  legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
+  ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
+  ORNA-REPO-CONTEXT-003 (unknown format) because the gate reclassified the
+  mixed snapshot (ORNA-META-001, ORNA-META-002; Gate A).
 - `mkdir` and `rmdir` on the live writable mount now return `EPERM`, the same
   errno as every other refused mutation there (profiles/vfs-1.md errno table;
   41-vfs.md:103-105). They previously fell through to the fuser default, ENOSYS,

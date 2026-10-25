@@ -1832,6 +1832,9 @@ fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
     orna_runtime_v1::repository_runtime_identity(repository).map_err(|error| match error {
+        orna_runtime_v1::RuntimeError::UnknownHeadFormat(
+            refusal @ orna_repository_v1::FormatContextError::MixedFormats { .. },
+        ) => cli_commit::mixed_formats_at_head(&refusal),
         orna_runtime_v1::RuntimeError::UnknownHeadFormat(refusal) => Diagnostic::target(
             refusal.code(),
             "repository format is unknown",
