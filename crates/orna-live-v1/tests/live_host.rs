@@ -382,7 +382,7 @@ struct UnitApplication {
 }
 
 struct CompetingTerminalApplication {
-    repository: Repository,
+    holder: Arc<RuntimeState>,
     owner: [u8; 16],
     calls: usize,
 }
@@ -501,11 +501,11 @@ impl LiveApplication for CompetingTerminalApplication {
             },
             extensions: BTreeMap::new(),
         };
-        let repository = self.repository.clone();
+        let holder = Arc::clone(&self.holder);
         let owner = self.owner;
         let fingerprint = *fingerprint;
         std::thread::spawn(move || {
-            let runtime = open_durable_state(&repository);
+            let runtime = holder;
             let writer = block_on(runtime.acquire_lease(owner)).unwrap();
             block_on(
                 runtime.complete_observed_request_with_owner(
@@ -550,11 +550,11 @@ impl LiveApplication for CompetingTerminalApplication {
             },
             extensions: BTreeMap::new(),
         };
-        let repository = self.repository.clone();
+        let holder = Arc::clone(&self.holder);
         let owner = self.owner;
         let fingerprint = *fingerprint;
         std::thread::spawn(move || {
-            let runtime = open_durable_state(&repository);
+            let runtime = holder;
             let writer = block_on(runtime.acquire_lease(owner)).unwrap();
             block_on(
                 runtime.complete_observed_request_with_owner(
@@ -11645,10 +11645,13 @@ fn durable_runtime_rejects_a_retained_response_with_the_wrong_message_shape() {
 fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
     let (root, repository) = durable_repository();
     let owner = [91; 16];
-    // The host takes the worktree owner lock, so it alone creates writer lease
-    // [91]. The competing terminal writer and the assertion handle are Secondary
-    // and may only re-acquire the lease their owner already holds (ORNA-TURSO-005).
+    // The host's owner-bound runtime holds the worktree owner lock and creates
+    // writer lease [91]. The racing terminal writer reuses that holder handle;
+    // the assertion handle is Secondary and only reads (ORNA-TURSO-005).
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let runtime = open_durable_state(&repository);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
@@ -11668,7 +11671,7 @@ fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
         request_id: [92; 16],
     };
     let mut application = CompetingTerminalApplication {
-        repository: repository.clone(),
+        holder,
         owner,
         calls: 0,
     };
@@ -11701,6 +11704,7 @@ fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
     );
     assert_eq!(application.calls, 1);
     drop(host);
+    drop(application);
     drop(runtime);
     remove_test_repository(&root);
 }
