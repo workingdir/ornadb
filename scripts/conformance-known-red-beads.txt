@@ -1,0 +1,6 @@
+# Bead ids permitted in the bead column of scripts/conformance-known-red.txt.
+# Adding a new bead id here is a reviewed change; the gate rejects any other id.
+ornadb-qx8l
+ornadb-f073
+ornadb-6aqk
+ornadb-qfzp

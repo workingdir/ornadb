@@ -1,0 +1,6 @@
+# Known-red orna-conformance-v1 tests: name<TAB>bead<TAB>reason<TAB>expected failure substring. Checked by scripts/check-conformance-known-red.sh.
+defined_semantic_diagnostic_codes_are_reachable_from_real_fixtures	ornadb-qx8l	owner type mismatch does not reach stable diagnostic ORNA-A091-004; product gap	A091-004 did not reach stable diagnostic ORNA-A091-004
+every_invalid_sidecar_matches_the_emitted_diagnostic_payload	ornadb-qx8l	same owner type mismatch: emitted diagnostic payload differs from the sidecar; product gap	unexpected payload mismatch for examples/invalid/assert-owner-type-mismatch.orna
+partial_mutation_rollback_keeps_the_empty_batch_for_a_failed_request	ornadb-qfzp	executable assert false in a durable request does not produce ORNA-A091-008; product gap	assertion failed: matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() ==
+project_row_admission_accepts_exact_current_container_forms	ornadb-f073	tuple row admission (coordinates: (51, "north")) fails; fix is on PR 9370 branch, not on this branch	assertion `left == right` failed
+semantic_adapter_preserves_published_closed_type_diagnostics	ornadb-6aqk	implicit-conversion-chain diagnostic differs from ORNA091-E-CONVERSION-CHAIN required by the published codes; product gap	invalid/implicit-conversion-chain.orna:

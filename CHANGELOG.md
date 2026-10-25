@@ -16,6 +16,7 @@ been published.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
 ### Fixes
+- Conformance gate: `scripts/check-conformance-known-red.sh` runs the full `orna-conformance-v1` test crate and fails on any failure not listed in `scripts/conformance-known-red.txt` (each row names a bead from `scripts/conformance-known-red-beads.txt`), and on any listed row that no longer fails or fails with a different message. CI runs it as `conformance-v1-tests` with `CONFORMANCE_KNOWN_RED_MAX`. Five known-red tests cover four product gaps: ornadb-qx8l (owner type mismatch does not reach ORNA-A091-004; two tests), ornadb-f073 (tuple row admission), ornadb-6aqk (implicit-conversion-chain diagnostic), and ornadb-qfzp (durable executable `assert false` does not surface ORNA-A091-008). `SEMANTIC_KNOWN_RED_MAX` is unchanged.
 - Conformance fixture pins now match current product output: `automatic-failure-propagation` passes and its stale pin is removed. The `failure-natural-key`, `stream-admin-repl`, `finite-stream` and `table-key-default` pins record product gaps tracked by ornadb-jnf1 and ornadb-7owc.
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
