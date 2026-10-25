@@ -20,7 +20,7 @@
 use super::cli_history::bare_ref_selector_is_ambiguous;
 use super::*;
 use crate::cli_row_key::{
-    check_bound_type, check_point_key_type, composite_bound_error, composite_key_error, key_candidates,
+    check_bound_type, check_point_key_type, composite_bound_error, key_candidates,
 };
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
@@ -367,26 +367,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     } else if options.from.is_some() || options.until.is_some() {
         return Err(composite_bound_error());
     }
-    // A predicate scan pages the table by successor keys, so it needs a key
-    // type with a successor. This is decided from the descriptor, not the row
-    // count, so a small table is refused the same way a large one is.
-    if options.has_predicate && options.key.is_none() {
-        match single_key {
-            None => return Err(composite_key_error()),
-            Some(key_type) if !is_pageable_key_type(key_type) => {
-                return Err(query_error(
-                    "Predicate scan cannot page this table's key type",
-                    format!(
-                        "the primary key is {}, which a predicate scan cannot page; \
-                         drop --kind, --not-kind, --suffix, --min-length and --max-length \
-                         to list the rows in range with --limit",
-                        key_type.unwrap_or("not a primitive type")
-                    ),
-                ));
-            }
-            Some(_) => {}
-        }
-    }
     let row_map = format
         .load_row_map(*table.relation_id())
         .map_err(|error| query_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -403,12 +383,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // the committed row map, and the row that answers is a real committed row
     // rather than a reinterpretation of the query. A single-component key
     // type that `--key` cannot spell is refused rather than missed.
-    let point_key_type = match single_key {
-        None => None,
-        Some(key_type) => {
+    let point_key_type = match (single_key, options.key) {
+        (Some(key_type), Some(_)) => {
             check_point_key_type(key_type)?;
             key_type
         }
+        _ => None,
     };
     let rows = match options.key {
         Some(key) => {
@@ -565,10 +545,10 @@ fn scan_all_rows(
 }
 
 /// Pages `[from, until)` in ordered pages of `page_rows` keys. Each page
-/// resumes at the successor of the last key it returned, so no row is read
-/// twice and none is skipped. A full page whose last key has no successor
-/// cannot be resumed, so the scan is refused rather than ending early and
-/// silently dropping the rows that order after it.
+/// resumes after the last key it returned, through the range's exclusive
+/// resume cursor, so no row is read twice and none is skipped. The cursor is
+/// a comparison under the logical key order, so every key type pages,
+/// composite keys included, and no successor of a key is ever computed.
 fn scan_pages<T>(
     page_rows: usize,
     from: Option<TypedKey>,
@@ -576,11 +556,11 @@ fn scan_pages<T>(
     mut read_page: impl FnMut(&KeyRange) -> Result<Vec<T>, Diagnostic>,
     key_of: impl Fn(&T) -> TypedKey,
 ) -> Result<Vec<T>, Diagnostic> {
+    let base = KeyRange::new(from, until, page_rows)
+        .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
     let mut rows = Vec::new();
-    let mut lower = from;
+    let mut range = base.clone();
     loop {
-        let range = KeyRange::new(lower.clone(), until.clone(), page_rows)
-            .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
         let page = read_page(&range)?;
         let short = page.len() < page_rows;
         let Some(last) = page.last().map(&key_of) else {
@@ -590,58 +570,12 @@ fn scan_pages<T>(
         if short {
             break;
         }
-        let Some(next) = successor_key(&last)? else {
-            return Err(query_error(
-                "Predicate scan cannot continue past its last key",
-                format!(
-                    "a full page of {page_rows} rows ends at key {last:?}, which has no successor; \
-                     rows ordering after it would be dropped, so the scan is refused. \
-                     Narrow the range with --from/--until, or drop the predicate flags to list rows with --limit"
-                ),
-            ));
-        };
-        if until.as_ref().is_some_and(|upper| next >= *upper) {
-            break;
-        }
-        lower = Some(next);
+        range = base
+            .clone()
+            .with_resume_after(last)
+            .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
     }
     Ok(rows)
-}
-
-/// The least key of the same type that orders after `key`, or `None` when
-/// `key` is the greatest key of its type. Composite and wide keys have no
-/// such successor in this seam, so a scan over them is refused rather than
-/// silently truncated.
-fn successor_key(key: &TypedKey) -> Result<Option<TypedKey>, Diagnostic> {
-    Ok(match key {
-        TypedKey::Text(text) => Some(TypedKey::Text(format!("{text}\0"))),
-        TypedKey::Bytes(bytes) => {
-            let mut next = bytes.clone();
-            next.push(0);
-            Some(TypedKey::Bytes(next))
-        }
-        TypedKey::Int(value) if *value == i64::MAX => Some(TypedKey::UInt(1 << 63)),
-        TypedKey::Int(value) => Some(TypedKey::Int(value + 1)),
-        TypedKey::UInt(value) => value.checked_add(1).map(TypedKey::UInt),
-        TypedKey::Bool(false) => Some(TypedKey::Bool(true)),
-        TypedKey::Bool(true) | TypedKey::Null => None,
-        TypedKey::Tuple(_) | TypedKey::Value(_) => {
-            return Err(query_error(
-                "Predicate scan cannot page this key type",
-                format!(
-                    "key {key:?} has no successor in the row seam (bead ornadb-5il1.461); narrow with --from/--until"
-                ),
-            ));
-        }
-    })
-}
-
-/// Whether a predicate scan can page a table whose primary key has this
-/// primitive type name. Only the primitive key types the spec permits
-/// (`Int`, `UInt`, `Str`) have a successor in `successor_key` here; a
-/// composite, `Bool`, `Decimal`, `Uuid`, `Date`, `Instant`, enum or table-ref key does not.
-fn is_pageable_key_type(key_type: Option<&str>) -> bool {
-    matches!(key_type, Some("Int" | "UInt" | "Str"))
 }
 
 /// The measured plan of one annotation predicate evaluation.
@@ -880,26 +814,6 @@ mod tests {
     }
 
     #[test]
-    fn successors_step_each_key_type_to_the_next_key_of_that_type() {
-        use super::successor_key;
-        assert_eq!(
-            successor_key(&TypedKey::Text("a".into())).unwrap(),
-            Some(TypedKey::Text("a\0".into()))
-        );
-        assert_eq!(
-            successor_key(&TypedKey::Bytes(vec![1])).unwrap(),
-            Some(TypedKey::Bytes(vec![1, 0]))
-        );
-        assert_eq!(
-            successor_key(&TypedKey::Int(i64::MAX)).unwrap(),
-            Some(TypedKey::UInt(1 << 63))
-        );
-        assert_eq!(successor_key(&TypedKey::UInt(u64::MAX)).unwrap(), None);
-        assert_eq!(successor_key(&TypedKey::Bool(true)).unwrap(), None);
-        assert!(successor_key(&TypedKey::Tuple(vec![])).is_err());
-    }
-
-    #[test]
     fn typed_bounds_parse_integers_and_refuse_bad_spellings() {
         use super::parse_bound_key;
         assert_eq!(parse_bound_key("int:-3").unwrap(), TypedKey::Int(-3));
@@ -910,7 +824,8 @@ mod tests {
     }
 
     /// Pages a sorted key set the way the graph does: each read serves the
-    /// keys in `[lower, upper)`, at most `page_rows` of them.
+    /// keys in `[lower, upper)` strictly above the resume cursor, at most the
+    /// range's limit of them.
     fn scan_fixture(
         keys: &[TypedKey],
         from: Option<TypedKey>,
@@ -925,8 +840,9 @@ mod tests {
                 Ok(keys
                     .iter()
                     .filter(|key| range.lower_inclusive().is_none_or(|lower| *key >= lower))
+                    .filter(|key| range.resume_after().is_none_or(|after| *key > after))
                     .filter(|key| range.upper_exclusive().is_none_or(|upper| *key < upper))
-                    .take(page_rows)
+                    .take(range.limit())
                     .cloned()
                     .collect())
             },
@@ -991,6 +907,34 @@ mod tests {
     }
 
     #[test]
+    fn scan_pages_pages_composite_keys_component_wise() {
+        let mut keys: Vec<TypedKey> = Vec::new();
+        for first in 0..4_i64 {
+            for second in ["a", "b", "c"] {
+                keys.push(TypedKey::Tuple(vec![
+                    TypedKey::Int(first),
+                    TypedKey::Text(second.to_owned()),
+                ]));
+            }
+        }
+        keys.sort();
+        for page_rows in [1_usize, 2, 5, super::MAX_QUERY_LIMIT] {
+            let scanned = scan_fixture(&keys, None, None, page_rows).unwrap();
+            assert_eq!(scanned, keys, "page {page_rows}");
+        }
+        let from = TypedKey::Tuple(vec![TypedKey::Int(1), TypedKey::Text("b".to_owned())]);
+        let until = TypedKey::Tuple(vec![TypedKey::Int(2), TypedKey::Text("b".to_owned())]);
+        let expected: Vec<TypedKey> = keys
+            .iter()
+            .filter(|key| *key >= &from && *key < &until)
+            .cloned()
+            .collect();
+        assert!(!expected.is_empty());
+        let scanned = scan_fixture(&keys, Some(from), Some(until), 2).unwrap();
+        assert_eq!(scanned, expected);
+    }
+
+    #[test]
     fn scan_pages_reaches_a_uint_key_held_only_by_a_later_page() {
         let keys: Vec<TypedKey> = (0..600_u64).map(TypedKey::UInt).collect();
         let scanned = scan_fixture(
@@ -1005,26 +949,11 @@ mod tests {
     }
 
     #[test]
-    fn scan_pages_refuses_a_full_page_that_ends_at_the_greatest_unsigned_key() {
+    fn scan_pages_continues_past_a_full_page_at_the_greatest_unsigned_key() {
         let keys: Vec<TypedKey> = (u64::MAX - 255..=u64::MAX).map(TypedKey::UInt).collect();
-        assert!(scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).is_err());
+        assert_eq!(scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap(), keys);
         let short: Vec<TypedKey> = (u64::MAX - 2..=u64::MAX).map(TypedKey::UInt).collect();
-        assert_eq!(
-            scan_fixture(&short, None, None, super::MAX_QUERY_LIMIT).unwrap(),
-            short
-        );
-    }
-
-    #[test]
-    fn only_spec_primitive_key_types_are_pageable() {
-        use super::is_pageable_key_type;
-        for key_type in ["Int", "UInt", "Str"] {
-            assert!(is_pageable_key_type(Some(key_type)), "{key_type}");
-        }
-        for key_type in ["Bool", "Decimal", "Uuid", "Date", "Instant"] {
-            assert!(!is_pageable_key_type(Some(key_type)), "{key_type}");
-        }
-        assert!(!is_pageable_key_type(None));
+        assert_eq!(scan_fixture(&short, None, None, super::MAX_QUERY_LIMIT).unwrap(), short);
     }
 
     #[test]
