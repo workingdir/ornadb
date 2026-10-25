@@ -216,6 +216,8 @@ fn refused_write_leaves_repository_head_and_worktree_unchanged() {
         "pub table Note(id: Int) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.insert({ id: 1, body: \"written\" });\n}\n",
     );
     let head_before = git_stdout(project.path(), &["rev-parse", "HEAD"]);
+    // `orna init` leaves its untracked `.orna/` metadata; the request must not change status.
+    let status_before = git_stdout(project.path(), &["status", "--porcelain"]);
     let (_server, address) = start_server(project.path());
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
@@ -223,10 +225,7 @@ fn refused_write_leaves_repository_head_and_worktree_unchanged() {
         git_stdout(project.path(), &["rev-parse", "HEAD"]),
         head_before
     );
-    assert_eq!(
-        git_stdout(project.path(), &["status", "--porcelain", "--", ":!.orna"]),
-        ""
-    );
+    assert_eq!(git_stdout(project.path(), &["status", "--porcelain"]), status_before);
 }
 
 #[test]
