@@ -1005,8 +1005,16 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
     let staged = repository
         .capture_staged_candidate()
         .map_err(|error| format!("{error:?}"))?;
+    let relative = path
+        .strip_prefix(repository.worktree())
+        .map_err(|error| format!("{error:?}"))?;
+    let logical_path = relative.to_string_lossy().replace('\\', "/");
     repository
-        .stage_object_identities(&staged, &next.to_stored(), &[])
+        .stage_object_identities(
+            &staged,
+            &next.to_stored(),
+            &[(logical_path.as_str(), saved_text.as_bytes())],
+        )
         .map(|_| ())
         .map_err(|error| format!("{error:?}"))
 }
@@ -1067,8 +1075,10 @@ fn request_rename(
         verify_project_check(state, &home, &workspace, &edits)?;
     }
     let changes = workspace_changes(&workspace, &edits);
-    if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name)
-        .map_err(RequestFailed)?
+    // An identity that cannot be read never fails an ordinary rename: the
+    // workspace edit is still returned and only the identity carry is skipped.
+    let identity = identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or(None);
+    if let Some(rename) = identity
         && let Some(document) = state.document(&uri)
         && let Some(expected_text) = changes
             .get(&uri)
