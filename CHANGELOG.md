@@ -8,12 +8,16 @@ been published.
 - The language server's semantic rename keeps a table or field's object identity.
   Owner-visible behaviour: on save, the editor writes to the git index. The index
   entry for `main.orna` is replaced with the whole saved file (not only the renamed
-  hunk), and the identity inventory and `.orna/store` are staged too. Nothing is
-  committed; `orna commit` then keeps the identity, like `orna mv`. A field rename is
-  staged the same way, but `orna commit` refuses it with "schema evolution is not
-  admitted" until schema evolution is implemented (ORNA-EVOL-002). An identity that
-  cannot be carried leaves the rename applied and shows a warning with code
-  `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`). Concurrent
+  hunk), and the identity inventory and `.orna/store` are staged too, but only when
+  the `main.orna` index entry still equals HEAD's or the text the edit started from.
+  Otherwise nothing is staged and the warning asks for manual staging, so partial
+  `git add -p` work is never overwritten. Nothing is committed; `orna commit` then
+  keeps the identity, like `orna mv`. A field rename is not staged: it is refused with
+  the warning `ORNA-LSP-RENAME-001` ("schema evolution is not admitted") until schema
+  evolution is implemented (ORNA-EVOL-002). An identity that cannot be carried leaves
+  the rename applied and shows a warning with code `ORNA-LSP-RENAME-001` and the remedy
+  `orna mv` (`ornadb-5il1.414`). A rename applied to the buffer but not saved before
+  the document closes or reopens is reported as "the rename was not saved". Concurrent
   inventory changes are guarded by the staged-store `StaleIndex` check. An outer
   coordination lock was not added because the install path takes the same lock
   non-blockingly: a re-entrant attempt fails with `RepositoryBusy`, so the install
