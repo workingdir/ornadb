@@ -433,7 +433,6 @@ fn format3_repository_parts(
     let modules = [ModuleInput::new("main.orna", media_source)];
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
-    let manifest_bytes = identities.encode().unwrap();
     let table = identities
         .source_table_schema(
             &modules,
@@ -448,7 +447,6 @@ fn format3_repository_parts(
     let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
-    std::fs::write(root.join(".orna/object-identities.cbor"), &manifest_bytes).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
     std::fs::write(root.join("main.orna"), media_source).unwrap();
     git(root, &["add", "--all"]);
@@ -522,12 +520,11 @@ fn format3_repository_parts(
     let store_root_oid =
         native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
     let database_oid = git_object(root, "blob", database.as_bytes());
-    let manifest_oid = git_object(root, "blob", &manifest_bytes);
     let source_oid = git_object(root, "blob", media_source.as_bytes());
     let orna_tree = git_tree(
         root,
         &format!(
-            "100644 blob {database_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
+            "100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root_oid}\tstore\n"
         ),
     );
     let root_tree = git_tree(
