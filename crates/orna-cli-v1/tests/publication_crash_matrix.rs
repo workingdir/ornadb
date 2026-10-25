@@ -638,7 +638,21 @@ fn coordinated_gc_and_repack(repository: &Repository, root: &Path) {
 // index-install parks after the reconciled index is installed but before
 // its IndexReconciled journal stage is durable (ORNA-PUB-007).
 async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) {
-    for boundary in ["index-lock", "capture", "row", "candidate", "ref-cas", "index-install", "index", "ref-index", "tail"] {
+    for boundary in [
+        "index-lock",
+        "capture",
+        "row",
+        "candidate",
+        "ref-cas-pre-journal",
+        "ref-cas",
+        "store-worktree",
+        "index-install",
+        "index",
+        "worktree",
+        "ref-index",
+        "runtime-complete",
+        "tail",
+    ] {
         let (directory, _source, repository, state, _base, _relation_id, _format_context) =
             seeded_project().await;
         let root = directory.path();
@@ -679,7 +693,28 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let pre_journal = repository.read_publication_journal().unwrap().is_some();
         let pre_pins = git_output(root, &["for-each-ref", "--format=%(refname)", "refs/orna/pins"], None);
         assert_eq!(pre_pins, seeded_pins, "killed child changed pin refs at {boundary}");
-        assert!(pre_journal == matches!(boundary, "ref-cas" | "index-install" | "index" | "ref-index"), "unexpected journal state at {boundary}");
+        let journal_expected = matches!(
+            boundary,
+            "ref-cas-pre-journal"
+                | "ref-cas"
+                | "store-worktree"
+                | "index-install"
+                | "index"
+                | "worktree"
+                | "ref-index"
+                | "runtime-complete"
+        );
+        assert!(pre_journal == journal_expected, "unexpected journal state at {boundary}");
+        // Recovery table rows (22-publication.md:63-72). Before the ref CAS, HEAD is still the base and
+        // the batch is pending. After the CAS, HEAD already names the candidate the killed publisher
+        // journaled (or, after journal removal, the candidate it completed).
+        let pre_head = head(&repository);
+        let pre_ref_cas = matches!(boundary, "index-lock" | "capture" | "row" | "candidate");
+        if pre_ref_cas {
+            assert_eq!(pre_head, base.as_str(), "ref moved before the ref CAS at {boundary}");
+        } else if let Some(journal) = repository.read_publication_journal().unwrap() {
+            assert_eq!(pre_head, journal.new_head().as_str(), "journal candidate differs from HEAD at {boundary}");
+        }
         // Before the Prepared journal, every publication pin an attempt holds must be its own base
         // index tree or its own candidate commit (parent = base head). Anything else is foreign.
         if matches!(boundary, "index-lock" | "capture" | "row" | "candidate") {
@@ -702,6 +737,29 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         let resumed = cli(root, &["--debug", "publish"]);
         assert!(resumed.status.success(), "recovery at {boundary} failed: {}", String::from_utf8_lossy(&resumed.stderr));
         let once = head(&repository);
+        if pre_ref_cas {
+            let parent_spec = format!("{once}^");
+            let parent = String::from_utf8_lossy(&git_output(root, &["rev-parse", "--verify", parent_spec.as_str()], None)).trim().to_owned();
+            assert_eq!(parent, base.as_str(), "recovered candidate is not parented on the captured HEAD at {boundary}");
+        } else {
+            assert_eq!(once, pre_head, "recovery moved HEAD off the candidate the killed publisher advanced to at {boundary}");
+        }
+        // Managed paths of the published commit must match the candidate after recovery: the worktree
+        // bytes equal the committed bytes and the ordinary index equals HEAD (recovery table rows 2-3,
+        // ORNA-PUB-011/016). Store paths are skip-worktree by design and are excluded.
+        let range_spec = format!("{}..{}", base.as_str(), once);
+        let changed = String::from_utf8_lossy(&git_output(root, &["diff-tree", "--no-commit-id", "--name-only", "-r", base.as_str(), once.as_str()], None)).into_owned();
+        let managed: Vec<&str> = changed.lines().filter(|path| !path.starts_with(".orna/store")).collect();
+        // Format 3 publishes rows only under `.orna/store` (ORNA-REPO-004), so the managed-worktree loop
+        // is empty for these fixtures. Assert that precondition explicitly rather than pass vacuously.
+        assert!(changed.lines().all(|path| path.starts_with(".orna/store")), "candidate changed a non-store path at {boundary}: {changed}");
+        for path in managed {
+            let object_spec = format!("{once}:{path}");
+            let committed = git_output(root, &["show", object_spec.as_str()], None);
+            assert_eq!(std::fs::read(root.join(path)).unwrap(), committed, "worktree bytes differ from candidate for {path} at {boundary}");
+            let staged = git_output(root, &["diff", "--cached", "--name-only", once.as_str(), "--", path], None);
+            assert!(staged.is_empty(), "index differs from HEAD for {path} at {boundary}");
+        }
         assert_ne!(once, base.as_str(), "candidate not retained after {boundary}");
         assert!(repository.read_publication_journal().unwrap().is_none(), "journal left after {boundary}");
         assert!(
@@ -726,6 +784,8 @@ async fn publish_kill_matrix(between_kill_and_recovery: fn(&Repository, &Path)) 
         assert!(second.status.success(), "second publish after {boundary} failed: {}", String::from_utf8_lossy(&second.stderr));
         assert_eq!(head(&repository), once, "publication repeated after {boundary}");
         assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+        let commit_count = String::from_utf8_lossy(&git_output(root, &["rev-list", "--count", range_spec.as_str()], None)).trim().to_owned();
+        assert_eq!(commit_count, "1", "publication did not produce exactly one commit at {boundary}");
         assert!(publication_pin_refs(root).is_empty(), "publication pins remain after second publish at {boundary}");
         // Lock and lease-release evidence only. This block does NOT prove Gate D P5 ("no abandoned
         // owner retains write permission"): no token is rejected here, and the publisher never held
