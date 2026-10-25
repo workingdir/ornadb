@@ -5,6 +5,14 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A complete-copy export of a workspace with a legacy format-1/2 snapshot now
+  admits that snapshot by its recorded format record, and an offline restore
+  re-admits each member (Gate F, `ACCEPTANCE.md:63-68`,
+  `24-git-history.md:19`). Format-3 members still require their schema and
+  store roots. Earlier builds refused every non-format-3 snapshot as a complete
+  copy. The migrated-member leg (`migrate copy` publication) remains open under
+  ornadb-5il1.192, and a gitlink whose dependency repository is absent is still
+  refused.
 - Runtime admission refuses a `HEAD` whose `.orna` metadata mixes layouts (a
   legacy `.orna/format.orna` or 1.0 sidecar beside `.orna/store`) with
   ORNA-REPO-CONTEXT-004 `MixedFormats`, naming `.orna/store`. It used to report
