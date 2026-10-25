@@ -5,7 +5,8 @@ name: Nightly gates
 # "Evidence record per gate"):
 # - `cargo test --workspace --no-fail-fast`, split into five runners by package
 #   for disk and time. The five shards together cover every workspace package.
-# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import runs in the cli shard.
+# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import runs in the cli shard
+#   on schedule and dispatch only; a pull request skips it (hours of runner disk, cli-gate-b.yml).
 #   Gate C at one million rows runs in gate-c-scale.yml (PR 9344), not here.
 # - cargo fmt and Clippy, which do not pass on main yet.
 # Every job writes an evidence record with scripts/gate_evidence.py: commit,
@@ -132,6 +133,7 @@ jobs:
           --timeout-minutes 330
           ${{ matrix.recorder }}
           -- cargo test --locked --no-fail-fast ${{ matrix.packages }}
+          ${{ matrix.shard == 'cli' && github.event_name == 'pull_request' && '-- --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata' || '' }}
 
       - name: Show free disk space
         if: ${{ !cancelled() }}
