@@ -844,3 +844,105 @@ async fn same_length_truncate_clears_guard_on_accepted_fsync_while_open() {
     await_draft_guard(&fixture, b'0', "closing the handle leaves no draft state").await;
     assert_view_contains(&fixture, "Truncate same");
 }
+
+/// EDIT-1 step 2: a write followed by fsync of a valid candidate is acknowledged
+/// only after the candidate is accepted, and the accepted fsync clears the
+/// handle's dirty state.
+#[tokio::test]
+async fn write_then_fsync_accepts_candidate_and_clears_dirty_state() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Write then sync"));
+    assert_eq!(draft_guard(&fixture), b'1', "a write is pending draft state");
+    file.sync_all().expect("fsync of a written candidate is acknowledged");
+    assert_view_contains(&fixture, "Write then sync");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "the accepted fsync clears the dirty handle",
+    );
+}
+
+/// EDIT-1 step 2: rewriting the accepted bytes produces a candidate equal to
+/// the baseline; fsync of that candidate is acknowledged and leaves the handle
+/// clean.
+#[tokio::test]
+async fn identical_bytes_write_then_fsync_is_ok_and_clean() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Identical bytes"));
+    file.sync_all().expect("first fsync accepts the candidate");
+    let accepted = fresh_view(&fixture);
+    replace_draft(&mut file, &accepted);
+    file.sync_all()
+        .expect("fsync of a rewrite of the accepted bytes is acknowledged");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "an identical-bytes rewrite leaves the handle clean",
+    );
+    assert_eq!(fresh_view(&fixture), accepted, "accepted bytes are unchanged");
+}
+
+/// EDIT-1 step 2: O_TRUNC with no write submits an empty candidate. That
+/// candidate is validated like any other: the row schema rejects an empty
+/// document, so fsync returns EINVAL (not the dirty-handle EIO), the accepted
+/// view is unchanged, and a new open still reads the accepted row.
+#[tokio::test]
+async fn open_truncate_without_write_then_fsync_is_validated_not_eio() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut seed = open_rw(&fixture);
+    replace_draft(&mut seed, &row("Truncate target"));
+    seed.sync_all().expect("seed fsync accepts the candidate");
+    drop(seed);
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&fixture.data_path)
+        .expect("open data.orna with O_TRUNC");
+    assert_errno(
+        file.sync_all(),
+        EINVAL,
+        "fsync of an O_TRUNC-only empty candidate is rejected by validation",
+    );
+    drop(file);
+    assert_view_contains(&fixture, "Truncate target");
+}
+
+/// EDIT-1 step 2: a failed write (offset beyond the draft size limit) leaves no
+/// candidate, so it must not mark the handle dirty; the following fsync is
+/// acknowledged and the accepted view is unchanged.
+#[tokio::test]
+async fn failed_write_then_fsync_is_ok_and_not_dirty() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Before failed write"));
+    file.sync_all().expect("first fsync accepts the candidate");
+    let accepted = fresh_view(&fixture);
+    file.seek(SeekFrom::Start(1 << 40))
+        .expect("seek beyond the draft size limit");
+    assert!(
+        file.write_all(b"x").is_err(),
+        "a write beyond the draft size limit is refused",
+    );
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "a refused write does not leave the handle dirty",
+    );
+    file.sync_all()
+        .expect("fsync after a refused write is acknowledged");
+    assert_eq!(fresh_view(&fixture), accepted, "accepted state is unchanged");
+}
