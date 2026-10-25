@@ -2223,9 +2223,9 @@ mod persisted_object_rename_tests {
         assert!(Command::new("git").args(args).current_dir(directory).status().unwrap().success());
     }
 
-    /// A format-3 repository whose index stages `main.orna` as `source`, with
-    /// the identity inventory `orna commit` would stage for it.
-    fn format3_fixture(source: &str) -> (tempfile::TempDir, Repository, PathBuf, ObjectIdentityManifest) {
+    /// A format-3 repository whose `main.orna` is committed as `source`, with no
+    /// identity inventory staged.
+    fn format3_committed(source: &str) -> (tempfile::TempDir, Repository, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let repository = orna_repository_v1::initialize_repository(directory.path())
             .unwrap()
@@ -2237,6 +2237,13 @@ mod persisted_object_rename_tests {
             "-c", "user.name=orna-test", "-c", "user.email=orna-test@example.invalid",
             "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
         ]);
+        (directory, repository, source_path)
+    }
+
+    /// A format-3 repository whose index stages `main.orna` as `source`, with
+    /// the identity inventory `orna commit` would stage for it.
+    fn format3_fixture(source: &str) -> (tempfile::TempDir, Repository, PathBuf, ObjectIdentityManifest) {
+        let (directory, repository, source_path) = format3_committed(source);
         let module = ModuleInput::new("main.orna", source);
         let initial = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
         let staged = repository.capture_staged_candidate().unwrap();
@@ -2482,6 +2489,103 @@ mod persisted_object_rename_tests {
         assert_eq!(shown_warnings(&messages).len(), 2, "one warning per rename request, none on save");
         fs::remove_file(merge_head).unwrap();
         assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    /// A rename request at `line`/`character`, for any declaration in the buffer.
+    fn rename_request_at(uri: &Uri, line: u32, character: u32, new_name: &str) -> Request {
+        Request::new(
+            1.into(),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "newName": new_name,
+            }),
+        )
+    }
+
+    /// The number of text edits in a rename response.
+    fn edit_count(response: serde_json::Value) -> usize {
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        edit.changes.unwrap().values().map(Vec::len).sum()
+    }
+
+    #[test]
+    fn rename_of_an_uncommitted_table_is_plain_and_silent() {
+        // Only `Media` has a committed identity; `Draft` exists in the buffer alone.
+        let committed = "pub table Media(id: Str) { payload: Blob, }\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(committed);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, &format!("{committed}pub table Draft(id: Str) {{ note: Str, }}\n"));
+
+        // No committed identity for `Draft`: the lookup is `Ok(None)`, so the
+        // plain edit is returned and nothing is shown.
+        let response = request_rename(&state.context, rename_request_at(&uri, 1, 11, "Final")).unwrap();
+        assert!(edit_count(response) > 0);
+        assert!(shown_warnings(&messages).is_empty(), "an uncommitted table has no identity to carry");
+    }
+
+    #[test]
+    fn ambiguous_field_rename_warns_when_a_committed_identity_exists() {
+        let source = "pub table Media(id: Str) { title: Str, }\npub table Music(id: Str) { title: Str, }\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Both tables hold a committed `title`, so the field cannot be matched to one identity.
+        let response = request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading")).unwrap();
+        assert!(edit_count(response) > 0, "the plain edit still returns");
+        assert_one_rename_warning(&messages, "matches several fields");
+    }
+
+    #[test]
+    fn legacy_format_rename_warns_that_identity_is_not_carried() {
+        let directory = tempfile::tempdir().unwrap();
+        orna_repository_v1::write_legacy_format1_fixture(directory.path());
+        let source_path = directory.path().join("main.orna");
+        let source = "pub table Media(id: Str) { payload: Blob, }\n";
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Format 1 and 2 repositories have no object identities to carry.
+        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        assert_eq!(edit_count(response), 1);
+        assert_one_rename_warning(&messages, "object identity was not carried");
+    }
+
+    #[test]
+    fn rename_without_a_staged_identity_inventory_warns_and_keeps_the_text() {
+        let source = "pub table Media(id: Str) { payload: Blob, }\n";
+        let (_directory, _repository, source_path) = format3_committed(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        assert_eq!(edit_count(response), 1);
+        assert_one_rename_warning(&messages, "the staged object identities are missing");
+    }
+
+    #[test]
+    fn local_rename_never_warns() {
+        let source = "pub fn total(value: Int): Int = value;\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Column 15 is inside the parameter `value`, a local name with no identity.
+        let response = request_rename(&state.context, rename_request_at(&uri, 0, 15, "amount")).unwrap();
+        assert!(edit_count(response) > 0);
+        assert!(shown_warnings(&messages).is_empty(), "a local rename carries no identity");
     }
 
     #[test]
