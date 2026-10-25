@@ -21,7 +21,7 @@ fn text_value(value: &str) -> CanonicalValue {
 }
 
 fn pinned_functions() -> Functions {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_evaluator_v1::reference_standard_sources() {
         let parsed = orna_syntax_v1::parse_module(&source);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);

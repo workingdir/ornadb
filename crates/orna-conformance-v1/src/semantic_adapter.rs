@@ -332,12 +332,12 @@ pub trait RuntimeEvaluator {
 pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
-    functions: BTreeMap<String, RetainedFunction>,
+    functions: Functions,
     nominal_definitions: NominalDefinitions,
 }
 
 struct BoundedSourceExecutor {
-    functions: BTreeMap<String, RetainedFunction>,
+    functions: Functions,
     nominal_definitions: NominalDefinitions,
     limits: EvaluatorLimits,
     descriptor: FunctionDescriptor,
@@ -655,7 +655,7 @@ impl BoundedEvaluator {
         Self {
             environment: BTreeMap::new(),
             limits,
-            functions: BTreeMap::new(),
+            functions: Functions::new(),
             nominal_definitions: NominalDefinitions::new(),
         }
     }
@@ -665,7 +665,7 @@ impl BoundedEvaluator {
         Self {
             environment,
             limits,
-            functions: BTreeMap::new(),
+            functions: Functions::new(),
             nominal_definitions: NominalDefinitions::new(),
         }
     }
@@ -1067,7 +1067,7 @@ impl RuntimeEvaluator for BoundedEvaluator {
 /// braced name absent from the pinned module is an import error, and two
 /// modules binding one unqualified name to different targets are ambiguous.
 fn bind_standard_function_aliases(
-    functions: &mut BTreeMap<String, RetainedFunction>,
+    functions: &mut Functions,
     project: &ProjectUnit,
 ) -> Result<(), StageOutcome<Diagnostic>> {
     let mut aliases = BTreeMap::<String, String>::new();
@@ -1122,7 +1122,9 @@ fn bind_standard_function_aliases(
     }
     for (alias, target) in aliases {
         if let Some(function) = functions.get(&target).cloned() {
-            functions.entry(alias).or_insert(function);
+            if !functions.contains_key(&alias) {
+                functions.insert(alias, function);
+            }
         }
     }
     Ok(())
@@ -6752,7 +6754,11 @@ fn admit_transaction_project(
                 reason: "project transaction modules declare a duplicate table name".into(),
             }));
         }
-        functions.extend(module_functions);
+        functions.extend(module_functions).map_err(|_| {
+            Box::new(StageOutcome::Skipped {
+                reason: "project transaction modules bind a second standard layer".into(),
+            })
+        })?;
         key_fields.extend(module_keys);
         float_fields.extend(module_float_fields);
         table_fields.extend(module_table_fields);
@@ -6795,7 +6801,9 @@ fn admit_transaction_project(
     }
     for (alias, target) in standard_aliases {
         if let Some(function) = functions.get(&target).cloned() {
-            functions.entry(alias).or_insert(function);
+            if !functions.contains_key(&alias) {
+                functions.insert(alias, function);
+            }
         }
     }
     // Candidate validation can admit a project without executing a transaction entry.
@@ -7152,7 +7160,7 @@ fn lower_relation_bindings(
     table_fields: &TableFields,
 ) -> Functions {
     let mut materialized = functions.clone();
-    for (name, function) in materialized.iter_mut() {
+    for (name, function) in materialized.local_iter_mut() {
         let mut shadowed = BTreeSet::new();
         for parameter in &function.parameters {
             shadowed.extend(relation_pattern_names(&parameter.pattern));
@@ -12570,9 +12578,9 @@ mod durable_tests {
             );
 
             assert!(
-                matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
+                matches!(&lowered.get("total").expect("total is lowered").body, Expr::Binary { op, .. } if op == "|"),
                 "{operation} shadow was lowered: {:?}",
-                lowered["total"].body
+                lowered.get("total").expect("total is lowered").body
             );
         }
     }
@@ -12619,9 +12627,9 @@ mod durable_tests {
                 "window_case",
             ] {
                 assert!(
-                    matches!(&lowered[name].body, Expr::Binary { op, .. } if op == "|"),
+                    matches!(&lowered.get(name).expect("case is lowered").body, Expr::Binary { op, .. } if op == "|"),
                     "{name} was specialized despite lexical shadowing: {:?}",
-                    lowered[name].body
+                    lowered.get(name).expect("case is lowered").body
                 );
             }
         }
