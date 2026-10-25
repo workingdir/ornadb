@@ -7,7 +7,7 @@ use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
 fn pinned_functions() -> Functions {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_evaluator_v1::reference_standard_sources() {
         let parsed = orna_syntax_v1::parse_module(&source);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);

@@ -1049,6 +1049,70 @@ async fn binary_invoke_routes_single_module_std_import_needing_publication_metad
     assert!(output.stderr.is_empty());
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn binary_invoke_executes_std_function_calls_through_authority_route() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub fn answer(): Bool {\n    let rows = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1;\n    assert rows == 1;\n    assert increment(1) == 2;\n    true\n}\n",
+        )],
+    );
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "check",
+        ])
+        .output()
+        .expect("CLI check");
+    assert!(
+        check.status.success(),
+        "check stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let (runtime_identity, initial_digest) = identity(directory.path());
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let context = state.begin_activation().await.expect("capture activation");
+    let lease = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .expect("writer lease");
+    let payload = b"fixture".to_vec();
+    let mutation = Mutation {
+        id: [11; 16],
+        digest: Sha256::digest(&payload).into(),
+        payload,
+    };
+    state
+        .commit_activation(
+            lease,
+            &context,
+            &[mutation],
+            Sha256::digest(b"std function call authority routing proof").into(),
+            &NoFault,
+        )
+        .await
+        .expect("seed durable pending mutation");
+
+    let output = invoke(directory.path(), "invoke", "answer");
+
+    assert!(
+        output.status.success(),
+        "invoke stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
 #[test]
 fn binary_run_without_a_target_reports_a_missing_root_main() {
     let directory = tempfile::tempdir().expect("project directory");
