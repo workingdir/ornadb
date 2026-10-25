@@ -98,12 +98,26 @@ impl CommittedReadBudget {
         Self { limits, bytes: 0 }
     }
 
-    /// Admits the next row of a table already holding `table_rows` admitted
-    /// rows, whose key and stored tuple take `row_bytes` bytes.
-    fn admit(&mut self, table_rows: usize, row_bytes: usize) -> Result<(), CommittedReadError> {
+    /// Checks that the next row of a table already holding `table_rows` admitted rows
+    /// is within the per-table row limit. Runs before that row's tuple is decoded.
+    fn check_row_slot(&self, table_rows: usize) -> Result<(), CommittedReadError> {
+        let rows_seen = table_rows.saturating_add(1);
+        if rows_seen > self.limits.max_rows_per_table {
+            return Err(CommittedReadError::Limit { rows_seen });
+        }
+        Ok(())
+    }
+
+    /// Admits the key and stored-tuple bytes of a row whose slot was checked. The
+    /// row is of a table already holding `table_rows` admitted rows.
+    fn admit_row_bytes(
+        &mut self,
+        table_rows: usize,
+        row_bytes: usize,
+    ) -> Result<(), CommittedReadError> {
         let rows_seen = table_rows.saturating_add(1);
         let bytes = self.bytes.saturating_add(row_bytes);
-        if rows_seen > self.limits.max_rows_per_table || bytes > self.limits.max_bytes {
+        if bytes > self.limits.max_bytes {
             return Err(CommittedReadError::Limit { rows_seen });
         }
         self.bytes = bytes;
@@ -154,6 +168,15 @@ pub fn committed_tables(
             }
             let next_lower = page.last().map(|row| row.key().clone());
             for row in page.into_iter().skip(usize::from(lower.is_some())) {
+                let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
+                let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
+                let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
+                // Reject a key whose shape does not match the primary key declaration.
+                key_values(admission.keys.len(), key_value.raw())?;
+                let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
+                // The row slot is checked before the stored tuple is decoded, so the row
+                // past the per-table row limit is never decoded or retained.
+                budget.check_row_slot(committed.len())?;
                 // The committed descriptor validates the whole stored tuple,
                 // Blob references included, so the tuple is kept as stored.
                 let decoded = graph
@@ -168,16 +191,10 @@ pub fn committed_tables(
                 {
                     return Err(TableStorageError.into());
                 }
-                let canonical_key = row.key().canonical_bytes().map_err(|_| TableStorageError)?;
-                let key_value = Value::decode(&canonical_key).map_err(|_| TableStorageError)?;
-                let key_bytes = key_value.encode().map_err(|_| TableStorageError)?;
-                // Reject a key whose shape does not match the primary key declaration.
-                key_values(admission.keys.len(), key_value.raw())?;
-                let runtime_key = runtime_key_from_evaluator(&key_bytes, text_primary_key)?;
                 let value = decoded.canonical_fields();
-                // Admitted before insertion, so the row past the limit is never retained
-                // and the page loop stops there.
-                budget.admit(committed.len(), runtime_key.len() + value.len())?;
+                // The byte bound needs the stored tuple's size, so it is admitted once
+                // decoded and before the row is retained.
+                budget.admit_row_bytes(committed.len(), runtime_key.len() + value.len())?;
                 if committed.insert(runtime_key, value.to_vec()).is_some() {
                     return Err(TableStorageError.into());
                 }
@@ -813,14 +830,14 @@ mod tests {
 
     #[test]
     fn read_budget_refuses_the_row_past_the_table_limit() {
-        let mut budget = CommittedReadBudget::new(CommittedReadLimits {
+        let budget = CommittedReadBudget::new(CommittedReadLimits {
             max_rows_per_table: 2,
             max_bytes: usize::MAX,
         });
-        assert_eq!(budget.admit(0, 1), Ok(()));
-        assert_eq!(budget.admit(1, 1), Ok(()));
+        assert_eq!(budget.check_row_slot(0), Ok(()));
+        assert_eq!(budget.check_row_slot(1), Ok(()));
         assert_eq!(
-            budget.admit(2, 1),
+            budget.check_row_slot(2),
             Err(CommittedReadError::Limit { rows_seen: 3 })
         );
     }
@@ -832,10 +849,10 @@ mod tests {
             max_bytes: 5,
         });
         // Two tables share one byte budget: 3 bytes in the first, 2 in the second.
-        assert_eq!(budget.admit(0, 3), Ok(()));
-        assert_eq!(budget.admit(0, 2), Ok(()));
+        assert_eq!(budget.admit_row_bytes(0, 3), Ok(()));
+        assert_eq!(budget.admit_row_bytes(0, 2), Ok(()));
         assert_eq!(
-            budget.admit(1, 1),
+            budget.admit_row_bytes(1, 1),
             Err(CommittedReadError::Limit { rows_seen: 2 })
         );
     }
