@@ -354,3 +354,60 @@ fn unborn_head_reports_entry_unavailable() {
     assert_eq!(status, 500, "body: {body}");
     assert!(body.contains("serve.entry_unavailable"), "body: {body}");
 }
+
+/// Walks `directory` and collects every regular file beneath it.
+fn store_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(directory).expect("read the store directory") {
+        let path = entry.expect("read a store entry").path();
+        if path.is_dir() {
+            store_files(&path, files);
+        } else {
+            files.push(path);
+        }
+    }
+}
+
+/// Overwrites every file of the committed format-3 store in a new commit. The
+/// store holds both the commit's identity inventory and its rows (ORNA-REPO-004),
+/// so the committed HEAD is unreadable and `serve` must refuse it.
+fn commit_corrupt_store(root: &Path) {
+    let mut files = Vec::new();
+    store_files(&root.join(".orna/store"), &mut files);
+    assert!(!files.is_empty(), "the committed store has files to corrupt");
+    for file in &files {
+        fs::write(file, b"corrupt").expect("corrupt a store file");
+    }
+    git(root, &["add", ".orna/store"]);
+    git(root, &["commit", "-m", "Corrupt store"]);
+}
+
+#[test]
+fn corrupt_identity_manifest_is_refused_without_a_value() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    commit_corrupt_store(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert!(
+        body.contains("serve.table_identity_unavailable"),
+        "body: {body}"
+    );
+    assert!(!body.contains(": Int"), "no partial value: {body}");
+}
+
+#[test]
+fn corrupt_committed_table_is_refused_without_a_value() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    commit_corrupt_store(&root);
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert!(body.contains("serve."), "a coded refusal: {body}");
+    assert!(!body.contains(": Int"), "no partial value: {body}");
+}

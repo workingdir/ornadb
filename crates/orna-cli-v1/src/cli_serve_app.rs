@@ -90,20 +90,52 @@ impl ServeApp {
         )
     }
 
-    /// Stages `serve` for one request at this clone's HEAD and CWD. The
-    /// committed `main.orna` at HEAD is admitted, its tables are bound to their
-    /// committed identities, and the committed rows are overlaid with the CWD
-    /// generation captured for this activation. A missing or unreadable HEAD
+    /// Stages `serve` for one request at this clone's HEAD and CWD.
+    ///
+    /// The request takes no per-request lock. The argument that one read cannot
+    /// mix generations has three steps, in this order:
+    /// 1. The published pin is read before the HEAD commit is captured. A
+    ///    publication after the pin moves the published mutation sequence away
+    ///    from that pin.
+    /// 2. Every committed row is read from that one captured commit, an
+    ///    immutable Git object, so no row can change under the read.
+    /// 3. The activation's transaction (`load_tx` in the runtime) captures the
+    ///    CWD generation and re-reads the published sequence in one immediate
+    ///    transaction. A sequence that differs from the pin fails closed as
+    ///    `StaleCapture`, which this request reports as the coded 500
+    ///    `serve.evaluation_failed` with no value.
+    /// The served process holds the runtime owner lock, so an ordinary write
+    /// cannot change the CWD while it serves. A publish that does not take the
+    /// lease is the remaining writer path, and step 3 covers it.
+    ///
+    /// The committed `main.orna` at HEAD is admitted, its tables are bound to
+    /// their committed identities, and the committed rows are overlaid with the
+    /// CWD generation captured for this activation. A missing or unreadable HEAD
     /// entry is `serve.entry_unavailable`; a table whose committed identity is
     /// missing, or present for only some tables, is refused before any read.
     fn stage_at_head(&self) -> Result<StagedActivation, &'static str> {
         let repository = orna_repository_v1::Repository::discover(&self.root)
             .map_err(|_| "serve.entry_unavailable")?;
-        let commit = repository
-            .head()
-            .ok()
-            .flatten()
-            .ok_or("serve.entry_unavailable")?;
+        // An unborn HEAD is reported before any runtime state opens.
+        let _ = Self::head_commit(&repository)?;
+        let (identity, initial_digest) =
+            runtime_identity(&repository).map_err(|_| "serve.table_rows_unavailable")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        // The served process holds the runtime owner lock, so this per-request
+        // handle opens as a secondary reader: it reads the CWD and the published
+        // pin but never writes or fences the owner.
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        // Step 1: the pin is read before the HEAD capture below.
+        let pin = runtime
+            .block_on(state.published_pin())
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        // Step 2: every committed read below uses this one captured commit.
+        let commit = Self::head_commit(&repository)?;
         let bytes = repository
             .read_committed_file(
                 &commit,
@@ -158,23 +190,15 @@ impl ServeApp {
         if admitted.requires_publication_metadata() {
             return Err("serve.table_read_unsupported");
         }
-        let (identity, initial_digest) =
-            runtime_identity(&repository).map_err(|_| "serve.table_rows_unavailable")?;
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| "serve.table_rows_unavailable")?;
-        // The served process holds the runtime owner lock, so this per-request
-        // handle opens as a secondary reader: it reads the CWD and the published
-        // pin but never writes or fences the owner.
-        let state = runtime
-            .block_on(RuntimeState::open(&repository, identity, initial_digest))
-            .map_err(|_| "serve.table_rows_unavailable")?;
         let (rows, storage_orders) = committed_rows_at(&repository, &commit, &admitted, &tables)
             .map_err(|_| "serve.table_rows_unavailable")?;
         check_committed_read_limits(&rows)?;
-        let committed = pin_committed_tables(&runtime, &state, rows, storage_orders)
-            .map_err(|_| "serve.table_rows_unavailable")?;
+        // Step 3 is the activation's `load_tx` fence over this pin.
+        let committed = PinnedCommittedTables {
+            rows: PinnedCommittedRows::new(pin, rows)
+                .map_err(|_| "serve.table_rows_unavailable")?,
+            storage_orders,
+        };
         let (_snapshot, staged) = evaluate_over_committed_tables(
             &runtime,
             &state,
@@ -186,6 +210,18 @@ impl ServeApp {
         )
         .map_err(|_| "serve.evaluation_failed")?;
         Ok(staged)
+    }
+
+    /// The HEAD commit of `repository`. An unborn HEAD has no commit to serve
+    /// (ORNA-SERVE-003) and is `serve.entry_unavailable`.
+    fn head_commit(
+        repository: &orna_repository_v1::Repository,
+    ) -> Result<orna_repository_v1::GitCommitRef, &'static str> {
+        repository
+            .head()
+            .ok()
+            .flatten()
+            .ok_or("serve.entry_unavailable")
     }
 }
 
