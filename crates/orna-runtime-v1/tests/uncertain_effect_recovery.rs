@@ -44,6 +44,7 @@ const FINGERPRINT: [u8; 32] = [6; 32];
 const SIGABRT: i32 = 6;
 const ROLLBACK_PROVEN: &str = "rollback-proven";
 const EFFECTS_UNCERTAIN: &str = "external-effects-uncertain";
+const UNREPORTED_ROLLBACK_TEST: &str = "unreported_rollback_before_the_kill_is_never_proven";
 
 /// Which request-level crash the re-executed child performs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -54,6 +55,10 @@ enum Scenario {
     /// A controlled transaction was rolled back in-process, then the process
     /// dies after the rollback was recorded.
     ControlledRollbackThenKill,
+    /// An activation declared possible external effects, its table write was
+    /// rolled back in-process, then the process dies. The rollback is observed
+    /// but cannot be proven controlled, so recovery must stay uncertain.
+    UnreportedRollbackThenKill,
 }
 
 impl Scenario {
@@ -61,6 +66,7 @@ impl Scenario {
         match self {
             Self::ExternalEffectAtKill => "external-effect-at-kill",
             Self::ControlledRollbackThenKill => "controlled-rollback-then-kill",
+            Self::UnreportedRollbackThenKill => "unreported-rollback-then-kill",
         }
     }
 
@@ -68,6 +74,7 @@ impl Scenario {
         match value {
             "external-effect-at-kill" => Some(Self::ExternalEffectAtKill),
             "controlled-rollback-then-kill" => Some(Self::ControlledRollbackThenKill),
+            "unreported-rollback-then-kill" => Some(Self::UnreportedRollbackThenKill),
             _ => None,
         }
     }
@@ -251,6 +258,53 @@ fn controlled_rollback_child(repository_path: &Path) {
                 outcome(ROLLBACK_PROVEN),
                 &RefuseAt(FaultPoint::AfterTableWrite),
                 ActivationEffectReport::declare(DeclaredEffectSet::None),
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
+            ),
+            "the refused table write must surface as an in-process rollback"
+        );
+        std::process::abort();
+    });
+}
+
+/// Commits an activation that declares possible external effects and whose
+/// table write is refused in-process. The runtime rolls the write back, but
+/// without a controlled declaration it records no rollback proof, so the
+/// process dies with an unprovable rollback on record.
+fn unreported_rollback_child(repository_path: &Path) {
+    let repository = Repository::discover(repository_path).expect("discover child repository");
+    runtime().block_on(async {
+        let state = RuntimeState::open(&repository, identity(), [3; 32])
+            .await
+            .expect("open child runtime");
+        let owner = state.acquire_lease(OWNER).await.expect("acquire writer");
+        let (_, capability) = state
+            .reserve_request_with_admission(request(), FINGERPRINT)
+            .await
+            .expect("reserve request");
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .start_request_with_owner_and_admission(request(), FINGERPRINT, owner, capability)
+            .await
+            .expect("start owned request");
+        let context = state.begin_activation().await.expect("capture activation");
+        let mutation = TableMutation::insert([7; 16], "records", vec![1], vec![9])
+            .expect("valid typed table mutation");
+        let result = state
+            .commit_table_request_activation(
+                owner,
+                request(),
+                FINGERPRINT,
+                &context,
+                &[mutation],
+                [8; 32],
+                outcome(ROLLBACK_PROVEN),
+                &RefuseAt(FaultPoint::AfterTableWrite),
+                ActivationEffectReport::declare(DeclaredEffectSet::ExternalPossible),
             )
             .await;
         assert!(
@@ -485,6 +539,69 @@ fn controlled_rollback_before_the_kill_is_the_only_proven_rollback() {
         assert_eq!(
             reopened.committed_table_row("records", &[1]).await.unwrap(),
             None
+        );
+    });
+}
+
+#[test]
+fn unreported_rollback_before_the_kill_is_never_proven() {
+    if child_scenario() == Some(Scenario::UnreportedRollbackThenKill) {
+        unreported_rollback_child(&child_repository());
+    }
+
+    let (directory, repository) = repository();
+    let status = run_crashing_child(
+        Scenario::UnreportedRollbackThenKill,
+        directory.path(),
+        UNREPORTED_ROLLBACK_TEST,
+    );
+    assert_eq!(
+        status.signal(),
+        Some(SIGABRT),
+        "the child must die by signal after its in-process rollback"
+    );
+
+    runtime().block_on(async {
+        let state = RuntimeState::open(&repository, identity(), [3; 32])
+            .await
+            .expect("an unreported rollback reopens as valid recovery state");
+        assert_eq!(
+            state.committed_table_row("records", &[1]).await.unwrap(),
+            None,
+            "the rolled-back table write is not acknowledged"
+        );
+
+        let fence = state
+            .recover_abandoned(OWNER, REPLACEMENT)
+            .await
+            .expect("the abandoned owner is recoverable by compare-and-swap");
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                request(),
+                FINGERPRINT,
+                RequestOwner {
+                    owner_id: OWNER,
+                    epoch: 1,
+                },
+                fence,
+                outcome(ROLLBACK_PROVEN),
+                outcome(EFFECTS_UNCERTAIN),
+            )
+            .await
+            .expect("the unreported rollback recovers from durable evidence");
+        assert_ne!(
+            recovered.disposition,
+            RecoveryDisposition::RollbackProven,
+            "an activation that did not declare controlled effects is never a proven rollback"
+        );
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            recovered.status.terminal_outcome,
+            Some(outcome(EFFECTS_UNCERTAIN))
         );
     });
 }
