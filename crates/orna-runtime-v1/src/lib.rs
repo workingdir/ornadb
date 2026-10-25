@@ -2734,6 +2734,60 @@ pub struct RuntimeActivationContext {
     committed_rows: Option<Arc<PinnedCommittedRows>>,
 }
 
+/// The effect set an activation declares before its table transaction opens
+/// (REQUEST-1 step 5). The declaration is the only input that can grant the
+/// Orna-controlled token: a caller that cannot prove its activation performs
+/// no effect outside Orna's table transaction must declare `ExternalPossible`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeclaredEffectSet {
+    /// The activation's only effects are Orna table writes (`ORNA-CAP-005`).
+    None,
+    /// The activation may perform an effect outside Orna's transaction boundary.
+    ExternalPossible,
+}
+
+/// Proof that a caller declared [`DeclaredEffectSet::None`] for one
+/// activation or request transaction. It is not verification: the runtime
+/// cannot observe the effects a caller performs, so trust rests on callers
+/// declaring truthfully. The private field keeps struct literals outside this
+/// module impossible; the value is obtained only via
+/// [`ControlledEffectToken::from_declaration`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ControlledEffectToken(());
+
+impl ControlledEffectToken {
+    /// Returns the token only for a declaration of no external effects.
+    #[must_use]
+    pub fn from_declaration(declared: DeclaredEffectSet) -> Option<Self> {
+        match declared {
+            DeclaredEffectSet::None => Some(Self(())),
+            DeclaredEffectSet::ExternalPossible => None,
+        }
+    }
+}
+
+/// The effect report every table-request activation presents to the runtime
+/// commit boundary. There is no default: a caller either declares no external
+/// effects, which yields a [`ControlledEffectToken`], or declares possible
+/// external effects. The positive controlled marker is written only for the
+/// former; the latter stays conservatively uncertain on recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ActivationEffectReport {
+    ControlledOnly(ControlledEffectToken),
+    ExternalPossible,
+}
+
+impl ActivationEffectReport {
+    /// Builds the report for a declared effect set.
+    #[must_use]
+    pub fn declare(declared: DeclaredEffectSet) -> Self {
+        match ControlledEffectToken::from_declaration(declared) {
+            Some(token) => Self::ControlledOnly(token),
+            None => Self::ExternalPossible,
+        }
+    }
+}
+
 /// Reusable source-derived work for one captured table activation.
 ///
 /// The live layer may carry this owned plan across asynchronous callback
@@ -2745,6 +2799,7 @@ pub struct StagedTableActivation {
     mutations: Vec<TableMutation>,
     next_digest: [u8; 32],
     faults: Arc<dyn FaultInjector>,
+    effects: ActivationEffectReport,
 }
 
 impl StagedTableActivation {
@@ -2753,6 +2808,7 @@ impl StagedTableActivation {
         mutations: Vec<TableMutation>,
         next_digest: [u8; 32],
         faults: Arc<dyn FaultInjector>,
+        effects: ActivationEffectReport,
     ) -> Result<Self, RuntimeError> {
         if mutations.is_empty() {
             return Err(RuntimeError::EmptyMutationBatch);
@@ -2762,7 +2818,13 @@ impl StagedTableActivation {
             mutations,
             next_digest,
             faults,
+            effects,
         })
+    }
+
+    /// Returns the effect report the commit boundary applies.
+    pub fn effects(&self) -> ActivationEffectReport {
+        self.effects.clone()
     }
 
     pub fn context(&self) -> &RuntimeActivationContext {
@@ -3222,6 +3284,7 @@ pub struct ValidatedTableRequestActivationCommit<'a> {
     pub outcome: TerminalOutcome,
     pub validator: &'a mut dyn TableActivationCandidateValidator,
     pub faults: &'a dyn FaultInjector,
+    pub effects: ActivationEffectReport,
 }
 
 struct StreamDeliveryParts<'a> {
@@ -7142,13 +7205,15 @@ impl RuntimeState {
     /// owner assignment remain separate durable steps. On a successful first
     /// call, typed table rows, the mutation/checkpoint capture, and the
     /// validated terminal outcome commit together. Before the table
-    /// transaction opens, the activation durably records the positive
-    /// controlled-transaction marker unless a possible external effect is
-    /// already on record. If the controlled table transaction faults before
-    /// commit, this method records a runtime-owned rollback receipt bound to
-    /// that marker. Only this method observes the transaction unwind after
-    /// the controlled table boundary; an externally marked activation, or one
-    /// with no positive evidence, remains conservatively uncertain.
+    /// transaction opens, the activation durably records its effect report:
+    /// a [`ControlledEffectToken`] writes the positive controlled-transaction
+    /// marker, while [`ActivationEffectReport::ExternalPossible`] records
+    /// possible external effects, which keeps recovery uncertain. If a
+    /// controlled table transaction faults before commit, this method records
+    /// a runtime-owned rollback receipt bound to that marker. A possible
+    /// external effect never receives a receipt, so its rollback stays
+    /// uncertain. Only this method observes the transaction unwind after the
+    /// controlled table boundary.
     #[allow(clippy::too_many_arguments)]
     pub async fn commit_table_request_activation(
         &self,
@@ -7160,7 +7225,9 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
+        effects: ActivationEffectReport,
     ) -> Result<RequestActivationCommit, RuntimeError> {
+        let controlled = matches!(effects, ActivationEffectReport::ControlledOnly(_));
         match self
             .commit_table_request_activation_tx(
                 lease,
@@ -7171,6 +7238,7 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
+                effects,
                 None,
                 None,
             )
@@ -7178,10 +7246,13 @@ impl RuntimeState {
         {
             Err(RequestActivationTransactionError::RolledBack(error)) => {
                 // A receipt follows only the explicit rollback observed at
-                // the runtime-owned boundary. Commit failures never enter
-                // this branch because their durable outcome is unknowable.
-                self.record_controlled_rollback_proof(identity, fingerprint, lease)
-                    .await?;
+                // the runtime-owned boundary of a controlled activation.
+                // Commit failures never enter this branch because their
+                // durable outcome is unknowable.
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, lease)
+                        .await?;
+                }
                 Err(error)
             }
             Ok(committed) => {
@@ -7214,6 +7285,7 @@ impl RuntimeState {
             staged.next_digest(),
             outcome,
             staged.faults(),
+            staged.effects(),
         )
         .await
     }
@@ -7260,7 +7332,9 @@ impl RuntimeState {
             outcome,
             validator,
             faults,
+            effects,
         } = request;
+        let controlled = matches!(effects, ActivationEffectReport::ControlledOnly(_));
         match self
             .commit_table_request_activation_tx(
                 writer,
@@ -7271,21 +7345,26 @@ impl RuntimeState {
                 next_digest,
                 outcome,
                 faults,
+                effects,
                 Some(validator),
                 admission,
             )
             .await
         {
             Err(RequestActivationTransactionError::RolledBack(error)) => {
-                self.record_controlled_rollback_proof(identity, fingerprint, writer)
-                    .await
-                    .map_err(TableActivationError::Runtime)?;
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                        .await
+                        .map_err(TableActivationError::Runtime)?;
+                }
                 Err(TableActivationError::Runtime(error))
             }
             Err(RequestActivationTransactionError::RolledBackValidation(diagnostic)) => {
-                self.record_controlled_rollback_proof(identity, fingerprint, writer)
-                    .await
-                    .map_err(TableActivationError::Runtime)?;
+                if controlled {
+                    self.record_controlled_rollback_proof(identity, fingerprint, writer)
+                        .await
+                        .map_err(TableActivationError::Runtime)?;
+                }
                 Err(TableActivationError::ValidationFailed(diagnostic))
             }
             Ok(committed) => Ok(committed),
@@ -7318,14 +7397,16 @@ impl RuntimeState {
         next_digest: [u8; 32],
         outcome: TerminalOutcome,
         faults: &dyn FaultInjector,
+        effects: ActivationEffectReport,
         mut validator: Option<&mut dyn TableActivationCandidateValidator>,
         admission: Option<&catalogue::CatalogueAdmission>,
     ) -> Result<RequestActivationCommit, RequestActivationTransactionError> {
         validate_request_identity(identity)?;
         validate_admitted_table_identities(context, mutations)?;
-        // The marker commits on its own first: it is the precondition for an
-        // observed-rollback receipt and changes nothing for crash recovery.
-        self.record_activation_controlled_marker(lease, identity, fingerprint)
+        // The effect report commits on its own first: it is the precondition
+        // for an observed-rollback receipt and changes nothing for crash
+        // recovery beyond recording what the activation may have done.
+        self.record_activation_effects(lease, identity, fingerprint, effects)
             .await?;
         let transaction = self
             .connection
@@ -12688,15 +12769,18 @@ impl RuntimeState {
     }
 
     /// Durably records that this owner entered a request transaction that the
-    /// runtime expected to be Orna-controlled. The marker is tied to the exact
-    /// request fingerprint and owner, but it is not a rollback receipt: crash
-    /// recovery remains uncertain until a durable transaction-boundary proof
-    /// exists.
+    /// runtime expected to be Orna-controlled. The caller must hold a
+    /// [`ControlledEffectToken`], which proves only that a declaration of no
+    /// external effects was made for this transaction; the runtime does not
+    /// verify that declaration. The marker is tied to the exact request
+    /// fingerprint and owner, but it is not a rollback receipt: crash recovery
+    /// remains uncertain until a durable transaction-boundary proof exists.
     pub async fn record_controlled_transaction(
         &self,
         identity: RequestIdentity,
         fingerprint: [u8; 32],
         owner: WriterLease,
+        _declared: &ControlledEffectToken,
     ) -> Result<(), RuntimeError> {
         validate_request_identity(identity)?;
         validate_id(owner.owner_id)?;
@@ -12783,6 +12867,35 @@ impl RuntimeState {
         tx.commit()
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)
+    }
+
+    /// Records the activation's mandatory effect report before its table
+    /// transaction opens (REQUEST-1 step 5). A [`ControlledEffectToken`]
+    /// writes the positive controlled marker. An activation that declares
+    /// possible external effects downgrades recovery to uncertain; a failure
+    /// to record that downgrade aborts the activation, because an unreported
+    /// external effect could later be mistaken for a rollback. A terminal
+    /// request is replayed from durable state and has no further effects to
+    /// report, so its replay does not require the downgrade.
+    async fn record_activation_effects(
+        &self,
+        lease: WriterLease,
+        identity: RequestIdentity,
+        fingerprint: [u8; 32],
+        effects: ActivationEffectReport,
+    ) -> Result<(), RuntimeError> {
+        match effects {
+            ActivationEffectReport::ControlledOnly(_) => {
+                self.record_activation_controlled_marker(lease, identity, fingerprint)
+                    .await
+            }
+            ActivationEffectReport::ExternalPossible => {
+                match self.request_status_for_identity(identity).await? {
+                    Some(status) if status.state.is_terminal() => Ok(()),
+                    _ => self.record_external_effect(identity, fingerprint, lease).await,
+                }
+            }
+        }
     }
 
     /// Records that an effect outside Orna's transaction boundary may have
@@ -22021,6 +22134,10 @@ mod tests {
     fn outcome(value: u8) -> TerminalOutcome {
         TerminalOutcome::new(vec![value]).unwrap()
     }
+    fn controlled_token() -> ControlledEffectToken {
+        ControlledEffectToken::from_declaration(DeclaredEffectSet::None)
+            .expect("a None declaration yields the controlled token")
+    }
     fn git(path: &Path, args: &[&str]) {
         assert!(
             Command::new("git")
@@ -23772,6 +23889,7 @@ mod tests {
                         outcome: outcome(90),
                         validator: &mut validator,
                         faults: &NoFault,
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -23837,6 +23955,7 @@ mod tests {
                         outcome: outcome(99),
                         validator: &mut rejecting,
                         faults: &Fail(FaultPoint::BeforeTableWrite),
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &activation_catalogue(None, 199),
                 )
@@ -23928,6 +24047,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &Fail(point),
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -23976,6 +24096,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut rejecting,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &admission,
             )
@@ -24011,6 +24132,7 @@ mod tests {
                         outcome: outcome(105),
                         validator: &mut validator,
                         faults: &NoFault,
+                        effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                     },
                     &admission,
                 )
@@ -24033,6 +24155,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &invalid,
             )
@@ -24059,6 +24182,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &admission,
             )
@@ -24085,6 +24209,7 @@ mod tests {
                     outcome: outcome(105),
                     validator: &mut validator,
                     faults: &NoFault,
+                    effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
                 },
                 &invalid_batch,
             )
@@ -46435,6 +46560,7 @@ mod tests {
                 digest(44),
                 outcome(45),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -46474,6 +46600,7 @@ mod tests {
                 outcome: outcome(51),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
             })
             .await
             .unwrap();
@@ -46528,6 +46655,7 @@ mod tests {
                 outcome: outcome(57),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: ActivationEffectReport::declare(DeclaredEffectSet::None),
             })
             .await;
 
@@ -46680,6 +46808,7 @@ mod tests {
                 digest(62),
                 outcome(63),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -46743,6 +46872,7 @@ mod tests {
                         digest(10),
                         outcome(11),
                         &Fail(point),
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                     )
                     .await,
                 Err(RuntimeError::FaultInjected(point))
@@ -46809,6 +46939,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -46923,6 +47054,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTerminalClaim))
@@ -47007,6 +47139,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTableWrite))
@@ -47136,6 +47269,67 @@ mod tests {
         );
     }
 
+    // Gate D: an activation that reports possible external effects and then
+    // faults in its table transaction never receives a rollback receipt, so
+    // recovery stays uncertain even though the rollback was observed.
+    #[tokio::test]
+    async fn external_possible_fault_never_records_a_rollback_receipt() {
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let owner = state.acquire_lease(id(4)).await.unwrap();
+        let identity = request(4, 5);
+        let fingerprint = digest(6);
+        let (_, capability) = state
+            .reserve_request_with_admission(identity, fingerprint)
+            .await
+            .unwrap();
+        let capability = capability.expect("fresh owner-bound capability");
+        state
+            .start_request_with_owner_and_admission(identity, fingerprint, owner, capability)
+            .await
+            .unwrap();
+        let context = state.begin_activation().await.unwrap();
+        assert_eq!(
+            state
+                .commit_table_request_activation(
+                    owner,
+                    identity,
+                    fingerprint,
+                    &context,
+                    &[table_mutation(8, 1, Some(9))],
+                    digest(10),
+                    outcome(11),
+                    &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::ExternalPossible,
+                )
+                .await,
+            Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
+        );
+        assert_eq!(
+            ledger_effect_evidence(&state, identity).await,
+            (2, None, None),
+            "a possible external effect must never carry a rollback receipt"
+        );
+
+        let fence = state.recover_abandoned(id(4), id(7)).await.unwrap();
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                identity,
+                fingerprint,
+                RequestOwner::from(owner),
+                fence,
+                outcome(12),
+                outcome(13),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+    }
+
     // Gate D: the activation records its positive controlled marker in its
     // own durable step before the table transaction, so the rollback receipt
     // is bound to that marker; a successful commit clears the evidence.
@@ -47167,6 +47361,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47213,6 +47408,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47260,6 +47456,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::EmptyMutationBatch)
@@ -47289,6 +47486,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47310,6 +47508,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::BeforeTableWrite))
@@ -47383,6 +47582,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &NoFault,
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::OwnerLost)
@@ -47437,6 +47637,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47491,6 +47692,7 @@ mod tests {
                 digest(10),
                 outcome(11),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -47522,6 +47724,7 @@ mod tests {
                 digest(14),
                 outcome(15),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -50256,6 +50459,7 @@ mod tests {
                     digest(10),
                     outcome(11),
                     &Fail(FaultPoint::AfterTerminalClaim),
+                    ActivationEffectReport::declare(DeclaredEffectSet::None),
                 )
                 .await,
             Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
@@ -50420,7 +50624,7 @@ mod tests {
                 .unwrap();
         }
         state
-            .record_controlled_transaction(controlled, digest(8), owner)
+            .record_controlled_transaction(controlled, digest(8), owner, &controlled_token())
             .await
             .unwrap();
         state
@@ -50573,7 +50777,7 @@ mod tests {
             .await
             .unwrap();
         state
-            .record_controlled_transaction(identity, fingerprint, owner)
+            .record_controlled_transaction(identity, fingerprint, owner, &controlled_token())
             .await
             .unwrap();
         let completed = state
@@ -50999,6 +51203,7 @@ mod tests {
                 digest(176),
                 outcome(177),
                 &NoFault,
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
             )
             .await
             .unwrap();
@@ -53062,6 +53267,7 @@ mod tests {
             mutations.clone(),
             digest(8),
             Arc::new(NoFault),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )
         .unwrap();
 
@@ -53069,7 +53275,13 @@ mod tests {
         assert_eq!(staged.mutations(), mutations.as_slice());
         assert_eq!(staged.next_digest(), digest(8));
         assert!(matches!(
-            StagedTableActivation::from_source(context, Vec::new(), digest(8), Arc::new(NoFault),),
+            StagedTableActivation::from_source(
+                context,
+                Vec::new(),
+                digest(8),
+                Arc::new(NoFault),
+                ActivationEffectReport::declare(DeclaredEffectSet::None),
+            ),
             Err(RuntimeError::EmptyMutationBatch)
         ));
     }

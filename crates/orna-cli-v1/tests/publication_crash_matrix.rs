@@ -105,6 +105,7 @@ async fn commit_capture(
     let commit = state.commit_table_request_activation(
         writer, request, fingerprint, &context, &[mutation], [24; 32],
         TerminalOutcome::new(vec![25]).unwrap(), &NoFault,
+        orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
     ).await.unwrap();
     assert_eq!(commit.request.state, RequestState::Completed);
     drop(source_bindings);
