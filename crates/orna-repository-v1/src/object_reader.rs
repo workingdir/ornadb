@@ -170,6 +170,9 @@ pub(crate) struct ObjectReader {
     worktree: PathBuf,
     algorithm: OnceLock<GitHashAlgorithm>,
     session: Mutex<Option<Session>>,
+    /// Processes this reader has started, for tests that count spawns.
+    #[cfg(test)]
+    starts: std::sync::atomic::AtomicUsize,
 }
 
 impl fmt::Debug for ObjectReader {
@@ -186,6 +189,8 @@ impl ObjectReader {
             worktree,
             algorithm: OnceLock::new(),
             session: Mutex::new(None),
+            #[cfg(test)]
+            starts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -479,6 +484,9 @@ impl ObjectReader {
         let mut slot = self.lock_session();
         if slot.is_none() {
             *slot = Some(Session::start(&self.worktree)?);
+            #[cfg(test)]
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let Some(session) = slot.as_mut() else {
             return Err(RepositoryError::GitOperationFailed);
@@ -511,6 +519,12 @@ impl ObjectReader {
         self.lock_session()
             .as_ref()
             .map(|session| session.child.id())
+    }
+
+    /// How many cat-file processes this reader has started.
+    #[cfg(test)]
+    pub(crate) fn process_starts(&self) -> usize {
+        self.starts.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -907,6 +921,29 @@ mod tests {
             clone.objects().process_id(),
             Some(process),
             "clones share the reader"
+        );
+    }
+
+    #[test]
+    fn a_multi_object_walk_starts_exactly_one_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]);
+        assert_eq!(objects.process_starts(), 0, "no read has started a process");
+        for _ in 0..8 {
+            objects
+                .info(&tree)
+                .expect("read the tree")
+                .expect("the tree exists");
+            objects
+                .tree_entries(&tree)
+                .expect("list the tree");
+        }
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "a multi-object walk reuses one cat-file process"
         );
     }
 
