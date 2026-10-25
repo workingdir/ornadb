@@ -596,12 +596,45 @@ impl ApplicationAuthority {
         snapshot: &RuntimeTableActivationSnapshot,
         publication_rows: Option<RuntimePublicationMetadataRows>,
     ) -> Result<StagedActivation, ApplicationError> {
-        let tables = application_table_schemas(application);
         let table_object_ids = application_table_object_ids(application);
         validate_snapshot_table_object_ids(&table_object_ids, snapshot)?;
+        self.evaluate_staged_over_table_rows(
+            application,
+            arguments,
+            snapshot.table_rows().clone(),
+            publication_rows,
+            Some(snapshot.context().capture().generation_digest()),
+        )
+    }
+
+    /// Evaluates admitted source over committed `HEAD` rows alone. Unlike
+    /// [`Self::evaluate_staged_with_table_snapshot`], no unpublished runtime tail
+    /// is overlaid: the rows are exactly the committed base the caller read, so
+    /// uncommitted writes of other activations are never observed (ORNA-TXN-006).
+    /// `publication_rows` mirrors [`Self::evaluate_staged_with_publication_rows`].
+    pub fn evaluate_staged_over_committed_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        self.evaluate_staged_over_table_rows(application, arguments, rows, publication_rows, None)
+    }
+
+    fn evaluate_staged_over_table_rows(
+        &self,
+        application: &AdmittedApplication,
+        arguments: &Environment,
+        rows: RuntimeTableRows,
+        publication_rows: Option<RuntimePublicationMetadataRows>,
+        snapshot_generation: Option<[u8; 32]>,
+    ) -> Result<StagedActivation, ApplicationError> {
+        let tables = application_table_schemas(application);
+        let table_object_ids = application_table_object_ids(application);
         let mut handler = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
-            snapshot.table_rows().clone(),
+            rows,
             table_object_ids,
         )?
         .with_insert_defaults(
@@ -622,11 +655,7 @@ impl ApplicationAuthority {
             ApplicationError::EffectRejected(error.code().to_owned())
         })?;
         let effects = handler.effect_report();
-        handler.into_staged_activation(
-            value,
-            Some(snapshot.context().capture().generation_digest()),
-            effects,
-        )
+        handler.into_staged_activation(value, snapshot_generation, effects)
     }
 
     /// Evaluates admitted source with a preloaded durable publication snapshot
