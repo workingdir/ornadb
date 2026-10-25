@@ -2248,51 +2248,51 @@ fn run_pure_invocation(
                     write_success_line("invocation completed", color_enabled)?;
                     return Ok(());
                 }
-            if admitted.requires_publication_metadata() {
-                let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
-                    endpoint,
-                    sys_host::std_snapshot_pin(&project),
-                )?;
-                let authority = authority.with_sys_host_context(sys_host_context);
-                let activation = authority
-                    .evaluate_staged_with_publication_rows(
-                        &admitted,
-                        &Environment::new(),
-                        publication_rows,
-                    )
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
+                if admitted.requires_publication_metadata() {
+                    let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                        endpoint,
+                        sys_host::std_snapshot_pin(&project),
+                    )?;
+                    let authority = authority.with_sys_host_context(sys_host_context);
+                    let activation = authority
+                        .evaluate_staged_with_publication_rows(
+                            &admitted,
+                            &Environment::new(),
+                            publication_rows,
                         )
-                    })?;
-                if !activation.mutations().is_empty() {
-                    return Err(Diagnostic::unavailable(
-                        "one-shot invocation cannot commit table mutations",
-                        "use a supported table transaction; stream roots require the explicit stream runtime",
-                    ));
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
+                    if !activation.mutations().is_empty() {
+                        return Err(Diagnostic::unavailable(
+                            "one-shot invocation cannot commit table mutations",
+                            "use a supported table transaction; stream roots require the explicit stream runtime",
+                        ));
+                    }
+                } else {
+                    let std_snapshot = sys_host::std_snapshot_pin(&project);
+                    let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                        Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                        None => authority,
+                    };
+                    authority
+                        .evaluate(&admitted, &Environment::new())
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
                 }
-            } else {
-                let std_snapshot = sys_host::std_snapshot_pin(&project);
-                let authority = match pure_sys_host_context(endpoint, std_snapshot) {
-                    Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
-                    None => authority,
-                };
-                authority
-                    .evaluate(&admitted, &Environment::new())
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
-                        )
-                    })?;
-            }
-            write_success_line("invocation completed", color_enabled)?;
-            return Ok(());
+                write_success_line("invocation completed", color_enabled)?;
+                return Ok(());
             }
         }
     }
@@ -2433,7 +2433,9 @@ fn committed_table_identities(
         }
         let identity = RuntimeTableIdentity::new(name.clone(), TableObjectId::new(*record.id()))
             .map_err(|_| {
-                unavailable_table_identity(format!("table `{name}` has an invalid identity at HEAD"))
+                unavailable_table_identity(format!(
+                    "table `{name}` has an invalid identity at HEAD"
+                ))
             })?;
         tables.push(identity);
     }
