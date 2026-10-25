@@ -2644,7 +2644,7 @@ fn parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_
         matches!(
             &outcome,
             StageOutcome::Failed(diagnostic)
-                if diagnostic.code() == "ORNA-S021-TYPE"
+                if diagnostic.code() == "E3002"
         ),
         "Decimal update key patch did not fail during source admission: {outcome:?}"
     );
@@ -2873,7 +2873,7 @@ fn parsed_composite_decimal_primary_key_invalid_amount_rolls_back_candidates() {
     assert!(
         matches!(
             &outcome,
-            StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-S021-TYPE"
+            StageOutcome::Failed(diagnostic) if diagnostic.code() == "E2001"
         ),
         "invalid Decimal component did not fail during source admission: {outcome:?}"
     );
