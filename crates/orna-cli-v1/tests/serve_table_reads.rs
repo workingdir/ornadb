@@ -1,7 +1,8 @@
-//! ORNA-SERVE-003 / ORNA-TXN-006 (ornadb-03ol): `orna serve` reads the committed
-//! `HEAD` rows of a project's tables. Uncommitted runtime rows are never read, a
-//! table without a committed identity beside bound tables is refused, and a
-//! `serve` that writes a table is refused without committing.
+//! ORNA-SERVE-003 / ORNA-TXN-005 / ORNA-TXN-006 (ornadb-03ol): `orna serve`
+//! reads the committed `HEAD` `main.orna` and the committed rows overlaid with
+//! the CWD generation of each activation. Durable CWD rows are served, a
+//! `serve` that attempts a table write is refused without committing, and a
+//! `HEAD` without a serving entry is reported rather than guessed.
 
 use std::{
     fs,
@@ -19,6 +20,8 @@ const COUNT_SOURCE: &str =
     "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note | count();\n";
 const WRITE_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note.insert({ id: \"write\", body: \"refused\" });\n";
 const MIXED_SOURCE: &str = "pub table Note(id: Str) { body: Str, }\n\npub table Other(id: Str) { body: Str, }\n\npub fn serve() = Note | count();\n";
+const COUNT_PLUS_TEN_SOURCE: &str =
+    "pub table Note(id: Str) { body: Str, }\n\npub fn serve() = Note | count() + 10;\n";
 
 /// Keeps the host's Git configuration and repository routing out of every
 /// process this test starts.
@@ -214,34 +217,6 @@ fn committed_published_rows_are_counted_at_root() {
 }
 
 #[test]
-fn uncommitted_runtime_rows_are_not_served() {
-    let directory = TempDir::new().expect("create the test directory");
-    let root = committed_project(&directory, COUNT_SOURCE);
-    insert_note(&root, "one", "first");
-    publish(&root);
-    // Inserted at runtime and never published: no committed HEAD row holds it.
-    insert_note(&root, "two", "second");
-    let (_server, address) = start_server(&root);
-    let (status, body) = http_get(&address, "/").expect("GET /");
-    assert_eq!(status, 200, "body: {body}");
-    assert_eq!(body.trim(), "1 : Int", "only committed HEAD rows are read");
-}
-
-#[test]
-fn table_without_committed_identity_beside_bound_table_is_mixed_identity() {
-    let directory = TempDir::new().expect("create the test directory");
-    let root = committed_project(&directory, COUNT_SOURCE);
-    insert_note(&root, "one", "first");
-    publish(&root);
-    // `Other` is in the working tree only: it has no committed identity.
-    fs::write(root.join("main.orna"), MIXED_SOURCE).expect("rewrite main.orna");
-    let (_server, address) = start_server(&root);
-    let (status, body) = http_get(&address, "/").expect("GET /");
-    assert_eq!(status, 500, "body: {body}");
-    assert!(body.contains("serve.mixed_table_identity"), "body: {body}");
-}
-
-#[test]
 fn serve_that_writes_a_table_is_refused_without_committing() {
     let directory = TempDir::new().expect("create the test directory");
     let root = committed_project(&directory, WRITE_SOURCE);
@@ -249,4 +224,80 @@ fn serve_that_writes_a_table_is_refused_without_committing() {
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
     assert!(body.contains("serve.write_refused"), "body: {body}");
+    // The serving process owns the runtime; the count runs once it has exited.
+    drop(_server);
+    let counted = orna_repl(&root, "main.Note | count()");
+    assert_success(&counted, "REPL count");
+    assert!(
+        transcript(&counted).contains("0 : Int"),
+        "the refused write leaves no committed or CWD row\n{}",
+        transcript(&counted)
+    );
+}
+
+#[test]
+fn durable_cwd_rows_are_served_without_publication() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    // Durable CWD change: inserted and never published. ORNA-TXN-005 makes it
+    // visible to the next activation of this clone's CWD.
+    insert_note(&root, "two", "second");
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "2 : Int", "committed and durable CWD rows");
+}
+
+#[test]
+fn head_commit_changes_are_visible_to_the_next_request() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int");
+    // The serving process owns the runtime, so the HEAD change is a source
+    // commit made outside it.
+    fs::write(root.join("main.orna"), COUNT_PLUS_TEN_SOURCE).expect("write main.orna");
+    git(&root, &["add", "main.orna"]);
+    git(&root, &["commit", "-m", "Add ten"]);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "11 : Int", "each request reads the current HEAD");
+}
+
+#[test]
+fn working_tree_source_does_not_replace_committed_source() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = committed_project(&directory, COUNT_SOURCE);
+    insert_note(&root, "one", "first");
+    publish(&root);
+    // Uncommitted edit: `Other` exists only in the working tree, so HEAD's
+    // `main.orna` (which declares only `Note`) is still the served module.
+    fs::write(root.join("main.orna"), MIXED_SOURCE).expect("rewrite main.orna");
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 200, "body: {body}");
+    assert_eq!(body.trim(), "1 : Int");
+}
+
+#[test]
+fn unborn_head_reports_entry_unavailable() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = directory.path().join("library");
+    let init = orna(
+        directory.path(),
+        &["init", root.to_str().expect("UTF-8 test path")],
+    );
+    assert_success(&init, "orna init");
+    // The working tree declares `serve`, so startup admits it, but no commit
+    // exists yet to serve (ORNA-SERVE-003).
+    fs::write(root.join("main.orna"), COUNT_SOURCE).expect("write main.orna");
+    let (_server, address) = start_server(&root);
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert!(body.contains("serve.entry_unavailable"), "body: {body}");
 }

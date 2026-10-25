@@ -3,15 +3,17 @@
 //! `orna serve` admits the project's `main.orna` module and invokes its
 //! `serve` function for `GET /`. The invocation is staged and read-only: a
 //! `serve` that attempts a table write is refused, and nothing is committed.
-//! `serve` reads of tables see the committed `HEAD` rows of the project's tables,
-//! bound to their committed identities per request (ORNA-TXN-006). Uncommitted
-//! runtime rows are never read. Without that entry the server keeps its Git
-//! transport, installs no page at `/`, and reports the absence once at startup.
+//! Each request serves this clone's HEAD and CWD (ORNA-SERVE-003): the module
+//! and the committed table identities are read from the committed `main.orna`
+//! at that request's HEAD commit, and the committed rows are overlaid with the
+//! CWD generation the runtime captures for that one activation (ORNA-TXN-005).
+//! Durable CWD changes are visible; the partial writes of an uncommitted
+//! activation are not (ORNA-TXN-006). Without that entry the server keeps its
+//! Git transport, installs no page at `/`, and reports the absence once at
+//! startup.
 
 use super::*;
-use orna_application_v1::{
-    AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
-};
+use orna_application_v1::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator_v1::{Environment, Limits};
 
 /// Repository-relative module that hosts the serving entry.
@@ -19,14 +21,13 @@ pub(super) const SERVE_MODULE_PATH: &str = "main.orna";
 /// The function invoked for each `GET /`.
 pub(super) const SERVE_ENTRY: &str = "serve";
 
-/// The admitted serving entry and the authority that evaluates it.
+/// The admitted serving entry's authority. Each request re-admits the module
+/// from its committed HEAD source, so the startup admission only proves that
+/// the working tree declares a public `serve`.
 pub(super) struct ServeApp {
     authority: ApplicationAuthority,
-    admitted: AdmittedApplication,
-    /// Project root whose committed `HEAD` supplies table rows.
+    /// Project root whose committed `HEAD` supplies the module and rows.
     root: String,
-    /// The `main.orna` source, re-admitted per request when the entry reads tables.
-    source: String,
 }
 
 impl ServeApp {
@@ -50,11 +51,9 @@ impl ServeApp {
             project.modules()[index].source.clone(),
             SERVE_ENTRY,
         ) {
-            Ok(admitted) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
+            Ok(_) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
-                admitted,
                 root: root.to_owned(),
-                source: project.modules()[index].source.clone(),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) => Ok(None),
@@ -77,14 +76,7 @@ impl ServeApp {
     /// Invokes `serve` read-only and renders its value as the `GET /` body.
     /// A `serve` that stages any table mutation is refused.
     fn respond(&self) -> Response {
-        let staged = if self.admitted.table_schemas().is_empty() {
-            self.authority
-                .evaluate_staged(&self.admitted, &Environment::new())
-                .map_err(|_| "serve.evaluation_failed")
-        } else {
-            self.stage_over_committed_tables()
-        };
-        let staged = match staged {
+        let staged = match self.stage_at_head() {
             Ok(staged) => staged,
             Err(code) => return serve_error(code),
         };
@@ -98,23 +90,46 @@ impl ServeApp {
         )
     }
 
-    /// Stages `serve` over the committed `HEAD` rows of its tables. Admission and
-    /// the table identity binding are repeated per request so that a new commit is
-    /// served as soon as it lands; runtime rows that are not committed are never read.
-    fn stage_over_committed_tables(&self) -> Result<StagedActivation, &'static str> {
+    /// Stages `serve` for one request at this clone's HEAD and CWD. The
+    /// committed `main.orna` at HEAD is admitted, its tables are bound to their
+    /// committed identities, and the committed rows are overlaid with the CWD
+    /// generation captured for this activation. A missing or unreadable HEAD
+    /// entry is `serve.entry_unavailable`; a table whose committed identity is
+    /// missing, or present for only some tables, is refused before any read.
+    fn stage_at_head(&self) -> Result<StagedActivation, &'static str> {
         let repository = orna_repository_v1::Repository::discover(&self.root)
-            .map_err(|_| "serve.table_identity_unavailable")?;
+            .map_err(|_| "serve.entry_unavailable")?;
         let commit = repository
             .head()
             .ok()
             .flatten()
-            .ok_or("serve.table_identity_unavailable")?;
-        let names = self
-            .admitted
+            .ok_or("serve.entry_unavailable")?;
+        let bytes = repository
+            .read_committed_file(
+                &commit,
+                SERVE_MODULE_PATH,
+                orna_project_v1::ProjectLimits::default().max_source_bytes,
+            )
+            .map_err(|_| "serve.entry_unavailable")?;
+        let source = String::from_utf8(bytes).map_err(|_| "serve.entry_unavailable")?;
+        if !serve_is_public(&source) {
+            return Err("serve.entry_unavailable");
+        }
+        let base = self
+            .authority
+            .admit_module(SERVE_MODULE_PATH, source.clone(), SERVE_ENTRY)
+            .map_err(|_| "serve.entry_unavailable")?;
+        let names = base
             .table_schemas()
             .keys()
             .cloned()
             .collect::<Vec<_>>();
+        if names.is_empty() {
+            return self
+                .authority
+                .evaluate_staged(&base, &Environment::new())
+                .map_err(|_| "serve.evaluation_failed");
+        }
         let tables = match committed_table_identities(&repository, &commit, names.clone()) {
             Ok(tables) => tables,
             Err(_) => {
@@ -139,7 +154,7 @@ impl ServeApp {
             .authority
             .admit_module_with_committed_table_metadata(
                 SERVE_MODULE_PATH,
-                &self.source,
+                &source,
                 SERVE_ENTRY.to_owned(),
                 committed,
             )
@@ -147,12 +162,63 @@ impl ServeApp {
         if admitted.requires_publication_metadata() {
             return Err("serve.table_read_unsupported");
         }
+        let (identity, initial_digest) =
+            runtime_identity(&repository).map_err(|_| "serve.table_rows_unavailable")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        // The served process holds the runtime owner lock, so this per-request
+        // handle opens as a secondary reader: it reads the CWD and the published
+        // pin but never writes or fences the owner.
+        let state = runtime
+            .block_on(RuntimeState::open(&repository, identity, initial_digest))
+            .map_err(|_| "serve.table_rows_unavailable")?;
         let rows = committed_rows_at(&repository, &commit, &admitted, &tables)
             .map_err(|_| "serve.table_rows_unavailable")?;
-        self.authority
-            .evaluate_staged_over_committed_rows(&admitted, &Environment::new(), rows, None)
-            .map_err(|_| "serve.evaluation_failed")
+        check_committed_read_limits(&rows)?;
+        let pin = runtime
+            .block_on(state.published_pin())
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        let committed =
+            PinnedCommittedRows::new(pin, rows).map_err(|_| "serve.table_rows_unavailable")?;
+        let (_snapshot, staged) = evaluate_over_committed_tables(
+            &runtime,
+            &state,
+            &self.authority,
+            &admitted,
+            &tables,
+            committed,
+            None,
+        )
+        .map_err(|_| "serve.evaluation_failed")?;
+        Ok(staged)
     }
+}
+
+/// Bounds one request's committed table read (ORNA-SERVE-003 serves whole
+/// relations). A table may hold at most the evaluator's collection limit of
+/// rows, and the rows' key and value bytes together may not exceed the project
+/// source byte limit. The rows are materialised before this check runs, so the
+/// committed load itself is not bounded here (see the `serve` bead).
+fn check_committed_read_limits(rows: &RuntimeTableRows) -> Result<(), &'static str> {
+    let max_rows = Limits::default().max_collection_items;
+    let max_bytes = orna_project_v1::ProjectLimits::default().max_source_bytes;
+    let mut total_bytes = 0usize;
+    for entries in rows.values() {
+        if entries.len() > max_rows {
+            return Err("serve.table_read_limit");
+        }
+        for (key, value) in entries {
+            total_bytes = total_bytes
+                .saturating_add(key.len())
+                .saturating_add(value.len());
+        }
+    }
+    if total_bytes > max_bytes {
+        return Err("serve.table_read_limit");
+    }
+    Ok(())
 }
 
 /// The `serve` error response: a JSON body naming a stable code, never a value.
