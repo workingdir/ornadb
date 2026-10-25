@@ -23,6 +23,7 @@ set -uo pipefail
 
 cd "$(dirname "$0")/.." || exit 2
 LIST=scripts/semantic-known-red.txt
+BEADS=scripts/semantic-known-red-beads.txt
 PKG=orna-semantic-v1
 CARGO=(cargo test --locked -p "$PKG")
 mode=check
@@ -90,6 +91,10 @@ while IFS= read -r line; do
     fi
     if ! [[ "$bead" =~ ^ornadb-[a-z0-9.-]+$ ]]; then
         echo "FAIL: bead column is not an ornadb bead id ($bead): $name" >&2
+        exit 1
+    fi
+    if ! grep -qxF -- "$bead" "$BEADS"; then
+        echo "FAIL: bead $bead is not in $BEADS (adding a bead id needs a reviewed change to that file): $name" >&2
         exit 1
     fi
     known+=("$name")
