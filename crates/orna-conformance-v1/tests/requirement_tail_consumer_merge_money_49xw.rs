@@ -1,4 +1,7 @@
-use orna_semantic_v1::{Catalogue, DIAG_TYPE, ModuleInput, Type, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, DIAG_DURABLE_CONSUMER_SOURCE_ROOTS, DIAG_TYPE, ModuleInput, Type,
+    analyze_with_catalogue,
+};
 use orna_stream_v1::{
     CheckpointPositionMerge, Component, Position, merge_checkpoint_position,
 };
@@ -23,7 +26,7 @@ fn position(token: &str) -> Position {
 fn durable_consumer_with_multiple_checkpointed_roots_gets_guidance() {
     let result = analyze(include_str!("fixtures/streams-pa0p-multiple-roots.orna"));
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_DURABLE_CONSUMER_SOURCE_ROOTS
             && diagnostic.message().starts_with(
                 "a durable consumer function may own only one checkpointed source root",
             )
