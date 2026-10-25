@@ -1013,7 +1013,7 @@ fn nominal_admission_rejects_malformed_named_call_captures() {
         (field_id_raw("unknown"), Raw::Int(8.into())),
         (field_id_raw("value"), Raw::Int(7.into())),
     ]);
-    let functions = BTreeMap::from([
+    let functions = Functions::from([
         (
             "run".into(),
             PureFunction {
@@ -1249,7 +1249,7 @@ fn nominal_private_field_selection_is_owner_scoped() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1280,7 +1280,7 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.make".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1306,7 +1306,7 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
                 "fixtures/evaluator_source_b054fcd571d69b72.orna"
             )),
             &environment,
-            &BTreeMap::new(),
+            &Functions::new(),
             &definitions,
             Limits::default(),
         )),
@@ -1322,7 +1322,7 @@ fn nominal_private_field_selection_works_in_owner_created_direct_closure() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1353,7 +1353,7 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.collect".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1543,7 +1543,7 @@ fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serializat
         })),
         span,
     };
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "run".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1618,7 +1618,7 @@ fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
             )),
         )],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.helper".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1789,7 +1789,7 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
         ),
     );
 
-    let functions = std::collections::BTreeMap::from([
+    let functions = Functions::from([
         (
             "vault.make".into(),
             PureFunction {
@@ -6157,9 +6157,9 @@ fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
         .find(|(path, _)| path == "std/collection.orna")
         .expect("the collection module is in the pinned standard profile")
         .1;
-    let functions = functions_from_source(&collection_source)
-        .into_iter()
-        .map(|(name, function)| (format!("std.collection.{name}"), function))
+    let functions: Functions = functions_from_source(&collection_source)
+        .iter()
+        .map(|(name, function)| (format!("std.collection.{name}"), function.clone()))
         .collect();
     let expression = include_str!("fixtures/asof_join_nearest.orna");
 
