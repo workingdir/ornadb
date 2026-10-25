@@ -541,7 +541,7 @@ const MIGRATION_PREPARED_HELP: &str = "this build has no writer for format-1/2 s
 
 /// Remedy for a managed-path edit that recovery refused (ORNA-PUB-010). The edit
 /// stays on disk; the user either admits it or discards it, then retries.
-const MANAGED_EDIT_HELP: &str = "to keep the edit, `git add` the path, run `orna commit -m MESSAGE`, then retry `orna publish`; to discard it, run `git checkout -- <path>`, then retry `orna publish`";
+const MANAGED_EDIT_HELP: &str = "to keep the edit, `git add` the path, run `orna commit -m MESSAGE`, then retry `orna publish`; to discard it, run `git show HEAD:<path> > <path>` (`git checkout -- <path>` does not restore a skip-worktree store path), then retry `orna publish`";
 
 /// ORNA-PUB-012: names the read-only legacy format, states that nothing was
 /// written, and gives the remedy that fits the worktree's migration state.
@@ -678,7 +678,7 @@ mod tests {
         assert_eq!(diagnostic.help, MANAGED_EDIT_HELP);
         assert!(diagnostic.help.contains("`git add`"));
         assert!(diagnostic.help.contains("`orna commit -m MESSAGE`"));
-        assert!(diagnostic.help.contains("`git checkout -- <path>`"));
+        assert!(diagnostic.help.contains("`git show HEAD:<path> > <path>`"));
         assert!(diagnostic.detail.as_deref().is_some_and(|detail| {
             detail.contains("the edit is retained on disk and HEAD was not changed")
         }));
