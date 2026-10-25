@@ -49,7 +49,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use orna_application_v1::{
     AdmittedApplication, ApplicationAuthority, ApplicationError, CommittedTableIdentity,
-    ReplTransactionScope, StagedActivation,
+    ReplEvaluationFailure, ReplTransactionScope, StagedActivation,
 };
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
@@ -3110,12 +3110,7 @@ fn run_repl_input(
         Ok(result) => result,
         Err(failure) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            let message = if failure.external_effects_possible {
-                REPL_EFFECT_UNCERTAIN.to_owned()
-            } else {
-                repl_application_error(failure.error)
-            };
-            return Err(message.into());
+            return Err(repl_evaluation_failure(failure));
         }
     };
     if activation.mutations().is_empty() {
@@ -3219,6 +3214,32 @@ fn repl_application_error(error: ApplicationError) -> String {
         | ApplicationError::SourceEffectFailed(code) => code,
         ApplicationError::UnadmittedTable(_) => "ORNA-EVAL-TABLE-UNADMITTED".to_owned(),
         _ => "ORNA-REPL-EFFECT".to_owned(),
+    }
+}
+
+/// Maps a failed REPL evaluation to its submission failure. When external
+/// effects may already have happened, the code stays
+/// `ORNA-REPL-EFFECT-UNCERTAIN` and the evaluator cause moves to the detail,
+/// so the uncertain outcome stays diagnosable without a replay.
+fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure {
+    let cause = repl_application_error(failure.error);
+    if !failure.external_effects_possible {
+        return repl::ReplFailure::from(cause);
+    }
+    repl::ReplFailure {
+        code: REPL_EFFECT_UNCERTAIN.to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: REPL_EFFECT_UNCERTAIN.to_owned(),
+            message: format!(
+                "external effects may already have happened after evaluation failed with {cause}"
+            ),
+            span: None,
+            notes: Vec::new(),
+            help: vec![
+                "the input is not replayed; the request row stays running for fenced recovery"
+                    .to_owned(),
+            ],
+        }),
     }
 }
 
@@ -5630,5 +5651,33 @@ mod repl_request_effect_tests {
             failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
             "a failure with no external effect keeps the evaluator code"
         );
+    }
+
+    #[test]
+    fn repl_effect_uncertain_failure_keeps_the_evaluation_cause() {
+        let failure = repl_evaluation_failure(ReplEvaluationFailure {
+            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+            external_effects_possible: true,
+        });
+        assert_eq!(failure.code, REPL_EFFECT_UNCERTAIN);
+        let detail = failure
+            .detail
+            .expect("an uncertain outcome carries its cause in the detail");
+        assert_eq!(detail.code, REPL_EFFECT_UNCERTAIN);
+        assert!(
+            detail.message.contains("ORNA-EVAL-DIVIDE-BY-ZERO"),
+            "the detail names the evaluation cause: {}",
+            detail.message
+        );
+    }
+
+    #[test]
+    fn repl_effect_free_failure_keeps_its_own_code_without_detail() {
+        let failure = repl_evaluation_failure(ReplEvaluationFailure {
+            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+            external_effects_possible: false,
+        });
+        assert_eq!(failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO");
+        assert!(failure.detail.is_none());
     }
 }

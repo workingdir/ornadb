@@ -320,7 +320,7 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, cancellation, None)
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_with_effects(
@@ -329,7 +329,7 @@ impl ReplSession {
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, None, Some(effects))
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_discarded(
