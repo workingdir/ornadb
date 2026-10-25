@@ -507,11 +507,11 @@ fn an_int_keyed_store_answers_point_range_and_missing_key_queries() {
 }
 
 /// A table whose primary key has two components has no single typed key
-/// spelling. Every query form over it (`--key`, a bounded range and an
-/// unbounded scan) is refused with the typed diagnostic that names bead
-/// ornadb-5il1.461, and no row is answered.
+/// spelling, so a predicate scan over it, which must page the rows, is refused
+/// with the typed diagnostic naming bead ornadb-5il1.461. Plain listings keep
+/// working as they did before the refusal existed.
 #[test]
-fn a_composite_key_query_is_refused_naming_the_successor_bead() {
+fn a_composite_key_predicate_scan_is_refused_but_plain_listing_works() {
     let directory = TempDir::new().expect("a temporary directory");
     let (root, relation) = committed_table(
         &directory,
@@ -527,25 +527,77 @@ fn a_composite_key_query_is_refused_naming_the_successor_bead() {
     );
     publish(&root, "Add one stock row");
 
-    let forms: [&[&str]; 3] = [
-        &["--key", "north"],
-        &["--from", "text:north", "--until", "text:south"],
-        &[],
-    ];
-    for form in forms {
-        let mut arguments = vec!["query", relation.as_str()];
-        arguments.extend_from_slice(form);
-        arguments.extend_from_slice(&["--format", "json"]);
-        let refused = orna(&root, &arguments);
-        assert!(
-            !refused.status.success(),
-            "a composite-key query is refused for {form:?}:\n{}",
-            transcript(&refused)
-        );
-        assert!(
-            transcript(&refused).contains("ornadb-5il1.461"),
-            "the refusal names bead ornadb-5il1.461 for {form:?}:\n{}",
-            transcript(&refused)
-        );
-    }
+    let listed = orna(&root, &["query", relation.as_str(), "--format", "json"]);
+    assert!(
+        listed.status.success(),
+        "a plain listing of a composite-key table succeeds:\n{}",
+        transcript(&listed)
+    );
+    assert_eq!(json(&listed, "orna query (composite plain listing)")["rows"], 1);
+
+    let refused = orna(
+        &root,
+        &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
+    );
+    assert!(
+        !refused.status.success(),
+        "a predicate scan over a composite key is refused:\n{}",
+        transcript(&refused)
+    );
+    assert!(
+        transcript(&refused).contains("ornadb-5il1.461"),
+        "the refusal names bead ornadb-5il1.461:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// A bound whose spelling does not match the table's `Int` primary key is
+/// refused with the valid spelling, never answered empty.
+#[test]
+fn a_bound_of_the_wrong_key_type_is_refused_naming_the_valid_spelling() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    assert_success(
+        &orna_repl(&root, r#"main.Tick.insert({ id: 5, body: "five" })"#),
+        "REPL integer insert",
+    );
+    publish(&root, "Add one tick");
+
+    let refused = orna(&root, &["query", relation.as_str(), "--from", "text:a", "--format", "json"]);
+    assert!(
+        !refused.status.success() && transcript(&refused).contains("int:N"),
+        "a text bound on an Int key is refused naming int:N:\n{}",
+        transcript(&refused)
+    );
+}
+
+/// A predicate scan over more than one page of 256 rows reads every row
+/// through the bounded-range pages, so all 300 rows are evaluated and listed.
+#[test]
+fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
+    let directory = TempDir::new().expect("a temporary directory");
+    let (root, relation) = committed_table(
+        &directory,
+        "pub table Tick(id: Int) { body: Str, }\n",
+        "Tick",
+    );
+    let inserts = (0..300)
+        .map(|index| format!(r#"main.Tick.insert({{ id: {index}, body: "tick {index}" }})"#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_success(&orna_repl(&root, &inserts), "REPL integer inserts");
+    publish(&root, "Add three hundred ticks");
+
+    let scanned = json(
+        &orna(
+            &root,
+            &["query", &relation, "--from", "int:0", "--kind", "text/plain", "--format", "json"],
+        ),
+        "orna query --from int:0 --kind text/plain",
+    );
+    assert_eq!(scanned["rows"], 300, "{scanned}");
 }
