@@ -6,14 +6,16 @@ been published.
 
 ## Unreleased
 - `orna publish` gains four crash barriers behind the `crash-barriers` test
-  feature, and `publication_crash_matrix` kills the publisher at each one:
-  `ref-cas-pre-journal` (after the ref CAS, before `RefAdvanced` is durable),
-  `store-worktree` (after the `.orna/store` worktree rewrite, before the index
-  install), `worktree` (after managed-file materialisation, before
-  `WorktreeReconciled`) and `runtime-complete` (after the runtime tail is
-  consumed, before the repository journal is cleared). Restart verifies the
-  recovery-state table of ORNA-PUB-009 and ACCEPTANCE.md Gate D. No production
-  behaviour changes.
+  feature: `ref-cas-pre-journal`, `store-worktree`, `worktree` and
+  `runtime-complete`. `publication_crash_matrix` SIGKILLs the publisher at each
+  barrier and asserts, after `orna publish` recovery: HEAD equals the base before
+  the ref CAS and equals the journaled candidate at or after it; the recovered
+  candidate is parented on the captured HEAD; exactly one publication commit
+  exists; a second publish is a no-op; staged and unstaged user work, pins, the
+  runtime tail, the writer lease and locks are preserved or released; and
+  `git fsck` passes. Managed-worktree and index reconciliation checks run only for
+  non-store paths, and format-3 candidates have none, so they are vacuous here.
+  No production behaviour changes.
 - A FUSE editor handle whose `close(2)` finds unsynced writes attempts the same
   acceptance as `fsync`, once (ORNA-VFS-008, `41-vfs.md:34-58`). A close whose
   baseline a peer has since accepted is refused: the peer's row stays and the
