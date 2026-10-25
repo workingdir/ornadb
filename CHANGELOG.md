@@ -431,10 +431,12 @@ been published.
   payload was never stored. The observed generation is nullable in the audit
   schema, migrated in place for existing stores; unobservable rows are
   excluded from the checkpoint-reset generation ordering.
-- A skip lease refused because the
-  failure is no longer open is `sys.failure.state_conflict`, not
-  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
-  no longer takes a lease purpose.
+- A skip lease refused because the failure is no longer open is
+  `RejectReason::RetryNotAllowed` at the stream layer. No production path maps
+  it to a public `sys.failure.*` code: the `RuntimeError::StreamFailure*`
+  variants keep their `public_code` strings for round-trip but nothing
+  constructs them. The unreached `failure_transition_error` mapping is removed
+  until `sys.admin.{retry,skip,resolve}_failure` exists (ornadb-5il1.296).
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and
