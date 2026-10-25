@@ -205,3 +205,32 @@ fn admits_committed_format_three_head() {
         "a committed format-3 HEAD must admit the runtime"
     );
 }
+
+/// A committed `HEAD` that mixes layouts (a format-3 `database.orna` beside a
+/// legacy `format.orna` marker, ORNA-META-001) is refused by `orna run` with
+/// ORNA-REPO-CONTEXT-004, naming the path and a remedy that is true for a
+/// committed snapshot, before any runtime state is opened or changed.
+#[test]
+fn run_refuses_mixed_committed_head_with_path_and_remedy() {
+    const LEGACY_MARKER: &str = "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
+    let database = format_three_database();
+    let directory = repository_with_head(
+        &[
+            ("database.orna", database.as_str()),
+            ("format.orna", LEGACY_MARKER),
+        ],
+        &database,
+    );
+    let root = directory.path();
+    let git_before = git_state(root);
+
+    let output = run(root, &["run", "main.main"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(output.stdout.is_empty(), "{stderr}");
+    assert!(stderr.contains("error[ORNA-REPO-CONTEXT-004]"), "{stderr}");
+    assert!(stderr.contains(".orna/format.orna"), "{stderr}");
+    assert!(stderr.contains("git rm --cached PATH"), "{stderr}");
+    assert!(!stderr.contains("ORNA-REPO-CONTEXT-003"), "{stderr}");
+    assert_eq!(git_state(root), git_before);
+}
