@@ -33,6 +33,7 @@ mod compact;
 pub mod complete_copy;
 pub mod format2_orr;
 pub mod format2_rov;
+pub mod format2_ogb;
 mod init;
 pub mod migration_copy;
 mod mount;
