@@ -373,7 +373,10 @@ fn store_files(directory: &Path, files: &mut Vec<PathBuf>) {
 fn commit_corrupt_store(root: &Path) {
     let mut files = Vec::new();
     store_files(&root.join(".orna/store"), &mut files);
-    assert!(!files.is_empty(), "the committed store has files to corrupt");
+    assert!(
+        !files.is_empty(),
+        "the committed store has files to corrupt"
+    );
     for file in &files {
         fs::write(file, b"corrupt").expect("corrupt a store file");
     }
