@@ -61,6 +61,7 @@ use orna_runtime_v1::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
     RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, RuntimeTableActivationSnapshot,
     RuntimeTableIdentity, StagedTableActivation, TableObjectId, TerminalOutcome, WriterLease,
+    RuntimeTableRows,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2548,16 +2549,32 @@ fn committed_invocation_rows(
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
 ) -> Result<PinnedCommittedRows, Diagnostic> {
-    let read_error = || {
-        Diagnostic::target(
-            "E2200",
-            "committed table rows could not be read",
-            "retry the invocation after checking local runtime state",
-        )
-    };
+    let rows = committed_rows_at(repository, commit, admitted, tables)?;
+    let pin = runtime
+        .block_on(state.published_pin())
+        .map_err(|_| committed_rows_read_error())?;
+    PinnedCommittedRows::new(pin, rows).map_err(|_| committed_rows_read_error())
+}
+
+fn committed_rows_read_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2200",
+        "committed table rows could not be read",
+        "retry the invocation after checking local runtime state",
+    )
+}
+
+/// The evaluator rows of every admitted table at `commit`, read from the
+/// committed format-3 base. Shared by the one-shot invocation and `serve`.
+fn committed_rows_at(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<RuntimeTableRows, Diagnostic> {
     let format = repository
         .open_pinned_format_context(commit.as_str())
-        .map_err(|_| read_error())?;
+        .map_err(|_| committed_rows_read_error())?;
     let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
         .table_schemas()
         .iter()
@@ -2569,18 +2586,17 @@ fn committed_invocation_rows(
         .collect();
     let committed =
         orna_project_v1::committed_tables(repository, &format, commit, &schemas, &table_ids)
-            .map_err(|_| read_error())?;
+            .map_err(|_| committed_rows_read_error())?;
     let mut rows = BTreeMap::new();
     for (name, schema) in &schemas {
-        let table = committed.get(name).ok_or_else(read_error)?;
+        let table = committed
+            .get(name)
+            .ok_or_else(committed_rows_read_error)?;
         let table_rows =
-            orna_project_v1::evaluator_rows(table, schema).map_err(|_| read_error())?;
+            orna_project_v1::evaluator_rows(table, schema).map_err(|_| committed_rows_read_error())?;
         rows.insert(name.clone(), table_rows);
     }
-    let pin = runtime
-        .block_on(state.published_pin())
-        .map_err(|_| read_error())?;
-    PinnedCommittedRows::new(pin, rows).map_err(|_| read_error())
+    Ok(rows)
 }
 
 /// One-shot `run` of a single admitted module that declares tables and reads
