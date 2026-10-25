@@ -20,7 +20,7 @@ mod format3;
 /// evaluation with a divide-by-zero.
 const SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
 pub fn seed() { music.insert({ id: \"london\", title: \"Original\", artist: \"Kieran\" }); music.insert({ id: \"paris\", title: \"Second\", artist: \"Kieran\" }); music.insert({ id: \"rome\", title: \"Third\", artist: \"Kieran\" }); }\n\
-pub fn expect_three() = 6 / (music | count());\n\
+pub fn expect_three(): Bool { let rows = music | count(); assert rows == 3; true }\n\
 pub fn main() = music | count();\n";
 
 const WRITE_SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
@@ -83,9 +83,9 @@ fn uncommitted_project(source: &str) -> tempfile::TempDir {
 /// carry their admitted `TableObjectId` (`repl_transaction.rs`). The runtime
 /// tail is then published so the three rows are committed at HEAD. A one-shot
 /// `run` write stages unstamped mutations that `publish` rejects (E2300).
-fn committed_three_rows() -> tempfile::TempDir {
+fn committed_rows(source: &str) -> tempfile::TempDir {
     let (directory, _repository, _relation) =
-        format3::format3_repository_for_table(SOURCE, "music");
+        format3::format3_repository_for_table(source, "music");
     for row in [
         "main.music.insert({ id: \"london\", title: \"Original\", artist: \"Kieran\" })",
         "main.music.insert({ id: \"paris\", title: \"Second\", artist: \"Kieran\" })",
@@ -98,6 +98,10 @@ fn committed_three_rows() -> tempfile::TempDir {
         "publish seeded rows",
     );
     directory
+}
+
+fn committed_three_rows() -> tempfile::TempDir {
+    committed_rows(SOURCE)
 }
 
 /// Seeds the same three keys as `committed_three_rows`, inserted rome, london,
@@ -296,6 +300,64 @@ fn uncommitted_project_table_read_fails_with_named_reason() {
     assert!(
         combined(&output).contains("table reads need a committed project"),
         "missing HEAD must name the table-read requirement: {}",
+        combined(&output)
+    );
+}
+
+const SYS_STORAGE_SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, }\n\
+pub fn storage_probe(): Bool { let rows = music | count(); let pending = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1; assert rows == 3; assert pending >= 0; true }\n\
+pub fn main() = music | count();\n";
+
+/// B: a table-bearing entry that also scans `sys.Storage` gets the publication
+/// snapshot and the sys host context through the table route. Without them the
+/// `sys.Storage` read fails, so success shows the table route threads both.
+#[test]
+fn invoke_table_entry_reading_sys_storage_gets_publication_metadata() {
+    let directory = committed_rows(SYS_STORAGE_SOURCE);
+    let output = orna(directory.path(), &["invoke", "storage_probe"]);
+    assert_success(&output, "table-bearing entry reading sys.Storage");
+    assert!(
+        combined(&output).contains("invocation completed"),
+        "sys.Storage read did not complete: {}",
+        combined(&output)
+    );
+}
+
+/// C: a held runtime owner lock does not block a one-shot read. The busy lock
+/// opens the runtime as a secondary participant, so the read completes and the
+/// process exits within the deadline instead of waiting on the lock.
+#[test]
+fn invoke_reads_committed_rows_while_runtime_owner_lock_is_held() {
+    let directory = committed_three_rows();
+    let repository =
+        orna_repository_v1::Repository::discover(directory.path()).expect("repository");
+    let _owner = repository
+        .acquire_runtime_owner_lock([9; 16])
+        .expect("owner lock held by the test");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", directory.path().to_str().expect("UTF-8 path")])
+        .args(["invoke", "expect_three"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("orna CLI process");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if child.try_wait().expect("poll orna").is_some() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("invoke hung while the runtime owner lock was held");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let output = child.wait_with_output().expect("orna output");
+    assert_success(&output, "invoke while the owner lock is held");
+    assert!(
+        combined(&output).contains("invocation completed"),
+        "invoke did not complete under a held lock: {}",
         combined(&output)
     );
 }
