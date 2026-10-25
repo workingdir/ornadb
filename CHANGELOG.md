@@ -5,10 +5,14 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- The language server's semantic rename keeps a table or field's object identity:
-  on save, the renamed source and identity inventory are staged, uncommitted, like
-  `orna mv` (reviewable with Git; `orna commit` keeps the identity). An identity
-  that cannot be carried leaves the rename applied and shows a warning with code
+- The language server's semantic rename keeps a table or field's object identity.
+  Owner-visible behaviour: on save, the editor writes to the git index. The index
+  entry for `main.orna` is replaced with the whole saved file (not only the renamed
+  hunk), and the identity inventory and `.orna/store` are staged too. Nothing is
+  committed; `orna commit` then keeps the identity, like `orna mv`. A field rename is
+  staged the same way, but `orna commit` refuses it with "schema evolution is not
+  admitted" until schema evolution is implemented (ORNA-EVOL-002). An identity that
+  cannot be carried leaves the rename applied and shows a warning with code
   `ORNA-LSP-RENAME-001` and the remedy `orna mv` (`ornadb-5il1.414`). Concurrent
   inventory changes are guarded by the staged-store `StaleIndex` check. An outer
   coordination lock was not added because the install path takes the same lock
