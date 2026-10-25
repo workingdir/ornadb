@@ -593,7 +593,7 @@ class CommandLineTests(unittest.TestCase):
 
 
 # Modules that can load or run code the guard does not read.
-FORBIDDEN_MODULES = frozenset({"builtins", "ctypes", "importlib", "multiprocessing", "pkgutil", "pty", "runpy"})
+FORBIDDEN_MODULES = frozenset({"asyncio", "builtins", "ctypes", "importlib", "multiprocessing", "pkgutil", "pty", "runpy"})
 # Names that run source text or import by name, whether called or aliased.
 DYNAMIC_NAMES = frozenset({"__import__", "compile", "eval", "exec"})
 # Subprocess attributes that spawn nothing and may appear without a call.
@@ -615,7 +615,11 @@ def _module_violations(name: str, line: int) -> list[str]:
 
 
 def _is_process_function(attr: str) -> bool:
-    return attr.startswith(("exec", "spawn", "fork")) or attr in {"system", "popen", "kill", "killpg", "startfile"}
+    return attr.startswith(("exec", "fork")) or "spawn" in attr or attr in {"system", "popen", "kill", "killpg", "startfile"}
+
+
+def _is_git_environment_call(node: ast.expr) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "git_environment"
 
 
 def _subprocess_call_violations(call: ast.Call) -> list[str]:
@@ -630,16 +634,27 @@ def _subprocess_call_violations(call: ast.Call) -> list[str]:
     for element in argv.elts:
         if isinstance(element, ast.Constant) and isinstance(element.value, str) and "orna" in element.value.lower():
             problems.append(f"line {line}: subprocess argv names orna")
+    for keyword in call.keywords:
+        if keyword.arg is None:
+            problems.append(f"line {line}: subprocess **keywords can hide executable, shell and env")
+        elif keyword.arg in {"executable", "shell"}:
+            problems.append(f"line {line}: subprocess {keyword.arg}= can run a program other than git")
+        elif keyword.arg == "env" and not _is_git_environment_call(keyword.value):
+            problems.append(f"line {line}: subprocess env= must be git_environment()")
     return problems
 
 
 def independence_violations(source: str) -> list[str]:
     """Return every construct that could make the extractor depend on an orna crate or run the orna binary.
 
-    Checked: imports (stdlib only, no relative, no orna, no code-loading modules); dynamic
-    import and exec/eval/compile by name; os process functions; subprocess used only as a
-    direct call whose argv is a literal list starting with "git" and naming no orna. Not
-    checked: values produced by variables or getattr, and reflection beyond those names.
+    Checked: imports (stdlib only, no relative, no orna, no code-loading modules such as
+    asyncio or importlib, and no "import X as Y" aliases); from-imports of os, subprocess
+    and sys; bare references to os, subprocess and sys; __dict__, __getattribute__ and
+    modules on os, subprocess and sys; dynamic import and exec/eval/compile by name; os
+    process functions, including spawn and posix_spawn variants; subprocess used only as a
+    direct call whose argv is a literal list starting with "git" and naming no orna, with no
+    executable, shell, **keyword or env other than git_environment(). Not checked: process
+    or module values reached through variables or getattr on other objects.
     """
     tree = ast.parse(source)
     problems: list[str] = []
@@ -650,21 +665,25 @@ def independence_violations(source: str) -> list[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 problems += _module_violations(alias.name, line)
+                if alias.asname:
+                    problems.append(f"line {line}: 'import {alias.name} as {alias.asname}' hides the module name; import it unaliased")
         elif isinstance(node, ast.ImportFrom):
             if node.level:
                 problems.append(f"line {line}: relative import")
             module = node.module or ""
             problems += _module_violations(module, line)
-            if module in {"os", "subprocess"}:
+            if module in {"os", "subprocess", "sys"}:
                 problems.append(f"line {line}: 'from {module} import ...' hides calls; use 'import {module}'")
         elif isinstance(node, ast.Name):
             if node.id in DYNAMIC_NAMES:
                 problems.append(f"line {line}: {node.id} runs or imports by name")
-            if node.id in {"os", "subprocess"} and id(node) not in module_values:
+            if node.id in {"os", "subprocess", "sys"} and id(node) not in module_values:
                 problems.append(f"line {line}: bare reference to {node.id!r} can alias process calls")
         elif isinstance(node, ast.Attribute):
             if isinstance(node.value, ast.Name) and node.value.id == "os" and _is_process_function(node.attr):
                 problems.append(f"line {line}: os.{node.attr} runs a process")
+            if isinstance(node.value, ast.Name) and node.value.id in {"os", "subprocess", "sys"} and node.attr in {"__dict__", "__getattribute__", "modules"}:
+                problems.append(f"line {line}: {node.value.id}.{node.attr} reaches names the guard does not read")
             if node.attr in {"import_module", "__import__"}:
                 problems.append(f"line {line}: dynamic import via .{node.attr}")
             if isinstance(node.value, ast.Name) and node.value.id == "subprocess":
@@ -688,6 +707,9 @@ class IndependenceTests(unittest.TestCase):
     def test_the_guard_admits_a_literal_git_argv(self) -> None:
         self.assertEqual(independence_violations('import subprocess\nsubprocess.run(["git", "-C", "r", "status"])\n'), [])
 
+    def test_the_guard_admits_the_git_environment_hook(self) -> None:
+        self.assertEqual(independence_violations("import subprocess\nsubprocess.Popen(['git'], env=git_environment())\n"), [])
+
     def test_the_guard_refuses_each_known_hole(self) -> None:
         holes = {
             "non-stdlib import": "import requests\n",
@@ -707,6 +729,20 @@ class IndependenceTests(unittest.TestCase):
             "subprocess with variable argv": "import subprocess\nsubprocess.Popen(COMMAND)\n",
             "uncalled subprocess alias": "import subprocess\nrun = subprocess.run\n",
             "bare os alias": "import os\nshell = os\n",
+            "aliased subprocess module": "import subprocess as sp\nsp.run(['orna', 'export', 'x'])\n",
+            "aliased os module": "import os as o\no.system('orna export x')\n",
+            "aliased sys module": "import sys as s\ns.modules['subprocess'].run(['orna', 'x'])\n",
+            "from sys import modules": "from sys import modules\nmodules['subprocess'].run(['orna', 'x'])\n",
+            "sys.modules access": "import sys\nsys.modules['subprocess'].run(['orna', 'x'])\n",
+            "sys.__dict__ access": "import sys\nsys.__dict__['modules']\n",
+            "bare sys reference": "import sys\nvars(sys)['modules']\n",
+            "os.__dict__ access": "import os\nos.__dict__['system']('orna export x')\n",
+            "os.posix_spawn": "import os\nos.posix_spawn('/usr/bin/orna', ['orna'], {})\n",
+            "asyncio subprocess": "import asyncio\nasyncio.create_subprocess_exec('orna', 'x')\n",
+            "subprocess executable keyword": "import subprocess\nsubprocess.run(['git', 'status'], executable='/usr/bin/orna')\n",
+            "subprocess shell keyword": "import subprocess\nsubprocess.run(['git', 'status'], shell=True)\n",
+            "subprocess env overriding PATH": "import subprocess\nsubprocess.run(['git', 'status'], env={'PATH': '/tmp/bin'})\n",
+            "subprocess spread keywords": "import subprocess\nsubprocess.run(['git', 'status'], **OPTIONS)\n",
         }
         for label, extra in holes.items():
             with self.subTest(hole=label):
