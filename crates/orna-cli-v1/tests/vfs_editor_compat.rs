@@ -161,16 +161,19 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
         "rejected save must preserve the durable row",
     );
 
-    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
-    let state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
+    // The fixture's foreign writer holds the owner lock and lease. Only that
+    // handle may read them; a fresh open is Secondary (ORNA-TURSO-005).
+    let (runtime_identity, _) = format3::cli_runtime_identity(&fixture.repository);
+    let foreign = fixture
+        ._foreign_writer
+        .as_ref()
+        .expect("the fixture keeps the live foreign writer");
     assert!(matches!(
-        state.acquire_lease(runtime_identity.repository_id).await,
+        foreign.acquire_lease(runtime_identity.repository_id).await,
         Err(orna_runtime_v1::RuntimeError::LeaseHeld),
     ));
     assert_eq!(
-        state
+        foreign
             .current_lease()
             .await
             .unwrap()
