@@ -57,7 +57,7 @@ impl ApplicationAuthority {
         let (value, successor) = session
             .evaluate_staged_with_effects(staged, &mut effects)
             .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
-        // The REPL evaluation always runs under its bound registry, whose environment provider and host providers may reach external state.
+        // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`.
         let declared = repl_declared_effects(effects.bindings);
         let activation = effects
             .mutations
@@ -908,9 +908,10 @@ fn restore_contextual_blob_values(
 }
 
 /// The effect set declared for one REPL transaction. Every REPL evaluation runs
-/// under a bound registry, whose providers may reach external state (for example
-/// `std.io.fs.write_text`), so the declaration derives from those bindings and
-/// never from the absence of a sys host.
+/// under a bound registry. `may_reach_external_state` is currently constant `true`
+/// (environment reads are always external), so this always yields `ExternalPossible`;
+/// the declaration is still routed through the registry so a future provider-aware
+/// answer changes it in one place.
 pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
     crate::declared_effects(bindings.may_reach_external_state())
 }
