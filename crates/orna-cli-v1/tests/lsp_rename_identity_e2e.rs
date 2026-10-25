@@ -11,6 +11,7 @@ use std::{
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio},
+    sync::LazyLock,
 };
 
 use orna_project_v1::{ObjectIdentityManifest, ObjectKind};
@@ -20,22 +21,36 @@ use tempfile::TempDir;
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
 
-/// The `orna-lsp` binary built alongside this test executable. It is a
-/// separate workspace binary, so `cargo build -p orna-lsp` must have produced
-/// it; the test refuses to run without it rather than skipping.
-fn orna_lsp_binary() -> PathBuf {
-    let test_exe = std::env::current_exe().expect("the test executable path");
-    let profile_dir = test_exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("the test executable lives in target/<profile>/deps");
-    let binary = profile_dir.join("orna-lsp");
-    assert!(
-        binary.exists(),
-        "{} is missing; run `cargo build -p orna-lsp` into the same target directory first",
-        binary.display()
-    );
-    binary
+/// The `orna-lsp` binary, built by this test once per test process with the
+/// same Cargo and target directory as the running test executable. `orna-lsp`
+/// is a separate package, so `cargo test -p orna-cli-v1` does not build it.
+fn orna_lsp_binary() -> &'static Path {
+    static BINARY: LazyLock<PathBuf> = LazyLock::new(|| {
+        let test_exe = std::env::current_exe().expect("the test executable path");
+        let profile_dir = test_exe
+            .parent()
+            .and_then(Path::parent)
+            .expect("the test executable lives in target/<profile>/deps");
+        let target_dir = profile_dir.parent().expect("a target directory above the profile");
+        let mut build = Command::new(env!("CARGO"));
+        build
+            .args(["build", "--locked", "-p", "orna-lsp"])
+            .env("CARGO_TARGET_DIR", target_dir);
+        if profile_dir.file_name().is_some_and(|name| name == "release") {
+            build.arg("--release");
+        }
+        let status = build
+            .status()
+            .expect("run `cargo build --locked -p orna-lsp` for the rename e2e");
+        assert!(
+            status.success(),
+            "`cargo build --locked -p orna-lsp` failed; the rename e2e needs the orna-lsp binary: {status}"
+        );
+        let binary = profile_dir.join(format!("orna-lsp{}", std::env::consts::EXE_SUFFIX));
+        assert!(binary.exists(), "{} is missing after building orna-lsp", binary.display());
+        binary
+    });
+    &BINARY
 }
 
 /// Keeps the host's Git configuration and repository routing out of every
@@ -121,6 +136,15 @@ fn head_identities(root: &Path) -> ObjectIdentityManifest {
     let repository = Repository::discover(root).expect("discover the repository");
     let head = repository.head().expect("read HEAD").expect("a committed HEAD");
     ObjectIdentityManifest::read_committed(&repository, &head).expect("committed identities")
+}
+
+/// The identity inventory staged in the index, as `orna commit` would read it.
+fn staged_identities(root: &Path) -> ObjectIdentityManifest {
+    let repository = Repository::discover(root).expect("discover the repository");
+    let staged = repository.capture_staged_candidate().expect("capture the staged candidate");
+    ObjectIdentityManifest::read_staged(&repository, &staged)
+        .expect("read the staged identities")
+        .expect("a staged identity inventory")
 }
 
 /// A stdio client speaking LSP framing to one `orna-lsp` process. Messages
@@ -225,6 +249,39 @@ fn apply_edits(source: &str, edits: &[Value]) -> String {
     text
 }
 
+/// Renames the declaration at `character` on line 0 of `main.orna` through a
+/// real `orna-lsp` session, writes the reviewed edit, and saves it. Returns the
+/// renamed source and the warnings the server showed.
+fn rename_through_lsp(root: &Path, source: &str, character: u64, new_name: &str) -> (String, Vec<String>) {
+    let main = root.join("main.orna");
+    let uri = format!("file://{}", main.display());
+    let mut client = Client::spawn(root);
+    client.request("initialize", json!({ "processId": null, "rootUri": null, "capabilities": {} }));
+    client.notify("initialized", json!({}));
+    client.notify(
+        "textDocument/didOpen",
+        json!({ "textDocument": { "uri": uri, "languageId": "orna", "version": 1, "text": source } }),
+    );
+    let rename = client.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 0, "character": character },
+            "newName": new_name,
+        }),
+    );
+    let edits = rename["changes"][&uri].as_array().expect("the rename edits main.orna").clone();
+    let renamed = apply_edits(source, &edits);
+    fs::write(&main, &renamed).expect("write the reviewed rename");
+    client.notify(
+        "textDocument/didChange",
+        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": renamed }] }),
+    );
+    client.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri } }));
+    let shown = client.finish();
+    (renamed, shown)
+}
+
 #[test]
 fn lsp_rename_then_commit_keeps_the_table_object_id() {
     let directory = TempDir::new().expect("create the test directory");
@@ -233,39 +290,18 @@ fn lsp_rename_then_commit_keeps_the_table_object_id() {
     let before = head_identities(&root);
     let music_id = *before.id(ObjectKind::Table, "Music").expect("Music has a committed identity");
 
-    let main = root.join("main.orna");
-    let uri = format!("file://{}", main.display());
-    let mut client = Client::spawn(&root);
-    client.request("initialize", json!({ "processId": null, "rootUri": null, "capabilities": {} }));
-    client.notify("initialized", json!({}));
-    client.notify(
-        "textDocument/didOpen",
-        json!({ "textDocument": { "uri": uri, "languageId": "orna", "version": 1, "text": MUSIC_SOURCE } }),
-    );
-
     // Position 11 is inside `Music` on line 0 of `pub table Music(...)`.
-    let rename = client.request(
-        "textDocument/rename",
-        json!({
-            "textDocument": { "uri": uri },
-            "position": { "line": 0, "character": 11 },
-            "newName": "Archive",
-        }),
-    );
-    let edits = rename["changes"][&uri].as_array().expect("the rename edits main.orna").clone();
-    let renamed = apply_edits(MUSIC_SOURCE, &edits);
+    let (renamed, shown) = rename_through_lsp(&root, MUSIC_SOURCE, 11, "Archive");
     assert_eq!(renamed, "pub table Archive(id: Str) { title: Str, }\n");
-    fs::write(&main, &renamed).expect("write the reviewed rename");
-    client.notify(
-        "textDocument/didChange",
-        json!({ "textDocument": { "uri": uri, "version": 2 }, "contentChanges": [{ "text": renamed }] }),
-    );
-    client.notify("textDocument/didSave", json!({ "textDocument": { "uri": uri } }));
-    let shown = client.finish();
     assert!(shown.is_empty(), "a table rename with identity carries no warning: {shown:?}");
 
-    // The save staged the renamed source and the identity inventory; no
-    // `git add` is needed before `orna commit` takes them.
+    // The save staged the renamed source and the identity inventory before any
+    // `git add` or `orna commit`.
+    assert_eq!(git(&root, &["show", ":main.orna"]), renamed);
+    let staged = staged_identities(&root);
+    assert_eq!(staged.id(ObjectKind::Table, "Archive"), Some(&music_id));
+    assert_eq!(staged.id(ObjectKind::Table, "Music"), None);
+
     let committed = orna(&root, &["commit", "-m", "Rename Music to Archive"]);
     assert_success(&committed, "orna commit");
     let after = head_identities(&root);
@@ -278,5 +314,31 @@ fn lsp_rename_then_commit_keeps_the_table_object_id() {
             "field {field} keeps its ID"
         );
     }
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn lsp_rename_field_then_commit_keeps_the_field_object_id() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+    let before = head_identities(&root);
+    let title_id = *before.id(ObjectKind::Field, "Music.title").expect("title has a committed identity");
+
+    // Position 28 is inside the field `title` in `{ title: Str, }`.
+    let (renamed, shown) = rename_through_lsp(&root, MUSIC_SOURCE, 28, "heading");
+    assert_eq!(renamed, "pub table Music(id: Str) { heading: Str, }\n");
+    assert!(shown.is_empty(), "a field rename with identity carries no warning: {shown:?}");
+
+    assert_eq!(git(&root, &["show", ":main.orna"]), renamed);
+    let staged = staged_identities(&root);
+    assert_eq!(staged.id(ObjectKind::Field, "Music.heading"), Some(&title_id));
+    assert_eq!(staged.id(ObjectKind::Field, "Music.title"), None);
+
+    let committed = orna(&root, &["commit", "-m", "Rename Music.title to heading"]);
+    assert_success(&committed, "orna commit");
+    let after = head_identities(&root);
+    assert_eq!(after.id(ObjectKind::Field, "Music.heading"), Some(&title_id));
+    assert_eq!(after.id(ObjectKind::Field, "Music.title"), None);
     assert_eq!(git(&root, &["status", "--porcelain"]), "");
 }

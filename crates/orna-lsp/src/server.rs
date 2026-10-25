@@ -15,18 +15,18 @@ use std::thread::{self, JoinHandle};
 use crate::analysis;
 use crate::diagnostics::{self, DiagnosticsWorker, Publisher, Snapshot};
 use crate::documents::{Document, PositionMapper};
-use crate::names::Role;
+use crate::names::{DeclaredKind, Role};
 use crate::project::{ProjectHome, ProjectLocator};
 use crate::rename::{self, ModuleEdits, Refusal};
 use crate::requests::RequestPool;
 use crate::views::{Documents, Views};
-use crate::workspace::{OpenDocument, Workspace};
+use crate::workspace::{OpenDocument, Target, Workspace};
 use crate::{editor_ranges, hierarchy, inlay, semantic};
 use lsp_server::{
     Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError,
 };
 use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
-use orna_repository_v1::Repository;
+use orna_repository_v1::{Repository, RepositoryFormat};
 use lsp_types::{
     CallHierarchyOptions, CallHierarchyServerCapability, CodeAction, CodeActionKind,
     CodeActionOptions, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
@@ -590,7 +590,7 @@ fn handle_notification(state: &mut ServerState, notification: Notification) -> b
             {
                 let uri = params.text_document.uri;
                 if let Err(error) = persist_pending_rename_identity(&state.context, &uri) {
-                    state.show_error(&format!("cannot save rename identity: {error}"));
+                    state.context.show_warning(&identity_not_carried(&error));
                 }
                 // Saved files are read from disk for closed modules.
                 state.context.views.invalidate();
@@ -932,14 +932,16 @@ fn identity_rename_for_request(
     }
 
     let suffix = format!(".{old_name}");
-    let mut pending_fields = pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).filter(|rename| {
+    let pending_fields = pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).filter(|rename| {
         let target = rename.new_qualified_name();
         rename.kind() == ObjectKind::Field
             && target.ends_with(&suffix)
             && target[..target.len() - suffix.len()].starts_with(&namespace)
-    });
-    if let Some(rename) = pending_fields.next() {
-        if pending_fields.next().is_some() { return Ok(None); }
+    }).collect::<Vec<_>>();
+    if pending_fields.len() > 1 {
+        return Err(format!("the field name {old_name} matches several pending renames"));
+    }
+    if let Some(rename) = pending_fields.first() {
         let current = rename.new_qualified_name();
         let parent = &current[..current.len() - old_name.len()];
         return Ok(Some(ObjectIdentityRename::new(
@@ -947,7 +949,9 @@ fn identity_rename_for_request(
         )));
     }
 
-    let Some(previous) = staged_identities(&repository)? else { return Ok(None); };
+    let Some(previous) = staged_identities(&repository)? else {
+        return Err("the staged object identities are missing".to_owned());
+    };
     if previous.id(ObjectKind::Table, &table).is_some() {
         return Ok(Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name))));
     }
@@ -956,7 +960,7 @@ fn identity_rename_for_request(
             && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
     });
     let Some(record) = matches.next() else { return Ok(None); };
-    if matches.next().is_some() { return Ok(None); }
+    if matches.next().is_some() { return Err(format!("the field name {old_name} matches several fields")); }
     let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
     Ok(Some(ObjectIdentityRename::new(
         ObjectKind::Field,
@@ -971,21 +975,64 @@ fn staged_identities(repository: &Repository) -> Result<Option<ObjectIdentityMan
     repository
         .refuse_unretained_committed_store()
         .map_err(|error| format!("{error:?}"))?;
+    require_identity_format(repository)?;
     let staged = repository
         .capture_staged_candidate()
         .map_err(|error| format!("{error:?}"))?;
     ObjectIdentityManifest::read_staged(repository, &staged).map_err(|error| format!("{error:?}"))
 }
 
+/// Object identities exist only in format 3. Older repositories refuse the
+/// carry rather than renaming without an identity.
+fn require_identity_format(repository: &Repository) -> Result<(), String> {
+    let format = repository
+        .open_format_context()
+        .map_err(|error| format!("{error:?}"))?;
+    if format.repository_format() == RepositoryFormat::Format3 {
+        Ok(())
+    } else {
+        Err("this repository uses a legacy format without object identities".to_owned())
+    }
+}
+
+/// Whether a rename of `target` concerns an object identity. Only declared
+/// tables and fields have one; local names, functions and modules do not.
+fn carries_identity(workspace: &Workspace, target: &Target) -> bool {
+    match target {
+        Target::Declared { module, index } => matches!(
+            workspace.declaration(*module, *index).kind,
+            DeclaredKind::Table
+                | DeclaredKind::Field
+                | DeclaredKind::KeyField
+                | DeclaredKind::PayloadField
+        ),
+        _ => false,
+    }
+}
+
+/// The warning for an object identity that a rename or save did not carry.
+/// The text is already changed, so the remedy is `orna mv`.
+fn identity_not_carried(reason: &str) -> String {
+    format!(
+        "ORNA-LSP-RENAME-001: object identity was not carried ({reason}); use orna mv to rename a table with its identity"
+    )
+}
+
 /// Saves the identity renames the saved source applies, into the staged store.
+/// Every pending rename that cannot be carried is returned as an error for the
+/// caller to report; the saved text is saved either way.
 fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<(), String> {
     let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else { return Ok(()); };
     let url = url::Url::parse(uri.as_str()).map_err(|error| format!("{error:?}"))?;
     let path = url.to_file_path().map_err(|()| format!("{uri:?} is not a file"))?;
-    let Some(open) = state.documents.get(uri) else { return Ok(()); };
+    let Some(open) = state.documents.get(uri) else {
+        return Err("the document is no longer open".to_owned());
+    };
     let saved_version = open.document.version;
     let saved_text = std::fs::read_to_string(&path).map_err(|error| format!("{error:?}"))?;
-    if saved_text != open.document.text { return Ok(()); }
+    if saved_text != open.document.text {
+        return Err("the saved text differs from the editor buffer".to_owned());
+    }
     let repository = Repository::discover(&path).map_err(|error| format!("{error:?}"))?;
     let project = ProjectLoader::default()
         .load(&repository)
@@ -994,50 +1041,73 @@ fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<
     repository
         .refuse_unretained_committed_store()
         .map_err(|error| format!("{error:?}"))?;
+    require_identity_format(&repository)?;
     let staged = repository
         .capture_staged_candidate()
         .map_err(|error| format!("{error:?}"))?;
     let previous = ObjectIdentityManifest::read_staged(&repository, &staged)
         .map_err(|error| format!("{error:?}"))?
         .ok_or_else(|| "the staged object identities are missing".to_owned())?;
-    let applicable = chains.into_iter().filter_map(|chain| {
-        let first = chain.first()?;
-        // Intermediate destinations are not in the saved source, so the
-        // furthest applied step that reconciles against it is the one saved.
+    // Intermediate destinations are not in the saved source, so the furthest
+    // applied step that reconciles against it is the one saved.
+    // `Ok(None)`: no step of the chain reached the saved text, so the rename was
+    // declined and there is no identity to carry.
+    let rename_for = |chain: &[PendingIdentityRename]| -> Result<Option<ObjectIdentityRename>, String> {
+        let Some(first) = chain.first() else { return Ok(None); };
         let applied = chain
             .iter()
             .take_while(|step| step.applied_version.is_some_and(|version| version <= saved_version))
             .collect::<Vec<_>>();
-        applied.into_iter().rev().find_map(|step| {
+        if applied.is_empty() { return Ok(None); }
+        let mut reason = format!(
+            "the saved source does not show the rename of {}",
+            first.rename.old_qualified_name()
+        );
+        for step in applied.into_iter().rev() {
             let rename = ObjectIdentityRename::new(
                 first.rename.kind(),
                 first.rename.old_qualified_name(),
                 step.rename.new_qualified_name(),
             );
-            previous
-                .with_renames(&modules, std::slice::from_ref(&rename))
-                .ok()
-                .map(|_| rename)
-        })
-    }).collect::<Vec<_>>();
-    if applicable.is_empty() { return Ok(()); }
-    let next = applicable.iter().try_fold(previous, |manifest, rename| {
-        manifest
-            .with_renames(&modules, std::slice::from_ref(rename))
-            .map_err(|error| format!("{error:?}"))
-    })?;
-    let relative = path
-        .strip_prefix(repository.worktree())
-        .map_err(|error| format!("{error:?}"))?;
-    let logical_path = relative.to_string_lossy().replace('\\', "/");
-    repository
-        .stage_object_identities(
-            &staged,
-            &next.to_stored(),
-            &[(logical_path.as_str(), saved_text.as_bytes())],
-        )
-        .map(|_| ())
-        .map_err(|error| format!("{error:?}"))
+            match previous.with_renames(&modules, std::slice::from_ref(&rename)) {
+                Ok(_) => return Ok(Some(rename)),
+                Err(error) => reason = format!("{error:?}"),
+            }
+        }
+        Err(reason)
+    };
+    let mut applicable = Vec::new();
+    let mut failures = Vec::new();
+    for chain in &chains {
+        match rename_for(chain) {
+            Ok(Some(rename)) => applicable.push(rename),
+            Ok(None) => {}
+            Err(reason) => failures.push(reason),
+        }
+    }
+    if !applicable.is_empty() {
+        let next = applicable.iter().try_fold(previous, |manifest, rename| {
+            manifest
+                .with_renames(&modules, std::slice::from_ref(rename))
+                .map_err(|error| format!("{error:?}"))
+        })?;
+        let relative = path
+            .strip_prefix(repository.worktree())
+            .map_err(|error| format!("{error:?}"))?;
+        let logical_path = relative.to_string_lossy().replace('\\', "/");
+        repository
+            .stage_object_identities(
+                &staged,
+                &next.to_stored(),
+                &[(logical_path.as_str(), saved_text.as_bytes())],
+            )
+            .map_err(|error| format!("{error:?}"))?;
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn mark_applied_identity_rename(state: &RequestContext, uri: &Uri, version: i32, text: &str) {
@@ -1096,51 +1166,53 @@ fn request_rename(
         verify_project_check(state, &home, &workspace, &edits)?;
     }
     let changes = workspace_changes(&workspace, &edits);
-    // Local names are never recorded in the identity store, so only declared
-    // targets consult it. An identity that cannot be carried never fails an
-    // ordinary rename: the plain workspace edit is returned with a warning.
-    let identity = if matches!(renamable.target, crate::workspace::Target::Local { .. }) {
-        None
-    } else {
+    // Only declared tables and fields have identities. Local names, functions
+    // and modules never consult the identity store, so they never warn. An
+    // identity that cannot be carried never fails an ordinary rename: the plain
+    // workspace edit is returned with a warning.
+    let identity = if carries_identity(&workspace, &renamable.target) {
         identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or_else(|error| {
-            state.show_warning(&format!(
-                "ORNA-LSP-RENAME-001: the rename was applied without carrying object identity ({error}); use orna mv to rename a table with its identity"
-            ));
+            state.show_warning(&identity_not_carried(&error));
             None
         })
+    } else {
+        None
     };
-    if let Some(rename) = identity
-        && let Some(document) = state.document(&uri)
-        && let Some(expected_text) = changes
-            .get(&uri)
-            .and_then(|edits| apply_text_edits(&document.text, edits))
-    {
-        let requested_version = document.version;
-        let pre_edit_text = document.text.clone();
-        let mut pending_renames = lock(&state.pending_identity_renames);
-        let pending = pending_renames.entry(uri.clone()).or_default();
-        if let Some(chain) = pending.iter_mut().find(|chain| {
-            chain.last().is_some_and(|last| {
-                last.rename.kind() == rename.kind()
-                    && last.rename.new_qualified_name() == rename.old_qualified_name()
-                    && last.expected_text == pre_edit_text
-            })
-        }) {
-            chain.push(PendingIdentityRename {
-                rename,
-                requested_version,
-                pre_edit_text,
-                expected_text,
-                applied_version: None,
-            });
-        } else {
-            pending.push(vec![PendingIdentityRename {
-                rename,
-                requested_version,
-                pre_edit_text,
-                expected_text,
-                applied_version: None,
-            }]);
+    if let Some(rename) = identity {
+        let matched = state.document(&uri).and_then(|document| {
+            changes
+                .get(&uri)
+                .and_then(|edits| apply_text_edits(&document.text, edits))
+                .map(|expected_text| (document, expected_text))
+        });
+        match matched {
+            Some((document, expected_text)) => {
+                let requested_version = document.version;
+                let pre_edit_text = document.text.clone();
+                let mut pending_renames = lock(&state.pending_identity_renames);
+                let pending = pending_renames.entry(uri.clone()).or_default();
+                let continues = pending.iter().position(|chain| {
+                    chain.last().is_some_and(|last| {
+                        last.rename.kind() == rename.kind()
+                            && last.rename.new_qualified_name() == rename.old_qualified_name()
+                            && last.expected_text == pre_edit_text
+                    })
+                });
+                let step = PendingIdentityRename {
+                    rename,
+                    requested_version,
+                    pre_edit_text,
+                    expected_text,
+                    applied_version: None,
+                };
+                match continues {
+                    Some(index) => pending[index].push(step),
+                    None => pending.push(vec![step]),
+                }
+            }
+            None => state.show_warning(&identity_not_carried(
+                "the renamed text could not be matched to the document",
+            )),
         }
     }
     let workspace_edit = WorkspaceEdit {
@@ -2161,6 +2233,10 @@ mod persisted_object_rename_tests {
         let source_path = directory.path().join("main.orna");
         fs::write(&source_path, source).unwrap();
         git(directory.path(), &["add", "main.orna", ".orna/database.orna"]);
+        git(directory.path(), &[
+            "-c", "user.name=orna-test", "-c", "user.email=orna-test@example.invalid",
+            "-c", "commit.gpgsign=false", "commit", "-q", "-m", "base",
+        ]);
         let module = ModuleInput::new("main.orna", source);
         let initial = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
         let staged = repository.capture_staged_candidate().unwrap();
@@ -2183,19 +2259,29 @@ mod persisted_object_rename_tests {
         let messages = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&messages);
         state.client = Some(Arc::new(move |message| lock(&sink).push(message)));
+        state.context.client = state.client.clone();
         messages
     }
 
-    /// The error messages shown to the client, as `window/showMessage`.
-    fn shown_errors(messages: &Mutex<Vec<Message>>) -> Vec<String> {
+    /// The warnings shown to the client, as `window/showMessage`.
+    fn shown_warnings(messages: &Mutex<Vec<Message>>) -> Vec<String> {
         lock(messages).iter().filter_map(|message| match message {
             Message::Notification(notification) if notification.method == "window/showMessage" => {
                 let params: lsp_types::ShowMessageParams =
                     serde_json::from_value(notification.params.clone()).unwrap();
-                (params.typ == lsp_types::MessageType::ERROR).then_some(params.message)
+                (params.typ == lsp_types::MessageType::WARNING).then_some(params.message)
             }
             _ => None,
         }).collect()
+    }
+
+    /// Asserts exactly one warning was shown, carrying the rename code and remedy.
+    fn assert_one_rename_warning(messages: &Mutex<Vec<Message>>, reason: &str) {
+        let warnings = shown_warnings(messages);
+        assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
+        assert!(warnings[0].starts_with("ORNA-LSP-RENAME-001"), "{warnings:?}");
+        assert!(warnings[0].contains(reason), "{warnings:?} should mention {reason}");
+        assert!(warnings[0].contains("orna mv"), "{warnings:?} should name the orna mv remedy");
     }
 
     #[test]
@@ -2367,7 +2453,7 @@ mod persisted_object_rename_tests {
             .expect("an unreadable identity never fails an ordinary rename");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
-        assert!(shown_errors(&messages).is_empty(), "no identity to carry is not an error");
+        assert_one_rename_warning(&messages, "object identity was not carried");
     }
 
     #[test]
@@ -2382,19 +2468,22 @@ mod persisted_object_rename_tests {
         open_document(&mut state, &uri, source);
 
         let response = request_rename(&state.context, rename_request(uri.clone(), "Archive"))
-            .expect("a merge in progress never fails an ordinary rename");
+            .expect("a merge in progress never fails the plain rename edit");
+        // The index cannot be read mid-merge, which is a typed error: the plain
+        // edit still returns, and the client is told the identity was not carried.
+        assert_one_rename_warning(&messages, "object identity was not carried");
         let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         assert_eq!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>(), 1);
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
-        // During a merge the rename finds no identity to carry (`Ok(None)`, as
-        // for an unreadable store), so the rename stays plain, no warning is
-        // shown, and the store is not written.
-        assert!(shown_errors(&messages).is_empty(), "no identity to carry is not an error");
+        // `apply_rename` issues a second rename request, which warns the same way.
+        // The save adds no warning: no identity was recorded to carry.
+        assert_eq!(shown_warnings(&messages).len(), 2, "one warning per rename request, none on save");
         fs::remove_file(merge_head).unwrap();
         assert_eq!(staged_manifest(&repository), initial);
     }
+
     #[test]
     fn failed_identity_persist_is_reported_to_client() {
         let source = "pub table Media(id: Str) { payload: Blob, }";
@@ -2409,6 +2498,109 @@ mod persisted_object_rename_tests {
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        assert_eq!(shown_errors(&messages).len(), 1);
+        assert_one_rename_warning(&messages, "object identity was not carried");
+    }
+
+    #[test]
+    fn declined_rename_saves_without_warning() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // The client asks for the rename, then never applies it: the chain is
+        // declined, so there is no identity to carry and no warning to show.
+        drop(request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap());
+        did_save(&mut state, &uri);
+
+        assert!(shown_warnings(&messages).is_empty(), "a declined rename is not a warning");
+    }
+
+    #[test]
+    fn saved_text_that_differs_from_the_buffer_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(&source_path, "pub table Other(id: Str) { payload: Blob, }\n").unwrap();
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "differs from the editor buffer");
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn save_after_the_document_closed_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(&source_path, &saved_source).unwrap();
+        Arc::get_mut(&mut state.context.documents).expect("no other owner").remove(&uri);
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "the document is no longer open");
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn identity_that_cannot_be_carried_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        // Stage an inventory that already holds `Archive`, so carrying `Media`
+        // to that name collides and `with_renames` refuses it.
+        let both = "pub table Media(id: Str) { payload: Blob, }\npub table Archive(id: Str) { payload: Blob, }\n";
+        let module = ModuleInput::new("main.orna", both);
+        let widened = ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let staged = repository.capture_staged_candidate().unwrap();
+        repository.stage_object_identities(&staged, &widened.to_stored(), &[]).unwrap();
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "object identity was not carried");
+        assert_eq!(staged_manifest(&repository), widened);
+        assert_ne!(initial, widened);
+    }
+
+    #[test]
+    fn function_rename_never_warns() {
+        let source = "pub fn total(value: Int): Int = value;\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Column 8 is inside `total`. A function has no identity, so the rename
+        // is plain and the client is shown nothing.
+        let request = Request::new(
+            1.into(),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 8 },
+                "newName": "sum",
+            }),
+        );
+        let response = request_rename(&state.context, request).unwrap();
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>() > 0);
+        assert!(shown_warnings(&messages).is_empty(), "a function rename carries no identity");
     }
 }
