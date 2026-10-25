@@ -16,6 +16,17 @@ been published.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
 ### Fixes
+- Row admission accepts the specification tuple encoding (`Tag(60015)` over an array)
+  for tuple-typed fields, where it previously failed with `ORNA-CONFORMANCE-ROW-TYPE`
+  (commit `89814e6e7`). Stale conformance and application test expectations were migrated to
+  the current specification: semantic-adapter and valid-fixture diagnostics, money and
+  multiple-root codes (`E5003`/`E9102`), the computed-field committed-row schema digest
+  (`orna.schema.v3` domain, store-format-3 section 5), primary-key patch `E3002`, txn key and
+  decimal pins, the partial-mutation rollback entry, and `ORNA-ASSERT-021`/`030` catalogue
+  resolution. Product gaps stay red and are tracked: `qx8l` (owner type-mismatch emits `E2001`
+  before `A091-004`), `yu0h` (unparenthesised pipeline lambda), `7owc` (table-key-default field
+  access), and `6aqk` (implicit conversion chain reports `ORNA-S012-UNRESOLVED` instead of
+  `ORNA091-E-CONVERSION-CHAIN`).
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
   only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
