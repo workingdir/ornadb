@@ -11,6 +11,7 @@ been published.
   reading an enclosing repository. A plain subdirectory of another repository is
   no longer adopted as a dependency checkout (`DependencyUnavailable`);
   dependencies must be their own repositories (ornadb-6vxj).
+- Publication recovery re-verifies `.orna/store` payloads at the `IndexReconciled` stage before worktree materialisation, so a managed store edit made inside the `index` kill window is retained (E2300) and HEAD is not rewound. `publication_crash_matrix` gains a later-tail leg at every kill boundary (`prepared` included) and a managed-store kill-window leg (ornadb-5il1.406, ornadb-5il1.407).
 - `orna serve` HTML pages (`/tree/`, `/blob/`) now send a
   `Content-Security-Policy` (`default-src 'none'`, inline styles only,
   `frame-ancestors 'none'`), `X-Content-Type-Options: nosniff`,
