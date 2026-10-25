@@ -23,6 +23,7 @@ been published.
   records external-effect uncertainty instead. A
   faulted `ExternalPossible` activation is not reported as rollback-proven
   (`ORNA-PROTO-004`, `ACCEPTANCE.md:33` Gate D; `W118` M1).
+- Conformance v1 test gate: `scripts/check-conformance-known-red.sh` (workflow `conformance-v1-tests.yml`) runs every `orna-conformance-v1` test target. Six product-gap tests are listed in `scripts/conformance-known-red.txt` against beads `ornadb-ptqm`, `ornadb-8rfu`, `ornadb-cep5` and `ornadb-ia1o`; each must still fail with its expected message. The row admission tuple arm now accepts canonical tagged tuple fields (ORNA-CONFORMANCE-ROW-TYPE no longer fires for `Raw::Tag(60015, Array)`). The stale cross-table and durable-consumer conformance expectations were migrated to the spec clauses they cite (ornadb-3ybj part B).
 - A project that imports `std` and whose source text contains `sys.Storage` or
   `sys.MaintenanceJob` now runs `use std.<module>.{name}` calls through the production
   authority route (`orna invoke`). The gate is a substring match on the admitted source
