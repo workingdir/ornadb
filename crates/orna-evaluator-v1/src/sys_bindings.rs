@@ -1486,6 +1486,10 @@ pub(crate) fn dispatch_blob_read(
     match (operation, bounds) {
         ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
         ("sys.blob.digest", []) => Ok(BlobReadValue::Digest(blob.content_identity().sha256())),
+        // Verifies raw content only. Orna-1.1.0 34-system-reference.md:3312-3314
+        // also requires the native dependency structure (ORNA-GRAPH-002,
+        // ORNA-OGB-004); that check is not implemented (ornadb-5il1.120), so this
+        // arm is narrower than the documented contract.
         ("sys.blob.verify", []) => {
             blob.verify().map_err(blob_read_failure)?;
             Ok(BlobReadValue::Unit)
@@ -1916,13 +1920,11 @@ mod tests {
         else {
             panic!("digest must return Digest");
         };
+        // Known-answer vector: SHA-256 of the raw bytes "0123456789". Comparing
+        // with the blob's own identity would pass by comparing a value to itself.
         assert_eq!(
-            digest,
-            source
-                .blob()
-                .expect("source Blob")
-                .content_identity()
-                .sha256()
+            crate::format_digest_hex(&digest),
+            "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"
         );
         assert!(matches!(
             dispatch_blob_read("sys.blob.verify", &source, &[]),
@@ -1933,6 +1935,22 @@ mod tests {
             panic!("to_bytes must return bytes");
         };
         assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn blob_digest_is_not_subject_to_the_call_limit() {
+        use sha2::Digest as _;
+
+        // The digest comes from the stored identity and reads no content, so
+        // a Blob over the 8 MiB call limit still reports its commitment.
+        let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
+        let source = blob_source(&over_limit);
+        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        else {
+            panic!("digest must not be refused by the read limit");
+        };
+        let expected: [u8; 32] = sha2::Sha256::digest(&over_limit).into();
+        assert_eq!(digest, expected);
     }
 
     #[test]
@@ -2128,6 +2146,14 @@ mod tests {
         let rejected = reference_blob(std::sync::Arc::new(RejectedContext));
         assert_eq!(rejected.read_to_end(), Err(ValueError::InvalidContext));
         assert_eq!(rejected.read(0, 3), Err(ValueError::InvalidContext));
+        assert_eq!(
+            blob_read_failure(unknown.verify().unwrap_err()).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(rejected.read_to_end().unwrap_err()).code(),
+            "sys.blob.reference_context"
+        );
     }
 
     // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
