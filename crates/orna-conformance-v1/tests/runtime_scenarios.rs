@@ -441,7 +441,7 @@ async fn transaction_scenarios_cross_the_durable_runtime_boundary() {
 #[tokio::test]
 async fn partial_mutation_rollback_keeps_the_empty_batch_for_a_failed_request() {
     let (_temp, repository) = durable_repository();
-    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    let evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
     let identity = RuntimeIdentity {
         database_id: [61; 16],
         repository_id: [62; 16],
