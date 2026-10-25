@@ -3759,6 +3759,108 @@ mod tests {
         assert_eq!(result, expected);
     }
 
+    fn std_import_authority(standard: &[(&str, &str)]) -> ApplicationAuthority {
+        let sources = standard
+            .iter()
+            .map(|(path, source)| ((*path).to_owned(), (*source).to_owned()))
+            .collect::<Vec<_>>();
+        let profile = StandardDependencyProfile::from_sources("std-import-binding", sources.clone())
+            .expect("standard profile");
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&profile, sources.clone())
+            .expect("standard catalogue");
+        ApplicationAuthority::new(catalogue, Limits::default())
+            .with_standard_sources(&profile, sources)
+            .expect("standard function bodies")
+    }
+
+    fn std_import_codes(error: ApplicationError) -> Vec<String> {
+        match error {
+            ApplicationError::Semantic(codes) => codes,
+            other => panic!("expected a semantic refusal, got {other:?}"),
+        }
+    }
+
+    fn int_value(value: i64) -> orna_foundation_v1::Value {
+        orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
+            num_bigint::BigInt::from(value),
+        ))
+        .expect("canonical integer")
+    }
+
+    #[test]
+    fn std_import_user_function_wins_over_import_alias() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let source = "use std.math.{increment};\npub fn increment(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n";
+        let admitted = authority
+            .admit_module("main.orna", source, "answer")
+            .expect("user function keeps its own name");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(101));
+    }
+
+    #[test]
+    fn std_import_of_a_missing_name_is_refused_with_import_diagnostic() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{missing};\npub fn answer(): Int = 1;\n",
+                "answer",
+            )
+            .expect_err("a name absent from the pinned module is refused");
+        assert!(std_import_codes(error).contains(&DIAG_IMPORT.to_owned()));
+    }
+
+    #[test]
+    fn std_import_of_one_name_from_two_functions_is_refused_as_ambiguous() {
+        let authority = std_import_authority(&[
+            (
+                "std/math.orna",
+                "pub fn increment(value: Int): Int = value + 1;\n",
+            ),
+            (
+                "std/other.orna",
+                "pub fn increment(value: Int): Int = value + 2;\n",
+            ),
+        ]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{increment};\nuse std.other.{increment};\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect_err("one unqualified name may not bind two functions");
+        assert!(std_import_codes(error).contains(&DIAG_AMBIGUOUS.to_owned()));
+    }
+
+    #[test]
+    fn std_glob_import_binds_no_names_on_the_authority_route() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let outcome = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.*;\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .and_then(|admitted| authority.evaluate(&admitted, &Environment::new()));
+        assert!(
+            outcome.is_err(),
+            "a call through a glob import must not bind silently, got {outcome:?}"
+        );
+    }
+
     #[test]
     fn name_only_publication_admission_constructs_handler_without_recursion() {
         let rows = RuntimePublicationMetadataRows {
