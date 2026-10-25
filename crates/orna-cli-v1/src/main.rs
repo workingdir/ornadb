@@ -2980,6 +2980,13 @@ fn repl_request_fingerprint(
     hasher.finalize().into()
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Running request rows counted when the first sys binding dispatches.
+    static FIRST_SYS_DISPATCH_RUNNING: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
@@ -3077,13 +3084,27 @@ fn run_repl_input(
         session_id: transactions.session_id,
         request_id: query_id,
     };
-    let scope = ReplTransactionScope {
-        project: &transactions.project,
-        repository,
-        format_context: &transactions.format_context,
-        runtime_context: snapshot.context(),
-        request,
+    #[cfg(test)]
+    let observe_first_dispatch = || {
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| {
+            if first.get().is_none() {
+                let running = transactions
+                    .runtime
+                    .block_on(state.running_requests())
+                    .expect("running requests at first sys dispatch");
+                first.set(Some(running.len()));
+            }
+        });
     };
+    let scope = ReplTransactionScope::new(
+        &transactions.project,
+        repository,
+        &transactions.format_context,
+        snapshot.context(),
+        request,
+    );
+    #[cfg(test)]
+    let scope = scope.with_dispatch_observer(&observe_first_dispatch);
     let writer = transactions.lease.expect("runtime writer lease initialized");
     transactions
         .runtime
@@ -3103,60 +3124,41 @@ fn run_repl_input(
             .map(|_| ())
             .map_err(|_| REPL_EFFECT_UNCERTAIN.to_owned())
     };
-    let evaluation = transactions
-        .authority
-        .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
-    let (value, successor, activation) = match evaluation {
-        Ok(result) => result,
-        Err(failure) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_evaluation_failure(failure));
-        }
+    let terminal = |prefix: &'static [u8]| {
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(&query_id);
+        TerminalOutcome::new(bytes).ok()
     };
-    if activation.mutations().is_empty() {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
-        *session = successor;
-        return Ok(value);
-    }
-    let activation = match activation
-        .stage_for_request(&transactions.authority, snapshot.context(), request)
-    {
-        Ok(activation) => activation,
-        Err(_) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        }
-    };
-    // The application stages with NoFault; rebuild the identical unit carrying
-    // the runtime's injector so the request boundary owns the fault seam.
-    let request_staged = match StagedTableActivation::from_source(
-        activation.context().clone(),
-        activation.mutations().to_vec(),
-        activation.next_digest(),
-        Arc::clone(&transactions.faults),
-        activation.effects(),
-    ) {
-        Ok(staged) => staged,
-        Err(_) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        }
-    };
-    let mut outcome_bytes = b"orna.repl.commit.v1".to_vec();
-    outcome_bytes.extend_from_slice(&query_id);
-    let outcome = match TerminalOutcome::new(outcome_bytes) {
-        Ok(outcome) => outcome,
-        Err(_) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
-        }
-    };
+    // A row whose input never reached an external binding is cancelled before
+    // any observation is recorded, so a failed observation write cannot strand
+    // it. A failed cancellation leaves the row unsettled, which is uncertain.
+    // REQUEST-1 (Orna-1.1.0 30-protocol.md:104): the request row is reserved
+    // and started before evaluation, so an external sys effect dispatched while
+    // the input evaluates is covered by a durable Running row. A panic between
+    // reservation and settlement leaves that row Running, which is the same
+    // state as a crash and is settled by fenced recovery.
     let fingerprint = repl_request_fingerprint(
         transactions.session_id,
         query_id,
         source,
         transactions.initial_digest,
     );
+    let abandon = |original: repl::ReplFailure| -> repl::ReplFailure {
+        let cancelled = terminal(b"orna.repl.cancel.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.cancel_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if finish_query(orna_runtime_v1::InvocationObservationStatus::Failed).is_err() {
+            eprintln!("warning: query observation not recorded");
+        }
+        if cancelled {
+            original
+        } else {
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        }
+    };
     let admission = match transactions
         .runtime
         .block_on(state.reserve_request_with_admission(request, fingerprint))
@@ -3164,7 +3166,7 @@ fn run_repl_input(
         Ok((_, Some(admission))) => admission,
         _ => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+            return Err("ORNA-REPL-EFFECT".to_owned().into());
         }
     };
     if transactions
@@ -3177,9 +3179,83 @@ fn run_repl_input(
         ))
         .is_err()
     {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        // The failed start leaves the row Reserved and no binding has run.
+        return Err(abandon("ORNA-REPL-EFFECT".to_owned().into()));
     }
+    let evaluation = transactions
+        .authority
+        .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
+    let (value, successor, activation) = match evaluation {
+        Ok(result) => result,
+        Err(failure) => {
+            if failure.external_effects_possible {
+                // The row stays Running: fenced recovery settles it and the
+                // input is never replayed.
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+                return Err(repl_evaluation_failure(failure));
+            }
+            return Err(abandon(repl_evaluation_failure(failure)));
+        }
+    };
+    // Known once evaluation succeeded: an external binding may already have run.
+    let external_possible = matches!(
+        activation.effects(),
+        orna_runtime_v1::ActivationEffectReport::ExternalPossible
+    );
+    // The request is committed, so an observation write failure is only a
+    // warning and never reports the committed input as uncertain.
+    let record_committed = |status: orna_runtime_v1::InvocationObservationStatus| {
+        if finish_query(status).is_err() {
+            eprintln!("warning: committed; query observation not recorded");
+        }
+    };
+    // Failure after evaluation: uncertain when external effects may have run
+    // (the row stays Running for fenced recovery); otherwise cancelled.
+    let unsettled_after_evaluation = || -> repl::ReplFailure {
+        if external_possible {
+            let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        } else {
+            abandon("ORNA-REPL-EFFECT".to_owned().into())
+        }
+    };
+    if activation.mutations().is_empty() {
+        // Read-only results are retained: the request completes with its
+        // terminal outcome instead of being left running.
+        let completed = terminal(b"orna.repl.read.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.complete_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if !completed {
+            return Err(unsettled_after_evaluation());
+        }
+        record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
+        *session = successor;
+        return Ok(value);
+    }
+    let activation = match activation
+        .stage_for_request(&transactions.authority, snapshot.context(), request)
+    {
+        Ok(activation) => activation,
+        Err(_) => return Err(unsettled_after_evaluation()),
+    };
+    // The application stages with NoFault; rebuild the identical unit carrying
+    // the runtime's injector so the request boundary owns the fault seam.
+    let request_staged = match StagedTableActivation::from_source(
+        activation.context().clone(),
+        activation.mutations().to_vec(),
+        activation.next_digest(),
+        Arc::clone(&transactions.faults),
+        activation.effects(),
+    ) {
+        Ok(staged) => staged,
+        Err(_) => return Err(unsettled_after_evaluation()),
+    };
+    let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
+        return Err(unsettled_after_evaluation());
+    };
     let committed = transactions
         .runtime
         .block_on(state.commit_staged_table_request_activation(
@@ -3193,7 +3269,7 @@ fn run_repl_input(
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
         return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
-    finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
+    record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
     *session = successor;
     Ok(value)
 }
@@ -5541,6 +5617,37 @@ mod repl_request_effect_tests {
         assert!(running.is_empty(), "a committed REPL insert leaves no running request");
     }
 
+    #[test]
+    fn sys_dispatch_observes_request_row_already_running() {
+        let (directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| first.set(None));
+        std::fs::write(directory.path().join("probe.bin"), b"probe").expect("probe file");
+        let input = format!(
+            "sys.blob.capture_file({:?}, \"probe.bin\", 65536)",
+            directory.path().to_string_lossy().as_ref()
+        );
+        run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            &input,
+        )
+        .expect("the blob capture succeeds");
+        let running_at_first_dispatch = FIRST_SYS_DISPATCH_RUNNING.with(std::cell::Cell::get);
+        assert_eq!(
+            running_at_first_dispatch,
+            Some(1),
+            "the request row is reserved before the first sys binding runs"
+        );
+    }
+
     /// Runs an insert whose commit fails at `point` and asserts the uncertain
     /// diagnostic and the still-running request row, then that fenced recovery
     /// settles it without proving a rollback.
@@ -5679,5 +5786,43 @@ mod repl_request_effect_tests {
         });
         assert_eq!(failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO");
         assert!(failure.detail.is_none());
+    }
+
+    #[test]
+    fn repl_effectful_failure_before_any_external_binding_leaves_no_running_row() {
+        // `n` is an Int, so `1 / 0` type-checks and the insert stages as an
+        // effectful activation that fails during evaluation, before any binding.
+        let (_directory, repository, _relation) =
+            format3_repository_for_table("pub table Counter(id: Str) { n: Int, }\n", "Counter");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            r#"main.Counter.insert({ id: "zero", n: 1 / 0 })"#,
+        )
+        .err()
+        .expect("the division by zero fails before any write");
+        assert_ne!(
+            failure.code, "ORNA-REPL-EFFECT-UNCERTAIN",
+            "no external binding ran, so the failure is not uncertain"
+        );
+        let state = transactions
+            .state
+            .as_ref()
+            .expect("the effectful input opened the runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(
+            running.is_empty(),
+            "a failure before any external effect cancels its reserved row"
+        );
     }
 }
