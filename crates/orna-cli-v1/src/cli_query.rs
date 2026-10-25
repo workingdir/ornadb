@@ -984,6 +984,27 @@ mod tests {
     }
 
     #[test]
+    fn scan_pages_pages_a_uint_range_across_production_pages() {
+        let keys: Vec<TypedKey> = (0..600_u64).map(TypedKey::UInt).collect();
+        let scanned = scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap();
+        assert_eq!(scanned, keys);
+    }
+
+    #[test]
+    fn scan_pages_reaches_a_uint_key_held_only_by_a_later_page() {
+        let keys: Vec<TypedKey> = (0..600_u64).map(TypedKey::UInt).collect();
+        let scanned = scan_fixture(
+            &keys,
+            Some(TypedKey::UInt(300)),
+            Some(TypedKey::UInt(600)),
+            super::MAX_QUERY_LIMIT,
+        )
+        .unwrap();
+        assert_eq!(scanned, keys[300..].to_vec());
+        assert!(scanned.len() > super::MAX_QUERY_LIMIT, "range spans a second page");
+    }
+
+    #[test]
     fn scan_pages_refuses_a_full_page_that_ends_at_the_greatest_unsigned_key() {
         let keys: Vec<TypedKey> = (u64::MAX - 255..=u64::MAX).map(TypedKey::UInt).collect();
         assert!(scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).is_err());
