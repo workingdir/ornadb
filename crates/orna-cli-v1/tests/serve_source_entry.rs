@@ -24,7 +24,10 @@ impl Drop for RunningServer {
 
 fn http_get(address: &str, path: &str) -> std::io::Result<(u16, String)> {
     let mut stream = TcpStream::connect(address)?;
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     let (headers, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
@@ -168,4 +171,95 @@ fn serve_that_attempts_a_write_is_refused_and_commits_nothing() {
     // Refusal is repeatable: nothing was committed by the first request.
     let (again, _) = http_get(&address, "/").expect("second GET /");
     assert_eq!(again, 500);
+}
+
+fn git_stdout(project: &Path, arguments: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(arguments)
+        .current_dir(project)
+        .output()
+        .expect("run git query");
+    assert!(output.status.success(), "git {arguments:?} failed");
+    String::from_utf8(output.stdout).expect("git output is UTF-8")
+}
+
+/// Starts `orna serve` with stderr captured to a file, returning the server,
+/// its address and everything written to stderr before the listener answered.
+fn start_server_with_stderr(project: &Path) -> (RunningServer, String, String) {
+    let stderr_capture = tempfile::NamedTempFile::new().expect("stderr capture");
+    let port = free_port();
+    let child = Command::new(BINARY)
+        .args(["serve", "--port", &port.to_string()])
+        .current_dir(project)
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(
+            stderr_capture.reopen().expect("reopen stderr capture"),
+        ))
+        .spawn()
+        .expect("start local server");
+    let server = RunningServer(child);
+    let address = format!("127.0.0.1:{port}");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if http_get(&address, "/").is_ok() {
+            let stderr = std::fs::read_to_string(stderr_capture.path()).expect("read stderr");
+            return (server, address, stderr);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("local server becomes available");
+}
+
+#[test]
+fn refused_write_leaves_repository_head_and_worktree_unchanged() {
+    let project = project_with_main(
+        "pub table Note(id: Int) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.insert({ id: 1, body: \"written\" });\n}\n",
+    );
+    let head_before = git_stdout(project.path(), &["rev-parse", "HEAD"]);
+    let (_server, address) = start_server(project.path());
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 500, "body: {body}");
+    assert_eq!(
+        git_stdout(project.path(), &["rev-parse", "HEAD"]),
+        head_before
+    );
+    assert_eq!(
+        git_stdout(project.path(), &["status", "--porcelain", "--", ":!.orna"]),
+        ""
+    );
+}
+
+#[test]
+fn private_serve_is_not_the_serving_entry() {
+    let project = project_with_main("fn serve(): Str = \"private-marker-9\";\n");
+    let (_server, address, stderr) = start_server_with_stderr(project.path());
+    assert!(stderr.contains("E2102"), "stderr: {stderr}");
+    let (status, body) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 404, "body: {body}");
+    assert!(!body.contains("private-marker-9"), "body: {body}");
+}
+
+#[test]
+fn broken_main_reports_and_git_transport_still_serves() {
+    let project = project_with_main("pub fn serve( = ;\n");
+    let (_server, address, stderr) = start_server_with_stderr(project.path());
+    assert!(stderr.contains("ORNA-PARSE-001"), "stderr: {stderr}");
+    let (status, _) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 404);
+    let clone_root = tempfile::tempdir().expect("clone root");
+    let clone = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            &format!("http://{address}/git"),
+            "clone",
+        ])
+        .current_dir(clone_root.path())
+        .output()
+        .expect("run git clone");
+    assert!(
+        clone.status.success(),
+        "git clone: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
 }
