@@ -13,7 +13,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 }
 
 fn pinned_functions() -> Functions {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_standard_sources::reference_standard_sources_v1() {
         let parsed = parse_module(&source);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
