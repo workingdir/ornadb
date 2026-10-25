@@ -667,9 +667,9 @@ fn new_serve_state(
         tls: false,
         ..TransportLimits::default()
     };
-    // Shared read-only handle to the runtime the host owns, taken before the
+    // Narrow read-only reader over the runtime the host owns, taken before the
     // host moves into the transport. `serve` reads stored rows through it.
-    let serving_runtime = host.runtime_state();
+    let serving_runtime = host.runtime_reader();
     let live = LiveTransport::new(host, transport_limits).map_err(|_| {
         Diagnostic::target(
             "E2100",
