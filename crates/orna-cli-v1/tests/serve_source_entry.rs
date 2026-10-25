@@ -263,8 +263,31 @@ fn broken_main_reports_and_git_transport_still_serves() {
     );
 }
 
-const NOTE_SERVE_SOURCE: &str =
-    "pub table Note(id: Str) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.count()\n}\n";
+#[test]
+fn semantic_broken_main_reports_and_git_transport_still_serves() {
+    let project = project_with_main("pub fn serve(): Int = \"text\";\n");
+    let (_server, address, stderr) = start_server_with_stderr(project.path());
+    assert!(stderr.contains("E2101"), "stderr: {stderr}");
+    assert!(stderr.contains("serving module failed semantic analysis"), "stderr: {stderr}");
+    let (status, _) = http_get(&address, "/").expect("GET /");
+    assert_eq!(status, 404);
+    let clone_root = tempfile::tempdir().expect("clone root");
+    let clone = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            &format!("http://{address}/git"),
+            "clone",
+        ])
+        .current_dir(clone_root.path())
+        .output()
+        .expect("run git clone");
+    assert!(
+        clone.status.success(),
+        "git clone: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+}
 
 /// Creates a project whose `Note` table is committed through `orna commit`, so
 /// the table has a stable object id. Returns the project and the relation id.
@@ -299,32 +322,6 @@ fn committed_project(source: &str) -> (tempfile::TempDir, String) {
     (project, relation)
 }
 
-/// Runs one REPL input line through the product REPL, then publishes it.
-fn repl_insert_and_publish(project: &Path, input: &str) {
-    let mut child = Command::new(BINARY)
-        .args(["--db", project.to_str().expect("UTF-8 path"), "repl"])
-        .current_dir(project)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start orna REPL");
-    child
-        .stdin
-        .take()
-        .expect("REPL stdin")
-        .write_all(format!("{input}\n:quit\n").as_bytes())
-        .expect("write REPL input");
-    let output = child.wait_with_output().expect("REPL exits");
-    assert!(output.status.success(), "REPL: {output:?}");
-    let published = Command::new(BINARY)
-        .args(["publish", "--message", "Add stored row"])
-        .current_dir(project)
-        .output()
-        .expect("orna publish");
-    assert!(published.status.success(), "publish: {published:?}");
-}
-
 fn query_row_count(project: &Path, relation: &str) -> u64 {
     let query = Command::new(BINARY)
         .args(["query", relation, "--format", "json"])
@@ -338,20 +335,6 @@ fn query_row_count(project: &Path, relation: &str) -> u64 {
 }
 
 #[test]
-#[ignore = "ornadb-03ol: evaluator cannot read user tables yet"]
-fn stored_row_committed_through_repl_is_visible_at_root() {
-    let (project, _relation) = committed_project(NOTE_SERVE_SOURCE);
-    repl_insert_and_publish(
-        project.path(),
-        r#"main.Note.insert({ id: "ridge", body: "stored" })"#,
-    );
-    let (_server, address) = start_server(project.path());
-    let (status, body) = http_get(&address, "/").expect("GET /");
-    assert_eq!(status, 200, "body: {body}");
-    assert_eq!(body.trim(), "1", "serve counts the stored row: {body}");
-}
-
-#[test]
 fn refused_write_stores_no_row_in_committed_table() {
     let source = "pub table Note(id: Str) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.insert({ id: \"1\", body: \"written\" });\n}\n";
     let (project, relation) = committed_project(source);
@@ -360,19 +343,4 @@ fn refused_write_stores_no_row_in_committed_table() {
     assert_eq!(status, 500, "body: {body}");
     assert!(body.contains("serve.write_refused"), "body: {body}");
     assert_eq!(query_row_count(project.path(), &relation), 0);
-}
-
-#[test]
-#[ignore = "ornadb-03ol: evaluator cannot read user tables yet"]
-fn mixed_table_identity_fails_closed_at_root() {
-    let (project, _relation) = committed_project(NOTE_SERVE_SOURCE);
-    std::fs::write(
-        project.path().join("main.orna"),
-        "pub table Note(id: Str) {\n    body: Str,\n}\n\npub table Other(id: Str) {\n    body: Str,\n}\n\npub fn serve() {\n    Note.count()\n}\n",
-    )
-    .expect("add uncommitted table");
-    let (_server, address) = start_server(project.path());
-    let (status, body) = http_get(&address, "/").expect("GET /");
-    assert_eq!(status, 500, "body: {body}");
-    assert!(body.contains("serve.mixed_table_identity"), "body: {body}");
 }

@@ -1751,61 +1751,8 @@ enum DurableAdmission {
 // The state boundary is synchronous today, but the async methods keep the
 // adapter signature ready for hosts whose credential and deletion adapters
 // perform I/O. The explicit lint allowance records that deliberate seam.
-/// Narrow, read-only handle to a host's durable runtime for serving stored
-/// table rows. It exposes only table-activation captures: no writes, no
-/// writer lease, and no runtime-owner transfer.
-#[derive(Clone)]
-pub struct RuntimeReader {
-    runtime: Arc<RuntimeState>,
-}
-
-impl RuntimeReader {
-    /// Captures the stored rows of admitted tables by their committed identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns the runtime's capture error (for example a stale or duplicate
-    /// table identity).
-    pub async fn begin_admitted_table_activation(
-        &self,
-        tables: &[orna_runtime_v1::RuntimeTableIdentity],
-    ) -> std::result::Result<
-        orna_runtime_v1::RuntimeTableActivationSnapshot,
-        orna_runtime_v1::RuntimeError,
-    > {
-        self.runtime.begin_admitted_table_activation(tables).await
-    }
-
-    /// Captures the stored rows of the named tables, for tables that have no
-    /// committed identity yet.
-    ///
-    /// # Errors
-    ///
-    /// Returns the runtime's capture error for an invalid table name.
-    pub async fn begin_table_activation(
-        &self,
-        tables: &[&str],
-    ) -> std::result::Result<
-        orna_runtime_v1::RuntimeTableActivationSnapshot,
-        orna_runtime_v1::RuntimeError,
-    > {
-        self.runtime.begin_table_activation(tables).await
-    }
-}
-
 #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
 impl LiveHost {
-    /// Returns a narrow [`RuntimeReader`] over the durable runtime this host
-    /// owns, or `None` when the host was built without one. The reader only
-    /// captures table snapshots; it neither writes nor transfers the writer
-    /// lease or runtime owner, so existing callers are unaffected.
-    #[must_use]
-    pub fn runtime_reader(&self) -> Option<RuntimeReader> {
-        self.runtime
-            .clone()
-            .map(|runtime| RuntimeReader { runtime })
-    }
-
     /// Creates a bounded live host around the supplied security and serving
     /// state machines.
     ///
