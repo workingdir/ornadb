@@ -312,6 +312,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
                 "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
             help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
         },
+        "ORNA-REPL-EFFECT-UNCERTAIN" => DiagnosticDocumentation {
+            code: "ORNA-REPL-EFFECT-UNCERTAIN",
+            title: "REPL effect outcome is uncertain",
+            explanation:
+                "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
+            help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
+        },
         "ORNA-REPL-AT" => DiagnosticDocumentation {
             code: "ORNA-REPL-AT",
             title: "snapshot selection failed",
@@ -3094,7 +3101,7 @@ fn run_repl_input(
             .runtime
             .block_on(state.finish_query_observation(writer, query_id, status))
             .map(|_| ())
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())
+            .map_err(|_| REPL_EFFECT_UNCERTAIN.to_owned())
     };
     let evaluation = transactions
         .authority
@@ -3115,9 +3122,9 @@ fn run_repl_input(
         .stage_for_request(&transactions.authority, snapshot.context(), request)
     {
         Ok(activation) => activation,
-        Err(error) => {
+        Err(_) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error).into());
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
     };
     // The application stages with NoFault; rebuild the identical unit carrying
@@ -3132,7 +3139,7 @@ fn run_repl_input(
         Ok(staged) => staged,
         Err(_) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err("ORNA-REPL-EFFECT".to_owned().into());
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
     };
     let mut outcome_bytes = b"orna.repl.commit.v1".to_vec();
@@ -3141,7 +3148,7 @@ fn run_repl_input(
         Ok(outcome) => outcome,
         Err(_) => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err("ORNA-REPL-EFFECT".to_owned().into());
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
     };
     let fingerprint = repl_request_fingerprint(
@@ -3157,7 +3164,7 @@ fn run_repl_input(
         Ok((_, Some(admission))) => admission,
         _ => {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err("ORNA-REPL-EFFECT".to_owned().into());
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
     };
     if transactions
@@ -3171,7 +3178,7 @@ fn run_repl_input(
         .is_err()
     {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
     let committed = transactions
         .runtime
@@ -3184,12 +3191,17 @@ fn run_repl_input(
         ));
     if committed.is_err() {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned().into());
+        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
     finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
     *session = successor;
     Ok(value)
 }
+
+/// Reported when external effects may already have happened after evaluation
+/// and no terminal outcome is proven. The request row stays Running for fenced
+/// recovery; the input is never replayed.
+const REPL_EFFECT_UNCERTAIN: &str = "ORNA-REPL-EFFECT-UNCERTAIN";
 
 fn repl_application_error(error: ApplicationError) -> String {
     match error {
@@ -5463,11 +5475,11 @@ mod repl_request_effect_tests {
     const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
     const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
 
-    struct FailBeforeTableWrite;
+    struct FailAt(FaultPoint);
 
-    impl FaultInjector for FailBeforeTableWrite {
+    impl FaultInjector for FailAt {
         fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
-            if point == FaultPoint::BeforeTableWrite {
+            if point == self.0 {
                 Err(RuntimeError::FaultInjected(point))
             } else {
                 Ok(())
@@ -5503,8 +5515,10 @@ mod repl_request_effect_tests {
         assert!(running.is_empty(), "a committed REPL insert leaves no running request");
     }
 
-    #[test]
-    fn repl_insert_fault_after_reservation_fails_closed_and_recovers_its_row() {
+    /// Runs an insert whose commit fails at `point` and asserts the uncertain
+    /// diagnostic and the still-running request row, then that fenced recovery
+    /// settles it without proving a rollback.
+    fn assert_commit_fault_reports_uncertain(point: FaultPoint) {
         let (_directory, repository, _relation) =
             format3_repository_for_table(MUSIC_SOURCE, "Music");
         let ReplRuntime {
@@ -5513,7 +5527,7 @@ mod repl_request_effect_tests {
             transactions,
         } = repl_runtime(Some(repository)).expect("repl runtime");
         let mut transactions = transactions.expect("repl transactions");
-        transactions.faults = Arc::new(FailBeforeTableWrite);
+        transactions.faults = Arc::new(FailAt(point));
         let failure = run_repl_input(
             repository.as_ref(),
             Some(&mut transactions),
@@ -5521,15 +5535,19 @@ mod repl_request_effect_tests {
             INSERT_LONDON,
         )
         .err()
-        .expect("the injected table-write fault fails the REPL request");
-        assert_eq!(failure.code, "ORNA-REPL-EFFECT");
+        .unwrap_or_else(|| panic!("{point:?}: the injected fault fails the REPL request"));
+        assert_eq!(failure.code, "ORNA-REPL-EFFECT-UNCERTAIN", "{point:?}");
 
         let state = transactions.state.as_ref().expect("runtime state");
         let running = transactions
             .runtime
             .block_on(state.running_requests())
             .expect("running requests");
-        assert_eq!(running.len(), 1, "the failed commit leaves its own row running");
+        assert_eq!(
+            running.len(),
+            1,
+            "{point:?}: the failed commit leaves its own row running"
+        );
         let row = &running[0];
         let lost = transactions
             .runtime
@@ -5556,16 +5574,32 @@ mod repl_request_effect_tests {
         assert_ne!(
             recovered.disposition,
             RecoveryDisposition::RollbackProven,
-            "a REPL activation declares ExternalPossible effects, so a rollback is never proven"
+            "{point:?}: a REPL activation declares ExternalPossible effects, so a rollback is never proven"
         );
         assert_eq!(
             recovered.disposition,
-            RecoveryDisposition::ExternalEffectsUncertain
+            RecoveryDisposition::ExternalEffectsUncertain,
+            "{point:?}"
         );
         let after = transactions
             .runtime
             .block_on(state.running_requests())
             .expect("running requests after recovery");
-        assert!(after.is_empty(), "recovery settles the abandoned request row");
+        assert!(
+            after.is_empty(),
+            "{point:?}: recovery settles the fenced request row"
+        );
+    }
+
+    #[test]
+    fn repl_commit_fault_reports_uncertain_and_keeps_its_request_row_running() {
+        for point in [
+            FaultPoint::BeforeTableWrite,
+            FaultPoint::AfterTableWrite,
+            FaultPoint::BeforeTerminalClaim,
+            FaultPoint::AfterTerminalClaim,
+        ] {
+            assert_commit_fault_reports_uncertain(point);
+        }
     }
 }

@@ -16,7 +16,7 @@ been published.
 - `ActivationWork::new` now defaults to `ExternalPossible`; callers that relied on the implicit controlled default must declare effects with `ActivationWork::with_effects`.
 
 ### Fixes
-- REPL table inserts now run through the runtime request ledger: the request row is reserved and started with a request-scoped fingerprint, and the commit records a terminal outcome. A failure after reservation finishes the REPL query as failed with `ORNA-REPL-EFFECT` and leaves the request row for fenced recovery instead of cancelling it.
+- REPL table inserts now run through the runtime request ledger: the request row is reserved and started with a request-scoped fingerprint, and the commit records a terminal outcome. Any failure after evaluation finishes the REPL query as failed with `ORNA-REPL-EFFECT-UNCERTAIN`, because external effects may already have happened; the request row stays Running and is settled only by fenced takeover recovery, and the input is never replayed.
 - The controlled-transaction marker is now written only for activations whose
   effects are proven controlled. `ActivationEffectReport::ControlledOnly` is built
   only by `ActivationEffectReport::declare(DeclaredEffectSet::None)`, which yields the
