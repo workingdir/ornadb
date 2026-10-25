@@ -39,7 +39,7 @@ use orna_semantic_v1::{
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    TableMember, UseTail, parse_module_with_file, parse_repl,
+    TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
 };
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
@@ -109,6 +109,8 @@ pub enum ApplicationError {
     /// Async runtime effects are supported only as the activation's terminal
     /// result, so their real result is available before the activation commits.
     UnsupportedSourceEffectPlacement,
+    /// An import names a public declaration kind this route cannot bind yet.
+    UnsupportedImport(String),
 }
 
 impl fmt::Display for ApplicationError {
@@ -141,6 +143,7 @@ impl fmt::Display for ApplicationError {
             Self::UnsupportedSourceEffectPlacement => formatter.write_str(
                 "runtime-backed source effects must be the activation's terminal result",
             ),
+            Self::UnsupportedImport(message) => formatter.write_str(message),
         }
     }
 }
@@ -206,6 +209,12 @@ pub struct ApplicationAuthority {
     limits: Limits,
     sys_host: Option<SysHostContext>,
     standard_functions: Functions,
+    /// Qualified keys (`std.<module>.<name>`) of standard functions declared `pub`.
+    /// Only these may be bound by `use std.<module>.{…}`, `*`, or `as _` (ORNA-IMPORT-004).
+    standard_public: BTreeSet<String>,
+    /// Qualified keys of public non-function standard declarations. These are
+    /// recognised so that importing them fails with a specific diagnostic.
+    standard_non_function: BTreeSet<String>,
 }
 
 impl ApplicationAuthority {
@@ -217,6 +226,8 @@ impl ApplicationAuthority {
             limits,
             sys_host: None,
             standard_functions: Functions::new(),
+            standard_public: BTreeSet::new(),
+            standard_non_function: BTreeSet::new(),
         }
     }
 
@@ -236,6 +247,8 @@ impl ApplicationAuthority {
             .catalogue
             .with_standard_sources(profile, sources.clone())?;
         let mut functions = Functions::new();
+        let mut public = BTreeSet::new();
+        let mut non_function = BTreeSet::new();
         for (logical_path, source) in sources {
             let parsed = parse_module_with_file(&source, logical_path.clone());
             if !parsed.is_ok() {
@@ -243,26 +256,48 @@ impl ApplicationAuthority {
             }
             let namespace = module_namespace(&logical_path).0.join(".");
             for item in parsed.value.items {
-                // Only functions execute. Other standard declarations are
+                let is_public = matches!(item.visibility, Visibility::Public { .. });
+                // Functions execute. Private functions stay in the map so that
+                // calls from inside their own module still resolve, but only
+                // public ones may be imported. Other standard declarations are
                 // catalogue-only and were already verified by the semantic catalogue.
-                let Declaration::Function { signature, body } = item.declaration else {
-                    continue;
+                let name = match item.declaration {
+                    Declaration::Function { signature, body } => {
+                        let key = format!("{namespace}.{}", signature.name);
+                        if functions.contains_key(&key) {
+                            return Err(StandardCatalogueError::DuplicateDeclaration);
+                        }
+                        if is_public {
+                            public.insert(key.clone());
+                        }
+                        functions.insert(
+                            key,
+                            PureFunction {
+                                parameters: signature.parameters,
+                                body,
+                                environment: Environment::new(),
+                            },
+                        );
+                        continue;
+                    }
+                    Declaration::Table { name, .. }
+                    | Declaration::Protocol { name, .. }
+                    | Declaration::Enum { name, .. }
+                    | Declaration::Dimension { name, .. }
+                    | Declaration::Unit { name, .. }
+                    | Declaration::Type { name, .. } => name,
+                    Declaration::Use { .. }
+                    | Declaration::Assertion { .. }
+                    | Declaration::Let { .. } => continue,
                 };
-                let key = format!("{namespace}.{}", signature.name);
-                if functions.contains_key(&key) {
-                    return Err(StandardCatalogueError::DuplicateDeclaration);
+                if is_public {
+                    non_function.insert(format!("{namespace}.{name}"));
                 }
-                functions.insert(
-                    key,
-                    PureFunction {
-                        parameters: signature.parameters,
-                        body,
-                        environment: Environment::new(),
-                    },
-                );
             }
         }
         self.standard_functions = functions;
+        self.standard_public = public;
+        self.standard_non_function = non_function;
         Ok(self)
     }
 
@@ -344,7 +379,11 @@ impl ApplicationAuthority {
                 );
             }
         }
-        bind_standard_imports(&mut functions, &parsed.value.items)?;
+        let exports = StandardExports {
+            public: &self.standard_public,
+            non_function: &self.standard_non_function,
+        };
+        bind_standard_imports(&mut functions, exports, &parsed.value.items)?;
         if !functions.contains_key(&entry) {
             return Err(ApplicationError::MissingEntry(entry));
         }
@@ -2644,16 +2683,37 @@ fn table_insert_defaults(items: &[Item]) -> TableInsertDefaults {
     defaults
 }
 
-/// Binds unqualified names from `use std.<module>.{name}` declarations to the
-/// admitted standard functions. A user function keeps its own name, and an
-/// alias is inserted only where no user function occupies the name. An imported
-/// name must exist in the pinned module, and one unqualified name may not bind
-/// two different functions. Glob and alias forms bind nothing (see below).
+/// Public standard exports of the pinned dependency, keyed by qualified name.
+struct StandardExports<'exports> {
+    /// Qualified keys of `pub` standard functions (the only importable functions).
+    public: &'exports BTreeSet<String>,
+    /// Qualified keys of `pub` standard types, constants and other non-function declarations.
+    non_function: &'exports BTreeSet<String>,
+}
+
+/// Binds unqualified names from `use std.<module>.{name}`, `use std.<module>.*`
+/// and `use std.<module>.. as _` declarations to public standard functions.
+/// A user function keeps its own name, and an alias is inserted only where no
+/// user function occupies the name. A named import must be a public function of
+/// the pinned module (ORNA-IMPORT-004); a private function is refused with
+/// `DIAG_IMPORT`, and a public non-function is refused with a dedicated
+/// unsupported-import error. Glob and `as _` forms bind every public function of
+/// the module (ORNA-IMPORT-003, ORNA-IMPORT-005). One unqualified name may not
+/// bind two different functions (`DIAG_AMBIGUOUS`).
 fn bind_standard_imports(
     functions: &mut Functions,
+    exports: StandardExports<'_>,
     items: &[Item],
 ) -> Result<(), ApplicationError> {
     let mut aliases = BTreeMap::<String, String>::new();
+    let mut bind = |alias: &str, target: String| -> Result<(), ApplicationError> {
+        if let Some(previous) = aliases.insert(alias.to_owned(), target.clone())
+            && previous != target
+        {
+            return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+        }
+        Ok(())
+    };
     for item in items {
         let Declaration::Use { path, tail } = &item.declaration else {
             continue;
@@ -2666,30 +2726,51 @@ fn bind_standard_imports(
             .map(|segment| segment.name.as_str())
             .collect::<Vec<_>>()
             .join(".");
-        let names = match tail {
-            UseTail::Names(names) => names,
-            // Glob and alias forms (`use std.x.*`, `use std.prelude as _`) bind no
-            // unqualified names here, so a call through them still fails as an
-            // unresolved name rather than binding a function silently. This keeps
-            // projects that already import them admitted; the prelude-as-`_` and
-            // glob binding rules are not implemented on this route.
-            UseTail::None | UseTail::Glob { .. } | UseTail::Alias { .. } => continue,
-        };
-        for name in names {
-            let target = format!("{namespace}.{}", name.name);
-            if !functions.contains_key(&target) {
-                return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+        match tail {
+            UseTail::Names(names) => {
+                for name in names {
+                    let target = format!("{namespace}.{}", name.name);
+                    if exports.public.contains(&target) {
+                        bind(&name.name, target)?;
+                    } else if exports.non_function.contains(&target) {
+                        return Err(ApplicationError::UnsupportedImport(format!(
+                            "non-function import `{target}` is not supported on this route"
+                        )));
+                    } else {
+                        return Err(ApplicationError::Semantic(vec![DIAG_IMPORT.to_owned()]));
+                    }
+                }
             }
-            if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
-                && previous != target
-            {
-                return Err(ApplicationError::Semantic(vec![DIAG_AMBIGUOUS.to_owned()]));
+            UseTail::Glob { .. } => bind_public_exports(&namespace, &exports, &mut bind)?,
+            UseTail::Alias { name, .. } if name.as_str() == "_" => {
+                bind_public_exports(&namespace, &exports, &mut bind)?;
             }
+            // `use std.x as y` binds a module alias, which this route does not
+            // resolve; it binds no unqualified names.
+            UseTail::None | UseTail::Alias { .. } => {}
         }
     }
     for (alias, target) in aliases {
         if let Some(function) = functions.get(&target).cloned() {
             functions.entry(alias).or_insert(function);
+        }
+    }
+    Ok(())
+}
+
+/// Binds every public function declared directly in `namespace`.
+fn bind_public_exports(
+    namespace: &str,
+    exports: &StandardExports<'_>,
+    bind: &mut impl FnMut(&str, String) -> Result<(), ApplicationError>,
+) -> Result<(), ApplicationError> {
+    let prefix = format!("{namespace}.");
+    for target in exports.public {
+        let Some(name) = target.strip_prefix(&prefix) else {
+            continue;
+        };
+        if !name.contains('.') {
+            bind(name, target.clone())?;
         }
     }
     Ok(())
@@ -3843,22 +3924,73 @@ mod tests {
     }
 
     #[test]
-    fn std_glob_import_binds_no_names_on_the_authority_route() {
+    fn std_glob_import_binds_every_public_function_of_the_module() {
         let authority = std_import_authority(&[(
             "std/math.orna",
             "pub fn increment(value: Int): Int = value + 1;\n",
         )]);
-        let outcome = authority
+        let admitted = authority
             .admit_module(
                 "main.orna",
                 "use std.math.*;\npub fn answer(): Int = increment(1);\n",
                 "answer",
             )
-            .and_then(|admitted| authority.evaluate(&admitted, &Environment::new()));
-        assert!(
-            outcome.is_err(),
-            "a call through a glob import must not bind silently, got {outcome:?}"
-        );
+            .expect("glob import binds the public function");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("glob-bound entry should execute");
+        assert_eq!(result, int_value(2));
+    }
+
+    #[test]
+    fn std_import_of_a_private_function_is_refused_with_import_diagnostic() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "fn helper(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = helper(value);\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{helper};\npub fn answer(): Int = helper(1);\n",
+                "answer",
+            )
+            .expect_err("a private helper is not importable (ORNA-IMPORT-004)");
+        assert!(std_import_codes(error).contains(&DIAG_IMPORT.to_owned()));
+    }
+
+    #[test]
+    fn std_import_of_a_public_non_function_is_refused_as_unsupported() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "pub type Count = Int;\npub fn increment(value: Int): Int = value + 1;\n",
+        )]);
+        let error = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{Count};\npub fn answer(): Int = 1;\n",
+                "answer",
+            )
+            .expect_err("non-function imports are not supported on this route");
+        assert!(matches!(error, ApplicationError::UnsupportedImport(_)));
+    }
+
+    #[test]
+    fn std_body_calls_its_own_helper_not_a_user_function_of_the_same_name() {
+        let authority = std_import_authority(&[(
+            "std/math.orna",
+            "fn g(value: Int): Int = value + 1;\npub fn increment(value: Int): Int = g(value);\n",
+        )]);
+        let admitted = authority
+            .admit_module(
+                "main.orna",
+                "use std.math.{increment};\nfn g(value: Int): Int = value + 100;\npub fn answer(): Int = increment(1);\n",
+                "answer",
+            )
+            .expect("user g does not shadow std's own g");
+        let result = authority
+            .evaluate(&admitted, &Environment::new())
+            .expect("entry should execute");
+        assert_eq!(result, int_value(2));
     }
 
     #[test]

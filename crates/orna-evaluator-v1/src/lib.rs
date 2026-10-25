@@ -4886,7 +4886,7 @@ impl Context<'_, '_> {
                 .get(text)
                 .cloned()
                 .or_else(|| {
-                    (!self.restrict_function_names && self.functions.contains_key(text)).then(
+                    (self.bare_user_names_visible() && self.functions.contains_key(text)).then(
                         || Value::Function {
                             name: text.clone(),
                             nominal_definitions: scope.3.clone(),
@@ -8821,6 +8821,16 @@ impl Context<'_, '_> {
             self.collection(name, values, depth)
         }
     }
+    /// Bare (unqualified) names resolve to top-level functions only outside named
+    /// standard modules. A standard body resolves its own module first and never
+    /// sees a user function through a bare name (ORNA-LIB-001 isolation).
+    fn bare_user_names_visible(&self) -> bool {
+        let in_standard = self
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace == "std" || namespace.starts_with("std."));
+        !self.restrict_function_names && !in_standard
+    }
     fn resolve_function_name(&self, expression: &Expr, scope: &Scope) -> Option<String> {
         let name = function_name(expression)?;
         if let Some(root) = function_root_name(expression)
@@ -8871,7 +8881,7 @@ impl Context<'_, '_> {
         if name.starts_with("std.") && self.functions.contains_key(&name) {
             return Some(name);
         }
-        if !self.restrict_function_names && self.functions.contains_key(&name) {
+        if self.bare_user_names_visible() && self.functions.contains_key(&name) {
             return Some(name);
         }
         if name.contains('.') {
