@@ -3,12 +3,15 @@
 //! `orna serve` admits the project's `main.orna` module and invokes its
 //! `serve` function for `GET /`. The invocation is staged and read-only: a
 //! `serve` that attempts a table write is refused, and nothing is committed.
-//! `serve` reads of tables are NOT delivered here; they are tracked by
-//! ornadb-03ol. Without that entry the server keeps its Git transport, installs
-//! no page at `/`, and reports the absence once at startup.
+//! `serve` reads of tables see the committed `HEAD` rows of the project's tables,
+//! bound to their committed identities per request (ORNA-TXN-006). Uncommitted
+//! runtime rows are never read. Without that entry the server keeps its Git
+//! transport, installs no page at `/`, and reports the absence once at startup.
 
 use super::*;
-use orna_application_v1::{AdmittedApplication, ApplicationAuthority, ApplicationError};
+use orna_application_v1::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, StagedActivation,
+};
 use orna_evaluator_v1::{Environment, Limits};
 
 /// Repository-relative module that hosts the serving entry.
@@ -20,12 +23,17 @@ pub(super) const SERVE_ENTRY: &str = "serve";
 pub(super) struct ServeApp {
     authority: ApplicationAuthority,
     admitted: AdmittedApplication,
+    /// Project root whose committed `HEAD` supplies table rows.
+    root: String,
+    /// The `main.orna` source, re-admitted per request when the entry reads tables.
+    source: String,
 }
 
 impl ServeApp {
     /// Admits the selected entry. Returns `Ok(None)` when the project has no
     /// `main.orna` module or that module declares no `serve` function.
     pub(super) fn admit(
+        root: &str,
         project: &orna_project_v1::LoadedProject,
         catalogue: &orna_semantic_v1::Catalogue,
     ) -> Result<Option<Self>, Diagnostic> {
@@ -45,6 +53,8 @@ impl ServeApp {
             Ok(admitted) if serve_is_public(&project.modules()[index].source) => Ok(Some(Self {
                 authority,
                 admitted,
+                root: root.to_owned(),
+                source: project.modules()[index].source.clone(),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
             Ok(_) => Ok(None),
@@ -67,25 +77,19 @@ impl ServeApp {
     /// Invokes `serve` read-only and renders its value as the `GET /` body.
     /// A `serve` that stages any table mutation is refused.
     fn respond(&self) -> Response {
-        let staged = match self
-            .authority
-            .evaluate_staged(&self.admitted, &Environment::new())
-        {
+        let staged = if self.admitted.table_schemas().is_empty() {
+            self.authority
+                .evaluate_staged(&self.admitted, &Environment::new())
+                .map_err(|_| "serve.evaluation_failed")
+        } else {
+            self.stage_over_committed_tables()
+        };
+        let staged = match staged {
             Ok(staged) => staged,
-            Err(_) => {
-                return Response::new(
-                    500,
-                    "application/json",
-                    br#"{"error":"serve.evaluation_failed"}"#.to_vec(),
-                );
-            }
+            Err(code) => return serve_error(code),
         };
         if !staged.mutations().is_empty() {
-            return Response::new(
-                500,
-                "application/json",
-                br#"{"error":"serve.write_refused"}"#.to_vec(),
-            );
+            return serve_error("serve.write_refused");
         }
         Response::new(
             200,
@@ -93,6 +97,71 @@ impl ServeApp {
             crate::repl::inspect(staged.value()).into_bytes(),
         )
     }
+
+    /// Stages `serve` over the committed `HEAD` rows of its tables. Admission and
+    /// the table identity binding are repeated per request so that a new commit is
+    /// served as soon as it lands; runtime rows that are not committed are never read.
+    fn stage_over_committed_tables(&self) -> Result<StagedActivation, &'static str> {
+        let repository = orna_repository_v1::Repository::discover(&self.root)
+            .map_err(|_| "serve.table_identity_unavailable")?;
+        let commit = repository
+            .head()
+            .ok()
+            .flatten()
+            .ok_or("serve.table_identity_unavailable")?;
+        let names = self
+            .admitted
+            .table_schemas()
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let tables = match committed_table_identities(&repository, &commit, names.clone()) {
+            Ok(tables) => tables,
+            Err(_) => {
+                let bound = names
+                    .iter()
+                    .filter(|name| {
+                        committed_table_identities(&repository, &commit, vec![(*name).clone()])
+                            .is_ok()
+                    })
+                    .count();
+                return Err(if bound == 0 || bound == names.len() {
+                    "serve.table_identity_unavailable"
+                } else {
+                    "serve.mixed_table_identity"
+                });
+            }
+        };
+        let committed = tables
+            .iter()
+            .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+        let admitted = self
+            .authority
+            .admit_module_with_committed_table_metadata(
+                SERVE_MODULE_PATH,
+                &self.source,
+                SERVE_ENTRY.to_owned(),
+                committed,
+            )
+            .map_err(|_| "serve.evaluation_failed")?;
+        if admitted.requires_publication_metadata() {
+            return Err("serve.table_read_unsupported");
+        }
+        let rows = committed_rows_at(&repository, &commit, &admitted, &tables)
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        self.authority
+            .evaluate_staged_over_committed_rows(&admitted, &Environment::new(), rows, None)
+            .map_err(|_| "serve.evaluation_failed")
+    }
+}
+
+/// The `serve` error response: a JSON body naming a stable code, never a value.
+fn serve_error(code: &str) -> Response {
+    Response::new(
+        500,
+        "application/json",
+        format!(r#"{{"error":"{code}"}}"#).into_bytes(),
+    )
 }
 
 /// Answers `/` through the serving entry when one is installed. Returns
