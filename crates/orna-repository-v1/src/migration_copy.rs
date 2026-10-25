@@ -1648,12 +1648,16 @@ fn migration_record(
 }
 
 /// A Git command bound to one directory, with inherited routing scrubbed and
-/// repository discovery stopped at the directory's parent.
+/// repository discovery stopped at the directory's parent. Every call site in
+/// this module names a repository root (the discovered worktree, a migration
+/// copy, a dependency clone, or an index source/destination). The bind is
+/// unconditional so a directory that is not a root cannot reach an enclosing
+/// repository's refs or objects.
 fn git_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(directory);
     crate::scrub_git_routing_environment(&mut command);
-    crate::bind_git_discovery_to_worktree(&mut command, directory);
+    crate::bind_git_ceiling_above(&mut command, directory);
     command
 }
 
@@ -1715,5 +1719,30 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         git(&destination, &["init", "-q"]);
         assert!(super::copy_index_blobs(&child, &destination).is_err());
+    }
+
+    #[test]
+    fn migration_git_commands_do_not_reach_an_enclosing_repository_from_a_plain_subdirectory() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        git(
+            parent.path(),
+            &["update-ref", &migration_index_ref(EMPTY_TREE), EMPTY_TREE],
+        );
+        let plain = parent.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        // Without the unconditional bind, discovery would read the parent's refs.
+        let pin = super::git_command(&plain)
+            .args(["rev-parse", "--verify", &migration_index_ref(EMPTY_TREE)])
+            .output()
+            .unwrap();
+        assert!(!pin.status.success());
+        assert!(super::git_path(&plain, "HEAD").is_err());
+
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        git(&destination, &["init", "-q"]);
+        assert!(super::copy_index_blobs(&plain, &destination).is_err());
     }
 }
