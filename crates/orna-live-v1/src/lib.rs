@@ -39,8 +39,8 @@ use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease, admin_invocation_id,
-    with_terminal_admin_effect,
+    ActivationEffectReport, StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
+    admin_invocation_id, with_terminal_admin_effect,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -731,6 +731,7 @@ impl Default for LiveApplicationWorkSupervisor {
 pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
+    pub effects: ActivationEffectReport,
     pub faults: Arc<dyn FaultInjector>,
     request_identity: Option<RequestIdentity>,
     after_commit: Option<Box<dyn FnOnce() + Send>>,
@@ -741,11 +742,13 @@ impl LiveEvalTransaction {
     pub fn new(
         mutations: Vec<TableMutation>,
         next_digest: [u8; 32],
+        effects: ActivationEffectReport,
         faults: Arc<dyn FaultInjector>,
     ) -> Self {
         Self {
             mutations,
             next_digest,
+            effects,
             faults,
             request_identity: None,
             after_commit: None,
@@ -4355,6 +4358,7 @@ impl LiveHost {
         let LiveEvalTransaction {
             mutations,
             next_digest,
+            effects,
             faults,
             request_identity: _,
             after_commit,
@@ -4365,9 +4369,14 @@ impl LiveHost {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
         })?;
-        let staged =
-            StagedTableActivation::from_source(context.clone(), mutations, next_digest, faults)
-                .map_err(|error| map_runtime(&error))?;
+        let staged = StagedTableActivation::from_source(
+            context.clone(),
+            mutations,
+            next_digest,
+            faults,
+            effects,
+        )
+        .map_err(|error| map_runtime(&error))?;
         let committed = runtime
             .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
@@ -10716,6 +10725,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
+                ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -10813,8 +10823,12 @@ mod tests {
                 extensions: BTreeMap::new(),
             };
             let committed_on_success = Arc::clone(&committed);
-            let mut transaction =
-                LiveEvalTransaction::new(vec![mutation], [24; 32], Arc::new(NoFault));
+            let mut transaction = LiveEvalTransaction::new(
+                vec![mutation],
+                [24; 32],
+                ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+                Arc::new(NoFault),
+            );
             if let Some(supplied_identity) = supplied_identity {
                 transaction = transaction.for_request(supplied_identity);
             }
