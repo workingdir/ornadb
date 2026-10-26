@@ -3179,7 +3179,7 @@ impl Repository {
 
     /// Whether `HEAD` names `commit` or descends from it. A commit that is not
     /// in the object database is contained by no ref.
-    fn head_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
+    pub fn head_contains_commit(&self, commit: &GitCommitRef) -> Result<bool, RepositoryError> {
         let Some(head) = self.head()? else {
             return Ok(false);
         };
@@ -4928,6 +4928,7 @@ impl Repository {
         if !self.head_contains_commit(journal.new_head())? {
             return Err(RepositoryError::StaleHead);
         }
+        self.verify_reconciled_index(journal)?;
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
         self.write_publication_journal_locked(journal)?;
         journal.advance(PublicationJournalStage::Complete)?;
@@ -5087,6 +5088,7 @@ impl Repository {
             if !self.head_contains_commit(journal.new_head())? {
                 return Err(RepositoryError::StaleHead);
             }
+            self.verify_reconciled_index(&journal)?;
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if matches!(
@@ -5096,6 +5098,7 @@ impl Repository {
         {
             return Err(RepositoryError::StaleHead);
         }
+        self.verify_reconciled_index(&journal)?;
         if journal.stage() == PublicationJournalStage::RuntimeCompleted {
             journal.advance(PublicationJournalStage::Complete)?;
             self.write_publication_journal_locked(&journal)?;
@@ -5105,6 +5108,32 @@ impl Repository {
             return Ok(Some(self.index_generation()?));
         }
         Err(RepositoryError::InvalidPublicationJournal)
+    }
+
+    /// Verifies, under `index.lock`, that the ordinary index still holds the
+    /// managed entries the reconciled candidate recorded. Finalization changes
+    /// neither ref, index nor worktree, so an index that moved since
+    /// reconciliation is a typed conflict that keeps the journal (ORNA-PUB-011,
+    /// ORNA-PUB-017; recovery row "Index or affected path differs from both
+    /// recorded states").
+    pub fn verify_reconciled_index(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let candidate = self.candidate_from_journal(journal)?;
+        let index = self.git_path("index")?;
+        let _git_lock =
+            GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
+        if self.index_entries_match_candidate(&candidate, journal)? {
+            return Ok(());
+        }
+        Err(RepositoryError::StaleIndex {
+            expected: IndexGeneration {
+                head: Some(journal.new_head().clone()),
+                tree: Some(candidate.tree().clone()),
+            },
+            actual: self.index_generation_while_locked()?,
+        })
     }
 
     fn candidate_from_journal(
@@ -5601,29 +5630,13 @@ impl Repository {
     }
 
     fn index_generation_while_locked(&self) -> Result<IndexGeneration, RepositoryError> {
+        // Observe a copy: `write-tree` on the live index contends with the
+        // `index.lock` the caller holds and fails with exit 128.
+        let index = self.git_path("index")?;
         Ok(IndexGeneration {
             head: self.head()?,
-            tree: self.git_optional_tree(["write-tree"])?,
+            tree: self.index_tree_from_file(&index)?,
         })
-    }
-
-    fn git_optional_tree<const N: usize>(
-        &self,
-        args: [&str; N],
-    ) -> Result<Option<IndexTreeRef>, RepositoryError> {
-        let mut command = self.command();
-        command.args(args);
-        let output = command
-            .output()
-            .map_err(|_| RepositoryError::GitUnavailable)?;
-        if output.status.success() {
-            return self
-                .index_tree_from_native_oid(trim_output(&output.stdout))
-                .map(Some);
-        }
-        // `write-tree` failure (including exit 128) is a corrupt or
-        // unmerged index, never an absent tree.
-        Err(RepositoryError::GitOperationFailed)
     }
 
     fn index_tree_from_file(&self, index: &Path) -> Result<Option<IndexTreeRef>, RepositoryError> {
@@ -11956,6 +11969,9 @@ mod tests {
         journal
             .advance(PublicationJournalStage::IndexReconciled)
             .unwrap();
+        fs::create_dir_all(root.path().join("generated")).unwrap();
+        fs::write(root.path().join("generated/row.orna"), "published\n").unwrap();
+        git(root.path(), &["add", "generated/row.orna"]);
         journal
             .advance(PublicationJournalStage::WorktreeReconciled)
             .unwrap();
@@ -12019,6 +12035,10 @@ mod tests {
         repository
             .advance_current_ref(&journal.old_head().clone(), &candidate)
             .unwrap();
+        let row = root.join("generated");
+        fs::create_dir_all(&row).unwrap();
+        fs::write(row.join("row.orna"), "published\n").unwrap();
+        git(root, &["add", "generated/row.orna"]);
         journal.advance(PublicationJournalStage::RefAdvanced).unwrap();
         journal.advance(PublicationJournalStage::IndexReconciled).unwrap();
         journal.advance(PublicationJournalStage::WorktreeReconciled).unwrap();
@@ -12027,7 +12047,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_finalizes_worktree_reconciled_descendant_head() {
+    fn worktree_reconciled_descendant_head_completes_via_runtime_completion() {
         let root = tempfile::TempDir::new().unwrap();
         let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
 
@@ -12049,6 +12069,10 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
             "later\n"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("generated/row.orna")).unwrap(),
+            "published\n"
         );
     }
 
@@ -12088,6 +12112,174 @@ mod tests {
             PublicationJournalStage::WorktreeReconciled
         );
         assert_eq!(repository.head().unwrap().unwrap().as_str(), sibling.trim());
+    }
+
+    /// Recovery row "Index or affected path differs from both recorded
+    /// states": a managed entry dropped from the index after reconciliation is
+    /// a typed conflict even when a descendant commit exists. The journal and
+    /// the managed bytes are preserved (ORNA-PUB-011, ORNA-PUB-017).
+    #[test]
+    fn descendant_completion_refuses_index_that_dropped_managed_entry() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        git(root.path(), &["rm", "--cached", "-q", "generated/row.orna"]);
+        fs::write(root.path().join("ordinary.txt"), "later\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        git(root.path(), &["commit", "-m", "follow-up after index edit"]);
+
+        let result = repository.mark_runtime_complete([33; 16], &mut journal);
+        assert!(
+            matches!(result, Err(RepositoryError::StaleIndex { .. })),
+            "{result:?}"
+        );
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::StaleIndex { .. })
+        ));
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("generated/row.orna")).unwrap(),
+            "published\n"
+        );
+    }
+
+    /// An unrelated staged edit is outside the published batch and survives
+    /// runtime completion.
+    #[test]
+    fn runtime_completion_preserves_unrelated_staged_change() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        fs::write(root.path().join("ordinary.txt"), "staged\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        repository
+            .mark_runtime_complete([33; 16], &mut journal)
+            .unwrap();
+
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(
+            git(root.path(), &["diff", "--cached", "--name-only"]).trim(),
+            "ordinary.txt"
+        );
+    }
+
+    /// A rewound HEAD (an ancestor of the candidate) does not contain the
+    /// batch: the journal and the managed bytes are preserved.
+    #[test]
+    fn recovery_fences_rewound_head_and_keeps_managed_bytes() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        let old_head = journal.old_head().clone();
+        git(root.path(), &["update-ref", "refs/heads/main", old_head.as_str()]);
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert!(matches!(
+            repository.mark_runtime_complete([33; 16], &mut journal),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("generated/row.orna")).unwrap(),
+            "published\n"
+        );
+    }
+
+    /// A same-tree commit with a different parent (a rebase) is a different
+    /// commit: containment is by commit id, so it is refused.
+    #[test]
+    fn recovery_fences_rebased_same_tree_commit() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        let old_head = journal.old_head().clone();
+        let tree = git(
+            root.path(),
+            &["rev-parse", &format!("{}^{{tree}}", journal.new_head().as_str())],
+        );
+        let rebased = git(
+            root.path(),
+            &["commit-tree", tree.trim(), "-p", old_head.as_str(), "-m", "rebased"],
+        );
+        git(root.path(), &["update-ref", "refs/heads/main", rebased.trim()]);
+
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert!(matches!(
+            repository.mark_runtime_complete([33; 16], &mut journal),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert_eq!(
+            repository
+                .read_publication_journal()
+                .unwrap()
+                .unwrap()
+                .stage(),
+            PublicationJournalStage::WorktreeReconciled
+        );
+    }
+
+    /// A merge whose first parent is the candidate descends from it, so the
+    /// batch is present and completion leaves ref, index and bytes untouched.
+    #[test]
+    fn runtime_completion_accepts_merge_descending_from_candidate() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        let old_head = journal.old_head().clone();
+        let candidate = journal.new_head().clone();
+        let tree = git(
+            root.path(),
+            &["rev-parse", &format!("{}^{{tree}}", candidate.as_str())],
+        );
+        let side = git(
+            root.path(),
+            &["commit-tree", tree.trim(), "-p", old_head.as_str(), "-m", "side"],
+        );
+        let merge = git(
+            root.path(),
+            &[
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                candidate.as_str(),
+                "-p",
+                side.trim(),
+                "-m",
+                "merge",
+            ],
+        );
+        git(root.path(), &["update-ref", "refs/heads/main", merge.trim()]);
+
+        repository
+            .mark_runtime_complete([33; 16], &mut journal)
+            .unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(repository.head().unwrap().unwrap().as_str(), merge.trim());
+        assert_eq!(
+            fs::read_to_string(root.path().join("generated/row.orna")).unwrap(),
+            "published\n"
+        );
     }
 
     #[test]
