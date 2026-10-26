@@ -23,6 +23,9 @@ const ORNADB_1_0_FORMAT_ONE: &str =
     include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
 /// The closed format-2 record of the previous 1.1.0 draft, byte for byte.
 const DRAFT_FORMAT_TWO: &str = include_str!("fixtures/format-context/format-2-draft-1.1.0.orna");
+/// Where the legacy writers kept compact table rows (`.orna/storage/<table>/`).
+/// No format-1/2 writer used the format-3 `.orna/store`.
+const LEGACY_ROW_STORAGE: &str = ".orna/storage/Music/manifest.orna";
 
 fn canonical_database(database_id: &str) -> String {
     DATABASE_TEMPLATE.replace("00000000-0000-4000-8000-000000000000", database_id)
@@ -382,6 +385,55 @@ fn dispatches_recorded_legacy_metadata_as_read_only_inputs() {
     }
 }
 
+/// MIGRATION.md: rollback selects an old snapshot and never relabels format-3
+/// bytes as an old format. No format-1/2 writer produced `.orna/store`, so a
+/// legacy record beside one is a mixed snapshot that fails before any reader
+/// is chosen (ORNA-META-001, ORNA-META-002; Gate A, "unknown/mixed formats
+/// fail early"), with or without the 1.0 database sidecar, at `HEAD` and as a
+/// historical pin. The legacy compact row layout beside the same record still
+/// opens as that legacy format.
+#[test]
+fn legacy_marker_beside_store_is_mixed_formats() {
+    for (record, format) in [(ORNADB_1_0_FORMAT_ONE, 1), (DRAFT_FORMAT_TWO, 2)] {
+        for database in [None, Some(SIDECAR_DATABASE)] {
+            let relabelled = repository(database, Some(record), true);
+            let opened = Repository::discover(relabelled.path()).unwrap();
+            let expected = RepositoryFormatContextError::MixedFormats {
+                path: ".orna/store".to_owned(),
+            };
+            let error = opened.open_format_context().unwrap_err();
+            assert_eq!(error, expected, "{record}");
+            assert_eq!(error.code(), "ORNA-REPO-CONTEXT-004");
+            assert!(error.to_string().contains(".orna/store"), "{error}");
+            let head = git_line(relabelled.path(), &["rev-parse", "HEAD"]);
+            assert_eq!(
+                opened.open_format_context_at_selector(&head).unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                opened.require_known_head_format().unwrap_err(),
+                expected,
+                "runtime admission refuses the mixed HEAD as ORNA-REPO-CONTEXT-004"
+            );
+
+            let compact = repository(database, Some(record), false);
+            let rows = compact.path().join(LEGACY_ROW_STORAGE);
+            fs::create_dir_all(rows.parent().unwrap()).unwrap();
+            fs::write(&rows, "compact rows").unwrap();
+            git(compact.path(), &["add", "--all"]);
+            git(
+                compact.path(),
+                &["commit", "--quiet", "-m", "legacy compact rows"],
+            );
+            let context = Repository::discover(compact.path())
+                .unwrap()
+                .open_format_context()
+                .expect("the legacy compact layout stays a legacy snapshot");
+            assert_eq!(context.repository_format_number(), format);
+        }
+    }
+}
+
 /// The recorded legacy records are closed: an extra field, a changed profile
 /// or another format number is not a known legacy layout.
 #[test]
@@ -478,6 +530,153 @@ fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
         Repository::discover(unborn.path())
             .unwrap()
             .require_writable_head_format(),
+        Ok(())
+    );
+}
+
+/// A committed `HEAD` whose `.orna/database.orna` is `head_database`, beside a
+/// valid format-3 record and store in the worktree.
+fn head_database_with_worktree_format_three(head_database: &str) -> TempDir {
+    let directory = repository(Some(head_database), None, true);
+    fs::write(
+        directory.path().join(".orna/database.orna"),
+        CANONICAL_DATABASE,
+    )
+    .unwrap();
+    directory
+}
+
+#[test]
+fn refuses_unclassifiable_committed_database_records_whatever_the_worktree_holds() {
+    let string_value =
+        CANONICAL_DATABASE.replace("repository_format: 3,", "repository_format: \"3\",");
+    let overflow = CANONICAL_DATABASE.replace(
+        "repository_format: 3,",
+        "repository_format: 99999999999999999999999999,",
+    );
+    let syntax_broken = CANONICAL_DATABASE.replace("}\n", "");
+    let extra_field =
+        CANONICAL_DATABASE.replace("    database_id:", "    extra: 1,\n    database_id:");
+    for (label, head) in [
+        ("string value", &string_value),
+        ("overflowing integer", &overflow),
+        ("syntax-broken record", &syntax_broken),
+        ("extra field", &extra_field),
+    ] {
+        assert_ne!(head, CANONICAL_DATABASE, "{label}: the shape must differ");
+        let directory = head_database_with_worktree_format_three(head);
+        let repository = Repository::discover(directory.path()).unwrap();
+        assert!(
+            orna_repository_v1::inspect_metadata(&repository)
+                .unwrap()
+                .is_some(),
+            "{label}: the worktree metadata alone admits a format-3 runtime"
+        );
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "{label}");
+    }
+}
+
+#[test]
+fn refuses_unclassifiable_committed_legacy_records_whatever_the_worktree_holds() {
+    for head_legacy in [
+        "{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n",
+        "{repository_format: 99, storage_profile: \"compact-storage-v1\", extra: 1}\n",
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\", extra: 1}\n",
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"\n",
+        "{repository_format: \"1\", storage_profile: \"compact-storage-v1\"}\n",
+    ] {
+        let directory = repository(None, Some(head_legacy), true);
+        fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+        fs::write(
+            directory.path().join(".orna/database.orna"),
+            CANONICAL_DATABASE,
+        )
+        .unwrap();
+        let repository = Repository::discover(directory.path()).unwrap();
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "{head_legacy}");
+    }
+}
+
+/// Pins the L1 behaviour: a `database.orna` that names format 1 or 2 beside its
+/// `database_id` is refused as an unknown format at `HEAD`. Legacy layouts are
+/// read only from `.orna/format.orna`, never from `database.orna`.
+#[test]
+fn refuses_legacy_format_numbers_inside_a_database_record() {
+    for number in ["1", "2"] {
+        let head = CANONICAL_DATABASE.replace(
+            "repository_format: 3,",
+            &format!("repository_format: {number},"),
+        );
+        let directory = repository(Some(&head), None, true);
+        let repository = Repository::discover(directory.path()).unwrap();
+        let error = repository.require_known_head_format().unwrap_err();
+        assert_eq!(error.code(), "ORNA-REPO-CONTEXT-003", "format {number}");
+    }
+}
+
+#[test]
+fn head_gate_admits_known_unborn_and_recordless_heads() {
+    let format_three = repository(Some(CANONICAL_DATABASE), None, true);
+    assert_eq!(
+        Repository::discover(format_three.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+    let recordless = repository(None, None, true);
+    assert_eq!(
+        Repository::discover(recordless.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+    let unborn = TempDir::new().unwrap();
+    git(
+        unborn.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    assert_eq!(
+        Repository::discover(unborn.path())
+            .unwrap()
+            .require_known_head_format(),
+        Ok(())
+    );
+}
+
+#[test]
+fn migration_carry_gate_refuses_a_legacy_head_without_a_prepared_copy() {
+    for (record, format) in [
+        (ORNADB_1_0_FORMAT_ONE, 1),
+        (DRAFT_FORMAT_TWO, 2),
+    ] {
+        let directory = repository(Some(SIDECAR_DATABASE), Some(record), false);
+        let repository = Repository::discover(directory.path()).unwrap();
+        assert!(!repository.holds_prepared_migration());
+        let refusal = repository
+            .require_migration_carry_head_format()
+            .unwrap_err();
+        assert_eq!(refusal.format(), format);
+        assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-015");
+    }
+
+    let format_three = repository(Some(CANONICAL_DATABASE), None, true);
+    assert_eq!(
+        Repository::discover(format_three.path())
+            .unwrap()
+            .require_migration_carry_head_format(),
+        Ok(())
+    );
+    let unborn = TempDir::new().unwrap();
+    git(
+        unborn.path(),
+        &["init", "--quiet", "--initial-branch=main", "--template="],
+    );
+    assert_eq!(
+        Repository::discover(unborn.path())
+            .unwrap()
+            .require_migration_carry_head_format(),
         Ok(())
     );
 }
@@ -616,28 +815,35 @@ fn reopens_legacy_and_format_three_mounts_side_by_side_without_sharing_state() {
 
 /// Reopens one legacy format's prior commit beside the format-3 commit that
 /// migrated away from it, and proves neither mount answers for the other.
+/// The legacy commit keeps its rows in the legacy compact layout; the
+/// format-3 `.orna/store` appears only in the later commit, because a legacy
+/// record beside it would be a mixed snapshot.
 fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_number: u8) {
     const LEGACY_BLOB: &str = "legacy bytes";
     const FORMAT_THREE_BLOB: &str = "format three bytes";
     let directory = repository(None, Some(legacy_format), false);
     // The legacy commit's own content, before the format-3 commit exists.
-    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
-    fs::write(directory.path().join(".orna/store/root"), LEGACY_BLOB).unwrap();
+    let legacy_rows = directory.path().join(LEGACY_ROW_STORAGE);
+    fs::create_dir_all(legacy_rows.parent().unwrap()).unwrap();
+    fs::write(&legacy_rows, LEGACY_BLOB).unwrap();
     git(directory.path(), &["add", "."]);
     git(
         directory.path(),
-        &["commit", "--quiet", "-m", "legacy store root"],
+        &["commit", "--quiet", "-m", "legacy compact rows"],
     );
     let legacy_commit = git_line(directory.path(), &["rev-parse", "HEAD"]);
 
-    // A later commit converts the workspace to format 3. The legacy commit is
+    // A later commit converts the workspace to format 3: the final record and
+    // the store replace the legacy record and row layout. The legacy commit is
     // still reachable, so its committed bytes must stay readable and unchanged.
     fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+    fs::remove_dir_all(directory.path().join(".orna/storage")).unwrap();
     fs::write(
         directory.path().join(".orna/database.orna"),
         CANONICAL_DATABASE,
     )
     .unwrap();
+    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
     fs::write(directory.path().join(".orna/store/root"), FORMAT_THREE_BLOB).unwrap();
     git(directory.path(), &["add", "--all"]);
     git(
@@ -671,7 +877,7 @@ fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_num
     // own snapshot, so the later format-3 write never leaks into it.
     assert_eq!(
         legacy
-            .read_committed_file(".orna/store/root", 64)
+            .read_committed_file(LEGACY_ROW_STORAGE, 64)
             .expect("read the legacy snapshot's own bytes"),
         LEGACY_BLOB.as_bytes()
     );
@@ -695,10 +901,10 @@ fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_num
 
     // A read past the bound is refused rather than silently truncated, while
     // the same path reads exactly at the bound.
-    assert!(legacy.read_committed_file(".orna/store/root", 4).is_err());
+    assert!(legacy.read_committed_file(LEGACY_ROW_STORAGE, 4).is_err());
     assert_eq!(
         legacy
-            .read_committed_file(".orna/store/root", LEGACY_BLOB.len())
+            .read_committed_file(LEGACY_ROW_STORAGE, LEGACY_BLOB.len())
             .expect("read exactly at the bound"),
         LEGACY_BLOB.as_bytes()
     );
@@ -765,7 +971,7 @@ fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_num
     );
     assert_eq!(
         legacy_view
-            .read_committed_file(".orna/store/root", 64)
+            .read_committed_file(LEGACY_ROW_STORAGE, 64)
             .expect("the legacy bytes are unchanged"),
         LEGACY_BLOB.as_bytes()
     );

@@ -1,0 +1,169 @@
+fn __group_by<T, K>(values: [T], key: fn(T): K): [(K, [T])] = [];
+fn __rank<T, K>(values: [T], key: fn(T): K): [(T, Int)] = [];
+fn __asof_join<T, Time, Key>(
+    left: [T], right: [T], time: fn(T): Time, by: fn(T): Key
+): [(T, T?)] = [];
+fn __bucket_by<T, P>(rows: [T], period: P, zone: Str): [[T]] = [];
+
+fn append<T>(values: [T], value: T): [T] = union(values, [value]);
+
+fn slice_range<T>(values: [T], index: Int, end: Int, output: [T]): [T] {
+    let cursor = index;
+    let result = output;
+    while cursor < end {
+        result = append(result, values[cursor]);
+        cursor += 1;
+    };
+    result
+}
+
+fn partition_from<T>(
+    values: [T], predicate: fn(T): Bool, index: Int, end: Int, yes: [T], no: [T]
+): ([T], [T]) {
+    let cursor = index;
+    let yes_items = yes;
+    let no_items = no;
+    while cursor < end {
+        let value = values[cursor];
+        if predicate(value) {
+            yes_items = append(yes_items, value);
+        } else {
+            no_items = append(no_items, value);
+        };
+        cursor += 1;
+    };
+    (yes_items, no_items)
+}
+
+fn flatten_from<T>(values: [[T]], index: Int, end: Int, output: [T]): [T] {
+    let cursor = index;
+    let result = output;
+    while cursor < end {
+        result = union(result, values[cursor]);
+        cursor += 1;
+    };
+    result
+}
+
+fn zip_from<T, U>(left: [T], right: [U], index: Int, end: Int, output: [(T, U)]): [(T, U)] {
+    let cursor = index;
+    let result = output;
+    while cursor < end {
+        result = append(result, (left[cursor], right[cursor]));
+        cursor += 1;
+    };
+    result
+}
+
+fn chunk_from<T>(values: [T], size: Int, index: Int, end: Int, output: [[T]]): [[T]] {
+    let cursor = index;
+    let result = output;
+    while cursor < end {
+        let next = if cursor + size < end { cursor + size } else { end };
+        result = append(result, slice_range(values, cursor, next, []));
+        cursor = next;
+    };
+    result
+}
+
+fn pairs_from<T>(values: [T], index: Int, end: Int, output: [(T, T)]): [(T, T)] {
+    let cursor = index;
+    let result = output;
+    while cursor + 1 < end {
+        result = append(result, (values[cursor], values[cursor + 1]));
+        cursor += 1;
+    };
+    result
+}
+
+fn windows_from<T>(
+    values: [T], size: Int, step: Int, index: Int, end: Int, output: [[T]]
+): [[T]] {
+    let cursor = index;
+    let result = output;
+    while cursor + size <= end {
+        result = append(result, slice_range(values, cursor, cursor + size, []));
+        cursor += step;
+    };
+    result
+}
+
+fn split_when_from<T>(
+    values: [T], predicate: fn(T): Bool, index: Int, end: Int,
+    groups: [[T]], current: [T]
+): [[T]] {
+    let cursor = index;
+    let result = groups;
+    let group = current;
+    while cursor < end {
+        let value = values[cursor];
+        if predicate(value) && count(group) > 0 {
+            result = append(result, group);
+            group = [value];
+        } else {
+            group = append(group, value);
+        };
+        cursor += 1;
+    };
+    if count(group) == 0 { result } else { append(result, group) }
+}
+
+pub fn asof_join<T, Time, Key>(
+    left: [T], right: [T], time: fn(T): Time, by: fn(T): Key
+): [(T, T?)] = __asof_join(left, right, time, by);
+
+pub fn chunk<T>(values: [T], size: Int): [[T]] =
+    if size <= 0 {
+        fail(error(code: "std.collection.invalid_chunk_size", message: "chunk size must be positive"))
+    } else {
+        chunk_from(values, size, 0, count(values), [])
+    };
+
+pub fn flatten<T>(values: [[T]]): [T] =
+    flatten_from(values, 0, count(values), []);
+
+pub fn partition<T>(values: [T], predicate: fn(T): Bool): ([T], [T]) =
+    partition_from(values, predicate, 0, count(values), [], []);
+
+pub fn zip<T, U>(left: [T], right: [U]): [(T, U)] =
+    zip_from(
+        left,
+        right,
+        0,
+        if count(left) < count(right) { count(left) } else { count(right) },
+        []
+    );
+
+pub fn zip_exact<T, U>(left: [T], right: [U]): [(T, U)] =
+    if count(left) != count(right) {
+        fail(error(code: "std.collection.zip_length_mismatch", message: "zip_exact requires equal lengths"))
+    } else {
+        zip_from(left, right, 0, count(left), [])
+    };
+
+pub fn unique<T>(values: [T]): [T] = distinct(values);
+
+pub fn group_by<T, K>(values: [T], key: fn(T): K): [(K, [T])] = __group_by(values, key);
+
+pub fn pairs<T>(values: [T]): [(T, T)] =
+    pairs_from(values, 0, count(values), []);
+
+pub fn window<T>(values: [T], size: Int, step: Int = 1): [[T]] =
+    if size <= 0 {
+        fail(error(code: "std.collection.invalid_window_size", message: "window size must be positive"))
+    } else if step <= 0 {
+        fail(error(code: "std.collection.invalid_window_step", message: "window step must be positive"))
+    } else {
+        windows_from(values, size, step, 0, count(values), [])
+    };
+
+// Produces consecutive nonempty groups; each matching item starts a new group.
+pub fn split_when<T>(values: [T], predicate: fn(T): Bool): [[T]] =
+    split_when_from(values, predicate, 0, count(values), [], []);
+
+pub fn rank<T, K>(values: [T], key: fn(T): K): [(T, Int)] = __rank(values, key);
+
+// Finite lists are grouped by the same explicit elapsed/calendar boundaries
+// used by relation bucketing. Input order must be nondecreasing by time.
+pub fn bucket_by<T, P>(rows: [T], period: P, zone: Str): [[T]] =
+    __bucket_by(rows, period, zone);

@@ -1,0 +1,245 @@
+name: Nightly gates
+
+# Runs what is too slow or too large for every pull request and keeps the
+# result as Orna 1.1.0 acceptance-gate evidence (implementation/ACCEPTANCE.md,
+# "Evidence record per gate"):
+# - `cargo test --workspace --no-fail-fast`, split into four runners by package
+#   for disk and time. The four shards cover every workspace package except
+#   orna-live-v1 and orna-conformance-v1, which live-v1-tests.yml and
+#   conformance-v1-tests.yml gate on every pull request.
+# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import is
+#   not run here; it lives in cli-gate-b.yml and Gate C scale in gate-c-scale.yml.
+# - cargo fmt and Clippy, which do not pass on main yet.
+# Every job writes an evidence record with scripts/gate_evidence.py: commit,
+# command, host and tool versions, inputs, exit status, per-test outcomes and
+# the log's SHA-256. A job fails only on a failure missing from
+# scripts/known-test-failures.toml. The evidence job resolves the gate items in
+# scripts/gate-evidence-items.toml and uploads one summary.
+# This workflow runs on schedule and on dispatch only; it is never a pull-request check.
+
+on:
+  schedule:
+    - cron: "23 1 * * *"
+  workflow_dispatch:
+    inputs:
+      revision_sha:
+        description: Full 40-character commit SHA to test; empty tests the dispatched ref.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-gates-${{ inputs.revision_sha || github.sha }}
+  cancel-in-progress: false
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+  CARGO_INCREMENTAL: 0
+  # Line tables keep backtraces and cut the size of the ~500 test binaries.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  revision:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - name: Pick the tested revision
+        id: pick
+        shell: bash
+        env:
+          REQUESTED_SHA: ${{ inputs.revision_sha }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$REQUESTED_SHA" ]]; then
+            if [[ ! "$REQUESTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::revision_sha must be a full 40-character lowercase commit SHA"
+              exit 1
+            fi
+            echo "sha=$REQUESTED_SHA" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=$EVENT_SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+  workspace:
+    name: workspace (${{ matrix.shard }})
+    needs: revision
+    runs-on: ubuntu-latest
+    # GitHub's maximum job time. The 330-minute recorder budget, the apt step and setup must fit inside it.
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: cli
+            packages: -p orna-cli-v1
+            # Gate E evidence needs the editor, kernel and libfuse versions.
+            recorder: >-
+              --input-env ORNA_REQUIRE_FUSE
+              --require-path /dev/fuse --require-command emacs
+              --tool-version 'uname -r' --tool-version 'fusermount3 -V' --tool-version 'fusermount -V'
+              --tool-version 'emacs --version' --tool-version 'vi --version'
+          - shard: evaluator
+            packages: -p orna-evaluator-v1
+            recorder: ""
+          - shard: sys
+            packages: -p orna-sys-v1
+            recorder: ""
+          - shard: rest
+            packages: >-
+              --workspace --exclude orna-cli-v1 --exclude orna-evaluator-v1
+              --exclude orna-sys-v1 --exclude orna-conformance-v1
+              --exclude orna-live-v1
+            recorder: ""
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Install Emacs for the editor compatibility suite
+        if: matrix.shard == 'cli'
+        # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
+        timeout-minutes: 15
+        run: |
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
+          sudo apt-get install -y emacs-nox
+
+      - name: Test the ${{ matrix.shard }} shard
+        env:
+          ORNA_REQUIRE_FUSE: ${{ matrix.shard == 'cli' && '1' || '' }}
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record workspace-${{ matrix.shard }}
+          --title "cargo test --workspace, ${{ matrix.shard }} shard"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 330
+          ${{ matrix.recorder }}
+          -- cargo test --locked --no-fail-fast ${{ matrix.packages }}
+
+      - name: Show free disk space
+        if: ${{ !cancelled() }}
+        run: df -h / "$RUNNER_TEMP"
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-workspace-${{ matrix.shard }}
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
+  gate-d-crash-matrix:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the publication crash matrix
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record gate-d-crash-matrix
+          --title "Gate D: SIGKILL at each publication boundary"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 130
+          -- cargo test --locked --no-fail-fast -p orna-cli-v1 --features crash-barriers
+          --test publication_crash_matrix
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-gate-d-crash-matrix
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
+  lint:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: >-
+          python3 scripts/gate_evidence.py run --check fmt
+          --record lint-fmt --title "cargo fmt --check"
+          --out "$RUNNER_TEMP/gate-evidence"
+          -- cargo fmt --all -- --check
+
+      - name: Run Clippy
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/gate_evidence.py run --check clippy
+          --record lint-clippy --title "cargo clippy, warnings denied"
+          --out "$RUNNER_TEMP/gate-evidence" --timeout-minutes 120
+          -- cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Upload the evidence records and logs
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-lint
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
+  evidence:
+    needs: [revision, workspace, gate-d-crash-matrix, lint]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha || github.sha }}
+          persist-credentials: false
+
+      - name: Download the evidence records
+        uses: actions/download-artifact@v8
+        with:
+          pattern: evidence-*
+          path: ${{ runner.temp }}/gate-evidence
+          merge-multiple: true
+
+      - name: Summarize gate evidence
+        run: >-
+          python3 scripts/gate_evidence.py summarize --expect-commit "${{ needs.revision.outputs.sha || github.sha }}"
+          --records "$RUNNER_TEMP/gate-evidence"
+          --out "$RUNNER_TEMP/gate-evidence-summary/gate-evidence-summary.json"
+          --markdown "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the evidence summary
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-evidence-summary
+          path: ${{ runner.temp }}/gate-evidence-summary
+          if-no-files-found: error

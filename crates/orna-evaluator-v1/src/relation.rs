@@ -589,6 +589,59 @@ impl FilterBatch {
     }
 }
 
+impl RelationStage {
+    /// Deterministic text for materialization identity. `SharedFilter` batches
+    /// carry identity-bearing caches, so only their ordered predicate values
+    /// are rendered; every other stage renders its own value-level payload.
+    /// Source spans are removed, so identical logical stages written at
+    /// different offsets share one identity.
+    pub(super) fn fingerprint(&self) -> String {
+        let text = match self {
+            Self::SharedFilter(batch) => {
+                format!("SharedFilter({:?})", batch.values().collect::<Vec<_>>())
+            }
+            other => format!("{other:?}"),
+        };
+        strip_source_spans(&text)
+    }
+}
+
+/// Removes every `SourceSpan { … }` block from a `Debug` rendering. Span
+/// blocks contain only coordinates and an optional file name, so brace
+/// matching from the opening brace finds the block's end.
+fn strip_source_spans(debug: &str) -> String {
+    const MARKER: &str = "SourceSpan {";
+    let mut out = String::with_capacity(debug.len());
+    let mut rest = debug;
+    while let Some(index) = rest.find(MARKER) {
+        out.push_str(&rest[..index]);
+        out.push_str("SourceSpan");
+        let open = index + MARKER.len() - 1;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, ch) in rest[open..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            out.push_str(&rest[index..]);
+            return out;
+        };
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
 #[derive(Clone, Debug)]
 pub(super) enum RelationStage {
     /// Adjacent filters, evaluated in order and short-circuited per input row.

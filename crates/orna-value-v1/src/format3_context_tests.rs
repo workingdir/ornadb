@@ -980,6 +980,37 @@ fn identical_reference_bindings_short_circuit_only_within_one_context() {
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
 }
 
+#[test]
+fn verify_streams_a_large_reference_in_bounded_chunks() {
+    // Larger than the 8 MiB call ceiling: verification must not need a buffer
+    // of the full length, so every resolver request stays within the quota.
+    let bytes = vec![0x5a_u8; 9 * 1024 * 1024];
+    let identity = ContentIdentity::from_bytes(&bytes);
+    let resolver = counting_resolver(&bytes);
+    let quota = Format3Quota::new(1024 * 1024, 1_u64 << 62).unwrap();
+    let context = test_context_with_quota(resolver.clone(), quota);
+    let blob = Blob::from_reference(
+        context
+            .reference(identity, NativeOid::from_bytes(&[9; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    blob.verify().unwrap();
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 9);
+    assert_eq!(resolver.max_request.load(Ordering::SeqCst), 1024 * 1024);
+
+    let wrong = Blob::from_reference(
+        context
+            .reference(
+                ContentIdentity::from_bytes(b"other"),
+                NativeOid::from_bytes(&[9; 20]).unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wrong.verify(), Err(Error::ContentDigestMismatch));
+}
+
 struct CountingResolver {
     bytes: Vec<u8>,
     reads: AtomicUsize,
@@ -1094,5 +1125,260 @@ fn stored_table_reference_admission_binds_database_to_containing_snapshot_contex
         foreign_schema
             .validate_stored_row_in_context(&context, [9; 16], &row_key, &foreign_fields),
         Err(Error::InvalidValue)
+    );
+}
+
+#[test]
+fn stored_table_reference_roundtrips_as_identity_without_snapshot() {
+    let reference = Value::table_reference([1; 16], [2; 16], Raw::Int(7.into())).unwrap();
+    let Raw::Tag(60021, payload) = reference.raw() else {
+        panic!("table reference must use tag 60021");
+    };
+    assert_eq!(
+        payload.as_ref(),
+        &Raw::Array(vec![uuid_raw([1; 16]), uuid_raw([2; 16]), Raw::Int(7.into())])
+    );
+    let bytes = reference.encode().unwrap();
+    let decoded = Value::decode(&bytes).unwrap();
+    assert_eq!(decoded, reference);
+    assert_eq!(decoded.encode().unwrap(), bytes);
+    // A fourth element would embed snapshot context; a stored table reference has none.
+    let with_snapshot = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid_raw([1; 16]),
+            uuid_raw([2; 16]),
+            Raw::Int(7.into()),
+            Raw::Null,
+        ])),
+    );
+    assert!(Value::new(with_snapshot).is_err());
+}
+
+#[test]
+fn table_reference_equality_is_identity_only() {
+    let base = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    let same = Value::table_reference([1; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    assert_eq!(base, same);
+    assert_eq!(
+        compare_primary_keys(&base, &same).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+
+    let other_key = Value::table_reference([1; 16], [2; 16], Raw::Int(4.into())).unwrap();
+    let other_table = Value::table_reference([1; 16], [5; 16], Raw::Int(3.into())).unwrap();
+    let other_database = Value::table_reference([9; 16], [2; 16], Raw::Int(3.into())).unwrap();
+    for other in [&other_key, &other_table, &other_database] {
+        assert_ne!(&base, other);
+    }
+}
+
+#[test]
+fn table_reference_keys_across_tables_are_not_ordered() {
+    // 08-relations.md:31 defines identity equality only; no spec clause orders
+    // references to different tables, so ordering is rejected (spec-silent).
+    let int_key = Value::table_reference([1; 16], [2; 16], Raw::Int(5.into())).unwrap();
+    let text_key_later_table =
+        Value::table_reference([1; 16], [3; 16], Raw::Text("a".into())).unwrap();
+    let other_database =
+        Value::table_reference([9; 16], [2; 16], Raw::Int(5.into())).unwrap();
+    assert!(compare_primary_keys(&int_key, &text_key_later_table).is_err());
+    assert!(compare_primary_keys(&text_key_later_table, &int_key).is_err());
+    assert!(compare_primary_keys(&int_key, &other_database).is_err());
+
+    // Same database and table: ordering follows the referenced key.
+    let smaller = Value::table_reference([1; 16], [2; 16], Raw::Int(4.into())).unwrap();
+    assert_eq!(
+        compare_primary_keys(&smaller, &int_key).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    let text_key_same_table =
+        Value::table_reference([1; 16], [2; 16], Raw::Text("a".into())).unwrap();
+    assert!(compare_primary_keys(&int_key, &text_key_same_table).is_err());
+}
+
+#[test]
+fn table_reference_decode_rejects_non_permitted_key() {
+    let float_key = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Float(0)])),
+    );
+    // Decode must apply the same key rule as the constructor (07-tables.md:283-287).
+    assert!(Value::new(float_key.clone()).is_err());
+    // Also inside a tuple primary key, which is composed of permitted values.
+    assert!(Value::new(Raw::Array(vec![float_key])).is_err());
+
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
+    let pinned_key = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid(1),
+            uuid(2),
+            Raw::Tag(
+                60010,
+                Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
+            ),
+        ])),
+    );
+    assert!(Value::new(pinned_key).is_err());
+
+    let permitted = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into())])),
+    );
+    assert!(Value::new(permitted).is_ok());
+}
+
+
+fn uuid(byte: u8) -> Raw {
+    Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
+}
+
+#[test]
+fn table_reference_rejects_non_key_components() {
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Null).is_err());
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Map(vec![])).is_err());
+}
+
+#[test]
+fn table_reference_rejects_each_non_permitted_key_clause() {
+    // Float is not a key (07-tables.md:272-281).
+    assert!(Value::table_reference([1; 16], [2; 16], Raw::Float(0)).is_err());
+    // A nested Float inside a composite (60015) is rejected recursively.
+    let nested_float = Raw::Tag(
+        60015,
+        Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Float(0)])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], nested_float).is_err());
+    // Pinned reference (60010) carries a snapshot: identity would depend on it.
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
+    let pinned = Raw::Tag(
+        60010,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], pinned).is_err());
+    // Enum-like (60008) payload must be exactly [type uuid, variant uuid, Null].
+    let bad_enum = Raw::Tag(
+        60008,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(0.into())])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], bad_enum).is_err());
+    // A table-reference key (60021) with a non-permitted inner key is rejected.
+    let nested_table_float = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Float(0)])),
+    );
+    assert!(Value::table_reference([1; 16], [2; 16], nested_table_float).is_err());
+}
+
+#[test]
+fn table_reference_accepts_each_permitted_key_shape() {
+    let shapes = [
+        Raw::Bool(true),
+        Raw::Int(7.into()),
+        Raw::Text("ada".into()),
+        Raw::Tag(37, Box::new(Raw::Bytes(vec![4; 16]))),
+        Raw::Tag(
+            60008,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Null])),
+        ),
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("x".into())])),
+        ),
+        Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into())])),
+        ),
+    ];
+    for key in shapes {
+        assert!(Value::table_reference([1; 16], [2; 16], key.clone()).is_ok(), "{key:?}");
+    }
+}
+
+#[test]
+fn table_reference_to_keyless_table_unit_key_decodes_and_round_trips() {
+    // Keyless tables carry a Unit key (29-formats.md:37; grammar/orna.ebnf:38-39).
+    // Stored rows with such references must still decode after the 60021 key rule.
+    let unit = Raw::Tag(60014, Box::new(Raw::Array(vec![])));
+    let reference = Value::table_reference([1; 16], [2; 16], unit.clone()).unwrap();
+    let bytes = reference.encode().unwrap();
+    let decoded = Value::decode(&bytes).unwrap();
+    assert_eq!(decoded, reference);
+    assert!(Value::new(Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![uuid(1), uuid(2), unit])),
+    ))
+    .is_ok());
+    assert_eq!(
+        compare_primary_keys(&reference, &reference).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+}
+
+// DEFERRED DECISION (follow-up bead ornadb-3cb3): a pinned 60010 component is
+// still base-accepted inside tuple primary keys. KEY-003/005 and 07-tables.md:270
+// do not list 60010 as permitted, so this asserts the current base behaviour
+// only until the bead decides; it does not endorse it.
+#[test]
+fn tuple_primary_key_with_pinned_reference_keeps_base_behaviour() {
+    // Base accepts and compares 60010 components inside tuple primary keys;
+    // only Value::table_reference applies the strict snapshot-free rule.
+    let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
+    let pinned = |n: i32| {
+        Raw::Tag(
+            60010,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(n.into()), snapshot.clone()])),
+        )
+    };
+    let one = Value::new(Raw::Array(vec![pinned(1)])).unwrap();
+    let two = Value::new(Raw::Array(vec![pinned(2)])).unwrap();
+    assert_eq!(
+        compare_primary_keys(&one, &one).unwrap(),
+        std::cmp::Ordering::Equal
+    );
+    assert_eq!(
+        compare_primary_keys(&one, &two).unwrap(),
+        std::cmp::Ordering::Less
+    );
+}
+
+#[test]
+fn permitted_key_shapes_compare_as_tuple_primary_keys() {
+    let decimal = |c: i32| {
+        Raw::Tag(
+            60000,
+            Box::new(Raw::Array(vec![Raw::Int(c.into()), Raw::Int(0.into())])),
+        )
+    };
+    let date = |s: &str| Raw::Tag(60001, Box::new(Raw::Text(s.into())));
+    let instant = |s: i32| {
+        Raw::Tag(
+            60002,
+            Box::new(Raw::Array(vec![Raw::Int(s.into()), Raw::Int(0.into())])),
+        )
+    };
+    for (left, right) in [
+        (decimal(1), decimal(2)),
+        (date("2024-01-01"), date("2024-01-02")),
+        (instant(1), instant(2)),
+    ] {
+        let left = Value::new(Raw::Array(vec![left])).unwrap();
+        let right = Value::new(Raw::Array(vec![right])).unwrap();
+        assert_eq!(
+            compare_primary_keys(&left, &right).unwrap(),
+            std::cmp::Ordering::Less
+        );
+    }
+    let tuple = |n: i32, s: &str| {
+        Value::new(Raw::Array(vec![Raw::Int(n.into()), Raw::Text(s.into())])).unwrap()
+    };
+    assert_eq!(
+        compare_primary_keys(&tuple(1, "a"), &tuple(1, "b")).unwrap(),
+        std::cmp::Ordering::Less
+    );
+    assert_eq!(
+        compare_primary_keys(&tuple(1, "b"), &tuple(1, "b")).unwrap(),
+        std::cmp::Ordering::Equal
     );
 }
