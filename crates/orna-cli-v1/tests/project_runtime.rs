@@ -1423,9 +1423,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .expect("seed capture")
         .generation()
         .clone();
-    assert_eq!(state.committed_table_rows("Book").await.unwrap().len(), 2);
-    assert_eq!(state.committed_table_rows("Loan").await.unwrap().len(), 0);
-    let stock = state.committed_table_rows("Stock").await.unwrap();
+    assert_eq!(state.committed_table_rows("library.Book").await.unwrap().len(), 2);
+    assert_eq!(state.committed_table_rows("library.Loan").await.unwrap().len(), 0);
+    let stock = state.committed_table_rows("warehouse.Stock").await.unwrap();
     assert_eq!(stock.len(), 2);
     assert!(stock.iter().any(|(_, row)| {
         text(row, "location") == "north"
@@ -1462,7 +1462,7 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
     );
     assert_eq!(
         duplicate_state
-            .committed_table_rows("Book")
+            .committed_table_rows("library.Book")
             .await
             .unwrap()
             .len(),
@@ -1484,11 +1484,11 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .await
         .expect("reopen runtime after exercise");
     assert!(final_state.capture().await.unwrap().generation() > &generation_after_seed);
-    let loans = final_state.committed_table_rows("Loan").await.unwrap();
+    let loans = final_state.committed_table_rows("library.Loan").await.unwrap();
     assert_eq!(loans.len(), 1);
     assert_eq!(text(&loans[0].1, "book_id"), "book-1");
     assert_eq!(text(&loans[0].1, "borrower"), "reader-1");
-    let stock = final_state.committed_table_rows("Stock").await.unwrap();
+    let stock = final_state.committed_table_rows("warehouse.Stock").await.unwrap();
     assert_eq!(stock.len(), 2);
     assert!(stock.iter().any(|(_, row)| {
         text(row, "location") == "north"
@@ -1507,9 +1507,9 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .expect("exercise capture")
         .generation()
         .clone();
-    let books_after_exercise = final_state.committed_table_rows("Book").await.unwrap();
-    let loans_after_exercise = final_state.committed_table_rows("Loan").await.unwrap();
-    let stock_after_exercise = final_state.committed_table_rows("Stock").await.unwrap();
+    let books_after_exercise = final_state.committed_table_rows("library.Book").await.unwrap();
+    let loans_after_exercise = final_state.committed_table_rows("library.Loan").await.unwrap();
+    let stock_after_exercise = final_state.committed_table_rows("warehouse.Stock").await.unwrap();
     drop(final_state);
 
     let duplicate_exercise = invoke(directory.path(), "run", "exercise");
@@ -1532,21 +1532,21 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
     );
     assert_eq!(
         after_rejected_exercise
-            .committed_table_rows("Book")
+            .committed_table_rows("library.Book")
             .await
             .unwrap(),
         books_after_exercise
     );
     assert_eq!(
         after_rejected_exercise
-            .committed_table_rows("Loan")
+            .committed_table_rows("library.Loan")
             .await
             .unwrap(),
         loans_after_exercise
     );
     assert_eq!(
         after_rejected_exercise
-            .committed_table_rows("Stock")
+            .committed_table_rows("warehouse.Stock")
             .await
             .unwrap(),
         stock_after_exercise
@@ -1581,7 +1581,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         .expect("seed capture")
         .generation()
         .clone();
-    let books_after_seed = seeded.committed_table_rows("Book").await.unwrap();
+    let books_after_seed = seeded.committed_table_rows("library.Book").await.unwrap();
     drop(seeded);
 
     let missing = Command::new(env!("CARGO_BIN_EXE_orna"))
@@ -1616,12 +1616,12 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         &generation_after_seed
     );
     assert_eq!(
-        after_missing.committed_table_rows("Book").await.unwrap(),
+        after_missing.committed_table_rows("library.Book").await.unwrap(),
         books_after_seed
     );
     assert!(
         after_missing
-            .committed_table_rows("Loan")
+            .committed_table_rows("library.Loan")
             .await
             .unwrap()
             .is_empty()
@@ -1655,7 +1655,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         .expect("lend capture")
         .generation()
         .clone();
-    let loans_after_lend = lent.committed_table_rows("Loan").await.unwrap();
+    let loans_after_lend = lent.committed_table_rows("library.Loan").await.unwrap();
     assert_eq!(loans_after_lend.len(), 1);
     assert_eq!(text(&loans_after_lend[0].1, "book_id"), "book-1");
     assert_eq!(text(&loans_after_lend[0].1, "borrower"), "reader-1");
@@ -1693,7 +1693,7 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         &generation_after_lend
     );
     assert_eq!(
-        after_duplicate.committed_table_rows("Loan").await.unwrap(),
+        after_duplicate.committed_table_rows("library.Loan").await.unwrap(),
         loans_after_lend
     );
 }
@@ -1730,7 +1730,7 @@ async fn binary_generic_run_executes_a_renamed_finite_list_stream_root() {
         .expect("reopen runtime after generic stream invocation");
     assert_eq!(
         state
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("read durable readings")
             .len(),
@@ -2063,7 +2063,7 @@ async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
         .await
         .expect("reopen runtime after sensors invocation");
     let readings = state
-        .committed_table_rows("Reading")
+        .committed_table_rows("sensors.Reading")
         .await
         .expect("read durable readings");
     assert_eq!(readings.len(), 3);
@@ -2103,7 +2103,7 @@ async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
         .expect("reopen runtime after second sensors invocation");
     assert_eq!(
         reopened
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("read durable readings after restart"),
         readings
