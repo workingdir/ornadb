@@ -430,15 +430,18 @@ fn matches_value(value: &Raw, ty: &Type, expression: &Expr) -> bool {
             _ => false,
         },
         Type::Tuple(types) => match (value, expression) {
-            (Raw::Array(values), Expr::Tuple { elements, .. })
-                if values.len() == types.len() && elements.len() == types.len() =>
-            {
-                values
-                    .iter()
-                    .zip(types)
-                    .zip(elements)
-                    .all(|((value, ty), expression)| matches_value(value, ty, expression))
-            }
+            (Raw::Tag(60015, tuple), Expr::Tuple { elements, .. }) => match tuple.as_ref() {
+                Raw::Array(values)
+                    if values.len() == types.len() && elements.len() == types.len() =>
+                {
+                    values
+                        .iter()
+                        .zip(types)
+                        .zip(elements)
+                        .all(|((value, ty), expression)| matches_value(value, ty, expression))
+                }
+                _ => false,
+            },
             _ => false,
         },
         Type::Record(types) => match (value, expression) {
@@ -524,5 +527,25 @@ mod stored_reference_tests {
         assert!(validate_stored_references(&wrong_database, &identity).is_err());
         let missing_table = reference([1; 16], [9; 16], Raw::Int(7.into()));
         assert!(validate_stored_references(&missing_table, &identity).is_err());
+    }
+
+    #[test]
+    fn tuple_field_admits_only_the_tag_60015_array_encoding() {
+        // Spec 29-formats: tuples are Tag(60015, Array). A bare array in a tuple column is
+        // not that encoding and must be refused (matches_value false => ORNA-CONFORMANCE-ROW-TYPE).
+        let parsed = parse_row("{ coordinates: (51, \"north\") }");
+        let Expr::Record { fields, .. } = &parsed.value else {
+            panic!("row fixture must parse as a record");
+        };
+        let expression = &fields[0].value;
+        let ty = Type::Tuple(vec![Type::Int, Type::Text]);
+        let bare = Raw::Array(vec![Raw::Int(51.into()), Raw::Text("north".into())]);
+        let tagged = Raw::Tag(60015, Box::new(bare.clone()));
+
+        assert!(matches_value(&tagged, &ty, expression));
+        assert!(
+            !matches_value(&bare, &ty, expression),
+            "a bare array in a tuple column must not admit"
+        );
     }
 }

@@ -1,5 +1,8 @@
 use crate::lexer::{Keyword, LexError, Token, TokenKind, lex};
 
+mod lookahead;
+use lookahead::TokenLookahead;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SourcePosition {
     pub line: u32,
@@ -1624,11 +1627,13 @@ struct Parser {
     incomplete_errors: usize,
     nesting_depth: usize,
     syntax_limit_reported: bool,
+    lookahead: TokenLookahead,
 }
 impl Parser {
     fn new(source: &str) -> Self {
         match lex(source) {
             Ok(tokens) => Self {
+                lookahead: TokenLookahead::new(&tokens),
                 tokens,
                 at: 0,
                 errors: Vec::new(),
@@ -1636,18 +1641,22 @@ impl Parser {
                 nesting_depth: 0,
                 syntax_limit_reported: false,
             },
-            Err(es) => Self {
-                tokens: vec![Token {
+            Err(es) => {
+                let tokens = vec![Token {
                     kind: TokenKind::Eof,
                     text: String::new(),
                     span: SourceSpan::new(source.len(), source.len()),
-                }],
-                at: 0,
-                errors: es.into_iter().map(from_lex).collect(),
-                incomplete_errors: 0,
-                nesting_depth: 0,
-                syntax_limit_reported: false,
-            },
+                }];
+                Self {
+                    lookahead: TokenLookahead::new(&tokens),
+                    tokens,
+                    at: 0,
+                    errors: es.into_iter().map(from_lex).collect(),
+                    incomplete_errors: 0,
+                    nesting_depth: 0,
+                    syntax_limit_reported: false,
+                }
+            }
         }
     }
     fn reset_syntax_budget(&mut self) {
@@ -1885,7 +1894,7 @@ impl Parser {
         if !Self::token_is_punct(tokens, pattern_end, "=") {
             return false;
         }
-        Self::has_terminated_initializer(tokens, pattern_end + 1)
+        self.lookahead.has_terminated_initializer(pattern_end + 1)
     }
     fn is_legacy_opaque_declaration(&self, at: usize) -> bool {
         let tokens = &self.tokens;
@@ -1895,7 +1904,7 @@ impl Parser {
                 Some(TokenKind::Identifier { .. })
             )
             && Self::token_is_punct(tokens, at + 2, "=")
-            && Self::has_terminated_initializer(tokens, at + 3)
+            && self.lookahead.has_terminated_initializer(at + 3)
     }
     fn is_legacy_currency_declaration(&self, at: usize) -> bool {
         let tokens = &self.tokens;
@@ -1946,7 +1955,7 @@ impl Parser {
                 | TokenKind::Keyword(Keyword::In)
                 | TokenKind::Punct("<" | "<=" | ">" | ">=" | "==" | "!=" | "!" | "-" | "+",)
         );
-        assertion_expression_starts && Self::has_terminated_initializer(tokens, at + 1)
+        assertion_expression_starts && self.lookahead.has_terminated_initializer(at + 1)
     }
     fn is_legacy_named_declaration(&self, at: usize, continuation: &str) -> bool {
         let tokens = &self.tokens;
@@ -1956,7 +1965,7 @@ impl Parser {
                 Some(TokenKind::Identifier { .. })
             )
             && Self::token_is_punct(tokens, at + 2, continuation)
-            && (continuation != "=" || Self::has_terminated_initializer(tokens, at + 3))
+            && (continuation != "=" || self.lookahead.has_terminated_initializer(at + 3))
     }
     fn is_legacy_on_declaration(&self, at: usize) -> bool {
         let tokens = &self.tokens;
@@ -2409,25 +2418,6 @@ impl Parser {
             }
         }
         Self::token_is_punct(tokens, at, "}").then_some(at + 1)
-    }
-    fn has_terminated_initializer(tokens: &[Token], start: usize) -> bool {
-        if matches!(
-            tokens.get(start).map(|token| &token.kind),
-            None | Some(TokenKind::Punct(";")) | Some(TokenKind::Eof)
-        ) {
-            return false;
-        }
-        let mut nesting = 0usize;
-        for token in &tokens[start..] {
-            match token.kind {
-                TokenKind::Punct("(" | "[" | "{") => nesting += 1,
-                TokenKind::Punct(")" | "]" | "}") => nesting = nesting.saturating_sub(1),
-                TokenKind::Punct(";") if nesting == 0 => return true,
-                TokenKind::Eof => return false,
-                _ => {}
-            }
-        }
-        false
     }
     fn token_is_contextual(tokens: &[Token], at: usize) -> bool {
         matches!(
@@ -4099,33 +4089,7 @@ impl Parser {
     /// immediately followed by `(`. Tokens that cannot occur inside type
     /// arguments, or a closer of an enclosing delimiter, end the scan.
     fn generic_call_ahead(&self) -> bool {
-        if !self.is_punct("<") {
-            return false;
-        }
-        let mut angles = 0usize;
-        let mut delimiters = 0usize;
-        for (index, token) in self.tokens.iter().enumerate().skip(self.at) {
-            match token.kind {
-                TokenKind::Punct("<") => angles += 1,
-                TokenKind::Punct(">") if angles > 0 => {
-                    angles -= 1;
-                    if angles == 0 {
-                        return matches!(
-                            self.tokens.get(index + 1).map(|next| &next.kind),
-                            Some(TokenKind::Punct("("))
-                        );
-                    }
-                }
-                TokenKind::Punct("(" | "[" | "{") => delimiters += 1,
-                TokenKind::Punct(")" | "]" | "}") => match delimiters.checked_sub(1) {
-                    Some(depth) => delimiters = depth,
-                    None => return false,
-                },
-                TokenKind::Punct(";" | "=" | "=>" | "&&" | "||") | TokenKind::Eof => return false,
-                _ => {}
-            }
-        }
-        false
+        self.lookahead.generic_call_at(self.at)
     }
 
     /// Tentatively parses the type arguments of a generic call. A declined

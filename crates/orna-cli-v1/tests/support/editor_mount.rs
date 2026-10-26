@@ -170,6 +170,9 @@ pub fn write_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
 
 pub struct EditorMount {
     pub _mounted: MountedProcess,
+    /// A live writer other than the mount, holding the worktree's runtime owner
+    /// lock and writer lease for the fixture's lifetime.
+    pub _foreign_writer: Option<RuntimeState>,
     pub repository: Repository,
     pub relation_id: [u8; 16],
     pub row_directory: PathBuf,
@@ -187,7 +190,7 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Starts `mount --cwd` on an existing mountpoint directory without waiting for
 /// the FUSE mount to appear.
 pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_path.to_str().unwrap(),
@@ -195,7 +198,7 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
+        .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
         .expect("start mount --cwd");
@@ -227,7 +230,11 @@ pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Waits until the Linux mount table lists the process's mountpoint.
 pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mounted.mountpoint) {
+    // Ready means the mount table lists the mountpoint and the mounted root answers.
+    // A bare mountinfo match can precede the first FUSE request being served.
+    while !(mountinfo_contains(&mounted.mountpoint)
+        && root_answers_before(&mounted.mountpoint, deadline))
+    {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             mounted.exited(status);
         }
@@ -235,6 +242,19 @@ pub fn wait_for_mount(mut mounted: MountedProcess) -> MountedProcess {
         thread::sleep(Duration::from_millis(20));
     }
     mounted
+}
+
+/// Lists the mounted root on a helper thread, so a hung FUSE daemon cannot block the
+/// caller past `deadline`. A probe that never returns stays blocked in the kernel; the
+/// caller then fails at the deadline.
+fn root_answers_before(path: &Path, deadline: Instant) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let path = path.to_path_buf();
+    thread::spawn(move || {
+        let _ = tx.send(path.read_dir().is_ok());
+    });
+    rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .unwrap_or(false)
 }
 
 pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
@@ -258,7 +278,7 @@ pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedP
 
 /// Runs `orna unmount` for a mount started from `repository`.
 pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", repository.to_str().unwrap(), "unmount"])
         .arg(mountpoint)
         .output()
@@ -273,14 +293,16 @@ pub fn run_orna_unmount(repository: &Path, mountpoint: &Path) {
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
 
+/// The writer owner of the live foreign writer `start_editor_mount(true)` keeps.
+pub const FOREIGN_OWNER: [u8; 16] = [0x83; 16];
+
 /// Creates a repository whose `Music` table has one committed row named `key`.
 pub async fn repository_with_music_row(
     key: &str,
     ordinal: u8,
     initial: &str,
-    foreign_owner: bool,
 ) -> (TempDir, Repository, [u8; 16]) {
-    repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial, foreign_owner).await
+    repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial).await
 }
 
 /// Like `repository_with_music_row`, with a caller-supplied table `source`.
@@ -289,25 +311,17 @@ pub async fn repository_with_source_row(
     key: &str,
     ordinal: u8,
     initial: &str,
-    foreign_owner: bool,
 ) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            &format!("Music/{key}.orna"),
-            initial,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
-    let lease_owner = if foreign_owner {
-        [0x83; 16]
-    } else {
-        runtime_identity.repository_id
-    };
-    let writer = state.acquire_lease(lease_owner).await.unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     commit_source_captures_for_table(
         &repository,
@@ -320,7 +334,7 @@ pub async fn repository_with_source_row(
         &[SourceCaptureRow {
             key,
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal,
             insert_only: true,
         }],
@@ -330,21 +344,33 @@ pub async fn repository_with_source_row(
     (repository_directory, repository, relation_id)
 }
 
+/// Opens a writer that is not the mount and keeps it live: it holds the
+/// worktree's runtime owner lock and takes the writer lease for
+/// `FOREIGN_OWNER`, so a mount started afterwards is only a secondary
+/// participant (ORNA-TURSO-005).
+pub async fn live_foreign_writer(repository: &Repository) -> RuntimeState {
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(repository);
+    let state = RuntimeState::open(repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    assert!(
+        state.holds_runtime_owner_lock(),
+        "the foreign writer owns the worktree runtime"
+    );
+    state
+        .acquire_lease(FOREIGN_OWNER)
+        .await
+        .expect("the foreign writer takes the writer lease");
+    state
+}
+
 /// Creates a repository whose `Music` table has one committed row for each
 /// `(key, document)` pair.
 pub async fn repository_with_music_rows(
     rows: &[(&str, &str)],
 ) -> (TempDir, Repository, [u8; 16]) {
-    let paths = rows
-        .iter()
-        .map(|(key, document)| (format!("Music/{key}.orna"), *document))
-        .collect::<Vec<_>>();
-    let sources = paths
-        .iter()
-        .map(|(path, document)| (path.as_str(), *document))
-        .collect::<Vec<_>>();
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(MUSIC_SOURCE, "Music", &sources);
+        format3::format3_repository_with_context(MUSIC_SOURCE, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -360,7 +386,7 @@ pub async fn repository_with_music_rows(
         .map(|(&(key, document), ordinal)| SourceCaptureRow {
             key,
             blob_fields: &[],
-            source_row: Some(document),
+            source_row: document,
             ordinal,
             insert_only: true,
         })
@@ -380,8 +406,9 @@ pub async fn repository_with_music_rows(
     (repository_directory, repository, relation_id)
 }
 
-/// The contents of every record in the repository's VFS recovery storage,
-/// where the mount retains candidates it did not accept.
+/// The contents of every retained candidate record in the repository's VFS
+/// recovery storage. Records are the top-level regular files; the private
+/// `editor-drafts` subdirectory holds explicit edit drafts, not records.
 pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     let directory = repository
         .runtime_paths()
@@ -389,8 +416,9 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
         .join("vfs-retained-drafts-v1");
     match std::fs::read_dir(&directory) {
         Ok(entries) => entries
-            .map(|entry| {
-                let path = entry.expect("list retained drafts").path();
+            .map(|entry| entry.expect("list retained drafts").path())
+            .filter(|path| path.is_file())
+            .map(|path| {
                 String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
                     .into_owned()
             })
@@ -400,6 +428,9 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     }
 }
 
+/// Mounts a repository whose `Music/london` row is `Original`. With
+/// `foreign_owner`, a live foreign writer owns the worktree for the fixture's
+/// lifetime, so the mount runs as a secondary participant.
 pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     start_editor_mount_with_source(
         "pub table Music(id: Str) { title: Str, artist: Str, }\n",
@@ -415,7 +446,12 @@ pub async fn start_editor_mount_with_source(
     foreign_owner: bool,
 ) -> EditorMount {
     let (repository_directory, repository, relation_id) =
-        repository_with_source_row(source, "london", 0x90, initial, foreign_owner).await;
+        repository_with_source_row(source, "london", 0x90, initial).await;
+    let foreign_writer = if foreign_owner {
+        Some(live_foreign_writer(&repository).await)
+    } else {
+        None
+    };
 
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
@@ -424,6 +460,7 @@ pub async fn start_editor_mount_with_source(
     let data_path = row_directory.join("data.orna");
     EditorMount {
         _mounted: mounted,
+        _foreign_writer: foreign_writer,
         repository,
         relation_id,
         row_directory,

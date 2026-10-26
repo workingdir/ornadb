@@ -1,0 +1,3 @@
+use std.collection;
+use tiny;
+pub fn seed(): [Int] = std.collection.unique(tiny.values());
