@@ -8,7 +8,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 }
 
 fn captured_test_source() -> (String, String) {
-    orna_standard::reference_standard_sources_v1()
+    orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/test.orna")
         .expect("the pinned std source bundle includes std.test")

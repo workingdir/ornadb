@@ -48,7 +48,7 @@ predecessor and forward-edge sets. In particular:
   must fail closed, not acquire different semantics.
 - Do not treat a retained evidence artifact, a local binary, or a build directory as
   a production distribution authority. The old
-  [first-release decision](decisions/0047-first-one-zero-release.md) records a
+  [first-release decision](decisions/archive/1.0/0047-first-one-zero-release.md) records a
   historical managed-product release plan; it does not amend the immutable
   1.0.0 contract or establish a current distribution requirement.
 
@@ -99,14 +99,14 @@ bundled `std.math` module and the `std.collection` source surface. This is a
 pinned source bundle, not discovery of an installed or host-provided standard
 library.
 
-When a project imports a standard module, `orna-cli-v1 check` first requires
+When a project imports a standard module, `orna check` first requires
 the imported logical module to be named by the selected profile. It then
 verifies the exact source bytes of every profile module, requires the complete
 declared bundle, parses the verified sources, and derives the semantic
 catalogue from their declarations. A changed, missing, duplicate, malformed,
 or unlisted standard module is rejected before that catalogue is admitted.
 
-`orna-cli-v1 run seed` uses the same selected source bundle. After semantic
+`orna run seed` uses the same selected source bundle. After semantic
 checking, its bounded evaluator loads the verified pure module and explicitly
 invokes the requested retained function; loading alone does not execute a
 function body. This establishes executable evidence for that source-level
@@ -199,3 +199,40 @@ For command details and the current evidence map, see the
 [editor tooling guide](editor-tooling.md),
 [1.0.0 release inventory](../CHANGELOG.md), and
 [decision index](decisions/README.md).
+
+## Legacy format-1 compact fixture (bead 5il1.394, partial slice)
+
+Fixture: `crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle`, built by the
+`build_legacy_fixture` example in `orna-repository-v1` (feature
+`legacy-fixture-writer`). Its SHA-256 is pinned by `BUNDLE_SHA256` in
+`crates/orna-cli-v1/tests/legacy_fixture_bundle.rs` and the bundle is listed in
+`scripts/fixture-manifest.sha256`.
+
+Provenance: the fixture is produced by the test encoder (`encoder_version`
+`test-encoder-v1`). It shares the canonical OVB encoder, base64 helper, date-key
+mapping and Parquet page-checksum helper with production. It is NOT an
+independent 1.0.0 golden repository.
+
+What it proves (focused test `legacy_fixture_bundle`): a clone of the bundle
+reads through `read_legacy_authoritative_tables` and admits through
+`migrate copy`, covering key-only compact Int (INT64), Str (BYTE_ARRAY, STRING,
+`utf8`) and Date (INT32, DATE) segments plus a committed gitlink.
+
+Open gaps (not proven by this fixture):
+
+- Blob compact encoding: excluded (spec-silent, conservative).
+- `state.db` and persistent consumers: not covered; spec-silent.
+- ORNA-UPGRADE-008 fail-closed behaviour for Blob-containing persistent-consumer
+  arguments: NOT asserted by any test.
+- Loose-row path codec: deferred.
+- Key-bound encoding: manifest and shard `min_key`/`max_key` hold the OVB-1
+  canonical encoding of the typed key value (Int, Str or Date), written as hex
+  text. The reader (`compact.rs`, `decode_hex` then `CanonicalValue::decode`)
+  accepts only this hex form. The 1.0.0 spec types these fields as `sys.Value`
+  (`source/34-system-reference.md` lines 2242-2243; OVB-1 envelope per
+  `source/29-formats.md` line 48), and `source/23-storage.md:214,216` says key
+  values use the table key schema. The spec does not pin a text-literal form,
+  so typed literals (`min_key: 42`, `min_key: "abc"`) are not what the reader
+  accepts. This is an unresolved reader/spec ambiguity recorded for follow-up,
+  not changed in this slice. Str bounds are OVB text bytes, not hex of raw UTF-8.
+- Byte-compatibility with 1.0.0 golden output: not verified.
