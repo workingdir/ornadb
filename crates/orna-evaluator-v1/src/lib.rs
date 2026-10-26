@@ -53,6 +53,7 @@ mod timezone;
 mod ui;
 mod unicode_16_case_properties;
 mod browser_profile;
+pub mod row_admission;
 pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
 pub use admitted_repl::{
