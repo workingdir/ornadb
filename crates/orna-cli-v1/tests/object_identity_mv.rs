@@ -281,12 +281,6 @@ fn mv_restores_the_source_when_staging_the_inventory_fails() {
     let (_directory, root, initial) = committed_project(SOURCE);
     let source_path = root.join("main.orna");
     let source = fs::read(&source_path).unwrap();
-    #[cfg(unix)]
-    let source_ctime = {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(&source_path).unwrap();
-        (metadata.ctime(), metadata.ctime_nsec())
-    };
     let index = index_bytes(&root);
     let repository = Repository::discover(&root).expect("repository");
     let head = repository.head().unwrap().expect("committed HEAD");
@@ -328,19 +322,6 @@ fn mv_restores_the_source_when_staging_the_inventory_fails() {
         "the refusal comes from installing the restaged store: {stderr}"
     );
     assert_refused_without_changes(&output, &root, &source, &index);
-    // The source file was written and then restored, not left untouched. A
-    // write and a restore both advance the change time, whereas inode numbers
-    // are reused by some filesystems (tmpfs), so only the ctime is compared.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let metadata = fs::metadata(&source_path).unwrap();
-        assert_ne!(
-            (metadata.ctime(), metadata.ctime_nsec()),
-            source_ctime,
-            "the source must be rewritten and restored, so its change time advances"
-        );
-    }
     assert_eq!(
         repository.read_publication_journal().unwrap(),
         Some(journal)

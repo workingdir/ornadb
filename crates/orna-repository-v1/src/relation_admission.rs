@@ -2231,6 +2231,18 @@ mod tests {
     }
 
     #[test]
+    fn private_carrier_capture_needs_no_configured_identity() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        git(root, &["config", "--unset", "user.name"]);
+        git(root, &["config", "--unset", "user.email"]);
+        let staged = repository
+            .capture_staged_candidate()
+            .expect("a private carrier commit must not require a configured identity");
+        assert!(staged.store_root().is_none());
+    }
+
+    #[test]
     fn staging_bootstraps_the_store_and_its_identity_inventory() {
         let (directory, repository) = initialized_repository();
         let root = directory.path();
