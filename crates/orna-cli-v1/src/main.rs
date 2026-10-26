@@ -2499,7 +2499,7 @@ fn unavailable_table_identity(detail: String) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2200",
         "committed table identities are unavailable",
-        "commit the project so every table has exactly one identity",
+        "run `orna commit -m MESSAGE` so every table has exactly one identity",
         detail,
     )
 }
@@ -2595,9 +2595,18 @@ fn refuse_legacy_bare_module_rows(
             "retry the invocation after checking local runtime state",
         )
     };
-    // No commit means no committed table relation can hold legacy rows.
-    let Some(commit) = repository.head().ok().flatten() else {
-        return Ok(());
+    // An unborn HEAD means no committed table relation can hold legacy rows.
+    // An unreadable HEAD is not evidence of absence: refuse it.
+    let commit = match repository.head() {
+        Ok(Some(commit)) => commit,
+        Ok(None) => return Ok(()),
+        Err(_) => {
+            return Err(Diagnostic::target(
+                "E2200",
+                "committed HEAD is unreadable",
+                "repair the repository HEAD reference, then run again",
+            ));
+        }
     };
     // A commit without an identity inventory never allocated its tables'
     // identities. Evaluating its table statements would touch no committed
