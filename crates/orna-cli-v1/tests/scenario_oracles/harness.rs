@@ -96,8 +96,32 @@ pub fn hex(bytes: &[u8]) -> String {
 }
 
 /// Why a scenario step did not hold, with the product output that shows it.
+/// `Unmet` is a product claim that a then-clause or gap probe checks and finds
+/// false. `Harness` is a step the harness could not establish: a process that
+/// did not start, a setup command that did not succeed, I/O, or output it could
+/// not parse. A gap probe reports STALE only on `Unmet`, because only a checked
+/// product claim shows that the blocker is gone.
 #[derive(Debug)]
-pub struct Failure(pub String);
+pub enum Failure {
+    Unmet(String),
+    Harness(String),
+}
+
+impl Failure {
+    pub fn reason(&self) -> &str {
+        match self {
+            Failure::Unmet(reason) | Failure::Harness(reason) => reason,
+        }
+    }
+
+    /// The same failure with its reason rewritten and its kind kept.
+    pub fn map_reason(self, rewrite: impl FnOnce(&str) -> String) -> Self {
+        match self {
+            Failure::Unmet(reason) => Failure::Unmet(rewrite(&reason)),
+            Failure::Harness(reason) => Failure::Harness(rewrite(&reason)),
+        }
+    }
+}
 
 /// An executor's result: every then-clause it checks held.
 pub type Check = Result<(), Failure>;
@@ -109,11 +133,22 @@ pub type Probe = Result<String, Failure>;
 macro_rules! ensure {
     ($condition:expr, $($reason:tt)+) => {
         if !$condition {
-            return Err($crate::harness::Failure(format!($($reason)+)));
+            return Err($crate::harness::Failure::Unmet(format!($($reason)+)));
         }
     };
 }
 pub(crate) use ensure;
+
+/// Fails the enclosing step as a harness error: a precondition the harness
+/// sets up, not a product claim.
+macro_rules! harness_ensure {
+    ($condition:expr, $($reason:tt)+) => {
+        if !$condition {
+            return Err($crate::harness::Failure::Harness(format!($($reason)+)));
+        }
+    };
+}
+pub(crate) use harness_ensure;
 
 /// How a registered scenario is expected to behave today.
 pub enum Expect {
@@ -225,7 +260,7 @@ pub fn run_entry(entry: &Entry) -> Verdict {
     }
     let mut db = match Db::init() {
         Ok(db) => db,
-        Err(Failure(reason)) => return Verdict::Fail(format!("orna init: {reason}")),
+        Err(failure) => return Verdict::Fail(format!("orna init: {}", failure.reason())),
     };
     let outcome = catch_unwind(AssertUnwindSafe(|| match &entry.expect {
         Expect::Pass(executor) => executor(&mut db).map(|()| String::new()),
@@ -233,19 +268,23 @@ pub fn run_entry(entry: &Entry) -> Verdict {
     }));
     let outcome = match outcome {
         Ok(outcome) => outcome,
-        Err(panic) => Err(Failure(format!(
+        Err(panic) => Err(Failure::Harness(format!(
             "the harness panicked: {}",
             panic_text(&panic)
         ))),
     };
     match (&entry.expect, outcome) {
         (Expect::Pass(_), Ok(_)) => Verdict::Pass,
-        (Expect::Pass(_), Err(Failure(reason))) => {
-            Verdict::Fail(format!("{reason}\n{}", db.transcript))
+        (Expect::Pass(_), Err(failure)) => {
+            Verdict::Fail(format!("{}\n{}", failure.reason(), db.transcript))
         }
         (Expect::Gap { .. }, Ok(evidence)) => Verdict::Gap(evidence),
-        (Expect::Gap { .. }, Err(Failure(reason))) => Verdict::Stale(format!(
+        (Expect::Gap { .. }, Err(Failure::Unmet(reason))) => Verdict::Stale(format!(
             "the blocker no longer reproduces: {reason}\n{}",
+            db.transcript
+        )),
+        (Expect::Gap { .. }, Err(Failure::Harness(reason))) => Verdict::Fail(format!(
+            "the gap probe could not establish its blocker: {reason}\n{}",
             db.transcript
         )),
     }
@@ -401,7 +440,7 @@ impl Run {
         if self.succeeded() {
             Ok(self)
         } else {
-            Err(Failure(format!("expected success: {}", self.describe())))
+            Err(Failure::Harness(format!("expected success: {}", self.describe())))
         }
     }
 }
@@ -440,9 +479,9 @@ impl Db {
 
     fn create(object_format: Option<&str>) -> Result<Db, Failure> {
         let directory =
-            TempDir::new().map_err(|error| Failure(format!("temporary directory: {error}")))?;
+            TempDir::new().map_err(|error| Failure::Harness(format!("temporary directory: {error}")))?;
         let home = directory.path().join("home");
-        fs::create_dir(&home).map_err(|error| Failure(format!("home directory: {error}")))?;
+        fs::create_dir(&home).map_err(|error| Failure::Harness(format!("home directory: {error}")))?;
         let root = directory.path().join("db");
         let mut db = Db {
             root: root.clone(),
@@ -503,21 +542,21 @@ impl Db {
     /// A scratch directory beside the database, outside its worktree.
     pub fn scratch(&self, name: &str) -> Result<PathBuf, Failure> {
         let path = self.directory.path().join(name);
-        fs::create_dir_all(&path).map_err(|error| Failure(format!("{name}: {error}")))?;
+        fs::create_dir_all(&path).map_err(|error| Failure::Harness(format!("{name}: {error}")))?;
         Ok(path)
     }
 
     pub fn write(&self, relative: &str, contents: impl AsRef<[u8]>) -> Result<(), Failure> {
         let path = self.root.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| Failure(format!("{relative}: {error}")))?;
+            fs::create_dir_all(parent).map_err(|error| Failure::Harness(format!("{relative}: {error}")))?;
         }
-        fs::write(&path, contents).map_err(|error| Failure(format!("write {relative}: {error}")))
+        fs::write(&path, contents).map_err(|error| Failure::Harness(format!("write {relative}: {error}")))
     }
 
     pub fn read(&self, relative: &str) -> Result<Vec<u8>, Failure> {
         fs::read(self.root.join(relative))
-            .map_err(|error| Failure(format!("read {relative}: {error}")))
+            .map_err(|error| Failure::Harness(format!("read {relative}: {error}")))
     }
 
     /// Runs `orna ARGS` in the database root.
@@ -550,7 +589,7 @@ impl Db {
     /// the REPL to accept it.
     pub fn repl_effect(&mut self, expression: &str) -> Result<Run, Failure> {
         let run = self.repl(&[expression])?;
-        ensure!(
+        harness_ensure!(
             run.succeeded() && !run.output().contains("error["),
             "the REPL rejected `{expression}`: {}",
             run.describe()
@@ -579,7 +618,7 @@ impl Db {
     /// The relation ID `orna commit` reported for `table`.
     pub fn relation(tables: &BTreeMap<String, String>, table: &str) -> Result<String, Failure> {
         tables.get(table).cloned().ok_or_else(|| {
-            Failure(format!(
+            Failure::Harness(format!(
                 "orna commit did not admit table {table}: {tables:?}"
             ))
         })
@@ -599,7 +638,7 @@ impl Db {
             .and_then(|rest| rest.split_whitespace().next())
             .and_then(|count| count.parse().ok())
             .ok_or_else(|| {
-                Failure(format!(
+                Failure::Harness(format!(
                     "no runtime summary in status: {}",
                     status.describe()
                 ))
@@ -617,7 +656,7 @@ impl Db {
         command.extend_from_slice(&["--format", "json"]);
         let listed = self.orna(&command)?.ok()?;
         serde_json::from_str(&listed.stdout).map_err(|error| {
-            Failure(format!(
+            Failure::Harness(format!(
                 "orna query printed no JSON ({error}): {}",
                 listed.describe()
             ))
@@ -634,7 +673,7 @@ impl Db {
     pub fn serve(&mut self) -> Result<Server, Failure> {
         let port = TcpListener::bind("127.0.0.1:0")
             .and_then(|listener| listener.local_addr())
-            .map_err(|error| Failure(format!("free port: {error}")))?
+            .map_err(|error| Failure::Harness(format!("free port: {error}")))?
             .port();
         let mut command = self.command("orna");
         command
@@ -645,7 +684,7 @@ impl Db {
             .stderr(Stdio::piped());
         let child = command
             .spawn()
-            .map_err(|error| Failure(format!("orna serve did not start: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("orna serve did not start: {error}")))?;
         let mut server = Server { child, port };
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
@@ -654,7 +693,7 @@ impl Db {
                 if let Some(mut stderr) = server.child.stderr.take() {
                     let _ = stderr.read_to_string(&mut output);
                 }
-                return Err(Failure(format!(
+                return Err(Failure::Harness(format!(
                     "orna serve exited ({status}): {}",
                     excerpt(&output)
                 )));
@@ -665,7 +704,7 @@ impl Db {
             }
             thread::sleep(Duration::from_millis(50));
         }
-        Err(Failure(
+        Err(Failure::Harness(
             "orna serve did not listen within 60 seconds".to_owned(),
         ))
     }
@@ -673,7 +712,7 @@ impl Db {
     /// The database UUID `orna init` recorded in `.orna/database.orna`.
     pub fn database_id(&self) -> Result<String, Failure> {
         let metadata = String::from_utf8(self.read(".orna/database.orna")?)
-            .map_err(|_| Failure("the database metadata is not UTF-8".to_owned()))?;
+            .map_err(|_| Failure::Harness("the database metadata is not UTF-8".to_owned()))?;
         metadata
             .split('"')
             .find(|field| {
@@ -681,7 +720,7 @@ impl Db {
                     && field.chars().filter(|character| *character == '-').count() == 4
             })
             .map(str::to_owned)
-            .ok_or_else(|| Failure(format!("no database UUID in {metadata}")))
+            .ok_or_else(|| Failure::Harness(format!("no database UUID in {metadata}")))
     }
 
     /// Starts `orna ARGS` in the database root with extra environment and
@@ -707,7 +746,7 @@ impl Db {
             arguments.join(" ")
         );
         command.spawn().map_err(|error| {
-            Failure(format!(
+            Failure::Harness(format!(
                 "`orna {}` did not start: {error}",
                 arguments.join(" ")
             ))
@@ -731,7 +770,7 @@ impl Db {
             .stderr(Stdio::null());
         let child = command
             .spawn()
-            .map_err(|error| Failure(format!("orna mount did not start: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("orna mount did not start: {error}")))?;
         let mut unmount = self.command("orna");
         unmount
             .args(["unmount", &point_text])
@@ -747,13 +786,13 @@ impl Db {
         let deadline = Instant::now() + Duration::from_secs(60);
         while !mounted(&mount.point) {
             if let Ok(Some(status)) = mount.child.try_wait() {
-                return Err(Failure(format!(
+                return Err(Failure::Harness(format!(
                     "orna mount {point_text} {} exited ({status}) before the view attached",
                     mode.join(" ")
                 )));
             }
             if Instant::now() >= deadline {
-                return Err(Failure(format!(
+                return Err(Failure::Harness(format!(
                     "orna mount {point_text} {} did not attach within 60 seconds",
                     mode.join(" ")
                 )));
@@ -835,14 +874,14 @@ fn indent(text: &str) -> String {
 fn path_text(path: &Path) -> Result<String, Failure> {
     path.to_str()
         .map(str::to_owned)
-        .ok_or_else(|| Failure(format!("non-UTF-8 test path {}", path.display())))
+        .ok_or_else(|| Failure::Harness(format!("non-UTF-8 test path {}", path.display())))
 }
 
 /// Runs a prepared command to completion, killing it after `COMMAND_LIMIT`.
 fn execute(mut command: Command, label: String, input: Option<&str>) -> Result<Run, Failure> {
     let mut child = command
         .spawn()
-        .map_err(|error| Failure(format!("`{label}` did not start: {error}")))?;
+        .map_err(|error| Failure::Harness(format!("`{label}` did not start: {error}")))?;
     let writer = input.map(|input| {
         let mut stdin = child.stdin.take().expect("piped stdin");
         let input = input.to_owned();
@@ -963,10 +1002,10 @@ impl Server {
         body: &[u8],
     ) -> Result<Response, Failure> {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port))
-            .map_err(|error| Failure(format!("connect to orna serve: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("connect to orna serve: {error}")))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
-            .map_err(|error| Failure(format!("socket timeout: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("socket timeout: {error}")))?;
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: {}\r\n",
             self.port,
@@ -979,21 +1018,21 @@ impl Server {
         stream
             .write_all(request.as_bytes())
             .and_then(|()| stream.write_all(body))
-            .map_err(|error| Failure(format!("send {method} {path}: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("send {method} {path}: {error}")))?;
         let mut bytes = Vec::new();
         stream
             .read_to_end(&mut bytes)
-            .map_err(|error| Failure(format!("read {method} {path}: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("read {method} {path}: {error}")))?;
         let split = bytes
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
-            .ok_or_else(|| Failure(format!("{method} {path}: response has no header end")))?;
+            .ok_or_else(|| Failure::Harness(format!("{method} {path}: response has no header end")))?;
         let head = String::from_utf8_lossy(&bytes[..split]).into_owned();
         let status = head
             .split_whitespace()
             .nth(1)
             .and_then(|code| code.parse().ok())
-            .ok_or_else(|| Failure(format!("{method} {path}: no status line in {head:?}")))?;
+            .ok_or_else(|| Failure::Harness(format!("{method} {path}: no status line in {head:?}")))?;
         Ok(Response {
             status,
             head,
