@@ -2437,6 +2437,7 @@ struct ReplTransactions {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     tables: Vec<RuntimeTableIdentity>,
+    table_schemas: BTreeMap<String, orna_semantic_v1::TableSchema>,
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
     host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
@@ -2714,7 +2715,8 @@ fn committed_invocation_rows(
     admitted: &AdmittedApplication,
     tables: &[RuntimeTableIdentity],
 ) -> Result<PinnedCommittedTables, Diagnostic> {
-    let (rows, storage_orders) = committed_rows_at(repository, commit, admitted, tables).map_err(
+    let schemas = admitted_table_schemas(admitted);
+    let (rows, storage_orders) = committed_rows_at(repository, commit, &schemas, tables).map_err(
         |error| match error {
             CommittedRowsError::Limit => Diagnostic::target(
                 "E2200",
@@ -2758,6 +2760,17 @@ enum CommittedRowsError {
     Limit,
 }
 
+/// The schema of every admitted table, keyed by table name.
+fn admitted_table_schemas(
+    admitted: &AdmittedApplication,
+) -> BTreeMap<String, orna_semantic_v1::TableSchema> {
+    admitted
+        .table_schemas()
+        .iter()
+        .map(|(name, table)| (name.clone(), table.schema().clone()))
+        .collect()
+}
+
 /// The stored tuples of every admitted table at `commit`, read from the
 /// committed format-3 base, with the stored field order each table lists.
 /// Shared by the one-shot invocation and `serve`. The read stops at the first
@@ -2765,17 +2778,12 @@ enum CommittedRowsError {
 fn committed_rows_at(
     repository: &orna_repository_v1::Repository,
     commit: &orna_repository_v1::GitCommitRef,
-    admitted: &AdmittedApplication,
+    schemas: &BTreeMap<String, orna_semantic_v1::TableSchema>,
     tables: &[RuntimeTableIdentity],
 ) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), CommittedRowsError> {
     let format = repository
         .open_pinned_format_context(commit.as_str())
         .map_err(|_| CommittedRowsError::Unavailable)?;
-    let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
-        .table_schemas()
-        .iter()
-        .map(|(name, table)| (name.clone(), table.schema().clone()))
-        .collect();
     let table_ids: BTreeMap<String, TableObjectId> = tables
         .iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
@@ -2961,18 +2969,19 @@ fn repl_transactions(
         return None;
     }
     let mut table_names = Vec::new();
+    let mut table_schemas = BTreeMap::new();
     for (namespace, module) in &analysis.modules {
         for (name, symbol) in &module.symbols {
-            if symbol.kind == orna_semantic_v1::SymbolKind::Table
-                && symbol
-                    .table_schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.admission.is_some())
-            {
-                table_names.push(match namespace.display().as_str() {
+            let Some(schema) = symbol.table_schema.as_ref() else {
+                continue;
+            };
+            if symbol.kind == orna_semantic_v1::SymbolKind::Table && schema.admission.is_some() {
+                let table = match namespace.display().as_str() {
                     "" => name.clone(),
                     prefix => format!("{prefix}.{name}"),
-                });
+                };
+                table_schemas.insert(table.clone(), schema.clone());
+                table_names.push(table);
             }
         }
     }
@@ -3007,6 +3016,7 @@ fn repl_transactions(
         identity,
         initial_digest,
         tables,
+        table_schemas,
         capture_relation_id,
         session_id,
         state: None,
@@ -3333,9 +3343,25 @@ fn run_repl_input(
         .state
         .as_ref()
         .expect("runtime state initialized");
+    let (committed_rows, _) = committed_rows_at(
+        repository,
+        &transactions.commit,
+        &transactions.table_schemas,
+        &transactions.tables,
+    )
+    .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let pin = transactions
+        .runtime
+        .block_on(state.published_pin())
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let committed = PinnedCommittedRows::new(pin, committed_rows)
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let snapshot = transactions
         .runtime
-        .block_on(state.begin_admitted_table_activation(&transactions.tables))
+        .block_on(state.begin_admitted_table_activation_over_committed(
+            &transactions.tables,
+            committed,
+        ))
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let query_id = cli_request_nonce().to_be_bytes();
     let expression = (source.len() <= 16 * 1024
