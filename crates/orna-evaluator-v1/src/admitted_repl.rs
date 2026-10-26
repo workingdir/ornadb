@@ -721,7 +721,14 @@ fn admitted_runtime_sources(
                         },
                     );
                 }
-                Declaration::Use { .. } | Declaration::Table { .. } | Declaration::Enum { .. } => {}
+                // Module assertions (ORNA-ASSERT-021..030) have no runtime value
+                // in a session. They bind to the candidate database on every
+                // REPL write, where the commit boundary evaluates them before
+                // publication, so the session admits them as declarations.
+                Declaration::Use { .. }
+                | Declaration::Table { .. }
+                | Declaration::Enum { .. }
+                | Declaration::Assertion { .. } => {}
                 // Catalogue-only declarations have no runtime representation. The
                 // REPL admits them only in the root project; elsewhere they stay
                 // unsupported below.
