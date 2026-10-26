@@ -1327,14 +1327,17 @@ impl RuntimePublicationCoordinator {
         if self.journal.stage() != orna_repository_v1::PublicationJournalStage::WorktreeReconciled {
             return Err(Error::PublicationPending);
         }
-        if repository
-            .head()
+        if !repository
+            .head_contains_commit(self.journal.new_head())
             .map_err(map_publication_repository_error)?
-            .as_ref()
-            != Some(self.journal.new_head())
         {
             return Err(Error::RefConflict);
         }
+        // Verified before the runtime tail is consumed, so a moved index
+        // leaves the pending batch intact (ORNA-PUB-009, ORNA-PUB-011).
+        repository
+            .verify_reconciled_index(&self.journal)
+            .map_err(map_publication_repository_error)?;
         runtime
             .complete_publication(freeze, &commit)
             .await
@@ -1429,14 +1432,17 @@ impl RuntimePublicationCoordinator {
         {
             return Err(Error::InvalidTransition);
         }
-        if repository
-            .head()
+        if !repository
+            .head_contains_commit(journal.new_head())
             .map_err(map_publication_repository_error)?
-            .as_ref()
-            != Some(journal.new_head())
         {
             return Err(Error::RefConflict);
         }
+        // Verified before the runtime tail is consumed, so a moved index
+        // leaves the pending batch intact (ORNA-PUB-009, ORNA-PUB-011).
+        repository
+            .verify_reconciled_index(&journal)
+            .map_err(map_publication_repository_error)?;
         runtime
             .complete_publication(&freeze, &commit)
             .await
@@ -1892,6 +1898,64 @@ mod tests {
             map_publication_repository_error(RepositoryError::StaleHead),
             Error::RefConflict
         ));
+    }
+
+    /// ORNA-PUB-009 recovery row "Ref no longer H or N": an ordinary commit
+    /// made after worktree reconciliation descends from the candidate, so the
+    /// production coordinator completes the runtime tail and clears the
+    /// journal without rewriting HEAD, index or worktree. The previous storage
+    /// gate refused every HEAD other than the candidate with `RefConflict`.
+    #[tokio::test]
+    async fn coordinator_recovery_completes_a_descendant_head() {
+        let (temp, repository) = repository();
+        let (runtime, freeze) = frozen_runtime(&repository).await;
+        let head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"row".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            freeze.intent_id,
+            vec![PublicationJournalEntry::new(
+                path.clone(),
+                None,
+                Some(b"row".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository
+            .publish_candidate(&index, &candidate, &mut journal)
+            .unwrap();
+
+        fs::write(temp.path().join("ordinary.txt"), "later\n").unwrap();
+        git(temp.path(), &["add", "ordinary.txt"]);
+        git(temp.path(), &["commit", "-m", "ordinary follow-up"]);
+        let follow_up = repository.head().unwrap().unwrap();
+
+        RuntimePublicationCoordinator::recover(&repository, &runtime)
+            .await
+            .unwrap();
+        assert_eq!(repository.read_publication_journal().unwrap(), None);
+        assert_eq!(repository.head().unwrap().unwrap(), follow_up);
+        assert_eq!(
+            fs::read(temp.path().join("generated/row.orna")).unwrap(),
+            b"row"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("ordinary.txt")).unwrap(),
+            "later\n"
+        );
     }
 
     #[tokio::test]
