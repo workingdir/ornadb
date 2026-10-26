@@ -9435,8 +9435,8 @@ fn infer_node(
                 return variant;
             }
             if let Some(path) = qualified_path(expr)
+                && scope.modules.contains_key(path[0])
                 && !local.contains_key(path[0])
-                && module_member_namespace(&path, scope).is_some()
             {
                 if let Some(table) = table_symbol(expr, scope, local) {
                     return Inferred {

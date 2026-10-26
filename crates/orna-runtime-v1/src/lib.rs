@@ -7658,6 +7658,26 @@ impl RuntimeState {
             .transpose()
     }
 
+    /// Whether `table_row` holds any row under the storage name `table`. The
+    /// CLI uses this to refuse a store whose module tables still carry rows
+    /// under their bare names, which the qualified module table would not see.
+    pub async fn has_table_rows(&self, table: &str) -> Result<bool, RuntimeError> {
+        validate_table_name(table)?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT 1 FROM table_row WHERE table_id = ?1 LIMIT 1",
+                params![table],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        Ok(rows
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .is_some())
+    }
+
     /// Reads one complete committed relation in canonical key order.
     pub async fn committed_table_rows(
         &self,

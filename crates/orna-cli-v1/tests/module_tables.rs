@@ -16,6 +16,7 @@ use std::{
 // so a user module reusing one collides (ornadb-5il1.285).
 const MAIN: &str = r#"use people;
 use a;
+use b;
 use telemetry.rig;
 use cloud.drive;
 
@@ -25,17 +26,16 @@ pub fn seed() {
     a.Item.insert({ id: "x", v: 1 });
     b.Item.insert({ id: "x", w: "wide" });
     rig.Reading.insert({ id: 1, rpm: 900 });
-    telemetry.rig.Reading.insert({ id: 2, rpm: 0 });
+    rig.Reading.insert({ id: 2, rpm: 0 });
 }
 
 pub fn verify() {
     assert (people.Contact | filter(contact => contact.name == "Ada") | count()) == 1;
     assert (a.Item | filter(item => item.v == 1) | count()) == 1;
     assert (b.Item | filter(item => item.w == "wide") | count()) == 1;
-    assert (telemetry.rig.Reading | filter(reading => reading.rpm > 0) | count()) == 1;
+    assert (rig.Reading | filter(reading => reading.rpm > 0) | count()) == 1;
     assert a.b_items() == 1;
     assert drive.sync() == 3;
-    assert cloud.drive.sync() == 3;
 }
 
 pub fn verify_rejects() {
@@ -45,8 +45,9 @@ pub fn verify_rejects() {
 
 const CONTACTS: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
 
-// `b` is reachable through `a`'s import only, so `main` names it by its full
-// namespace path without a `use` of its own.
+// `a` imports `b` itself, and `main` imports `b`, `telemetry.rig` and `cloud.drive`
+// in its own right (ORNA-IMPORT-001): a namespace reached only through another
+// module's import is not in scope.
 const A: &str = "use b;\n\npub table Item(id: Str) {\n    v: Int,\n}\n\npub fn b_items() = b.Item | count();\n";
 
 const B: &str = "pub table Item(id: Str) {\n    w: Str,\n}\n";
@@ -109,6 +110,19 @@ fn module_tables_check_run_and_query_through_qualified_identities() {
     // Both `Item` rows use key "x": one table under one bare name would
     // reject the second insert as a duplicate key.
     assert_success(&project_command(directory.path(), &["run", "main.seed"]), "seed");
+    // Each module table keeps its own stored key: the two `x` rows are one row
+    // per qualified table, never one row under a bare `Item` name.
+    let counts = stored_row_counts(directory.path());
+    for table in ["a.Item", "b.Item"] {
+        assert!(
+            counts.contains(&(table.to_owned(), 1)),
+            "{table} must store exactly one row under its qualified name: {counts:?}"
+        );
+    }
+    assert!(
+        !counts.iter().any(|(table, _)| table == "Item"),
+        "module rows must not be stored under the bare name: {counts:?}"
+    );
     assert_success(&project_command(directory.path(), &["run", "main.verify"]), "verify");
     assert_success(
         &project_command(directory.path(), &["run", "telemetry.rig.trips"]),
@@ -121,4 +135,68 @@ fn module_tables_check_run_and_query_through_qualified_identities() {
         "a false query assertion must fail the run: {:?}",
         String::from_utf8_lossy(&rejected.stderr)
     );
+}
+
+fn run_state_sql(directory: &Path, sql: &str) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let database = libsql::Builder::new_local(directory.join(".git/orna/state.db"))
+            .build()
+            .await
+            .expect("state database");
+        let connection = database.connect().expect("state connection");
+        connection.execute(sql, ()).await.expect("state update");
+    });
+}
+
+/// `(table_id, stored row count)` for every table with stored rows, read from
+/// the store that each `run` process reopens.
+fn stored_row_counts(directory: &Path) -> Vec<(String, i64)> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let database = libsql::Builder::new_local(directory.join(".git/orna/state.db"))
+            .build()
+            .await
+            .expect("state database");
+        let connection = database.connect().expect("state connection");
+        let mut rows = connection
+            .query(
+                "SELECT table_id, COUNT(*) FROM table_row GROUP BY table_id ORDER BY table_id",
+                (),
+            )
+            .await
+            .expect("row counts");
+        let mut counts = Vec::new();
+        while let Some(row) = rows.next().await.expect("row") {
+            counts.push((
+                row.get::<String>(0).expect("table id"),
+                row.get::<i64>(1).expect("count"),
+            ));
+        }
+        counts
+    })
+}
+
+#[test]
+fn legacy_bare_module_rows_are_refused_not_migrated() {
+    let directory = module_project();
+    assert_success(&project_command(directory.path(), &["run", "main.seed"]), "seed");
+    // Rows an earlier build stored under the bare `Item` name.
+    run_state_sql(
+        directory.path(),
+        "UPDATE table_row SET table_id = 'Item' WHERE table_id = 'a.Item'",
+    );
+    let rejected = project_command(directory.path(), &["run", "main.verify"]);
+    assert!(
+        !rejected.status.success(),
+        "a store holding bare-name module rows must be refused"
+    );
+    let stderr = String::from_utf8_lossy(&rejected.stderr);
+    assert!(stderr.contains("E2200"), "refusal must carry E2200: {stderr}");
 }
