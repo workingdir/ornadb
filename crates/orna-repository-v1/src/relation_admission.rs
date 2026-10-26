@@ -2234,8 +2234,11 @@ mod tests {
     fn private_carrier_capture_needs_no_configured_identity() {
         let (directory, repository) = initialized_repository();
         let root = directory.path();
-        git(root, &["config", "--unset", "user.name"]);
-        git(root, &["config", "--unset", "user.email"]);
+        // An empty local identity makes an ambient-identity commit fail on
+        // any host, even one with a global identity, because local config
+        // overrides global config. The carrier must not read it.
+        git(root, &["config", "user.name", ""]);
+        git(root, &["config", "user.email", ""]);
         let staged = repository
             .capture_staged_candidate()
             .expect("a private carrier commit must not require a configured identity");
