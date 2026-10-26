@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     harness::{
-        Check, Db, Entry, Failure, Probe, check_refuses, ensure, hex, repl_refuses,
-        unknown_command, vendored_fixture,
+        Check, Db, Entry, Failure, Probe, check_refuses, ensure, harness_ensure, hex,
+        repl_refuses, unknown_command, vendored_fixture,
     },
     mandatory::{LIVE_BLOCKER as LIVE_WATCH, watches_receive_no_update},
 };
@@ -900,7 +900,7 @@ fn listings(db: &mut Db, relation: &str) -> Result<Vec<serde_json::Value>, Failu
     report["listings"]
         .as_array()
         .cloned()
-        .ok_or_else(|| Failure(format!("the query has no listings: {report}")))
+        .ok_or_else(|| Failure::Harness(format!("the query has no listings: {report}")))
 }
 
 fn listing<'a>(
@@ -910,7 +910,7 @@ fn listing<'a>(
     listings
         .iter()
         .find(|listing| listing["key"] == key)
-        .ok_or_else(|| Failure(format!("no listing for row {key}: {listings:?}")))
+        .ok_or_else(|| Failure::Harness(format!("no listing for row {key}: {listings:?}")))
 }
 
 /// One entry of `git ls-tree -r -t -l` below `.orna/store`.
@@ -953,10 +953,10 @@ fn store_entries(db: &mut Db, commit: &str) -> Result<Vec<StoreEntry>, Failure> 
             let record = String::from_utf8_lossy(record);
             let (header, path) = record
                 .split_once('\t')
-                .ok_or_else(|| Failure(format!("unparsable tree entry {record}")))?;
+                .ok_or_else(|| Failure::Harness(format!("unparsable tree entry {record}")))?;
             let fields = header.split_whitespace().collect::<Vec<_>>();
             let [_mode, kind, oid, size] = fields.as_slice() else {
-                return Err(Failure(format!("unparsable tree entry {record}")));
+                return Err(Failure::Harness(format!("unparsable tree entry {record}")));
             };
             Ok(StoreEntry {
                 kind: (*kind).to_owned(),
@@ -1016,7 +1016,7 @@ fn ovb2(bytes: &[u8], media_type: &str, hint: Option<&str>) -> Vec<u8> {
 fn golden_ovb2_values_match() -> Check {
     let values = FINAL_VECTORS["values"]
         .as_array()
-        .ok_or_else(|| Failure("the release vectors list no values".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the release vectors list no values".to_owned()))?;
     for (id, bytes, media_type) in [
         ("ovb2-empty", &b""[..], "application/octet-stream"),
         ("ovb2-text", &b"abc"[..], "text/plain;charset=utf-8"),
@@ -1025,8 +1025,8 @@ fn golden_ovb2_values_match() -> Check {
             .iter()
             .find(|value| value["id"] == id)
             .and_then(|value| value["canonical_hex"].as_str())
-            .ok_or_else(|| Failure(format!("the release vectors have no {id}")))?;
-        ensure!(
+            .ok_or_else(|| Failure::Harness(format!("the release vectors have no {id}")))?;
+        harness_ensure!(
             hex(&ovb2(bytes, media_type, None)) == golden,
             "the OVB-2 reference encoding disagrees with release vector {id}"
         );
@@ -1088,13 +1088,13 @@ fn media_vectors() -> Result<Vec<serde_json::Value>, Failure> {
     FINAL_VECTORS["media"]
         .as_array()
         .cloned()
-        .ok_or_else(|| Failure("the release vectors list no media cases".to_owned()))
+        .ok_or_else(|| Failure::Harness("the release vectors list no media cases".to_owned()))
 }
 
 fn text<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, Failure> {
     value[field]
         .as_str()
-        .ok_or_else(|| Failure(format!("{field} is not text in {value}")))
+        .ok_or_else(|| Failure::Harness(format!("{field} is not text in {value}")))
 }
 
 // FINAL-MIME and FINAL-BLOB-001 executors over `orna annotate`.
@@ -1353,7 +1353,7 @@ fn shared_content_rows(db: &mut Db) -> Result<(String, String), Failure> {
     );
     let descriptor = png["descriptor"]
         .as_str()
-        .ok_or_else(|| Failure(format!("no descriptor in {png}")))?
+        .ok_or_else(|| Failure::Harness(format!("no descriptor in {png}")))?
         .to_owned();
     Ok((relation, descriptor))
 }
@@ -1404,7 +1404,7 @@ fn empty_content_has_one_descriptor(db: &mut Db) -> Check {
     );
     let descriptor = first["descriptor"]
         .as_str()
-        .ok_or_else(|| Failure(format!("no descriptor in {first}")))?
+        .ok_or_else(|| Failure::Harness(format!("no descriptor in {first}")))?
         .to_owned();
     replace_node_data(db, &descriptor, b"\xa0")?;
     refused_reading(db, &relation)
@@ -1574,7 +1574,9 @@ fn sha256_repositories_keep_native_widths(db: &mut Db) -> Check {
         );
         Ok(())
     })();
-    checked.map_err(|Failure(reason)| Failure(format!("{reason}\n{}", sha.transcript())))?;
+    checked.map_err(|failure| {
+        failure.map_reason(|reason| format!("{reason}\n{}", sha.transcript()))
+    })?;
     // The default database is SHA-1 with 40-digit IDs.
     ensure!(
         db.git_text(&["rev-parse", "--show-object-format"])?.trim() == "sha1",
@@ -1632,7 +1634,7 @@ fn replace_node_data(db: &mut Db, node: &str, bytes: &[u8]) -> Check {
             .iter()
             .find(|entry| entry.kind == "tree" && entry.oid == node)
             .map(|entry| entry.path.clone())
-            .ok_or_else(|| Failure(format!("node {node} is not in the committed store")))?;
+            .ok_or_else(|| Failure::Harness(format!("node {node} is not in the committed store")))?;
         format!("{node_path}/data")
     };
     db.write("tampered.bin", bytes)?;
@@ -1655,14 +1657,14 @@ fn replace_node_data(db: &mut Db, node: &str, bytes: &[u8]) -> Check {
 /// `orna export` copies a store that the product readers refuse.
 fn export_copies_refused_store(check: Check) -> Probe {
     match check {
-        Ok(()) => Err(Failure(
+        Ok(()) => Err(Failure::Unmet(
             "orna export now refuses the tampered store".to_owned(),
         )),
-        Err(Failure(reason))
-            if reason.contains("copied a corrupted store")
-                || reason.contains("copied a content graph") =>
+        Err(failure)
+            if failure.reason().contains("copied a corrupted store")
+                || failure.reason().contains("copied a content graph") =>
         {
-            Ok(reason.lines().next().unwrap_or_default().to_owned())
+            Ok(failure.reason().lines().next().unwrap_or_default().to_owned())
         }
         Err(failure) => Err(failure),
     }
@@ -1699,11 +1701,11 @@ const SIZE_LIMIT_CHUNK_CAPTURE: &str =
 /// the product refusal that blocks the scenario, before its own assertions.
 fn executor_stops_at(check: Check, needle: &str) -> Probe {
     match check {
-        Ok(()) => Err(Failure(format!(
+        Ok(()) => Err(Failure::Unmet(format!(
             "the scenario now passes; `{needle}` no longer blocks it"
         ))),
-        Err(Failure(reason)) if reason.contains(needle) => {
-            Ok(reason.lines().next().unwrap_or_default().to_owned())
+        Err(failure) if failure.reason().contains(needle) => {
+            Ok(failure.reason().lines().next().unwrap_or_default().to_owned())
         }
         Err(failure) => Err(failure),
     }
@@ -1751,11 +1753,11 @@ fn tampered_graph_edges_are_refused(db: &mut Db) -> Check {
     let root_edge = entries
         .iter()
         .find(|entry| entry.kind == "tree" && entry.parent() == ".orna/store/refs")
-        .ok_or_else(|| Failure("the store root has no child node".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the store root has no child node".to_owned()))?;
     let chunk = entries
         .iter()
         .find(|entry| entry.kind == "blob" && entry.name() != "data")
-        .ok_or_else(|| Failure("the store has no terminal chunk".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the store has no terminal chunk".to_owned()))?;
     let unused = format!("100644,{},.orna/store/refs/{}", chunk.oid, chunk.oid);
     let variants: [(&str, Vec<Vec<String>>); 2] = [
         (
@@ -1785,7 +1787,7 @@ fn tampered_graph_edges_are_refused(db: &mut Db) -> Check {
         }
         db.git(&["commit", "-q", "-m", label])?.ok()?;
         refused_reading(db, &relation)
-            .map_err(|Failure(reason)| Failure(format!("{label}: {reason}")))?;
+            .map_err(|failure| failure.map_reason(|reason| format!("{label}: {reason}")))?;
         db.git(&["reset", "-q", "--hard", &good])?.ok()?;
     }
     ensure!(
@@ -1821,7 +1823,7 @@ fn corrupted_chunks_fail_verification(db: &mut Db) -> Check {
     let chunk = store_entries(db, "HEAD")?
         .into_iter()
         .find(|entry| entry.kind == "blob" && entry.name() != "data")
-        .ok_or_else(|| Failure("the store has no terminal chunk".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the store has no terminal chunk".to_owned()))?;
     let path = chunk.path.clone();
     let mut forged = distinctive_payload(2048);
     forged[0] ^= 0xff;
@@ -1858,7 +1860,7 @@ fn metadata_query_reads_no_payload(db: &mut Db, relation: &str) -> Check {
         return Ok(());
     }
     let report: serde_json::Value = serde_json::from_str(&query.stdout)
-        .map_err(|error| Failure(format!("orna query printed no JSON ({error})")))?;
+        .map_err(|error| Failure::Harness(format!("orna query printed no JSON ({error})")))?;
     ensure!(
         report["media_payload_bytes_read"] == 0,
         "the metadata query read payload bytes: {report}"
@@ -1881,7 +1883,7 @@ fn missing_chunks_are_not_empty_content(db: &mut Db) -> Check {
     let chunk = store_entries(db, "HEAD")?
         .into_iter()
         .find(|entry| entry.kind == "blob" && entry.name() != "data")
-        .ok_or_else(|| Failure("the store has no terminal chunk".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the store has no terminal chunk".to_owned()))?;
     let objects = db.git_text(&["rev-parse", "--git-path", "objects"])?;
     let object = db
         .root()
@@ -1889,7 +1891,9 @@ fn missing_chunks_are_not_empty_content(db: &mut Db) -> Check {
         .join(&chunk.oid[..2])
         .join(&chunk.oid[2..]);
     fs::remove_file(&object)
-        .map_err(|error| Failure(format!("remove chunk object {}: {error}", object.display())))?;
+        .map_err(|error| {
+            Failure::Harness(format!("remove chunk object {}: {error}", object.display()))
+        })?;
     let export = db.orna(&["export", "../missing-copy", "--at", "HEAD"])?;
     ensure!(
         !export.succeeded(),
@@ -2013,7 +2017,7 @@ fn row_directories_project_non_key_fields(db: &mut Db) -> Check {
     let mount = db.mount("snapshot", &["--at", "HEAD"])?;
     let read = |relative: &str| {
         fs::read_to_string(mount.point.join(relative))
-            .map_err(|error| Failure(format!("read {relative}: {error}")))
+            .map_err(|error| Failure::Harness(format!("read {relative}: {error}")))
     };
     let cover = read("media/cover/data.orna")?;
     ensure!(
@@ -2042,7 +2046,7 @@ fn row_names_escape_reversibly(db: &mut Db) -> Check {
     let vectors = FINAL_VECTORS["paths"]
         .as_array()
         .cloned()
-        .ok_or_else(|| Failure("the release vectors list no paths".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the release vectors list no paths".to_owned()))?;
     let mut expected = BTreeSet::new();
     for vector in &vectors {
         let key = text(vector, "input")?;
@@ -2053,10 +2057,10 @@ fn row_names_escape_reversibly(db: &mut Db) -> Check {
     db.publish()?.ok()?;
     let mount = db.mount("snapshot", &["--at", "HEAD"])?;
     let names = fs::read_dir(mount.point.join("Item"))
-        .map_err(|error| Failure(format!("list Item: {error}")))?
+        .map_err(|error| Failure::Harness(format!("list Item: {error}")))?
         .map(|entry| {
             entry
-                .map_err(|error| Failure(format!("list Item: {error}")))
+                .map_err(|error| Failure::Harness(format!("list Item: {error}")))
                 .map(|entry| entry.file_name().to_string_lossy().into_owned())
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
@@ -2075,7 +2079,7 @@ fn views_expose_no_repository_internals(db: &mut Db) -> Check {
     db.publish()?.ok()?;
     let mount = db.mount("snapshot", &["--at", "HEAD"])?;
     let names = fs::read_dir(&mount.point)
-        .map_err(|error| Failure(format!("list the view: {error}")))?
+        .map_err(|error| Failure::Harness(format!("list the view: {error}")))?
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
@@ -2174,7 +2178,7 @@ fn large_row_is_not_published(db: &mut Db) -> Probe {
             "x".repeat(100_000)
         ),
     )
-    .map_err(|error| Failure(format!("write the editor: {error}")))?;
+    .map_err(|error| Failure::Harness(format!("write the editor: {error}")))?;
     make_executable(&editor)?;
     let edited = db.orna_with_editor(&editor, &["edit", "--row", "Doc/big/data.orna"])?;
     ensure!(
@@ -2197,7 +2201,7 @@ fn large_row_is_not_published(db: &mut Db) -> Probe {
 fn make_executable(path: &std::path::Path) -> Check {
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-        .map_err(|error| Failure(format!("chmod {}: {error}", path.display())))
+        .map_err(|error| Failure::Harness(format!("chmod {}: {error}", path.display())))
 }
 
 fn no_clone(db: &mut Db) -> Probe {
@@ -2276,7 +2280,7 @@ fn edit_skips_table_assertions(db: &mut Db) -> Probe {
 fn write_editor(db: &mut Db, name: &str, body: &str) -> Result<std::path::PathBuf, Failure> {
     let editor = db.scratch("editors")?.join(name);
     fs::write(&editor, format!("#!/bin/sh\n{body}\n"))
-        .map_err(|error| Failure(format!("write the editor: {error}")))?;
+        .map_err(|error| Failure::Harness(format!("write the editor: {error}")))?;
     make_executable(&editor)?;
     Ok(editor)
 }
@@ -2390,7 +2394,7 @@ fn import_only_dry_runs(db: &mut Db) -> Probe {
     let bundle = db.scratch("bundle")?;
     let bundle = bundle
         .to_str()
-        .ok_or_else(|| Failure("non-UTF-8 bundle path".to_owned()))?
+        .ok_or_else(|| Failure::Harness("non-UTF-8 bundle path".to_owned()))?
         .to_owned();
     let imported = db.orna(&["import", &bundle])?;
     ensure!(
@@ -2447,7 +2451,7 @@ fn workspace_is_read_only(db: &mut Db) -> Probe {
     let data = mount.point.join("Note/row/data.orna");
     let error = fs::write(&data, b"{\n    text: \"edited\",\n}\n")
         .err()
-        .ok_or_else(|| Failure("the workspace mount now accepts a row save".to_owned()))?;
+        .ok_or_else(|| Failure::Unmet("the workspace mount now accepts a row save".to_owned()))?;
     ensure!(
         error.raw_os_error() == Some(30),
         "the workspace save failed for another reason: {error}"
@@ -2540,7 +2544,7 @@ fn refused_edit_keeps_no_draft(db: &mut Db) -> Probe {
     )?;
     db.orna_with_editor(&capture, &["edit", "--row", "media/cover/data.orna"])?;
     let opened = fs::read_to_string(&seen)
-        .map_err(|error| Failure(format!("the second edit opened nothing: {error}")))?;
+        .map_err(|error| Failure::Harness(format!("the second edit opened nothing: {error}")))?;
     ensure!(
         opened.contains("title: \"cover\"") && !opened.contains("title: 5"),
         "the second edit now opens the rejected draft: {opened}"
@@ -2577,7 +2581,7 @@ fn push_fails_after_commit(db: &mut Db) -> Probe {
     let remote = db.scratch("remote.git")?;
     let remote = remote
         .to_str()
-        .ok_or_else(|| Failure("non-UTF-8 remote path".to_owned()))?
+        .ok_or_else(|| Failure::Harness("non-UTF-8 remote path".to_owned()))?
         .to_owned();
     db.git(&["init", "-q", "--bare", &remote])?.ok()?;
     db.git(&["remote", "add", "origin", &remote])?.ok()?;
@@ -2668,7 +2672,7 @@ fn media_is_not_decoded(db: &mut Db) -> Probe {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/media/pixel.png"
     ))
-    .map_err(|error| Failure(format!("read the PNG fixture: {error}")))?;
+    .map_err(|error| Failure::Harness(format!("read the PNG fixture: {error}")))?;
     capture_row(db, "pixel", "pixel.png", &png, Some(("image/png", None)))?;
     db.publish()?.ok()?;
     let listings = listings(db, &relation)?;

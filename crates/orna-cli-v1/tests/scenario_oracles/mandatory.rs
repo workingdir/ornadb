@@ -11,8 +11,8 @@ use std::{
 };
 
 use crate::harness::{
-    Check, Db, Entry, Failure, Probe, check_refuses, ensure, one_line, repl_refuses,
-    unknown_command,
+    Check, Db, Entry, Failure, Probe, check_refuses, ensure, harness_ensure, one_line,
+    repl_refuses, unknown_command,
 };
 
 pub const LIVE_BLOCKER: &str = "the live watch socket is closed with code 1002 before the first snapshot for the spec-shaped `main.notes()` watch request, so ORNA-WIRE-001's initial snapshot is not delivered; root cause unverified (host rejection or probe envelope)";
@@ -134,10 +134,14 @@ fn cwd_overlays_head(db: &mut Db) -> Probe {
         head.output().trim()
     );
     if cwd.output().contains("> 2 : Int") && head.output().contains("> 1 : Int") {
-        return Err(Failure(format!(
+        return Err(Failure::Unmet(format!(
             "the CWD relation now counts the local row and HEAD counts only the published row: {evidence}"
         )));
     }
+    harness_ensure!(
+        cwd.output().contains("> 1 : Int"),
+        "the CWD count is not in the expected form, so the blocker was not observed: {evidence}"
+    );
     Ok(evidence)
 }
 
@@ -300,7 +304,7 @@ fn publication_keeps_a_partially_staged_edit(db: &mut Db) -> Check {
 fn published_only_managed_paths(db: &mut Db, relation: &str) -> Check {
     let staged = db.git_text(&["diff", "--cached", "--binary"])?;
     let unstaged = db.git_text(&["diff", "--binary"])?;
-    ensure!(
+    harness_ensure!(
         !staged.is_empty() && !unstaged.is_empty(),
         "the scenario has staged and unstaged human work"
     );
@@ -354,7 +358,7 @@ fn kill_publication_at(db: &mut Db, boundary: &str) -> Check {
     let crash = db.scratch(&format!("crash-{boundary}"))?;
     let crash_text = crash
         .to_str()
-        .ok_or_else(|| Failure("non-UTF-8 crash directory".to_owned()))?
+        .ok_or_else(|| Failure::Harness("non-UTF-8 crash directory".to_owned()))?
         .to_owned();
     let mut child = db.spawn_orna(
         &["publish", "--message", "Publish the scenario rows"],
@@ -373,13 +377,13 @@ fn wait_for_marker(child: &mut Child, marker: &Path) -> Check {
             return Ok(());
         }
         if let Ok(Some(status)) = child.try_wait() {
-            return Err(Failure(format!(
+            return Err(Failure::Harness(format!(
                 "the publisher exited ({status}) before its crash point"
             )));
         }
         thread::sleep(Duration::from_millis(10));
     }
-    Err(Failure(
+    Err(Failure::Harness(
         "the publisher never reached its crash point".to_owned(),
     ))
 }
@@ -462,9 +466,9 @@ fn crash_after_the_ref_update_completes_once(db: &mut Db) -> Check {
 }
 
 /// LIVE-002/004: a watch over a value derived from a table receives its
-/// first snapshot, then nothing after the table changes. The probe fails
-/// (the gap is stale) once the host pushes a snapshot or delta for the
-/// change, or if the watch request itself is malformed.
+/// first snapshot, then nothing after the table changes. The probe is stale
+/// once the host pushes any message for the change. A malformed watch request
+/// is a harness error, not evidence about the product.
 pub fn watches_receive_no_update(db: &mut Db) -> Probe {
     db.declare(
         "pub table Note(id: Str) { text: Str, }\n\npub fn notes(): Int = Note | count();\n",
@@ -478,17 +482,17 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         &[("Content-Type", "application/json"), ("Origin", &origin)],
         format!(r#"{{"database":"{database}","protocol":"orna.present.v1"}}"#).as_bytes(),
     )?;
-    ensure!(
+    harness_ensure!(
         session.status == 201,
         "the live session was not created: {} {}",
         session.status,
         session.body_text()
     );
     let body: serde_json::Value = serde_json::from_slice(&session.body)
-        .map_err(|error| Failure(format!("session response is not JSON: {error}")))?;
+        .map_err(|error| Failure::Harness(format!("session response is not JSON: {error}")))?;
     let path = body["websocket_path"]
         .as_str()
-        .ok_or_else(|| Failure(format!("no websocket_path in {body}")))?;
+        .ok_or_else(|| Failure::Harness(format!("no websocket_path in {body}")))?;
     let cookie = session
         .head
         .lines()
@@ -498,7 +502,7 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
                 .then(|| line["set-cookie:".len()..].trim().to_owned())
         })
         .and_then(|value| value.split(';').next().map(str::to_owned))
-        .ok_or_else(|| Failure("the session response sets no cookie".to_owned()))?;
+        .ok_or_else(|| Failure::Harness("the session response sets no cookie".to_owned()))?;
 
     let mut socket = WatchSocket::connect(
         server.port(),
@@ -510,15 +514,24 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         ],
     )?;
     socket.send_binary(&watch_envelope(&database, "main.notes()")?)?;
-    let first = match socket.read_message(Duration::from_secs(60)) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => return Err(Failure("no first live message within 60 s".to_owned())),
-        Err(Failure(reason)) if reason.starts_with("the host closed the live socket") => {
-            return Ok(format!(
-                "watch on `main.notes()`: {reason} before the first snapshot"
+    let first = match socket.read_message(Duration::from_secs(60))? {
+        Received::Message(bytes) => bytes,
+        Received::Idle => {
+            return Err(Failure::Harness(
+                "no first live message within 60 s".to_owned(),
             ));
         }
-        Err(error) => return Err(error),
+        Received::Closed(1002) => {
+            return Ok(
+                "watch on `main.notes()`: the host closed the live socket with close code 1002 before the first snapshot"
+                    .to_owned(),
+            );
+        }
+        Received::Closed(code) => {
+            return Err(Failure::Unmet(format!(
+                "the host closed the live socket with close code {code} before the first snapshot, not 1002"
+            )));
+        }
     };
     match message_type(&first) {
         Some(SNAPSHOT) => {}
@@ -526,14 +539,14 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
             // A `wire.*` code means this request is malformed, which says
             // nothing about the product.
             let text = printable(&first);
-            ensure!(
+            harness_ensure!(
                 !text.contains("wire."),
                 "the watch request is malformed: {text}"
             );
             return Ok(format!("watch on `main.notes()` refused: {text}"));
         }
         other => {
-            return Err(Failure(format!(
+            return Err(Failure::Harness(format!(
                 "the watch got message type {other:?} instead of a snapshot: {}",
                 printable(&first)
             )));
@@ -542,19 +555,22 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
 
     // A second process changes the watched relation's CWD.
     db.repl_effect(r#"main.Note.insert({ id: "later", text: "changes the watched count" })"#)?;
-    match socket.read_message(Duration::from_secs(10)) {
-        Ok(Some(bytes)) => Err(Failure(format!(
-            "the host now pushes message type {:?} after the change",
-            message_type(&bytes)
-        ))),
-        Ok(None) => Ok(
+    match socket.read_message(Duration::from_secs(10))? {
+        Received::Idle => Ok(
             "watch on `main.notes()`: snapshot 0 received; no snapshot or delta within 10 s of a CWD insert"
                 .to_owned(),
         ),
-        Err(Failure(reason)) if reason.starts_with("the host closed the live socket") => Ok(format!(
-            "watch on `main.notes()`: snapshot 0 received; after a CWD insert, {reason}"
-        )),
-        Err(error) => Err(error),
+        Received::Closed(1002) => Ok(
+            "watch on `main.notes()`: snapshot 0 received; after a CWD insert, the host closed the live socket with close code 1002"
+                .to_owned(),
+        ),
+        Received::Closed(code) => Err(Failure::Unmet(format!(
+            "after a CWD insert the host closed the live socket with close code {code}, not 1002"
+        ))),
+        Received::Message(bytes) => Err(Failure::Unmet(format!(
+            "the host now pushes message type {:?} after the change",
+            message_type(&bytes)
+        ))),
     }
 }
 
@@ -606,7 +622,7 @@ fn uuid_bytes(text: &str) -> Result<[u8; 16], Failure> {
     ensure!(digits.len() == 32, "{text} is not a UUID");
     for (index, byte) in bytes.iter_mut().enumerate() {
         *byte = u8::from_str_radix(&digits[index * 2..index * 2 + 2], 16)
-            .map_err(|_| Failure(format!("{text} is not a UUID")))?;
+            .map_err(|_| Failure::Harness(format!("{text} is not a UUID")))?;
     }
     Ok(bytes)
 }
@@ -614,6 +630,16 @@ fn uuid_bytes(text: &str) -> Result<[u8; 16], Failure> {
 /// The `Sec-WebSocket-Key` the probe sends. Any 16-byte base64 value is valid;
 /// the server's accept key is not checked because the probe only reads frames.
 const WATCH_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+/// What one read from the live socket produced.
+enum Received {
+    /// A binary message.
+    Message(Vec<u8>),
+    /// Nothing arrived before the timeout.
+    Idle,
+    /// The host sent a close frame with this status code.
+    Closed(u16),
+}
 
 /// A minimal RFC 6455 client for the live watch probe: one HTTP upgrade, masked
 /// client frames and unmasked server frames. It adds no dependency, so the
@@ -625,10 +651,10 @@ struct WatchSocket {
 impl WatchSocket {
     fn connect(port: u16, path: &str, headers: &[(&str, &str)]) -> Result<Self, Failure> {
         let mut stream = TcpStream::connect(("127.0.0.1", port))
-            .map_err(|error| Failure(format!("connect: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("connect: {error}")))?;
         stream
             .set_read_timeout(Some(Duration::from_secs(60)))
-            .map_err(|error| Failure(format!("socket timeout: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("socket timeout: {error}")))?;
         let extra: String = headers
             .iter()
             .map(|(name, value)| format!("{name}: {value}\r\n"))
@@ -638,9 +664,9 @@ impl WatchSocket {
         );
         stream
             .write_all(request.as_bytes())
-            .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("websocket upgrade: {error}")))?;
         let head = read_head(&mut stream)?;
-        ensure!(
+        harness_ensure!(
             head.starts_with("HTTP/1.1 101"),
             "websocket upgrade refused: {}",
             head.lines().next().unwrap_or_default()
@@ -676,15 +702,15 @@ impl WatchSocket {
         );
         self.stream
             .write_all(&frame)
-            .map_err(|error| Failure(format!("send live frame: {error}")))
+            .map_err(|error| Failure::Harness(format!("send live frame: {error}")))
     }
 
-    /// Waits up to `timeout` for the next binary message. `Ok(None)` means
-    /// nothing arrived in time; pings are answered and other frames fail.
-    fn read_message(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, Failure> {
+    /// Waits up to `timeout` for the next message. Pings are answered, a close
+    /// frame is returned with its status code, and any other frame is an error.
+    fn read_message(&mut self, timeout: Duration) -> Result<Received, Failure> {
         self.stream
             .set_read_timeout(Some(timeout))
-            .map_err(|error| Failure(format!("socket timeout: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("socket timeout: {error}")))?;
         loop {
             let mut header = [0u8; 2];
             match self.stream.read_exact(&mut header) {
@@ -695,11 +721,13 @@ impl WatchSocket {
                         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                     ) =>
                 {
-                    return Ok(None);
+                    return Ok(Received::Idle);
                 }
-                Err(error) => return Err(Failure(format!("live socket failed: {error}"))),
+                Err(error) => {
+                    return Err(Failure::Harness(format!("live socket failed: {error}")));
+                }
             }
-            ensure!(header[1] & 0x80 == 0, "the host sent a masked frame");
+            harness_ensure!(header[1] & 0x80 == 0, "the host sent a masked frame");
             let length = match header[1] & 0x7f {
                 126 => {
                     let mut bytes = [0u8; 2];
@@ -710,26 +738,26 @@ impl WatchSocket {
                     let mut bytes = [0u8; 8];
                     self.read_frame_bytes(&mut bytes)?;
                     usize::try_from(u64::from_be_bytes(bytes))
-                        .map_err(|_| Failure("live frame length overflows".to_owned()))?
+                        .map_err(|_| Failure::Harness("live frame length overflows".to_owned()))?
                 }
                 short => usize::from(short),
             };
             let mut payload = vec![0u8; length];
             self.read_frame_bytes(&mut payload)?;
             match header[0] & 0x0f {
-                0x2 => return Ok(Some(payload)),
+                0x2 => return Ok(Received::Message(payload)),
                 0x9 => self.send_frame(0xa, &payload)?,
                 0xa => {}
                 0x8 => {
                     let code = payload
                         .get(..2)
                         .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
-                    return Err(Failure(format!(
-                        "the host closed the live socket (close code {code})"
-                    )));
+                    return Ok(Received::Closed(code));
                 }
                 other => {
-                    return Err(Failure(format!("unexpected live frame opcode {other:#x}")));
+                    return Err(Failure::Harness(format!(
+                        "unexpected live frame opcode {other:#x}"
+                    )));
                 }
             }
         }
@@ -738,7 +766,7 @@ impl WatchSocket {
     fn read_frame_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Failure> {
         self.stream
             .read_exact(bytes)
-            .map_err(|error| Failure(format!("read live frame: {error}")))
+            .map_err(|error| Failure::Harness(format!("read live frame: {error}")))
     }
 }
 
@@ -748,13 +776,13 @@ fn read_head(stream: &mut TcpStream) -> Result<String, Failure> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        ensure!(
+    harness_ensure!(
             head.len() < 16 * 1024,
             "the websocket upgrade response has no end"
         );
         stream
             .read_exact(&mut byte)
-            .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;
+            .map_err(|error| Failure::Harness(format!("websocket upgrade: {error}")))?;
         head.push(byte[0]);
     }
     Ok(String::from_utf8_lossy(&head).into_owned())
