@@ -12,9 +12,11 @@
 //! An entry is either an executor, which must pass, or a known gap: the bead
 //! that blocks the scenario plus a probe that reproduces the blocker with
 //! product commands. A gap never counts as a pass. When a probe stops
-//! reproducing its blocker the run fails as STALE, so the gap list cannot
-//! outlive the work it waits for: write the scenario's executor, or record
-//! its next blocker and bead.
+//! reproducing its blocker the scenario is STALE. STALE does not fail the
+//! release run, but the set is ratcheted by `stale-entries.txt`, so the gap
+//! list cannot silently change: write the scenario's executor, or record its
+//! next blocker and bead, then re-record the list. Mandatory scenarios must
+//! never be STALE.
 //!
 //! `cargo test -p orna-cli-v1 --test scenario_oracles -- --show-output`
 //! prints one line per scenario.
@@ -59,12 +61,44 @@ fn every_release_oracle_is_registered_once() {
     }
 }
 
-/// Runs all 157 FINAL-* and V110-* oracles and reports each one.
+/// The committed STALE ratchet (bead ornadb-ksrh). Each ID is a known gap whose
+/// blocker no longer reproduces. The set may only shrink by re-recording: a new
+/// STALE entry fails the suite, and so does a listed entry that is no longer
+/// STALE.
+const STALE_RATCHET: &str = include_str!("stale-entries.txt");
+
+fn ratchet_entries() -> BTreeSet<&'static str> {
+    STALE_RATCHET
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect()
+}
+
+/// Runs all 157 FINAL-* and V110-* oracles and reports each one. Passes when
+/// every executor passes and the STALE set equals the committed ratchet.
 #[test]
 fn release_scenario_oracles() {
     let entries = release::entries();
     let verdicts = run_entries(&entries);
-    report(&entries, &verdicts);
+    let stale = report(&entries, &verdicts)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let listed = ratchet_entries();
+    let new_stale = stale.difference(&listed).collect::<Vec<_>>();
+    let no_longer_stale = listed.difference(&stale).collect::<Vec<_>>();
+    println!(
+        "STALE ratchet: {} listed in stale-entries.txt, {} observed",
+        listed.len(),
+        stale.len()
+    );
+    assert!(
+        new_stale.is_empty() && no_longer_stale.is_empty(),
+        "STALE ratchet mismatch. New STALE (write the executor or record the next blocker): \
+         {new_stale:?}. Listed but no longer STALE (remove by re-recording): \
+         {no_longer_stale:?}. Observed STALE set, sorted, for re-recording stale-entries.txt: \
+         {stale:?}"
+    );
 }
 
 fn mandatory(ids: &[&str]) {
@@ -78,7 +112,11 @@ fn mandatory(ids: &[&str]) {
         "every mandatory scenario has an entry: {ids:?}"
     );
     let verdicts = run_entries(&entries);
-    report(&entries, &verdicts);
+    let stale = report(&entries, &verdicts);
+    assert!(
+        stale.is_empty(),
+        "mandatory scenarios must not be STALE: {stale:?}"
+    );
 }
 
 /// §39: CWD includes a local row while HEAD does not.
