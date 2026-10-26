@@ -62,6 +62,10 @@ const DECLARED_LINKS: [SystemProviderLink; 17] = [
     // `orna-evaluator-v1`: `Evaluator::call` serves the `sys.Materialization`
     // rows natively from the decisions the activation recorded (ORNA-QUERY-006,
     // ORNA-CALL-004); the relation reaches no host relation source.
+    // The catalogue's local-durable availability is the target, not the current
+    // behaviour: these rows exist only for the activation that recorded them
+    // (tracked by ornadb-l7sk). system_api_inventory.json mirrors the spec table
+    // and is deliberately left unchanged.
     SystemProviderLink {
         member: SystemSurfaceMember::Relation("sys.Materialization"),
         host: SystemProviderHost::Evaluator,

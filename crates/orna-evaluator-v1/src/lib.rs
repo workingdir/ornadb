@@ -1908,6 +1908,7 @@ pub fn planner_metadata(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2044,6 +2045,7 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation,
@@ -2157,6 +2159,7 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation,
@@ -2298,6 +2301,7 @@ fn evaluate_with_functions_and_nominals_and_budget(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2343,6 +2347,7 @@ pub fn evaluate_function(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2435,6 +2440,7 @@ fn invoke_named_with_host(
         namespace: function_namespace(name),
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host,
         cancellation: None,
@@ -2551,6 +2557,7 @@ fn invoke_named_with_effects_and_reuse(
         namespace: function_namespace(name),
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         cancellation: None,
         reuse: CallReuse::default(),
         sys_host: None,
@@ -2639,6 +2646,7 @@ pub fn invoke_named_with_context_effects(
             namespace: function_namespace(name),
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -4596,6 +4604,7 @@ struct Context<'functions, 'effects> {
     namespace: Option<String>,
     transfer: Option<Transfer>,
     materializations: Vec<MaterializationRecord>,
+    materialization_clock_unavailable: bool,
     cancellation: Option<&'functions CancellationToken>,
     reuse: CallReuse,
     sys_host: ActivationSysHost<'functions>,
@@ -4782,6 +4791,7 @@ fn invoke_task_callback(
         namespace: None,
         transfer: None,
         materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::disabled(),
         sys_host,
         cancellation: Some(&cancellation),
@@ -8194,20 +8204,29 @@ impl Context<'_, '_> {
     /// activation shares the instant its first decision captured (ORNA-TXN-005),
     /// so later decisions reuse it. The read runs on a budget of its own and is
     /// not debited from the query, so recording cannot move a pure result to a
-    /// step limit (ORNA-PLAN-001). A missing, failing or non-Instant clock yields
-    /// `None`: the decision is not recorded rather than failing the query or
-    /// recording a fabricated `created`. Cancellation still propagates.
+    /// step limit (ORNA-PLAN-001). The clock is a host-visible `now` effect call,
+    /// made at most once per activation: when it is missing, failing or not an
+    /// Instant the decision is not recorded rather than failing the query or
+    /// recording a fabricated `created`, and that absence is cached so later
+    /// decisions in the same activation do not call the host again. Cancellation
+    /// still propagates.
     fn materialization_clock(&mut self) -> Result<Option<Value>, EvaluationError> {
         if let Some(first) = self.materializations.first() {
             return Ok(Some(first.created.clone()));
         }
-        let mut budget = StepBudget::new(self.limits.max_steps);
-        match self.resolve_now(&materialization_clock_callee(), &mut budget) {
-            Ok(Some(instant @ Value::Instant { .. })) => Ok(Some(instant)),
-            Ok(_) => Ok(None),
-            Err(failure) if failure.code() == "ORNA-EVAL-CANCELLED" => Err(failure),
-            Err(_) => Ok(None),
+        if self.materialization_clock_unavailable {
+            return Ok(None);
         }
+        let mut budget = StepBudget::new(self.limits.max_steps);
+        let clock = match self.resolve_now(&materialization_clock_callee(), &mut budget) {
+            Ok(Some(instant @ Value::Instant { .. })) => Some(instant),
+            Err(failure) if failure.code() == "ORNA-EVAL-CANCELLED" => return Err(failure),
+            _ => None,
+        };
+        if clock.is_none() {
+            self.materialization_clock_unavailable = true;
+        }
+        Ok(clock)
     }
 
     fn validate_relation_plan_sources(
@@ -16845,6 +16864,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18336,6 +18356,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18413,6 +18434,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18566,6 +18588,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation,
@@ -18714,6 +18737,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18752,6 +18776,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -19221,6 +19246,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -19257,6 +19283,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -19292,6 +19319,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -19457,6 +19485,7 @@ mod table_reference_value_tests {
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -19797,7 +19826,7 @@ mod blob_equality_tests {
         .unwrap()
     }
 
-    fn rov3_blob_value(payload: &[u8]) -> Value {
+    pub(super) fn rov3_blob_value(payload: &[u8]) -> Value {
         let context = rov3_context(payload);
         let reference = context
             .reference(
@@ -19937,6 +19966,7 @@ mod blob_equality_tests {
             namespace: None,
             transfer: None,
             materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -20092,5 +20122,133 @@ mod output_digest_allocation_proof {
         assert!(digest.valid);
         assert_eq!(digest.bytes, expected_len * ROWS);
         assert!(borrowing < legacy);
+    }
+}
+
+#[cfg(test)]
+mod output_digest_equivalence {
+    use super::blob_equality_tests::rov3_blob_value;
+    use super::*;
+
+    /// One value per `Value` variant (31 arms), so the borrowed digest encoding
+    /// is checked against the legacy clone path on every arm.
+    fn every_variant() -> Vec<Value> {
+        let closure = Closure {
+            parameters: Vec::new(),
+            body: Expr::Name {
+                text: "x".to_owned(),
+                span: orna_syntax_v1::SyntaxSpan::new(0, 0),
+            },
+            captured: Scope(
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                NominalDefinitions::new(),
+                BTreeSet::new(),
+            ),
+            namespace: None,
+        };
+        let relation = RelationPlan {
+            source: "rows".to_owned(),
+            source_identity: RelationReadScope(0),
+            shared_filter_group: None,
+            source_union: None,
+            source_values: None,
+            stages: Vec::new(),
+        };
+        vec![
+            Value::Null,
+            Value::Unit,
+            Value::Bool(true),
+            Value::Int(BigInt::from(-7)),
+            Value::Decimal(DecimalValue::new(BigInt::from(125), BigInt::from(-2)).unwrap()),
+            Value::Money {
+                amount: DecimalValue::new(BigInt::from(1), BigInt::from(0)).unwrap(),
+                currency: [0x55; 16],
+            },
+            Value::Float(1.5_f64.to_bits()),
+            Value::String("text".to_owned()),
+            Value::Blob(vec![1, 2, 3]),
+            Value::AnnotatedBlob(Raw::Text("annotated".to_owned())),
+            rov3_blob_value(b"payload"),
+            Value::Date("2026-10-26".to_owned()),
+            Value::Uuid([3; 16]),
+            Value::Digest([4; 32]),
+            Value::Reference(CanonicalValue::new(Raw::Int(3.into())).expect("canonical")),
+            Value::TableReference(CanonicalValue::new(Raw::Int(4.into())).expect("canonical")),
+            Value::Instant {
+                unix_seconds: 1,
+                nanosecond: 0,
+            },
+            Value::Duration {
+                seconds: BigInt::from(1),
+                nanosecond: 5,
+            },
+            Value::Period {
+                days: BigInt::from(2),
+            },
+            Value::Error(error("ORNA-TEST-ERROR")),
+            Value::Range {
+                lower: Some(Box::new(Value::Int(BigInt::from(1)))),
+                upper: None,
+                upper_inclusive: false,
+            },
+            Value::List(List::from(vec![Value::Bool(false)])),
+            Value::Stream {
+                values: vec![Value::Bool(false)],
+                source_label: "source".to_owned(),
+                source_digest: [0; 32],
+                position: 0,
+                provider: None,
+            },
+            Value::Relation(relation),
+            Value::Tuple(vec![Value::Null]),
+            Value::Record(BTreeMap::from([("field".to_owned(), Value::Bool(true))])),
+            Value::NominalRecord {
+                type_id: Raw::Int(1.into()),
+                fields: vec![(Raw::Text("field".to_owned()), Value::Null)],
+            },
+            Value::Enum {
+                type_id: Raw::Int(1.into()),
+                variant_id: Raw::Int(2.into()),
+                payload: Some(Box::new(Value::Null)),
+            },
+            Value::Option(Some(Box::new(Value::Int(BigInt::from(5))))),
+            Value::Function {
+                name: "f".to_owned(),
+                nominal_definitions: NominalDefinitions::new(),
+            },
+            Value::Closure(Arc::new(closure)),
+        ]
+    }
+
+    fn outcome(result: Result<Vec<u8>, EvaluationError>) -> Result<Vec<u8>, String> {
+        result.map_err(|failure| failure.code().to_owned())
+    }
+
+    /// Spec: Orna-1.1.0.md:7400-7417. The digest fold must encode each row to
+    /// exactly the bytes, or exactly the rejection code, of the legacy path.
+    #[test]
+    fn borrowed_canonical_bytes_match_legacy_clone_path_for_every_variant() {
+        let values = every_variant();
+        assert_eq!(values.len(), 31);
+        let mut accepted = 0;
+        let mut rejected = 0;
+        for value in values {
+            let borrowed = outcome(value.canonical_bytes());
+            let legacy = outcome(
+                value
+                    .clone()
+                    .canonical()
+                    .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE"))),
+            );
+            assert_eq!(borrowed, legacy, "{value:?}");
+            if borrowed.is_ok() {
+                accepted += 1;
+            } else {
+                rejected += 1;
+            }
+        }
+        assert!(accepted > 0 && rejected > 0);
     }
 }

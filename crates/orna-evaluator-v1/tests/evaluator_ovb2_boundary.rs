@@ -165,6 +165,7 @@ fn native_sys_blob_length_read_verify_and_to_bytes_dispatch_through_call() {
     )
     .expect("a read starting at EOF is in bounds");
     assert_eq!(at_end.format(), ValueFormat::Ovb2);
+    assert_eq!(at_end.raw(), &Raw::Int(0.into()));
 
     evaluate_expression_ovb2(
         "sys.blob.verify(sys.blob.from_bytes([1, 2, 3]))",
