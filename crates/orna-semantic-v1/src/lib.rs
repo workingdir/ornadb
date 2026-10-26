@@ -27198,6 +27198,63 @@ fn resolved_helper_summary_key(
     (function.kind == SymbolKind::Function).then(|| path.join("."))
 }
 
+/// Dependency marker for an assertion whose table reads cannot be enumerated.
+/// Such an assertion is evaluated on every write instead of being skipped.
+pub const UNRESOLVED_TABLE_DEPENDENCY: &str = "*";
+
+/// Reports whether an assertion with `dependencies` must be evaluated for a write
+/// that changed `changed_tables`. An incomplete dependency set applies to every write.
+pub fn assertion_dependencies_apply(
+    dependencies: &BTreeSet<String>,
+    changed_tables: &BTreeSet<String>,
+) -> bool {
+    dependencies.contains(UNRESOLVED_TABLE_DEPENDENCY)
+        || dependencies.iter().any(|table| changed_tables.contains(table))
+}
+
+/// Records the table identities named by a path expression. Returns true when the
+/// path is itself a table reference, so nothing beneath it contributes further.
+fn table_path_dependency(
+    e: &Expr,
+    path: &[&str],
+    names: &mut BTreeSet<String>,
+    resolved_tables: Option<&BTreeMap<String, Type>>,
+    scope: Option<&Scope>,
+    local_names: &BTreeSet<String>,
+) -> bool {
+    if let Some(scope) = scope
+        && !local_names.contains(path[0])
+        && let Some(identity) = table_identity(e, scope, &BTreeMap::new())
+        && resolved_tables.is_none_or(|tables| tables.contains_key(&identity))
+    {
+        names.insert(identity);
+        return true;
+    }
+    let joined = path.join(".");
+    if resolved_tables.is_some_and(|tables| tables.contains_key(&joined)) {
+        names.insert(joined);
+        return true;
+    }
+    if resolved_tables.is_none()
+        && let Expr::Name { text, .. } = e
+        && text.chars().next().is_some_and(char::is_uppercase)
+    {
+        names.insert(text.clone());
+    }
+    false
+}
+
+/// Adds the table reads of a helper used as a callee or function value. A helper
+/// without a computed summary cannot be analysed, so the set becomes incomplete.
+fn helper_dependencies(summary_key: &str, names: &mut BTreeSet<String>, scope: &Scope) {
+    match scope.function_dependencies.borrow().get(summary_key) {
+        Some(dependencies) => names.extend(dependencies.iter().cloned()),
+        None => {
+            names.insert(UNRESOLVED_TABLE_DEPENDENCY.to_owned());
+        }
+    }
+}
+
 fn tables_referenced(
     expr: &Expr,
     resolved_tables: Option<&BTreeMap<String, Type>>,
@@ -27220,27 +27277,15 @@ fn tables_referenced(
         // an import contributes its qualified identity, so same-named tables
         // in different modules stay distinct dependencies.
         if let Some(path) = qualified_path(e) {
+            if table_path_dependency(e, &path, names, resolved_tables, scope, local_names) {
+                return;
+            }
+            // A helper reached as a callee or a function value contributes its summary.
+            // Without a summary it cannot be analysed, so the set becomes incomplete.
             if let Some(scope) = scope
-                && !local_names.contains(path[0])
-                && let Some(identity) = table_identity(e, scope, &BTreeMap::new())
-                && resolved_tables.is_none_or(|tables| tables.contains_key(&identity))
+                && let Some(summary_key) = resolved_helper_summary_key(&path, local_names, scope)
             {
-                names.insert(identity);
-                return;
-            }
-            let path = path.join(".");
-            if resolved_tables.is_some_and(|tables| tables.contains_key(&path)) {
-                names.insert(path);
-                return;
-            }
-            if resolved_tables.is_none()
-                && matches!(
-                    e,
-                    Expr::Name { text, .. } if text.chars().next().is_some_and(char::is_uppercase)
-                )
-                && let Expr::Name { text, .. } = e
-            {
-                names.insert(text.clone());
+                helper_dependencies(&summary_key, names, scope);
             }
         }
         match e {
@@ -27265,16 +27310,6 @@ fn tables_referenced(
                 callee, arguments, ..
             } => {
                 visit(callee, names, resolved_tables, scope, local_names);
-                if let Some(scope) = scope
-                    && let Some(path) = qualified_path(callee)
-                    && let Some(summary_key) =
-                        resolved_helper_summary_key(&path, local_names, scope)
-                {
-                    let summaries = scope.function_dependencies.borrow();
-                    if let Some(dependencies) = summaries.get(&summary_key) {
-                        names.extend(dependencies.iter().cloned());
-                    }
-                }
                 for argument in arguments {
                     visit(&argument.value, names, resolved_tables, scope, local_names);
                 }
@@ -27369,7 +27404,18 @@ fn tables_referenced(
                     visit(&arm.body, names, resolved_tables, scope, &arm_locals);
                 }
             }
-            _ => {}
+            // Names are resolved by the qualified-path check above; literals read no table.
+            Expr::Name { .. } | Expr::Literal { .. } => {}
+            // A REPL binding stands for a value captured outside this expression, so
+            // its table reads cannot be enumerated here.
+            Expr::ReplBinding { .. } => {
+                names.insert(UNRESOLVED_TABLE_DEPENDENCY.to_owned());
+            }
+            Expr::Range { lower, upper, .. } => {
+                for bound in [lower, upper].into_iter().flatten() {
+                    visit(bound, names, resolved_tables, scope, local_names);
+                }
+            }
         }
     }
     visit(
