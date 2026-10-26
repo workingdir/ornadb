@@ -66,8 +66,8 @@ closed boundaries; later ADRs supersede only the named deferred portion.
 | 0116 | Superseded by 0117: the browser playground and its app-specific runtime path are retired. | Historical rationale only; no current product or runtime commitment remains. |
 | 0117 | D6 retires the browser playground and keeps generic native serving. | `orna serve`, Git transport, and the removable `std.devtools` frontend remain under ORNA-SERVE-001 and ORNA-SERVE-007..009; no app-specific browser or WASM path remains. |
 | 0118 | Format-3 schema expression digests hash tokens with free references replaced by their resolved declarations, under `ornadb.computed-selector.v2` and `ornadb.refinement-assertion.v2`. | Postfix unit and currency suffixes and member names keep their spelling. |
-| 0121 | UPGRADE-3 decisions: runtime owner of activation, layering of legacy row decode and store build, and the decoded annotation-default coordinate. No runtime behaviour changes in this ADR. | Legacy row decode, store bootstrap, annotation-default decoding, activation, and the `orna upgrade --to-format 3` surface remain deferred; the format-2 compact reader stays out of scope until a format-2 record shape is specified. |
 | 0120 | OrnaDB 1.0 CLIENT VM trust boundary (renumbered from duplicate 0101) | Host-side remote source evaluation remains normative; production CLIENT bytecode VM, artifact trust, and CLIENT sandbox contracts are deferred. |
+| 0121 | UPGRADE-3 decisions: runtime owner of activation, layering of legacy row decode and store build, and the annotation-default coordinate (operator count today; decoded-count assertion deferred to `ornadb-i6ma`). No runtime behaviour changes in this ADR. | Legacy row decode, store bootstrap, annotation-default decoding, activation, and the `orna upgrade --to-format 3` surface remain deferred; the format-2 compact reader stays out of scope until a format-2 record shape is specified. |
 
 ## Current work ADRs
 

@@ -1,8 +1,9 @@
 //! Project-context admission for editable loose rows.
 //!
-//! The admission rules live in `orna_evaluator_v1::row_admission`, the boundary
-//! the production application also uses. This module only adapts conformance
-//! project units onto that boundary so the corpus exercises the same code.
+//! The admission rules live in `orna_evaluator_v1::row_admission`. This module
+//! only adapts conformance project units onto that boundary, so the conformance
+//! corpus exercises the evaluator code. No production admission caller exists
+//! yet; production admission wiring is not yet present.
 
 use crate::ProjectUnit;
 use orna_evaluator_v1::{
