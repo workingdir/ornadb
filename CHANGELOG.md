@@ -520,7 +520,9 @@ been published.
   release's own `tests/scenarios.json`: every FINAL and V110 oracle and the
   mandatory behavioural scenarios start from `orna init` and use only product
   commands. Each is an executor that must pass or a known gap that names its
-  blocking work item and a probe that still reproduces the blocker.
+  blocking work item and a probe that still reproduces the blocker. Gaps on
+  export of a tampered store, the REPL effect a scenario needs, and a 3 MiB
+  REPL capture are blocked by ornadb-z7v3, ornadb-k2wq and ornadb-9hjd.
 - Format-3 transaction validation maps positional row values by stable field-ID order before evaluating row assertions.
 - `orna serve` no longer installs a host-generated devtools table browser; local query, mount, and content workflows remain independent.
 - Remounted writable workspace views capture one runtime activation and project
