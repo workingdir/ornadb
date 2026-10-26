@@ -470,7 +470,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                         format!("{error:?}"),
                     )
                 })?;
-            return Ok::<_, Diagnostic>(None);
+            return Ok::<_, Diagnostic>(Publication::NoVisibleChange(counts));
         };
         coordinator
             .publish_with_stage_hook(&repository, |stage| match stage {
@@ -502,20 +502,44 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 publish_error("published snapshot could not be read", format!("{error:?}"))
             })?
             .ok_or_else(|| publish_error("publication left no committed snapshot", USAGE_HELP))?;
-        Ok(Some((commit.as_str().to_owned(), counts)))
+        Ok(Publication::Published(commit.as_str().to_owned(), counts))
     })?;
 
     match commit {
-        Some((commit, counts)) => {
+        Publication::Published(commit, counts) => {
             println!("published {commit}");
             for (table, rows) in counts {
                 println!("  {table}  {rows} rows");
             }
         }
-        /* A no-op range consumes the frozen range without creating a commit. */
-        None => println!("nothing to publish: the runtime changes are already committed"),
+        // ORNA-UX-004: lead with what happened to the user's changes. The
+        // range is consumed without a commit, so say that its mutations
+        // matched the committed rows and were cleared, and where they were.
+        Publication::NoVisibleChange(counts) => {
+            let mutations = counts.values().sum::<usize>();
+            let (noun, verb) = if mutations == 1 {
+                ("mutation", "was")
+            } else {
+                ("mutations", "were")
+            };
+            println!(
+                "nothing to publish: {mutations} runtime {noun} made no visible change to the committed snapshot and {verb} cleared"
+            );
+            for (table, rows) in counts {
+                println!("  {table}  {rows} unchanged rows");
+            }
+        }
     }
     Ok(())
+}
+
+/// What one publication did with its frozen runtime range.
+enum Publication {
+    /// A commit holds the range; rows per table.
+    Published(String, BTreeMap<String, usize>),
+    /// Every row already matched the committed snapshot, so the range was
+    /// consumed without a commit; mutations per table.
+    NoVisibleChange(BTreeMap<String, usize>),
 }
 
 /// Rows per table in the frozen batch, in table order. A mutation that was

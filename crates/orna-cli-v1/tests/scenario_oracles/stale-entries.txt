@@ -1,0 +1,54 @@
+# STALE ratchet for the release scenario oracles (bead ornadb-ksrh).
+#
+# Each ID is a known gap whose recorded blocker no longer reproduces. The
+# release_scenario_oracles test requires this list to equal the observed STALE
+# set exactly. Remove an ID only by writing its executor or re-recording its
+# next blocker in release.rs. Never add an ID by hand to hide a new STALE.
+FINAL-APP-001
+FINAL-APP-002
+FINAL-APP-003
+FINAL-APP-004
+FINAL-APP-008
+FINAL-APP-009
+FINAL-APP-010
+FINAL-APP-011
+FINAL-APP-012
+FINAL-APP-013
+FINAL-APP-014
+FINAL-APP-015
+FINAL-APP-016
+FINAL-APP-021
+FINAL-APP-022
+FINAL-BLOB-002
+FINAL-BLOB-010
+FINAL-BLOB-015
+FINAL-BLOB-019
+FINAL-CAP-002
+FINAL-CAP-003
+FINAL-GRAPH-004
+FINAL-MIME-009
+FINAL-ROW-001
+FINAL-ROW-002
+FINAL-ROW-005
+FINAL-ROW-007
+FINAL-VFS-004
+FINAL-VFS-006
+FINAL-VFS-007
+FINAL-VFS-008
+FINAL-VFS-011
+FINAL-VFS-012
+FINAL-VFS-013
+FINAL-VFS-014
+FINAL-VFS-015
+FINAL-VFS-021
+FINAL-VFS-022
+FINAL-VFS-024
+V110-APP-01
+V110-APP-02
+V110-APP-04
+V110-APP-05
+V110-APP-06
+V110-APP-07
+V110-BLOB-07
+V110-BLOB-10
+V110-OGB-01
