@@ -1,1 +1,1 @@
-std.collection.one([1, 1], value => value == 1)
+one([1, 1], value => value == 1)

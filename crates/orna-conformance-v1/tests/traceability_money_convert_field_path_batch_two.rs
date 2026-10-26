@@ -4,7 +4,9 @@
 //! key/path fixtures. A passed row below names only the observed analyzer or
 //! path-codec boundary; it is not a claim of complete language conformance.
 
-use orna_semantic_v1::{Catalogue, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+};
 use orna_storage_v1::LoosePath;
 
 fn analyzed(name: &str, source: &str) -> orna_semantic_v1::Analysis {
@@ -52,7 +54,7 @@ fn money_002_cross_currency_addition_is_rejected() {
         include_str!("fixtures/semantic/traceability-money-cross-currency-add.orna"),
     );
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == "E5003"
             && diagnostic.message() == "cannot add different currencies without conversion"
     }));
     passed("ORNA-MONEY-002", "cross-currency-addition-type-error");
@@ -72,7 +74,7 @@ fn money_003_exact_rate_algebra_admits_decimal_and_rejects_float() {
         include_str!("fixtures/semantic/traceability-money-float-energy-rate.orna"),
     );
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == DIAG_MONEY_BINARY_FLOAT
             && diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
     }));
     passed("ORNA-MONEY-003", "decimal-rate-typecheck-and-float-rejection");
@@ -130,7 +132,12 @@ fn field_006_computed_field_cannot_be_supplied_to_insert() {
         "computed-insert.orna",
         include_str!("fixtures/semantic/traceability-field-computed-insert.orna"),
     );
-    assert!(type_error(&result), "{:?}", result.diagnostics);
+    // Spec 07-tables and manifest: computed insert is E3010, not a generic type error.
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == "E3010"),
+        "{:?}",
+        result.diagnostics
+    );
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message().contains("computed field")
     }));
@@ -148,7 +155,7 @@ fn field_008_computed_field_rejects_io_effect() {
         &Catalogue::authoritative_core(),
     );
     assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
+        diagnostic.code() == "E3012"
             && diagnostic.message() == "computed field must be deterministic and row-local"
     }));
     passed("ORNA-FIELD-008", "computed-field-effect-type-error");

@@ -1,13 +1,13 @@
 //! Evaluator bindings for native operations in the generated sys host registry.
 
-use std::{
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
 
 use num_traits::ToPrimitive;
+use num_bigint::BigInt;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
-use orna_repository_v1::{CapturedBlobCandidate, OrpBlobBinding, RepositoryCaptureCapability};
+use orna_repository_v1::{
+    CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
+};
 use orna_syntax_v1::Expr;
 use orna_sys_v1::{
     CaptureFileError, ClockProvider, EnvironmentDispatchValue, EnvironmentProvider,
@@ -18,9 +18,10 @@ use orna_sys_v1::{
 };
 use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
-use crate::{CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget};
-
-use crate::explain_bindings::ExplainCatalogue;
+use crate::{
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget, Value,
+    SysHostAttachment, SysHostContext,
+};
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
 
@@ -39,7 +40,7 @@ pub struct SysHostBindingRegistry {
     capture_candidates: Arc<Mutex<Vec<CapturedBlobForRow>>>,
     http: Option<HttpProvider>,
     system_random: bool,
-    explain_catalogue: Option<Arc<dyn ExplainCatalogue>>,
+    sys_host_context: Option<SysHostAttachment>,
 }
 
 #[derive(Debug)]
@@ -58,17 +59,27 @@ impl PartialEq for SysHostBindingRegistry {
             && self.repository_capture == other.repository_capture
             && self.http == other.http
             && self.system_random == other.system_random
-            && match (&self.explain_catalogue, &other.explain_catalogue) {
-                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                (None, None) => true,
-                _ => false,
-            }
+            && self.sys_host_context == other.sys_host_context
     }
 }
 
 impl Eq for SysHostBindingRegistry {}
 
+/// Environment reads are conservatively external (ORNA-CAP-005): every
+/// registry binds the environment provider, and its snapshot is host state
+/// outside Orna's table transaction, so no bound registry is effect-free.
+const ENVIRONMENT_READS_ARE_EXTERNAL: bool = true;
+
 impl SysHostBindingRegistry {
+    /// Whether evaluation under this registry may reach state outside Orna's
+    /// table transaction (ORNA-CAP-005). A registry is never effect-free: the
+    /// environment provider is always bound and its reads are external. An
+    /// evaluation with no registry at all is the only effect-free shape.
+    #[must_use]
+    pub fn may_reach_external_state(&self) -> bool {
+        ENVIRONMENT_READS_ARE_EXTERNAL
+    }
+
     /// Links the baked environment role to its native provider and a caller
     /// supplied, already allowlisted environment snapshot.
     #[must_use]
@@ -82,7 +93,7 @@ impl SysHostBindingRegistry {
             capture_candidates: Arc::default(),
             http: None,
             system_random: false,
-            explain_catalogue: None,
+            sys_host_context: None,
         }
     }
 
@@ -100,10 +111,12 @@ impl SysHostBindingRegistry {
         self
     }
 
-    /// Installs the host catalogue that pins `sys.explain(Query)` sources.
+    /// Installs the attached repository and activation facts that
+    /// `sys.rt.info()` reports. Without them the call reports
+    /// `sys.version.incompatible`.
     #[must_use]
-    pub fn with_explain_catalogue(mut self, catalogue: Arc<dyn ExplainCatalogue>) -> Self {
-        self.explain_catalogue = Some(catalogue);
+    pub fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host_context = Some(SysHostAttachment::new(context));
         self
     }
 
@@ -878,8 +891,8 @@ fn raw_duration(raw: &OvbRaw) -> Option<std::time::Duration> {
 }
 
 impl EffectHandler for SysHostBindingRegistry {
-    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
-        self.explain_catalogue.as_deref()
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
@@ -917,9 +930,15 @@ impl EffectHandler for SysHostBindingRegistry {
 }
 
 impl Ovb2EffectHandler for SysHostBindingRegistry {
+    /// Captures return lazy ROV-3 values in the repository capture context;
+    /// every other value keeps the OVB-2 profile.
+    fn accepts_context_values(&self) -> bool {
+        true
+    }
+
     #[cfg(feature = "system-host-bindings")]
-    fn explain_catalogue(&self) -> Option<&dyn ExplainCatalogue> {
-        self.explain_catalogue.as_deref()
+    fn sys_host_context(&self) -> Option<&SysHostAttachment> {
+        self.sys_host_context.as_ref()
     }
 
     fn handle(
@@ -967,14 +986,14 @@ impl SysHostBindingRegistry {
         arguments: &[ContextValue],
         cancellation: Option<&CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        let operation = system_host_operation_registry()
+        system_host_operation_registry()
             .operation(operation_name)
             .filter(|operation| {
                 operation.name == "sys.blob.capture_file"
                     && operation.implementation == "capture_file"
                     && operation.role == "host.sys.blob.capture@1.0"
                     && operation.provider == "orna.sys.host.filesystem.v1"
-                    && operation.effects == ["read"]
+                    && operation.effects == ["invoke"]
             })
             .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
         let [root, path, max_bytes] = arguments else {
@@ -985,57 +1004,69 @@ impl SysHostBindingRegistry {
         let OvbRaw::Int(max_bytes) = max_bytes.raw() else {
             return Err(redacted_error("ORNA-EVAL-TYPE"));
         };
+        // A negative or unrepresentable byte bound is an out-of-range length.
         let max_bytes = max_bytes
             .to_u64()
-            .ok_or_else(|| redacted_error(CaptureFileError::LimitExceeded.code()))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::BoundOutOfRange))?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
+        // A host without a filesystem provider authorises no root, so the
+        // selected source is not permitted (ORNA-INGEST-002).
         let filesystem = self
             .filesystem
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| capture_file_failure(CaptureFileError::UnauthorizedRoot))?;
+        // Without a repository Blob writer the host does not offer capture, and
+        // the call fails before any write (ORNA-SYS-008).
         let repository = self
             .repository_capture
             .as_ref()
-            .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+            .ok_or_else(|| redacted_error("sys.version.incompatible"))?;
         let mut source = filesystem
             .capture_file(root, path, max_bytes)
-            .map_err(|failure| capture_file_failure(operation, failure))?;
-        let candidate = repository.capture_blob_candidate(&mut source, max_bytes);
-        source
-            .verify_unchanged()
-            .map_err(|failure| capture_file_failure(operation, failure))?;
+            .map_err(capture_file_failure)?;
+        // The stream already holds the source within `max_bytes` and the
+        // provider limit, so its observed length is the writer's ceiling;
+        // growth past it is reported below as a changed source.
+        let length = source.length();
+        let candidate = repository.capture_blob_candidate(&mut source, length);
+        source.verify_unchanged().map_err(capture_file_failure)?;
         if source.exceeded() {
-            return Err(capture_file_failure(
-                operation,
-                CaptureFileError::LimitExceeded,
-            ));
+            return Err(capture_file_failure(CaptureFileError::LimitExceeded));
         }
-        let candidate = candidate
-            .map_err(|_| capture_file_failure(operation, CaptureFileError::SourceUnavailable))?;
+        let candidate = candidate.map_err(|error| {
+            capture_file_failure(match error {
+                GraphError::ReadQuotaExceeded | GraphError::InvalidLength(_) => {
+                    CaptureFileError::LimitExceeded
+                }
+                _ => CaptureFileError::SourceUnavailable,
+            })
+        })?;
         if cancellation.is_some_and(CancellationToken::is_requested) {
             return Err(redacted_error("ORNA-EVAL-CANCELLED"));
         }
-        let (media_type, suffix) = mime1_for_path(path);
-        let blob = Blob::from_bytes_with_annotation(
-            source.into_captured_bytes(),
-            media_type,
-            suffix.as_deref(),
-        )
-        .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
-        let value = ContextValue::from_blob(&blob, ValueFormat::Ovb2)
-            .map(Some)
+        // Capture is one of the old constructors: it supplies the
+        // octet-stream/null annotation whatever the file is called, and an
+        // importer declares the media type afterwards with `sys.blob.annotate`
+        // (ORNA-MIME-001). The value names the candidate's descriptor in the
+        // capture context, so no captured byte is held in memory
+        // (ORNA-BLOB-007; store-format-3 ROV-3).
+        let value = repository
+            .candidate_value(&candidate)
+            .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
+        let blob = value
+            .blob()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?;
         self.capture_candidates
             .lock()
             .map_err(|_| redacted_error("ORNA-EVAL-VALUE"))?
             .push(CapturedBlobForRow {
                 candidate,
-                media_type: media_type.to_owned(),
-                suffix,
+                media_type: blob.media_type().to_owned(),
+                suffix: blob.suffix().map(str::to_owned),
             });
-        Ok(value)
+        Ok(Some(value))
     }
 }
 
@@ -1054,6 +1085,94 @@ const BLOB_ANNOTATION_CONTRACT: &str = "annotated-blob-format-3";
 /// True when `operation` is the generated portable Blob annotation operation.
 pub(crate) fn is_blob_annotation_operation(operation: &str) -> bool {
     operation == BLOB_ANNOTATION_OPERATION
+}
+
+/// True when `operation` is a metadata or content reflection over a Blob value
+/// (`sys.blob.media_type`, `sys.blob.suffix`, `sys.blob.same_content`).
+///
+/// These declare no role: the generated `annotated-blob-format-3` contract
+/// names them and the evaluator answers them natively from the Blob value.
+pub(crate) fn is_blob_reflection_operation(operation: &str) -> bool {
+    matches!(
+        operation,
+        "sys.blob.media_type" | "sys.blob.suffix" | "sys.blob.same_content"
+    )
+}
+
+/// True when the evaluator dispatches `operation` natively: a Blob annotation,
+/// a Blob reflection, a read-side Blob operation, or a Blob construction from
+/// bytes.
+pub(crate) fn is_blob_host_operation(operation: &str) -> bool {
+    is_blob_annotation_operation(operation)
+        || is_blob_reflection_operation(operation)
+        || is_blob_read_operation(operation)
+        || is_blob_from_bytes_operation(operation)
+}
+
+/// Answers a generated Blob reflection call from the value's own annotation.
+///
+/// `media_type` and `suffix` read only the canonical annotation without
+/// hydrating payload bytes. `same_content` compares exact bytes under the
+/// content rules and may stream them, so an unreadable side fails with its
+/// portable `sys.blob.*` code. Arity is fixed by the reflection contract
+/// declared for each operation, not by this dispatcher.
+pub(crate) fn dispatch_blob_reflection(
+    operation: &str,
+    arguments: &[ContextValue],
+    cancellation: Option<&CancellationToken>,
+) -> Result<Value, EvaluationError> {
+    if !is_blob_reflection_operation(operation) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    let contract = orna_sys_v1::system_dispatch_table()
+        .operation(operation)
+        .ok_or_else(|| redacted_error("ORNA-EVAL-UNSUPPORTED"))?;
+    if contract.role.is_some() || contract.contract.as_deref() != Some(BLOB_ANNOTATION_CONTRACT) {
+        return Err(redacted_error("ORNA-EVAL-UNSUPPORTED"));
+    }
+    match (operation, arguments) {
+        ("sys.blob.media_type", [value]) => {
+            let blob = value.blob().map_err(blob_reflection_failure)?;
+            Ok(Value::String(blob.media_type().to_owned()))
+        }
+        ("sys.blob.suffix", [value]) => {
+            let blob = value.blob().map_err(blob_reflection_failure)?;
+            Ok(Value::Option(
+                blob.suffix()
+                    .map(|suffix| Box::new(Value::String(suffix.to_owned()))),
+            ))
+        }
+        ("sys.blob.same_content", [left, right]) => {
+            let left = left.blob().map_err(blob_reflection_failure)?;
+            let right = right.blob().map_err(blob_reflection_failure)?;
+            left.same_content_checked(&right, || {
+                if cancellation.is_some_and(CancellationToken::is_requested) {
+                    Err(ValueError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            })
+            .map(Value::Bool)
+            .map_err(blob_reflection_failure)
+        }
+        _ => Err(redacted_error("ORNA-EVAL-ARGUMENT")),
+    }
+}
+
+/// Maps a Blob read failure to the portable code the reflection contract
+/// declares.
+fn blob_reflection_failure(error: ValueError) -> EvaluationError {
+    match error {
+        ValueError::ContentUnavailable => redacted_error("sys.blob.unavailable"),
+        ValueError::OwnerExpired | ValueError::MissingDescriptor => {
+            redacted_error("sys.blob.unavailable")
+        }
+        ValueError::ContentDigestMismatch => redacted_error("sys.blob.corrupt"),
+        ValueError::Cancelled => redacted_error("ORNA-EVAL-CANCELLED"),
+        ValueError::ContentCollision => redacted_error("sys.blob.collision"),
+        ValueError::InvalidContext => redacted_error("sys.blob.reference_context"),
+        _ => redacted_error("ORNA-EVAL-VALUE"),
+    }
 }
 
 /// Rewraps a registry-admitted failure code as an evaluator error.
@@ -1256,11 +1375,166 @@ pub(crate) fn dispatch_blob_annotation(
             };
             decoded.map_err(|_| redacted_error("ORNA-EVAL-VALUE"))
         }
-        Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(redacted_code(code.as_str())),
+        Ok(orna_sys_v1::SystemDispatchResult::Failed(code)) => Err(blob_annotation_failure(&code)),
         Err(ProviderDiagnostic::PreconditionFailed { code, .. }) => {
-            Err(redacted_code(code.as_str()))
+            Err(blob_annotation_failure(&code))
         }
-        Err(_) => Err(redacted_error("ORNA-EVAL-UNSUPPORTED")),
+        // The host does not link the generated provider for this operation:
+        // the required coordinate is unavailable (ORNA-SYS-008).
+        Err(_) => Err(redacted_error("sys.version.incompatible")),
+    }
+}
+
+/// Portable read-side Blob operations. Length, digest, bounded reads and full
+/// verification use only the Blob value's own identity and content, so they
+/// need no host effect grant and never reach native I/O.
+const BLOB_READ_OPERATIONS: [&str; 5] = [
+    "sys.blob.length",
+    "sys.blob.digest",
+    "sys.blob.read",
+    "sys.blob.verify",
+    "sys.blob.to_bytes",
+];
+
+/// Largest byte count one read-side call may return or materialise (ORNA-BLOB-011).
+pub(crate) const MAX_BLOB_CALL_BYTES: u64 = 8 * 1024 * 1024;
+
+/// True when `operation` is one of the portable read-side Blob operations.
+pub(crate) fn is_blob_read_operation(operation: &str) -> bool {
+    BLOB_READ_OPERATIONS.contains(&operation)
+}
+
+/// True when `operation` is the portable Blob constructor from integer bytes.
+pub(crate) fn is_blob_from_bytes_operation(operation: &str) -> bool {
+    operation == "sys.blob.from_bytes"
+}
+
+/// Builds the Blob of `sys.blob.from_bytes` from integers in `0..=255`. The
+/// integer list is checked against the 8 MiB call limit before any byte is
+/// copied, and a value outside the byte range is `sys.blob.bounds`.
+pub(crate) fn dispatch_blob_from_bytes(values: &[BigInt]) -> Result<ContextValue, EvaluationError> {
+    if values.len() as u64 > MAX_BLOB_CALL_BYTES {
+        return Err(redacted_error("sys.blob.limit"));
+    }
+    let bytes = values
+        .iter()
+        .map(|value| {
+            value
+                .to_u8()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))
+        })
+        .collect::<Result<Vec<u8>, _>>()?;
+    ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2).map_err(blob_read_failure)
+}
+
+/// Typed result of one read-side Blob call, before evaluator value conversion.
+pub(crate) enum BlobReadValue {
+    Int(u64),
+    Blob(ContextValue),
+    Bytes(Vec<u8>),
+    Digest([u8; 32]),
+    Unit,
+}
+
+/// Maps an `orna_value_v1` read failure onto the portable failures declared by
+/// the read-side `sys.blob.*` descriptors.
+fn blob_read_failure(error: ValueError) -> EvaluationError {
+    let code = match error {
+        ValueError::InvalidContext => "sys.blob.reference_context",
+        ValueError::ContentUnavailable
+        | ValueError::OwnerExpired
+        | ValueError::MissingDescriptor => "sys.blob.unavailable",
+        ValueError::Cancelled => "ORNA-EVAL-CANCELLED",
+        ValueError::ContentCollision => "sys.blob.collision",
+        ValueError::InvalidRange => "sys.blob.bounds",
+        ValueError::Limit | ValueError::QuotaExceeded => "sys.blob.limit",
+        ValueError::Truncated
+        | ValueError::TrailingBytes
+        | ValueError::Unsupported
+        | ValueError::NonCanonical
+        | ValueError::InvalidUtf8
+        | ValueError::InvalidTag
+        | ValueError::InvalidValue
+        | ValueError::DuplicateOrUnorderedMapKey
+        | ValueError::ProtectedValue
+        | ValueError::InvalidPath
+        | ValueError::InvalidSchema
+        | ValueError::DecimalLimit
+        | ValueError::DivisionByZero
+        | ValueError::NonFiniteDecimal
+        | ValueError::InvalidMediaType
+        | ValueError::InvalidSuffix
+        | ValueError::IncompatibleSuffix
+        | ValueError::InvalidProfile
+        | ValueError::InvalidOid
+        | ValueError::ContentDigestMismatch
+        | ValueError::RoleMismatch { .. }
+        | ValueError::SinkFailed => "sys.blob.corrupt",
+    };
+    redacted_error(code)
+}
+
+/// Dispatches one portable read-side Blob operation. `bounds` holds the `Int`
+/// arguments of `sys.blob.read` (offset, length) in declared order and is
+/// empty for every other operation; the caller has checked arity and types.
+pub(crate) fn dispatch_blob_read(
+    operation: &str,
+    source: &ContextValue,
+    bounds: &[BigInt],
+) -> Result<BlobReadValue, EvaluationError> {
+    let blob = source.blob().map_err(blob_read_failure)?;
+    match (operation, bounds) {
+        ("sys.blob.length", []) => Ok(BlobReadValue::Int(blob.length())),
+        ("sys.blob.digest", []) => Ok(BlobReadValue::Digest(blob.content_identity().sha256())),
+        // Verifies raw content only. Orna-1.1.0 34-system-reference.md:3312-3314
+        // also requires the native dependency structure (ORNA-GRAPH-002,
+        // ORNA-OGB-004); that check is not implemented (ornadb-5il1.120), so this
+        // arm is narrower than the documented contract.
+        ("sys.blob.verify", []) => {
+            blob.verify().map_err(blob_read_failure)?;
+            Ok(BlobReadValue::Unit)
+        }
+        ("sys.blob.to_bytes", []) => {
+            if blob.length() > MAX_BLOB_CALL_BYTES {
+                return Err(redacted_error("sys.blob.limit"));
+            }
+            blob.read_to_end()
+                .map(BlobReadValue::Bytes)
+                .map_err(blob_read_failure)
+        }
+        ("sys.blob.read", [offset, length]) => {
+            // Negative or unrepresentable bounds, a start past EOF and checked
+            // overflow are bounds failures before any byte is read (ORNA-BLOB-011).
+            let offset = offset
+                .to_u64()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            let length = length
+                .to_u64()
+                .ok_or_else(|| redacted_error("sys.blob.bounds"))?;
+            if offset > blob.length() || offset.checked_add(length).is_none() {
+                return Err(redacted_error("sys.blob.bounds"));
+            }
+            if length > MAX_BLOB_CALL_BYTES {
+                return Err(redacted_error("sys.blob.limit"));
+            }
+            let bytes = blob.read(offset, length).map_err(blob_read_failure)?;
+            ContextValue::from_blob(&Blob::from_bytes(bytes), ValueFormat::Ovb2)
+                .map(BlobReadValue::Blob)
+                .map_err(blob_read_failure)
+        }
+        _ => Err(redacted_error("ORNA-EVAL-ARGUMENT")),
+    }
+}
+
+/// A declared portable code is the call's primary failure (ORNA-SYS-097). The
+/// shared `sys.abi.*` provider-boundary codes never surface: the provider
+/// reports them only for arguments that are not the typed values its contract
+/// declares, which the ordinary argument type diagnostic covers.
+fn blob_annotation_failure(code: &FailureCode) -> EvaluationError {
+    if code.as_str().starts_with("sys.abi.") {
+        redacted_error("ORNA-EVAL-TYPE")
+    } else {
+        redacted_code(code.as_str())
     }
 }
 
@@ -1273,18 +1547,18 @@ fn blob_suffix_argument(raw: &OvbRaw) -> Result<Option<&str>, FailureCode> {
     }
 }
 
-/// Maps an `orna_value_v1` failure onto the portable Blob failure vocabulary.
+/// Maps an `orna_value_v1` annotation failure onto the declared portable
+/// failures of `sys.blob.annotate` (MIME-1 declaration codes, and the global
+/// value-profile code for an OVB-1 value without an annotation slot).
 ///
-/// A code outside the operation's generated declarations is rejected by the
-/// registry, so this mapping cannot invent an undeclared portable failure.
+/// Any other value error means the argument was not an annotated Blob value,
+/// which the shared provider-boundary code reports.
 fn blob_value_failure(error: ValueError) -> FailureCode {
     static_failure(match error {
         ValueError::InvalidMediaType => "sys.blob.invalid_media_type",
         ValueError::InvalidSuffix => "sys.blob.invalid_suffix",
         ValueError::IncompatibleSuffix => "sys.blob.incompatible_suffix",
-        ValueError::ContentDigestMismatch => "sys.blob.collision",
-        ValueError::ContentUnavailable => "sys.blob.unavailable",
-        ValueError::InvalidRange | ValueError::Limit => "sys.blob.bounds",
+        ValueError::InvalidProfile => "sys.codec.unsupported_value_profile",
         _ => "sys.abi.provider_failed",
     })
 }
@@ -1298,50 +1572,10 @@ fn static_call_name(expression: &Expr) -> Option<String> {
     }
 }
 
-fn capture_file_failure(
-    operation: &HostOperationDescriptor,
-    failure: CaptureFileError,
-) -> EvaluationError {
-    if operation
-        .failures
-        .iter()
-        .any(|code| code == failure.failure_code())
-    {
-        redacted_error(failure.code())
-    } else {
-        redacted_error("ORNA-EVAL-UNSUPPORTED")
-    }
-}
-
-fn mime1_for_path(path: &str) -> (&'static str, Option<String>) {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(std::ffi::OsStr::to_str)
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    match extension.as_str() {
-        "json" => ("application/json", None),
-        "pdf" => ("application/pdf", None),
-        "wasm" => ("application/wasm", None),
-        "zip" => ("application/zip", None),
-        "gz" | "tgz" => ("application/gzip", (extension != "gz").then_some(extension)),
-        "flac" => ("audio/flac", None),
-        "m4a" | "m4b" | "mpg4" => ("audio/mp4", (extension != "m4a").then_some(extension)),
-        "mp1" | "mp2" | "mp3" => ("audio/mpeg", (extension != "mp3").then_some(extension)),
-        "oga" | "ogg" | "opus" => ("audio/ogg", (extension != "ogg").then_some(extension)),
-        "wav" => ("audio/wav", None),
-        "gif" => ("image/gif", None),
-        "jpe" | "jpeg" | "jpg" => ("image/jpeg", (extension != "jpg").then_some(extension)),
-        "png" => ("image/png", None),
-        "svg" => ("image/svg+xml", None),
-        "webp" => ("image/webp", None),
-        "css" => ("text/css", None),
-        "mjs" | "js" => ("text/javascript", (extension != "js").then_some(extension)),
-        "text" | "txt" => ("text/plain", (extension != "txt").then_some(extension)),
-        "m4v" | "mp4" => ("video/mp4", (extension != "mp4").then_some(extension)),
-        "webm" => ("video/webm", None),
-        _ => ("application/octet-stream", None),
-    }
+/// Surfaces a capture failure with its portable code (ORNA-SYS-097); the
+/// generated host operation declares exactly these codes.
+fn capture_file_failure(failure: CaptureFileError) -> EvaluationError {
+    redacted_error(failure.failure_code())
 }
 
 fn redacted_error(code: &'static str) -> EvaluationError {
@@ -1351,6 +1585,7 @@ fn redacted_error(code: &'static str) -> EvaluationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use orna_value_v1::Blob;
 
     #[test]
     fn every_generated_host_operation_reaches_its_native_dispatch_arm() {
@@ -1429,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_file_selects_only_mime1_annotations() {
+    fn capture_file_declares_only_its_generated_failures() {
         let operation = system_host_operation_registry()
             .operation("sys.blob.capture_file")
             .expect("capture_file is present in the generated host ABI");
@@ -1440,25 +1675,104 @@ mod tests {
                 .map(String::as_str)
                 .collect::<Vec<_>>(),
             [
-                "sys.blob.capture.unauthorized_root",
-                "sys.blob.capture.invalid_path",
-                "sys.blob.capture.source_unavailable",
-                "sys.blob.capture.limit_exceeded",
-                "sys.blob.capture.source_changed",
+                "sys.blob.source_denied",
+                "sys.blob.bounds",
+                "sys.blob.limit",
+                "sys.blob.source_changed",
             ]
         );
-        assert_eq!(
-            mime1_for_path("records/data.json"),
-            ("application/json", None)
+        // Every capture outcome surfaces a code the operation declares.
+        for failure in [
+            CaptureFileError::UnauthorizedRoot,
+            CaptureFileError::InvalidPath,
+            CaptureFileError::SourceUnavailable,
+            CaptureFileError::LimitExceeded,
+            CaptureFileError::SourceChanged,
+            CaptureFileError::BoundOutOfRange,
+        ] {
+            assert!(
+                operation
+                    .failures
+                    .iter()
+                    .any(|declared| declared == failure.failure_code()),
+                "{failure:?}"
+            );
+            assert_eq!(capture_file_failure(failure).code(), failure.failure_code());
+        }
+        // The provider takes a `u64` bound. A bound the binding cannot narrow
+        // to it is `sys.blob.bounds`, which the portable operation declares.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        assert!(
+            portable
+                .failures
+                .iter()
+                .any(|declared| declared.as_str() == "sys.blob.bounds")
         );
+        let negative_bound = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int((-1).into())).unwrap(),
+        ];
         assert_eq!(
-            mime1_for_path("records/photo.jpeg"),
-            ("image/jpeg", Some("jpeg".to_owned()))
+            SysHostBindingRegistry::default()
+                .capture_file_ovb2("sys.blob.capture_file", &negative_bound, None)
+                .expect_err("a negative byte bound is out of range")
+                .code(),
+            "sys.blob.bounds"
         );
+        assert!(
+            operation
+                .failures
+                .iter()
+                .any(|failure| failure == "sys.blob.bounds"),
+            "capture_file must declare the negative-bound failure"
+        );
+    }
+
+    /// ORNA-INGEST-002 and ORNA-SYS-008: a host that lacks part of the capture
+    /// capability reports a portable code, never an evaluator code.
+    #[test]
+    fn capture_file_without_host_capability_reports_portable_codes() {
+        let arguments = [
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("root".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text("file.bin".to_owned())).unwrap(),
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Int(16.into())).unwrap(),
+        ];
+        let without_filesystem = SysHostBindingRegistry::default();
         assert_eq!(
-            mime1_for_path("records/unknown.custom"),
-            ("application/octet-stream", None)
+            without_filesystem
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a filesystem provider authorises no root")
+                .code(),
+            "sys.blob.source_denied"
         );
+        let without_writer =
+            SysHostBindingRegistry::default().with_filesystem_provider(FilesystemProvider::new());
+        assert_eq!(
+            without_writer
+                .capture_file_ovb2("sys.blob.capture_file", &arguments, None)
+                .expect_err("a host without a repository Blob writer cannot capture")
+                .code(),
+            "sys.version.incompatible"
+        );
+        // Each branch code the binding can emit must be in the portable
+        // operation's vocabulary. `sys.version.incompatible` is a global code
+        // that the portable table chains into every callable operation, so it
+        // is not declared per operation on the host side.
+        let portable = orna_sys_v1::system_dispatch_table()
+            .operation("sys.blob.capture_file")
+            .expect("capture_file is a portable sys operation");
+        for code in ["sys.blob.source_denied", "sys.version.incompatible"] {
+            assert!(
+                portable
+                    .failures
+                    .iter()
+                    .any(|declared| declared.as_str() == code),
+                "capture_file must declare `{code}`"
+            );
+        }
     }
 
     #[test]
@@ -1575,5 +1889,469 @@ mod tests {
             Some("sys.codec.unsupported_value_profile".to_owned()),
             "the annotated-Blob ABI must not reinterpret OVB-1 bytes"
         );
+    }
+
+    fn blob_source(bytes: &[u8]) -> ContextValue {
+        ContextValue::from_blob(&Blob::from_bytes(bytes.to_vec()), ValueFormat::Ovb2)
+            .expect("OVB-2 Blob source")
+    }
+
+    fn bounds(values: &[i64]) -> Vec<BigInt> {
+        values.iter().map(|value| BigInt::from(*value)).collect()
+    }
+
+    fn read_code(result: Result<BlobReadValue, EvaluationError>) -> String {
+        match result {
+            Ok(_) => panic!("read-side call must fail"),
+            Err(error) => error.code().to_owned(),
+        }
+    }
+
+    #[test]
+    fn blob_read_length_digest_verify_and_bytes_come_from_the_value() {
+        let payload = b"0123456789";
+        let source = blob_source(payload);
+        let Ok(BlobReadValue::Int(length)) = dispatch_blob_read("sys.blob.length", &source, &[])
+        else {
+            panic!("length must return Int");
+        };
+        assert_eq!(length, 10);
+        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        else {
+            panic!("digest must return Digest");
+        };
+        // Known-answer vector: SHA-256 of the raw bytes "0123456789". Comparing
+        // with the blob's own identity would pass by comparing a value to itself.
+        assert_eq!(
+            crate::format_digest_hex(&digest),
+            "84d89877f0d4041efb6bf91a16f0248f2fd573e6af05c19f96bedb9f882f7882"
+        );
+        assert!(matches!(
+            dispatch_blob_read("sys.blob.verify", &source, &[]),
+            Ok(BlobReadValue::Unit)
+        ));
+        let Ok(BlobReadValue::Bytes(bytes)) = dispatch_blob_read("sys.blob.to_bytes", &source, &[])
+        else {
+            panic!("to_bytes must return bytes");
+        };
+        assert_eq!(bytes, payload);
+    }
+
+    #[test]
+    fn blob_digest_is_not_subject_to_the_call_limit() {
+        use sha2::Digest as _;
+
+        // The digest comes from the stored identity and reads no content, so
+        // a Blob over the 8 MiB call limit still reports its commitment.
+        let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
+        let source = blob_source(&over_limit);
+        let Ok(BlobReadValue::Digest(digest)) = dispatch_blob_read("sys.blob.digest", &source, &[])
+        else {
+            panic!("digest must not be refused by the read limit");
+        };
+        let expected: [u8; 32] = sha2::Sha256::digest(&over_limit).into();
+        assert_eq!(digest, expected);
+    }
+
+    #[test]
+    fn blob_read_returns_a_bounded_slice_clipped_only_at_known_eof() {
+        let source = blob_source(b"0123456789");
+        let Ok(BlobReadValue::Blob(slice)) =
+            dispatch_blob_read("sys.blob.read", &source, &bounds(&[2, 3]))
+        else {
+            panic!("read must return a Blob");
+        };
+        assert_eq!(slice.blob().expect("slice Blob").read_to_end().unwrap(), b"234");
+        let Ok(BlobReadValue::Blob(clipped)) =
+            dispatch_blob_read("sys.blob.read", &source, &bounds(&[8, 5]))
+        else {
+            panic!("read past EOF must clip to the known end");
+        };
+        assert_eq!(clipped.blob().expect("clipped Blob").read_to_end().unwrap(), b"89");
+    }
+
+    #[test]
+    fn blob_read_bounds_and_limit_failures_use_declared_codes() {
+        let source = blob_source(b"0123456789");
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[-1, 1]))),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[11, 1]))),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[i64::MAX, i64::MAX])
+            )),
+            "sys.blob.bounds"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[0, 8 * 1024 * 1024 + 1])
+            )),
+            "sys.blob.limit"
+        );
+    }
+
+    #[test]
+    fn blob_from_bytes_builds_an_ovb2_blob_within_the_byte_range() {
+        let values = bounds(&[0, 1, 255]);
+        let value = dispatch_blob_from_bytes(&values).expect("bytes in 0..=255 build a Blob");
+        assert_eq!(value.format(), ValueFormat::Ovb2);
+        assert_eq!(
+            value.blob().expect("Blob").read_to_end().unwrap(),
+            [0u8, 1, 255]
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[256]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        assert_eq!(
+            dispatch_blob_from_bytes(&bounds(&[-1]))
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.bounds".to_owned())
+        );
+        let too_many = vec![BigInt::from(0); MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            dispatch_blob_from_bytes(&too_many)
+                .err()
+                .map(|error| error.code().to_owned()),
+            Some("sys.blob.limit".to_owned())
+        );
+    }
+
+    #[test]
+    fn blob_to_bytes_materialises_at_most_the_call_limit() {
+        let at_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize];
+        let Ok(BlobReadValue::Bytes(bytes)) =
+            dispatch_blob_read("sys.blob.to_bytes", &blob_source(&at_limit), &[])
+        else {
+            panic!("to_bytes at the 8 MiB limit must succeed");
+        };
+        assert_eq!(bytes.len(), at_limit.len());
+
+        let over_limit = vec![7u8; MAX_BLOB_CALL_BYTES as usize + 1];
+        assert_eq!(
+            read_code(dispatch_blob_read(
+                "sys.blob.to_bytes",
+                &blob_source(&over_limit),
+                &[]
+            )),
+            "sys.blob.limit"
+        );
+    }
+
+    /// A ROV-3 Blob whose reads go only through `resolver`. It is built as a
+    /// `Blob`, not through `ContextValue` (which holds ROV-3 descriptor-only,
+    /// ornadb-55op), so the resolver's outcome reaches the reader.
+    fn reference_blob(resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver>) -> Blob {
+        let database = [1; 16];
+        let context = orna_value_v1::Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let identity = orna_value_v1::ContentIdentity::from_bytes(b"payload");
+        let reference = context
+            .reference(
+                identity,
+                orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+            )
+            .unwrap();
+        Blob::from_reference_with_annotation(reference, "application/octet-stream", None).unwrap()
+    }
+
+    #[test]
+    fn blob_read_failures_map_unknown_handle_and_rejected_context_to_declared_codes() {
+        assert_eq!(
+            blob_read_failure(ValueError::ContentUnavailable).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::InvalidContext).code(),
+            "sys.blob.reference_context"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::OwnerExpired).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::MissingDescriptor).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(ValueError::Cancelled).code(),
+            "ORNA-EVAL-CANCELLED"
+        );
+        assert_eq!(
+            blob_reflection_failure(ValueError::OwnerExpired).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_reflection_failure(ValueError::MissingDescriptor).code(),
+            "sys.blob.unavailable"
+        );
+    }
+
+    #[test]
+    fn held_reference_refuses_unknown_handle_and_rejected_context_without_rebinding() {
+        // ORNA-BLOB-008: the held reference keeps its exact context. An unknown
+        // handle or a rejected context refuses the read; it never rebinds.
+        struct UnknownHandle;
+
+        impl orna_value_v1::BlobResolver for UnknownHandle {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(ValueError::ContentUnavailable)
+            }
+        }
+
+        struct RejectedContext;
+
+        impl orna_value_v1::BlobResolver for RejectedContext {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                _offset: u64,
+                _length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                Err(ValueError::InvalidContext)
+            }
+        }
+
+        let unknown = reference_blob(std::sync::Arc::new(UnknownHandle));
+        assert_eq!(unknown.read_to_end(), Err(ValueError::ContentUnavailable));
+        assert_eq!(unknown.read(0, 3), Err(ValueError::ContentUnavailable));
+
+        let rejected = reference_blob(std::sync::Arc::new(RejectedContext));
+        assert_eq!(rejected.read_to_end(), Err(ValueError::InvalidContext));
+        assert_eq!(rejected.read(0, 3), Err(ValueError::InvalidContext));
+        assert_eq!(
+            blob_read_failure(unknown.verify().unwrap_err()).code(),
+            "sys.blob.unavailable"
+        );
+        assert_eq!(
+            blob_read_failure(rejected.read_to_end().unwrap_err()).code(),
+            "sys.blob.reference_context"
+        );
+    }
+
+    // Descriptor-only ROV-3 round-trip binding loss is tracked as ornadb-55op.
+    #[test]
+    fn rov3_descriptor_only_is_unavailable_and_self_equal() {
+        struct PayloadResolver(Vec<u8>);
+
+        impl orna_value_v1::BlobResolver for PayloadResolver {
+            fn read_range(
+                &self,
+                _reference: &orna_value_v1::ContentReference,
+                offset: u64,
+                length: u64,
+            ) -> orna_value_v1::Result<Vec<u8>> {
+                let start =
+                    usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let length =
+                    usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(orna_value_v1::Error::InvalidRange)?;
+                self.0
+                    .get(start..end)
+                    .map(<[u8]>::to_vec)
+                    .ok_or(orna_value_v1::Error::InvalidRange)
+            }
+        }
+
+        let payload = b"payload";
+        let database = [1; 16];
+        let resolver: std::sync::Arc<dyn orna_value_v1::BlobResolver> =
+            std::sync::Arc::new(PayloadResolver(payload.to_vec()));
+        let context = orna_value_v1::Format3Context::from_persisted(
+            database,
+            orna_value_v1::Snapshot::cwd(database, [2; 16], 0.into()).unwrap(),
+            orna_value_v1::GitHash::Sha1,
+            orna_value_v1::NativeOid::from_bytes(&[9; 20]).unwrap(),
+            orna_value_v1::NativeOid::from_bytes(&[8; 20]).unwrap(),
+            orna_value_v1::AvailabilityState::Available,
+            orna_value_v1::OwnerLifetime::new([3; 16]),
+            orna_value_v1::Format3Quota::new(8 * 1024 * 1024, 1_u64 << 62).unwrap(),
+            resolver,
+        )
+        .unwrap();
+        let identity = orna_value_v1::ContentIdentity::from_bytes(payload);
+        let reference = context
+            .reference(
+                identity,
+                orna_value_v1::NativeOid::from_bytes(&[7; 20]).unwrap(),
+            )
+            .unwrap();
+        let rov3_source =
+            Blob::from_reference_with_annotation(reference, "application/octet-stream", None)
+                .unwrap();
+        let ovb2_source =
+            Blob::from_bytes_with_annotation(payload.to_vec(), "application/octet-stream", None)
+                .unwrap();
+        let rov3 = ContextValue::from_blob(&rov3_source, ValueFormat::Rov3).unwrap();
+        let ovb2 = ContextValue::from_blob(&ovb2_source, ValueFormat::Ovb2).unwrap();
+
+        let rov3_text = |value: &str| {
+            ContextValue::new_in_context(
+                &context,
+                ValueFormat::Rov3,
+                OvbRaw::Text(value.to_owned()),
+            )
+            .unwrap()
+        };
+        let ovb2_text = |value: &str| {
+            ContextValue::new(ValueFormat::Ovb2, OvbRaw::Text(value.to_owned())).unwrap()
+        };
+        let rov3_annotated = dispatch_blob_annotation(
+            BLOB_ANNOTATION_OPERATION,
+            &[rov3.clone(), rov3_text("audio/mp4"), rov3_text("m4b")],
+        )
+        .expect("annotation keeps the ROV-3 profile");
+        let ovb2_annotated = dispatch_blob_annotation(
+            BLOB_ANNOTATION_OPERATION,
+            &[ovb2.clone(), ovb2_text("audio/mp4"), ovb2_text("m4b")],
+        )
+        .expect("annotation keeps the OVB-2 profile");
+        assert_eq!(rov3_annotated.format(), ValueFormat::Rov3);
+        assert_eq!(ovb2_annotated.format(), ValueFormat::Ovb2);
+
+        let media_type = |value: &ContextValue| {
+            match dispatch_blob_reflection("sys.blob.media_type", std::slice::from_ref(value), None)
+                .expect("media_type reads metadata")
+            {
+                Value::String(media_type) => media_type,
+                _ => panic!("media_type returns Str"),
+            }
+        };
+        let suffix = |value: &ContextValue| {
+            dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value), None)
+                .expect("suffix reads metadata")
+        };
+        assert_eq!(media_type(&rov3), "application/octet-stream");
+        assert_eq!(media_type(&ovb2), "application/octet-stream");
+        assert_eq!(media_type(&rov3_annotated), "audio/mp4");
+        assert_eq!(media_type(&ovb2_annotated), "audio/mp4");
+        assert!(matches!(suffix(&rov3), Value::Option(None)));
+        assert!(matches!(
+            suffix(&ovb2_annotated),
+            Value::Option(Some(value)) if matches!(value.as_ref(), Value::String(text) if text == "m4b")
+        ));
+
+        let same_content = |left: &ContextValue, right: &ContextValue| {
+            match dispatch_blob_reflection(
+                "sys.blob.same_content",
+                &[left.clone(), right.clone()],
+                None,
+            )
+            .expect("same_content reads exact content")
+            {
+                Value::Bool(equal) => equal,
+                _ => panic!("same_content returns Bool"),
+            }
+        };
+        let same_content_code = |left: &ContextValue, right: &ContextValue| {
+            dispatch_blob_reflection("sys.blob.same_content", &[left.clone(), right.clone()], None)
+                .err()
+                .map(|error| error.code().to_owned())
+        };
+        // ORNA-BLOB-005: explicit unavailability is an allowed outcome. A decoded
+        // ROV-3 value is descriptor-only and carries no content binding, so with
+        // no shared admitted witness it reports `sys.blob.unavailable`. This is a
+        // deliberate scope decision; losing the Reference binding on the ROV-3
+        // round trip is tracked separately (see the linked P2 bead).
+        assert_eq!(
+            same_content_code(&rov3, &ovb2),
+            Some("sys.blob.unavailable".to_owned())
+        );
+        // Same descriptor in the same admitted context is a shared witness.
+        assert!(same_content(&rov3, &rov3));
+        // Annotations are ignored when comparing exact inline OVB-2 bytes.
+        assert!(same_content(&ovb2, &ovb2_annotated));
+
+        let other = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"different".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        // Different identities are decided without reading bytes.
+        assert!(!same_content(&ovb2, &other));
+
+        let undeclared = dispatch_blob_reflection("sys.blob.media_type", &[], None)
+            .err()
+            .map(|error| error.code().to_owned());
+        assert_eq!(undeclared, Some("ORNA-EVAL-ARGUMENT".to_owned()));
+        assert!(is_blob_host_operation("sys.blob.suffix"));
+        assert!(is_blob_host_operation("sys.blob.read"));
+        assert!(is_blob_host_operation("sys.blob.from_bytes"));
+        assert!(!is_blob_host_operation("sys.blob.capture_file"));
+    }
+
+    #[test]
+    fn blob_collision_maps_to_portable_code() {
+        assert_eq!(
+            blob_reflection_failure(ValueError::ContentCollision).code(),
+            "sys.blob.collision"
+        );
+    }
+
+    #[test]
+    fn blob_read_rejects_arity_outside_the_declared_signature() {
+        let source = blob_source(b"0123456789");
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[1]))),
+            "ORNA-EVAL-ARGUMENT"
+        );
+        assert_eq!(
+            read_code(dispatch_blob_read("sys.blob.length", &source, &bounds(&[1]))),
+            "ORNA-EVAL-ARGUMENT"
+        );
+    }
+
+    #[test]
+    fn blob_same_content_observes_cancellation() {
+        let left = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"same".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        let right = ContextValue::from_blob(
+            &Blob::from_bytes_with_annotation(b"same".to_vec(), "application/octet-stream", None)
+                .unwrap(),
+            ValueFormat::Ovb2,
+        )
+        .unwrap();
+        let token = CancellationToken::new();
+        token.request();
+        let result = dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
+        // No partial Bool may escape: the cancelled comparison yields only an error.
+        let error = result
+            .err()
+            .expect("a requested cancellation must fail the comparison");
+        assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
     }
 }

@@ -3293,7 +3293,9 @@ fn nested_window_aggregates_recompute_real_values_for_paired_restore_chains() {
         ("View.Paired", restore([2, 4, 8])),
     ]);
     let mut functions = fixture_functions();
-    functions.extend(nested_window_aggregate_functions());
+    functions
+        .extend(nested_window_aggregate_functions())
+        .expect("nested window fixture binds no second standard layer");
     let run_paired = |source: &mut PairedCursorRestoreSource| {
         let mut functions = functions.clone();
         functions.insert(

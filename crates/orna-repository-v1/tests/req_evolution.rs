@@ -4,11 +4,14 @@ use orna_repository_v1::Repository;
 use tempfile::TempDir;
 
 const LEGACY_FORMATS: [(&str, u8); 2] = [
-    (include_str!("fixtures/format-context/format-1.orna"), 1),
-    (include_str!("fixtures/format-context/format-2.orna"), 2),
+    (include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"), 1),
+    (include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"), 2),
 ];
 const FORMAT_THREE_DATABASE: &str =
     include_str!("fixtures/format-context/database-final.orna");
+/// Where the legacy writers kept compact table rows. No format-1/2 writer used
+/// the format-3 `.orna/store`, so a legacy commit beside one is mixed.
+const LEGACY_ROW_STORAGE: &str = ".orna/storage/Music/manifest.orna";
 
 fn git(directory: &Path, args: &[&str]) {
     let output = Command::new("git")
@@ -32,9 +35,9 @@ fn repository_with_legacy_format(format: &str) -> (TempDir, String) {
     );
     git(directory.path(), &["config", "user.name", "Orna tests"]);
     git(directory.path(), &["config", "user.email", "tests@example.invalid"]);
-    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
+    fs::create_dir_all(directory.path().join(".orna/storage/Music")).unwrap();
     fs::write(directory.path().join(".orna/format.orna"), format).unwrap();
-    fs::write(directory.path().join(".orna/store/root"), HISTORICAL_VALUE).unwrap();
+    fs::write(directory.path().join(LEGACY_ROW_STORAGE), HISTORICAL_VALUE).unwrap();
     fs::write(directory.path().join("main.orna"), "// source at historical commit
 ").unwrap();
     git(directory.path(), &["add", "."]);
@@ -52,11 +55,13 @@ fn repository_with_legacy_format(format: &str) -> (TempDir, String) {
     .to_owned();
 
     fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
+    fs::remove_dir_all(directory.path().join(".orna/storage")).unwrap();
     fs::write(
         directory.path().join(".orna/database.orna"),
         FORMAT_THREE_DATABASE,
     )
     .unwrap();
+    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
     fs::write(directory.path().join(".orna/store/root"), "current value").unwrap();
     git(directory.path(), &["add", "--all"]);
     git(directory.path(), &["commit", "--quiet", "-m", "format 3 current snapshot"]);
@@ -75,7 +80,7 @@ fn req_evol_003_historical_snapshot_uses_its_recorded_decoder_and_value() {
             .expect("open the historical snapshot");
         assert_eq!(historical.repository_format_number(), format_number);
         assert_eq!(
-            historical.read_committed_file(".orna/store/root", 64).unwrap(),
+            historical.read_committed_file(LEGACY_ROW_STORAGE, 64).unwrap(),
             b"historical value"
         );
         let current = repository.open_format_context().expect("open current snapshot");

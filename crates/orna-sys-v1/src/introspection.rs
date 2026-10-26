@@ -1316,9 +1316,8 @@ impl Plan {
 }
 
 /// Planner failures. These are diagnostics for the planner's own callers; the
-/// provider boundary reports every one as the shared `sys.abi.provider_failed`
-/// code, because the `sys.explain(Query)` failure vocabulary is fixed by the
-/// published `api/sys.json` (which has no `sys.explain` codes).
+/// evaluator's `sys.explain` boundary maps each onto the portable failure code
+/// of the system reference that its catalogue input caused.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExplainError {
     /// The query snapshot is empty or cannot be resolved.

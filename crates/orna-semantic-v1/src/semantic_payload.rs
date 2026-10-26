@@ -460,7 +460,15 @@ impl Producer<'_> {
                             array(Vec::new()),
                             array(encoded_parameters),
                             result_node,
-                            array(symbol.effects.effects.iter().map(|s| text(s)).collect()),
+                            array(
+                                symbol
+                                    .effects
+                                    .effects
+                                    .iter()
+                                    .map(|kind| text(kind.as_str()))
+                                    .chain(symbol.effects.opaque.then(|| text("opaque")))
+                                    .collect(),
+                            ),
                             Raw::Bool(symbol.effects.may_fail),
                             body,
                         ],
@@ -672,6 +680,7 @@ impl Producer<'_> {
             Type::Text => "Str",
             Type::Bool => "Bool",
             Type::Null => "Null",
+            Type::Unit => "Unit",
             Type::Bottom => "Bottom",
             Type::Named(name) => {
                 let target = self.target(key, name, scope)?;
@@ -1804,5 +1813,18 @@ mod tests {
             value.object_id().unwrap_err().kind,
             SemanticPayloadErrorKind::IdentityEvidenceRequired
         );
+    }
+
+    #[test]
+    fn value_less_function_results_encode_as_unit() {
+        // A body without a final expression completes with `Unit`
+        // (ORNA-CFLOW-001); its payload encodes the Unit primitive instead of
+        // rejecting the declaration as an unsupported type.
+        let result =
+            produce("pub fn stop(flag: Bool) {\n    if flag {\n        return;\n    }\n}\n");
+        assert!(matches!(
+            named(&result, "payload.stop").resolved_type(),
+            Type::Function { result, .. } if result.as_ref() == &Type::Unit
+        ));
     }
 }

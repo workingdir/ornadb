@@ -8,10 +8,13 @@ fn render_source_fixture(template: &str, replacements: &[(&str, &str)]) -> Strin
 }
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_ONE_TABLE, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_LEGACY_RESULT,
-    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_RESERVED, DIAG_TYPE, DIAG_UNRESOLVED,
-    DIAG_UNSUPPORTED, EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
+    Catalogue, DIAG_ABSOLUTE_QUANTITY_SUM, DIAG_AFFINE_TEMPERATURE_ADD, DIAG_AMBIGUOUS,
+    DIAG_ANNOTATION, DIAG_ASSERTION, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_ONE_TABLE,
+    DIAG_ASSERTION_SCOPE, DIAG_IMPORT, DIAG_INCOMPATIBLE_DIMENSIONS, DIAG_LEGACY_RESULT,
+    DIAG_LEGACY_SYS_RUNTIME, DIAG_LEGACY_TRYFROM, DIAG_MONEY_BINARY_FLOAT, DIAG_PRIMARY_KEY_FLOAT,
+    DIAG_RELATION_EQUALITY_AMBIGUOUS, DIAG_RESERVED, DIAG_RESERVED_SYS, DIAG_TABLE_FIELD_TYPE,
+    DIAG_TABLE_UNKNOWN_FIELD, DIAG_TYPE, DIAG_TYPE_MISMATCH, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    EffectSummary, ModuleHeader, ModuleInput, Namespace, StandardCatalogueError,
     StandardDependencyProfile, StandardProfileError, Symbol, SymbolKind, Type, analyze,
     analyze_with_catalogue,
 };
@@ -21,6 +24,19 @@ fn has(result: &orna_semantic_v1::Analysis, code: &str) -> bool {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code() == code)
+}
+
+/// Corpus snippets name `GBP` and `EUR` without declaring them; the
+/// manifest's fixture environment supplies that semantic support.
+fn analyze_corpus(inputs: &[ModuleInput]) -> orna_semantic_v1::Analysis {
+    analyze_with_catalogue(inputs, &Catalogue::authoritative_fixture())
+}
+
+/// ORNA-UNIT-001: unit names never resolve from spelling. Snippets that name corpus units
+/// import them from `fixture.units`, because the conformance manifest's `fixture_environment.snippets`
+/// says semantic support "must be supplied explicitly before implementation execution".
+fn with_fixture_units(source: &str) -> String {
+    format!("use fixture.units.*;\n{source}")
 }
 
 // ORNA-TYPE-005: closed variants are declared as nominal enums, while pipe-separated types are rejected.
@@ -412,19 +428,27 @@ fn attached_table_results_preserve_nominal_identity_and_row_selectors() {
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
         assert!(result.is_ok(), "{source}: {:?}", result.diagnostics);
     }
-    for source in [
-        include_str!("fixtures/attached-table-reject-customer-payment.orna"),
-        include_str!("fixtures/attached-table-reject-struct-payment.orna"),
-        include_str!("fixtures/attached-table-reject-contact-order.orna"),
-        include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+    for (source, code) in [
+        (
+            include_str!("fixtures/attached-table-reject-customer-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-struct-payment.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-contact-order.orna"),
+            DIAG_TYPE,
+        ),
+        (
+            include_str!("fixtures/attached-table-reject-nominal-contact.orna"),
+            DIAG_TYPE,
+        ),
     ] {
         let result =
             analyze_with_catalogue(&[ModuleInput::new("consumer.orna", source)], &catalogue);
-        assert!(
-            has(&result, DIAG_TYPE),
-            "{source}: {:?}",
-            result.diagnostics
-        );
+        assert!(has(&result, code), "{source}: {:?}", result.diagnostics);
     }
 }
 
@@ -438,11 +462,11 @@ fn stored_email_provider_is_typed_without_changing_connector_messages() {
         ),
         (
             include_str!("fixtures/stored-email-provider-wrong-type.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_FIELD_TYPE),
         ),
         (
             include_str!("fixtures/stored-email-provider-unknown-field.orna"),
-            Some(DIAG_TYPE),
+            Some(DIAG_TABLE_UNKNOWN_FIELD),
         ),
         (
             include_str!("fixtures/stored-email-provider-connector-message.orna"),
@@ -827,10 +851,19 @@ fn table_insert_and_upsert_validate_provided_fields() {
             }
         }
     }
-    for value in [
-        include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
-        include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
-        include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+    for (value, code) in [
+        (
+            include_str!("fixtures/inline-semantic_graph/15970aabe980.orna"),
+            DIAG_TABLE_UNKNOWN_FIELD,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/c113b2a4ccf0.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            include_str!("fixtures/inline-semantic_graph/6666ea1f2a5c.orna"),
+            DIAG_TABLE_FIELD_TYPE,
+        ),
     ] {
         let result = analyze(&[ModuleInput::new(
             "rows.orna",
@@ -839,7 +872,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
                 &[("value", &value)],
             ),
         )]);
-        assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
+        assert!(has(&result, code), "{:?}", result.diagnostics);
     }
 }
 
@@ -964,7 +997,7 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
             ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE
+            diagnostic.code() == DIAG_RELATION_EQUALITY_AMBIGUOUS
                 && diagnostic.message() == "relation equality is ambiguous; choose sequence or row-set comparison explicitly"
         }), "{:?}", result.diagnostics);
     }
@@ -1019,7 +1052,7 @@ fn failure_skip_requires_a_typed_version_precondition() {
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol = &valid.modules[&orna_semantic_v1::Namespace(vec!["skip".into()])].exports["skip"];
-    assert!(symbol.effects.effects.contains("admin"));
+    assert!(symbol.effects.opaque);
     assert!(symbol.effects.may_fail);
 }
 
@@ -1044,8 +1077,8 @@ fn failure_replay_requires_a_typed_version_precondition() {
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
     let symbol =
         &valid.modules[&orna_semantic_v1::Namespace(vec!["replay".into()])].exports["replay"];
-    assert!(symbol.effects.effects.contains("admin"));
-    assert!(!symbol.effects.effects.contains("database write"));
+    assert!(symbol.effects.opaque);
+    assert!(!symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(symbol.effects.may_fail);
 }
 
@@ -1356,7 +1389,7 @@ fn imported_std_net_callables_preserve_effects_and_imports_remain_analysis_only(
         .expect("consumer module");
     for name in ["aliased", "named"] {
         let symbol = module.symbols.get(name).expect("imported callable summary");
-        assert!(symbol.effects.effects.contains("network"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
         assert!(symbol.effects.may_fail);
     }
 }
@@ -1760,7 +1793,7 @@ fn imported_generic_calls_preserve_declared_effects_and_failure_metadata() {
     ));
     assert_eq!(
         read.effects.effects,
-        std::collections::BTreeSet::from(["database read".into()])
+        std::collections::BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
     );
     assert!(read.effects.may_fail);
 }
@@ -1917,13 +1950,13 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
         "key.orna",
         include_str!("fixtures/inline-semantic_graph/4bae95d858a3.orna"),
     )]);
-    assert!(has(&key, DIAG_TYPE));
+    assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
     let temperature = analyze(&[ModuleInput::new(
         "temperature.orna",
         include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
     )]);
-    assert!(has(&temperature, DIAG_TYPE));
+    assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
 
 #[test]
@@ -2037,15 +2070,17 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
 
 #[test]
 fn table_rows_reject_overlapping_protocol_implementations() {
+    // A key-less table's row includes its automatic `id` (ORNA-AUTOID-001,
+    // ORNA-KEY-002), so these structural conversion rows use an explicit key.
     let distinct = analyze(&[ModuleInput::new(
         "distinct-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/ddc1070ae1fd.orna"),
+        include_str!("fixtures/inline-semantic_graph/e6cba2ed225f.orna"),
     )]);
     assert!(distinct.is_ok(), "{:#?}", distinct.diagnostics);
 
     let overlapping = analyze(&[ModuleInput::new(
         "overlapping-table-conversions.orna",
-        include_str!("fixtures/inline-semantic_graph/6f9f39aac506.orna"),
+        include_str!("fixtures/inline-semantic_graph/e12bf9706073.orna"),
     )]);
     assert!(overlapping.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_TYPE
@@ -2120,7 +2155,7 @@ fn system_commit_rows_reject_mutation() {
 // Specified: ORNA-MONEY-003; the exact money-rate unit expression is resolved before rejecting an unqualified Float calculation.
 #[test]
 fn money_rate_unit_resolves_before_float_exactness_check() {
-    let analysis = analyze(&[ModuleInput::new(
+    let analysis = analyze_corpus(&[ModuleInput::new(
         "rate.orna",
         include_str!("fixtures/inline-semantic_graph/459784eb93e7.orna"),
     )]);
@@ -2129,9 +2164,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
         "{:?}",
         analysis.diagnostics
     );
-    assert!(has(&analysis, DIAG_TYPE), "{:?}", analysis.diagnostics);
+    assert!(has(&analysis, DIAG_MONEY_BINARY_FLOAT), "{:?}", analysis.diagnostics);
 
-    let unknown = analyze(&[ModuleInput::new(
+    let unknown = analyze_corpus(&[ModuleInput::new(
         "unknown.orna",
         include_str!("fixtures/inline-semantic_graph/e2e3ba7cadca.orna"),
     )]);
@@ -2140,9 +2175,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 
 #[test]
 fn published_money_and_affine_diagnostics_are_preserved() {
-    let affine_sum = analyze(&[ModuleInput::new(
+    let affine_sum = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
     )]);
     assert!(
         affine_sum
@@ -2160,7 +2195,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
             == "currency symbols belong to locale-aware formatting, not Currency identity"
     }));
 
-    let float_money = analyze(&[ModuleInput::new(
+    let float_money = analyze_corpus(&[ModuleInput::new(
         "money.orna",
         include_str!("fixtures/inline-semantic_graph/e6cc03beb7e7.orna"),
     )]);
@@ -2168,7 +2203,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
         diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
     }));
 
-    let float_constructor = analyze(&[ModuleInput::new(
+    let float_constructor = analyze_corpus(&[ModuleInput::new(
         "constructor.orna",
         include_str!("fixtures/inline-semantic_graph/7012225696c5.orna"),
     )]);
@@ -2177,7 +2212,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
             == "Money cannot be constructed from an inexact Float without explicit rounding"
     }));
 
-    let exact_constructor = analyze(&[ModuleInput::new(
+    let exact_constructor = analyze_corpus(&[ModuleInput::new(
         "constructor.orna",
         include_str!("fixtures/inline-semantic_graph/210723bc8b9b.orna"),
     )]);
@@ -2186,7 +2221,7 @@ fn published_money_and_affine_diagnostics_are_preserved() {
         "{:?}",
         exact_constructor.diagnostics
     );
-    let good = &exact_constructor.modules.values().next().unwrap().exports["good"];
+    let good = &exact_constructor.modules[&Namespace(vec!["constructor".into()])].exports["good"];
     assert!(matches!(
         &good.ty,
         Type::Function { result, .. }
@@ -2292,7 +2327,7 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
     let helper = module.exports.get("related").expect("pure helper export");
     assert_eq!(
         helper.effects.effects,
-        std::collections::BTreeSet::from(["database read".into()])
+        std::collections::BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
     );
     assert!(helper.effects.may_fail);
 
@@ -2390,7 +2425,7 @@ fn legacy_system_and_result_forms_keep_phase_specific_diagnostics() {
 
 #[test]
 fn closed_literal_addition_diagnostics_preserve_published_meaning() {
-    let currencies = analyze(&[ModuleInput::new(
+    let currencies = analyze_corpus(&[ModuleInput::new(
         "currency.orna",
         include_str!("fixtures/inline-semantic_graph/1b8649578d3c.orna"),
     )]);
@@ -2398,9 +2433,9 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
         diagnostic.message() == "cannot add different currencies without conversion"
     }));
 
-    let dimensions = analyze(&[ModuleInput::new(
+    let dimensions = analyze_corpus(&[ModuleInput::new(
         "dimensions.orna",
-        include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna")),
     )]);
     assert!(
         dimensions
@@ -2412,24 +2447,42 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
 #[test]
 fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
-    let result = analyze(&[ModuleInput::new(
+    // ORNA-UNIT-001: unit spellings do not resolve by name alone. Without a
+    // supplied environment the postfix units are unresolved and the literals
+    // are rejected.
+    let unsupplied = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/7f039374396b.orna"),
     )]);
+    assert!(!unsupplied.is_ok(), "{:?}", unsupplied.diagnostics);
+    assert!(
+        has(&unsupplied, DIAG_UNRESOLVED),
+        "{:?}",
+        unsupplied.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
 
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    let rates = analyze(&[ModuleInput::new(
+        "rates.orna",
+        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
+    )]);
+    assert!(
+        has(&rates, DIAG_UNRESOLVED),
+        "{:?}",
+        rates.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+    );
+
+    // With the corpus environment supplied, the same postfix literals succeed.
+    let supplied = analyze_corpus(&[ModuleInput::new(
+        "literals.orna",
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/7f039374396b.orna")),
+    )]);
+    assert!(supplied.is_ok(), "{:?}", supplied.diagnostics);
 
     let non_currency = analyze(&[ModuleInput::new(
         "literals.orna",
         include_str!("fixtures/inline-semantic_graph/4f50dc5cff02.orna"),
     )]);
     assert!(has(&non_currency, DIAG_TYPE));
-
-    let unsupported = analyze(&[ModuleInput::new(
-        "rates.orna",
-        include_str!("fixtures/inline-semantic_graph/66566070ac1a.orna"),
-    )]);
-    assert!(has(&unsupported, DIAG_UNSUPPORTED));
 }
 
 #[test]
@@ -2514,13 +2567,12 @@ fn authoritative_core_exposes_implicit_encoding_and_duration_members() {
 
 #[test]
 fn authoritative_core_types_locale_aware_money_pipeline() {
-    let result = analyze_with_catalogue(
-        &[ModuleInput::new(
-            "receipt.orna",
-            include_str!("fixtures/inline-semantic_graph/e9055e4effff.orna"),
-        )],
-        &Catalogue::authoritative_core(),
-    );
+    // The fixture catalogue is the authoritative core plus the `GBP` the
+    // corpus snippet assumes.
+    let result = analyze_corpus(&[ModuleInput::new(
+        "receipt.orna",
+        include_str!("fixtures/inline-semantic_graph/e9055e4effff.orna"),
+    )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
@@ -14895,7 +14947,7 @@ fn historical_projection_rejects_unknown_members_and_snapshot_context_mixing() {
     }
 }
 
-fn historical_effect_catalogue(effect: &str) -> Catalogue {
+fn historical_effect_catalogue(effects: EffectSummary) -> Catalogue {
     let symbol = Symbol {
         kind: SymbolKind::Function,
         ty: Type::Function {
@@ -14905,10 +14957,7 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
             result: Box::new(Type::Null),
         },
         public: true,
-        effects: EffectSummary {
-            effects: std::collections::BTreeSet::from([effect.to_owned()]),
-            may_fail: true,
-        },
+        effects,
         generic_parameters: Vec::new(),
         enum_variants: BTreeSet::new(),
         table_schema: None,
@@ -14928,26 +14977,41 @@ fn historical_effect_catalogue(effect: &str) -> Catalogue {
 #[test]
 fn historical_callables_are_read_effect_only() {
     for effect in [
-        "database write",
-        "checkpoint",
-        "secret",
-        "network",
-        "external",
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableWrite]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::Network]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::SecretAccess]),
+            opaque: false,
+            may_fail: true,
+        },
+        EffectSummary {
+            effects: BTreeSet::new(),
+            opaque: true,
+            may_fail: true,
+        },
     ] {
         let result = analyze_with_catalogue(
             &[ModuleInput::new(
                 "historical-effect.orna",
                 include_str!("fixtures/inline-semantic_graph/4085c519acf1.orna"),
             )],
-            &historical_effect_catalogue(effect),
+            &historical_effect_catalogue(effect.clone()),
         );
-        assert!(!result.is_ok(), "{effect}: {:?}", result.diagnostics);
+        assert!(!result.is_ok(), "{effect:?}: {:?}", result.diagnostics);
         assert!(
             result
                 .diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.code() == DIAG_UNSUPPORTED),
-            "{effect}: {:?}",
+            "{effect:?}: {:?}",
             result.diagnostics
         );
     }
@@ -14967,7 +15031,7 @@ fn qualified_kwh_units_share_the_closed_cross_database_identity() {
         "units.orna",
         include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
     )]);
-    assert!(has(&incompatible, DIAG_TYPE));
+    assert!(has(&incompatible, DIAG_INCOMPATIBLE_DIMENSIONS));
 }
 
 #[test]
@@ -15043,7 +15107,7 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
             )
     ));
     let sync = &module.exports["sync_selected"];
-    assert!(sync.effects.effects.contains("network"));
+    assert!(sync.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
     assert!(sync.effects.may_fail);
 
     let invalid = analyze(&[ModuleInput::new(
@@ -15128,14 +15192,14 @@ fn recovery_pipeline_replaces_handled_failure_effect() {
         module.symbols["recovered"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(!module.symbols["recovered"].effects.may_fail);
     assert!(
         module.symbols["still_fails"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["still_fails"].effects.may_fail);
 }
@@ -15291,7 +15355,7 @@ fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_executi
         .find(|module| module.namespace.display() == "sensors")
         .unwrap();
     let ingest = module.symbols.get("ingest").unwrap();
-    assert!(ingest.effects.effects.contains("database write"));
+    assert!(ingest.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(ingest.effects.may_fail);
 }
 
@@ -15431,7 +15495,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
     )]);
     assert!(
         reserved_table.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == "`sys` is reserved"
+            diagnostic.code() == DIAG_RESERVED_SYS && diagnostic.message() == "`sys` is reserved"
         }),
         "{:#?}",
         reserved_table.diagnostics
@@ -15473,7 +15537,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                 arguments: vec![Type::Int],
             }
     ));
-    assert!(metadata.effects.effects.contains("database read"));
+    assert!(metadata.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(metadata.effects.may_fail);
 
     let named_metadata = analyze(&[ModuleInput::new(
@@ -15515,7 +15579,7 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                     arguments: vec![value_type.clone()],
                 }
         ));
-        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
         assert!(symbol.effects.may_fail);
     }
     let generic = &explicit_metadata.exports["generic"];
@@ -15527,13 +15591,15 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                 arguments: vec![Type::Named("T".into())],
             }
     ));
+    // The fixture declares its own `GBP` currency, so the identity is
+    // qualified by the declaring module.
     let money = &explicit_metadata.exports["money"];
     assert!(matches!(
         &money.ty,
         Type::Function { result, .. }
             if result.as_ref() == &Type::Applied {
                 base: "Money".into(),
-                arguments: vec![Type::Named("GBP".into())],
+                arguments: vec![Type::Named("explicit-metadata.GBP".into())],
             }
     ));
 
@@ -15615,8 +15681,8 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
                 arguments: vec![Type::Named("sys.Value".into())],
             }
     ));
-    assert!(awaited.effects.effects.contains("admin"));
-    assert!(awaited.effects.effects.contains("invoke"));
+    assert!(awaited.effects.opaque);
+    assert!(awaited.effects.effects.is_empty());
     assert!(awaited.effects.may_fail);
 
     let typed = analyze(&[ModuleInput::new(
@@ -15643,8 +15709,9 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
         ));
         assert_eq!(
             typed.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(typed.effects.opaque);
         assert!(typed.effects.may_fail);
     }
 
@@ -15659,8 +15726,9 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
 
     for source in [
@@ -15771,8 +15839,9 @@ fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
 
@@ -15853,8 +15922,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
     let local_generic = &module.exports["local_generic"];
@@ -15864,8 +15934,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
     let erased = &module.exports["erased"];
     assert!(matches!(
@@ -15875,8 +15946,9 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
     ));
     assert_eq!(
         erased.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(erased.effects.opaque);
     assert!(erased.effects.may_fail);
 
     for (name, source, message) in [
@@ -15978,8 +16050,9 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
     let local_generic = &module.exports["local_generic"];
@@ -15993,8 +16066,9 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
     ));
     assert_eq!(
         local_generic.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(local_generic.effects.opaque);
     assert!(local_generic.effects.may_fail);
 
     for (name, source, message) in [
@@ -16096,8 +16170,9 @@ fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
         ));
         assert_eq!(
             symbol.effects.effects,
-            std::collections::BTreeSet::from(["invoke".into()])
+            std::collections::BTreeSet::new()
         );
+        assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
 
@@ -16131,8 +16206,9 @@ fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
     ));
     assert_eq!(
         piped.effects.effects,
-        std::collections::BTreeSet::from(["invoke".into()])
+        std::collections::BTreeSet::new()
     );
+    assert!(piped.effects.opaque);
     assert!(piped.effects.may_fail);
 
     for (name, source, message) in [
@@ -16260,7 +16336,7 @@ fn default_expression_effects_remain_visible_on_the_callable() {
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
         let symbol = &result.modules.values().next().unwrap().exports["pinned"];
-        assert!(symbol.effects.effects.contains("database read"));
+        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
         assert!(symbol.effects.may_fail);
     }
 }
@@ -16364,7 +16440,7 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
         if expression.contains("snapshot") {
             let symbol = &result.modules.values().next().expect("module").symbols["logical"];
-            assert!(symbol.effects.effects.contains("database read"));
+            assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
             assert!(symbol.effects.may_fail);
         }
     }
@@ -16553,7 +16629,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
     ));
-    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(readings.effects.may_fail);
     let direct = &module.symbols["direct"];
     assert!(matches!(
@@ -16561,7 +16637,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("Reading".into())))
     ));
-    assert!(direct.effects.effects.contains("database read"));
+    assert!(direct.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(direct.effects.may_fail);
 
     let catalogue_valid = analyze_with_catalogue(
@@ -16587,7 +16663,7 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         "{:?}",
         readings.ty
     );
-    assert!(readings.effects.effects.contains("database read"));
+    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(readings.effects.may_fail);
 
     let relation_argument = analyze(&[ModuleInput::new(
@@ -16633,7 +16709,7 @@ fn finite_list_filter_types_predicate_and_preserves_effects() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -16749,7 +16825,7 @@ fn finite_list_map_and_flat_map_preserve_list_types_and_callback_effects() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -16817,7 +16893,7 @@ fn finite_list_sort_by_admits_direct_pipeline_and_named_keys() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -16860,18 +16936,51 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
     assert!(!invalid.is_ok(), "{:?}", invalid.diagnostics);
 
-    let unprofiled = analyze_with_catalogue(
+    // Bare root intrinsics resolve without a profile (09-standard-library L7).
+    let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
-            "unprofiled.orna",
+            "root-intrinsic.orna",
             include_str!("fixtures/inline-semantic_graph/d58035e5f3f6.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(
-        has(&unprofiled, DIAG_UNRESOLVED),
-        "{:?}",
-        unprofiled.diagnostics
+    assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.sort_by(values, value => value);",
+        )],
+        &Catalogue::authoritative_core(),
     );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+}
+
+#[test]
+fn root_intrinsic_calls_are_checked_against_their_signatures() {
+    let invalid = [
+        ("arity: sort_by without key", "fn bad(rows: [Int]) = sort_by(rows);"),
+        ("arity: every without predicate", "fn bad(rows: [Int]) = every(rows);"),
+        ("arity: take without count", "fn bad(rows: [Int]) = take(rows);"),
+        ("arity: sum with extra argument", "fn bad(rows: [Int]) = sum(rows, 1);"),
+        ("type: take with text count", "fn bad(rows: [Int]) = take(rows, \"x\");"),
+        ("type: sum over text", "fn bad(rows: [Text]) = sum(rows);"),
+        ("type: union with other element type", "fn bad(rows: [Int]) = union(rows, [\"x\"]);"),
+        ("callback arity: sort_by key", "fn bad(rows: [Int]) = sort_by(rows, (x, y) => x);"),
+        ("callback arity: every predicate", "fn bad(rows: [Int]) = every(rows, (x, y) => true);"),
+        ("callback return: every predicate", "fn bad(rows: [Int]) = every(rows, value => value);"),
+        ("callback return: filter predicate", "fn bad(rows: [Int]) = filter(rows, value => 1);"),
+        ("callback return: one predicate", "fn bad(rows: [Int]) = one(rows, value => 1);"),
+    ];
+    for (label, source) in invalid {
+        let result = analyze(&[ModuleInput::new("invalid.orna", source)]);
+        assert!(has(&result, DIAG_TYPE), "{label}: {:?}", result.diagnostics);
+        assert!(!result.is_ok(), "{label}: {:?}", result.diagnostics);
+    }
+    let valid = analyze(&[ModuleInput::new(
+        "valid.orna",
+        "fn good(rows: [Int]) = sort_by(rows, value => value);\nfn all(rows: [Int]) = every(rows, value => true);",
+    )]);
+    assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 }
 
 #[test]
@@ -17031,7 +17140,7 @@ fn finite_list_one_returns_exactly_the_element_type_and_preserves_callback_effec
             module.symbols[name]
                 .effects
                 .effects
-                .contains("database read"),
+                .contains(&orna_semantic_v1::EffectKind::TableRead),
             "{name}: {:?}",
             module.symbols[name].effects
         );
@@ -17150,7 +17259,7 @@ fn finite_list_every_and_exists_return_bool_for_all_supported_call_forms_and_pre
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
     assert!(matches!(
@@ -17206,18 +17315,22 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
     assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
 
-    let qualified = analyze_with_catalogue(
+    let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
-            "unprofiled.orna",
+            "root-intrinsic.orna",
             include_str!("fixtures/inline-semantic_graph/ccadb756aac0.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
+    assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(rows: [Int]) = collection.every(rows, value => true);",
+        )],
+        &Catalogue::authoritative_core(),
     );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let assertions = analyze(&[ModuleInput::new(
         "assertions.orna",
@@ -17266,13 +17379,13 @@ fn finite_list_sum_returns_exact_int_for_supported_forms_and_preserves_effects()
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
 
 #[test]
-fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_names() {
+fn finite_list_sum_rejects_unsupported_kinds_and_arguments() {
     let invalid = analyze(&[
         ModuleInput::new(
             "decimal.orna",
@@ -17310,18 +17423,22 @@ fn finite_list_sum_rejects_unsupported_kinds_arguments_and_unprofiled_qualified_
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
     assert!(!invalid.diagnostics.is_empty(), "{:?}", invalid.diagnostics);
 
-    let qualified = analyze_with_catalogue(
+    let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
-            "unprofiled.orna",
+            "root-intrinsic.orna",
             include_str!("fixtures/inline-semantic_graph/8fac65264f2b.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
+    assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
     );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 }
 
 #[test]
@@ -17368,7 +17485,7 @@ fn finite_list_integer_min_max_return_optional_int_for_all_call_forms() {
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
@@ -17415,18 +17532,22 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 
-    let qualified = analyze_with_catalogue(
+    let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
-            "unprofiled.orna",
+            "root-intrinsic.orna",
             include_str!("fixtures/inline-semantic_graph/a161fc681171.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
+    assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Int]) = collection.min(values);",
+        )],
+        &Catalogue::authoritative_core(),
     );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let relation = analyze(&[ModuleInput::new(
         "relation-min-max.orna",
@@ -17546,13 +17667,13 @@ fn finite_list_float_aggregates_return_exact_types_for_all_call_forms_and_effect
         module.symbols["reads"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["reads"].effects.may_fail);
 }
 
 #[test]
-fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_names() {
+fn finite_list_float_aggregates_reject_mixed_inputs() {
     let invalid = analyze(&[
         ModuleInput::new(
             "mixed-sum.orna",
@@ -17581,18 +17702,22 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     ]);
     assert!(has(&invalid, DIAG_TYPE), "{:?}", invalid.diagnostics);
 
-    let qualified = analyze_with_catalogue(
+    let root_intrinsic = analyze_with_catalogue(
         &[ModuleInput::new(
-            "unprofiled.orna",
+            "root-intrinsic.orna",
             include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(
-        has(&qualified, DIAG_UNRESOLVED),
-        "{:?}",
-        qualified.diagnostics
+    assert!(root_intrinsic.is_ok(), "{:?}", root_intrinsic.diagnostics);
+    let qualified = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "qualified-unprofiled.orna",
+            "use std.collection;\npub fn bad(values: [Float]) = collection.sum(values);",
+        )],
+        &Catalogue::authoritative_core(),
     );
+    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
 
     let incompatible_source = include_str!("fixtures/inline-semantic_graph/e0b8483cc8bc.orna");
     let incompatible_profile = StandardDependencyProfile::from_sources(
@@ -17609,7 +17734,7 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
     let incompatible = analyze_with_catalogue(
         &[ModuleInput::new(
             "incompatible.orna",
-            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
+            "use std.collection;\npub fn total(values: [Float]) = collection.sum(values);",
         )],
         &incompatible_catalogue,
     );
@@ -17617,6 +17742,20 @@ fn finite_list_float_aggregates_reject_mixed_inputs_and_unprofiled_qualified_nam
         has(&incompatible, DIAG_TYPE),
         "{:?}",
         incompatible.diagnostics
+    );
+    // Root intrinsics do not come from the std profile (09-standard-library L7),
+    // so an incompatible std collection profile must not change a bare call.
+    let incompatible_bare = analyze_with_catalogue(
+        &[ModuleInput::new(
+            "incompatible-bare.orna",
+            include_str!("fixtures/inline-semantic_graph/45acf201d157.orna"),
+        )],
+        &incompatible_catalogue,
+    );
+    assert!(
+        incompatible_bare.is_ok(),
+        "{:?}",
+        incompatible_bare.diagnostics
     );
 }
 
@@ -17680,7 +17819,7 @@ fn relation_flat_map_preserves_relation_output_and_accepts_finite_inner_collecti
         module.symbols["relation_inner"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(module.symbols["relation_inner"].effects.may_fail);
 }
@@ -17864,7 +18003,7 @@ fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
         "sum.orna",
         include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
     )]);
-    assert!(has(&invalid, DIAG_TYPE));
+    assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
 }
 
@@ -17876,9 +18015,9 @@ fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
     )]);
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
 
-    let absolute = analyze(&[ModuleInput::new(
+    let absolute = analyze_corpus(&[ModuleInput::new(
         "temperatures.orna",
-        include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna")),
     )]);
     assert!(
         absolute
@@ -17926,7 +18065,7 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
         sensors.symbols["ingest"]
             .effects
             .effects
-            .contains("database write")
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
     );
     assert!(sensors.symbols["ingest"].effects.may_fail);
 
@@ -17939,7 +18078,7 @@ fn inferred_function_summaries_propagate_through_project_calls_independent_of_in
         main.symbols["run"]
             .effects
             .effects
-            .contains("database write")
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
     );
     assert!(main.symbols["run"].effects.may_fail);
 }
@@ -18049,7 +18188,7 @@ fn case_arms_preserve_call_effects_and_named_calls_use_declared_parameter_names(
         values.symbols["describe"]
             .effects
             .effects
-            .contains("database read")
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
     );
     assert!(values.symbols["describe"].effects.may_fail);
 
@@ -18099,7 +18238,9 @@ fn control_flow_infers_list_for_and_local_assignment_while_other_shapes_fail_clo
         "mismatched-compound-assignment.orna",
         include_str!("fixtures/inline-semantic_graph/7f30f77a4e31.orna"),
     )]);
-    assert!(has(&mismatched_compound, DIAG_TYPE));
+    // `value += true` is `value = value + true`; Int + Bool is not an
+    // arithmetic operand pair (ORNA-CFLOW-006).
+    assert!(has(&mismatched_compound, DIAG_TYPE_MISMATCH));
 
     let field_assignment = analyze(&[ModuleInput::new(
         "field-assignment.orna",
@@ -18126,7 +18267,7 @@ fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
         Type::Function { result, .. } if result.as_ref() == &Type::Int
     ));
     let populate = &module.symbols["populate"];
-    assert!(populate.effects.effects.contains("database write"));
+    assert!(populate.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(populate.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -18162,11 +18303,13 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         .find(|module| module.namespace.display() == "while")
         .unwrap();
     let poll = &module.symbols["poll"];
+    // The trailing `while` is the block tail and a loop completes with
+    // `Unit` (ORNA-CFLOW-001), not the `null` value.
     assert!(matches!(
         &poll.ty,
-        Type::Function { result, .. } if result.as_ref() == &Type::Null
+        Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
-    assert!(poll.effects.effects.contains("database write"));
+    assert!(poll.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
     assert!(poll.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 

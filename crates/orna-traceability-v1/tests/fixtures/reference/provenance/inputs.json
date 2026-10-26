@@ -1,0 +1,21 @@
+{
+  "publication_version": "1.1.0",
+  "publication_revision": "final-2026-10-05",
+  "inputs": [
+    {
+      "file": "Orna-1.1.0.zip",
+      "sha256": "096273779e0ce773ef5ede4eb9b1fe0af4817776fb78097fb58fadb366449e59",
+      "role": "superseded complete draft"
+    },
+    {
+      "file": "ORNA-STORAGE-VFS-FINAL-PLAN.md",
+      "sha256": "9f6b3d18c4599fad57529030c67ca26382a086bde7b3e0c8ca6daf29beac68c6",
+      "role": "latest accepted design decisions"
+    }
+  ],
+  "repository_observation": {
+    "commit": "1ac3253f96116946521f58c860aec963d75e664c",
+    "scope": "baseline recorded in supplied final plan, not refreshed or executed in this publication"
+  },
+  "implementation_execution": "not-executed"
+}

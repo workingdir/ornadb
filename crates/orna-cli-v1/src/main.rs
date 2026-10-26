@@ -22,6 +22,7 @@ mod cli_status;
 mod cli_serve;
 mod media_range;
 mod repl;
+mod sys_host;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -34,7 +35,8 @@ use cli_args::{
     requested_debug_mode,
 };
 use cli_dispatch::execute;
-use repl::{AnsiColor, write_styled, write_styled_display};
+use repl::{AnsiColor, write_rendered_error, write_styled, write_styled_display};
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -42,9 +44,13 @@ use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use orna_application_v1::{ApplicationAuthority, ApplicationError, ReplTransactionScope};
+use orna_application_v1::{
+    AdmittedApplication, ApplicationAuthority, ApplicationError, CommittedTableIdentity,
+    ReplEvaluationFailure, ReplTransactionScope, StagedActivation,
+};
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
@@ -52,10 +58,15 @@ use orna_conformance_v1::{
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_runtime_v1::{
-    QueryObservationRegistration, RequestIdentity, RuntimeIdentity, RuntimePublicationMetadataRows,
-    RuntimeState, RuntimeTableIdentity, TableObjectId, WriterLease,
+    FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
+    RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
+    RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation,
+    TableObjectId, TerminalOutcome, WriterLease,
 };
-use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+use orna_sys_v1::{
+    EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
+};
+use sha2::{Digest, Sha256};
 
 static CLI_REQUEST_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -117,11 +128,14 @@ fn write_cli_line(
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "CLI output could not be written",
-                "check the output stream, then retry the command",
-            )
+            Diagnostic {
+                code: "E2200",
+                title: Cow::Borrowed("CLI output could not be written"),
+                help: "check the output stream, then retry the command",
+                exit: Exit::Presentation,
+                detail: None,
+                body: None,
+            }
         })
 }
 #[allow(
@@ -142,28 +156,31 @@ enum Exit {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Diagnostic {
     code: &'static str,
-    title: &'static str,
+    title: Cow<'static, str>,
     help: &'static str,
     exit: Exit,
     detail: Option<String>,
+    body: Option<String>,
 }
 impl Diagnostic {
     const fn usage(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Usage,
             detail: None,
+            body: None,
         }
     }
     const fn target(code: &'static str, title: &'static str, help: &'static str) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: None,
+            body: None,
         }
     }
     fn target_with_detail(
@@ -174,10 +191,11 @@ impl Diagnostic {
     ) -> Self {
         Self {
             code,
-            title,
+            title: Cow::Borrowed(title),
             help,
             exit: Exit::Target,
             detail: Some(detail.into()),
+            body: None,
         }
     }
     const fn unavailable(title: &'static str, help: &'static str) -> Self {
@@ -206,6 +224,50 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
     }
 }
 
+fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
+    if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
+        return Diagnostic::target(
+            "E2100",
+            "committed source tree exceeds the fixed walk limit",
+            "reduce the committed tree's entry count, nesting depth or path length, then run check again",
+        );
+    }
+    let invalid_unit = match &error {
+        orna_project_v1::ProjectLoadError::InvalidModule {
+            logical_path,
+            diagnostics,
+        }
+        | orna_project_v1::ProjectLoadError::InvalidRowUnit {
+            logical_path,
+            diagnostics,
+        } => Some((logical_path, diagnostics)),
+        _ => None,
+    };
+    if let Some((logical_path, diagnostics)) = invalid_unit
+        && let Some(first) = diagnostics.first()
+    {
+        // The first parser diagnostic is the primary code: it is the spec code
+        // that names the source contract violation, not a loader wrapper.
+        let location = match &first.span.start_position {
+            Some(position) => format!("{logical_path}:{}:{}", position.line, position.column),
+            None => logical_path.clone(),
+        };
+        return Diagnostic {
+            code: first.code,
+            title: Cow::Owned(format!("{} ({location})", first.message)),
+            help: "fix the reported source error, then retry",
+            exit: Exit::Target,
+            detail: None,
+            body: None,
+        };
+    }
+    Diagnostic::target(
+        "E2100",
+        "project source could not be loaded",
+        "fix the project module graph and source boundaries, then run check again",
+    )
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct DiagnosticDocumentation {
     code: &'static str,
@@ -222,6 +284,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
+        },
+        "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
+            code: "ORNA-S011-AMBIGUOUS",
+            title: "standard import name is ambiguous",
+            explanation:
+                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            help: "import the functions under distinct names or use their qualified paths",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
@@ -243,6 +312,13 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
             explanation:
                 "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
             help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        },
+        "ORNA-REPL-EFFECT-UNCERTAIN" => DiagnosticDocumentation {
+            code: "ORNA-REPL-EFFECT-UNCERTAIN",
+            title: "REPL effect outcome is uncertain",
+            explanation:
+                "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
+            help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
         },
         "ORNA-REPL-AT" => DiagnosticDocumentation {
             code: "ORNA-REPL-AT",
@@ -456,15 +532,19 @@ fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagn
     };
     Diagnostic {
         code,
-        title: "operation was cancelled",
+        title: Cow::Borrowed("operation was cancelled"),
         help: "inspect the durable operation state before retrying",
         exit: Exit::Cancelled,
         detail: (code == "E2200").then(|| format!("cancellation code: {}", diagnostic.code())),
+        body: None,
     }
 }
 
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(body) = &self.body {
+            return f.write_str(body);
+        }
         write!(f, "error[{}]: {}", self.code, self.title)?;
         if let Some(detail) = &self.detail {
             write!(f, "\n  {detail}")?;
@@ -479,6 +559,9 @@ fn write_diagnostic<W: io::Write>(
     color_enabled: bool,
     debug_enabled: bool,
 ) -> io::Result<()> {
+    if let Some(body) = &diagnostic.body {
+        return write_rendered_error(writer, body, color_enabled);
+    }
     write_styled(writer, AnsiColor::Red, b"error", color_enabled)?;
     writer.write_all(b"[")?;
     write_styled(
@@ -889,6 +972,21 @@ fn local_project_path(endpoint: &Endpoint) -> Result<&str, Diagnostic> {
     }
 }
 
+fn pure_sys_host_context(
+    endpoint: &Endpoint,
+    std_snapshot: StdSnapshotPin,
+) -> Option<SysHostContext> {
+    let path = local_project_path(endpoint).ok()?;
+    let repository = orna_repository_v1::Repository::discover(path).ok()?;
+    let (identity, _) = runtime_identity(&repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Run,
+        std_snapshot,
+    ))
+}
+
 fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
@@ -1077,7 +1175,8 @@ fn unpublished_mutation_count(
 
 fn runtime_publication_metadata_rows(
     endpoint: &Endpoint,
-) -> Result<RuntimePublicationMetadataRows, Diagnostic> {
+    std_snapshot: StdSnapshotPin,
+) -> Result<(RuntimePublicationMetadataRows, SysHostContext), Diagnostic> {
     let path = local_project_path(endpoint)?;
     let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
         Diagnostic::target(
@@ -1087,6 +1186,12 @@ fn runtime_publication_metadata_rows(
         )
     })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
+    let sys_host_context = sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Embedded,
+        std_snapshot,
+    );
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1106,7 +1211,7 @@ fn runtime_publication_metadata_rows(
                 "retry the invocation after checking local runtime state",
             )
         })?;
-    runtime
+    let rows = runtime
         .block_on(state.publication_metadata_rows())
         .map_err(|_| {
             Diagnostic::target(
@@ -1114,7 +1219,8 @@ fn runtime_publication_metadata_rows(
                 "local runtime publication metadata could not be read",
                 "retry the invocation after checking local runtime state",
             )
-        })
+        })?;
+    Ok((rows, sys_host_context))
 }
 
 fn write_unpublished_summary<W: io::Write>(writer: &mut W, count: usize) -> io::Result<()> {
@@ -1607,20 +1713,14 @@ fn load_project_without_standard_rejection(
     })?;
     let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "project source could not be loaded",
-                "fix the project module graph and source boundaries, then run check again",
-            )
-        })?;
+        .map_err(project_load_diagnostic)?;
     Ok(project)
 }
 
 fn reject_uncaptured_standard_modules(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    if project.standard_modules().is_empty() || project.standard_profile().is_some() {
+    if !project.has_uncaptured_standard_imports() {
         return Ok(());
     }
     Err(Diagnostic::target(
@@ -1633,25 +1733,19 @@ fn reject_uncaptured_standard_modules(
 fn semantic_catalogue(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<orna_semantic_v1::Catalogue, Diagnostic> {
-    let catalogue = orna_semantic_v1::Catalogue::authoritative_core();
-    let Some(profile) = project.standard_profile() else {
-        return Ok(catalogue);
-    };
-    catalogue
-        .with_standard_sources(profile, project.standard_sources().iter().cloned())
-        .map_err(|_| {
-            Diagnostic::target(
-                "ORNA-S010-IMPORT",
-                "imported module is unavailable",
-                "use a captured standard dependency or remove the import",
-            )
-        })
+    project.production_catalogue().map_err(|_| {
+        Diagnostic::target(
+            "ORNA-S010-IMPORT",
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        )
+    })
 }
 
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
     } else {
@@ -1714,7 +1808,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: project.standard_profile().map(|profile| {
                     // Verify the full graph-bound bundle in the durable
                     // evaluator while loading only import-reachable modules.
@@ -1731,55 +1825,43 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     }
 }
 
+/// The bounded pure path receives reachable standard modules through
+/// `load_standard_sources`, which verifies them against the captured profile.
+/// The project unit therefore carries neither those source units nor a
+/// standard dependency that the bounded evaluator would reject.
+fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
+    let mut execution = execution_project(project);
+    execution
+        .modules
+        .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
+    execution.expectations.environment.stdlib = None;
+    execution
+}
+
 fn runtime_identity(
     repository: &orna_repository_v1::Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), Diagnostic> {
-    let metadata = orna_repository_v1::inspect_metadata(repository).map_err(|_| {
-        Diagnostic::target(
+    orna_runtime_v1::repository_runtime_identity(repository).map_err(|error| match error {
+        orna_runtime_v1::RuntimeError::UnknownHeadFormat(
+            refusal @ orna_repository_v1::FormatContextError::MixedFormats { .. },
+        ) => cli_commit::mixed_formats_at_head(&refusal),
+        orna_runtime_v1::RuntimeError::UnknownHeadFormat(refusal) => Diagnostic::target(
+            refusal.code(),
+            "repository format is unknown",
+            "the repository HEAD records a format this build does not know; use a build that supports it",
+        ),
+        _ => Diagnostic::target(
             "E2200",
             "repository runtime metadata is unavailable",
             "initialize the Orna repository before running a durable project invocation",
-        )
-    })?;
-    let Some(metadata) = metadata else {
-        return Err(Diagnostic::target(
-            "E2200",
-            "repository runtime metadata is unavailable",
-            "initialize the Orna repository before running a durable project invocation",
-        ));
-    };
-
-    let database_id = *metadata.database_id().as_bytes();
-    let mut repository_id = database_id;
-    for (index, byte) in repository_id.iter_mut().enumerate() {
-        let rotation = u32::try_from(index % 7 + 1).expect("bounded rotation");
-        let salt = u8::try_from(index).expect("fixed identity length");
-        *byte = byte.rotate_left(rotation) ^ (0x5a_u8.wrapping_add(salt));
-    }
-    if repository_id == [0; 16] {
-        repository_id[0] = 1;
-    }
-
-    let mut initial_digest = [0; 32];
-    initial_digest[..16].copy_from_slice(&database_id);
-    initial_digest[16..].copy_from_slice(&repository_id);
-    if initial_digest == [0; 32] {
-        initial_digest[0] = 1;
-    }
-    Ok((
-        RuntimeIdentity {
-            database_id,
-            repository_id,
-        },
-        initial_digest,
-    ))
+        ),
+    })
 }
 
-fn invocation_owner_id(identity: RuntimeIdentity) -> [u8; 16] {
-    // The embedded runtime persists one local writer lease in the worktree's
-    // private state. Reusing the repository-derived owner lets a later CLI
-    // process resume that same local owner without stealing an unknown lease.
-    identity.repository_id
+/// The writer owner for this process. A later process has a different owner, so
+/// it takes the lease over (bumping the epoch) and fences a killed writer's token.
+fn invocation_owner_id() -> [u8; 16] {
+    orna_runtime_v1::process_owner_id()
 }
 
 fn run_project_invocation(
@@ -1834,7 +1916,7 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1861,6 +1943,7 @@ fn run_project_function(
             endpoint,
             target,
             &execution,
+            sys_host::std_snapshot_pin(&project),
             color_enabled,
         );
     }
@@ -1873,7 +1956,7 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1882,7 +1965,13 @@ fn run_project_stream_invocation(
         ));
     }
     let execution = execution_project(&project);
-    run_project_stream_invocation_with_project(endpoint, root_entry, &execution, color_enabled)
+    run_project_stream_invocation_with_project(
+        endpoint,
+        root_entry,
+        &execution,
+        sys_host::std_snapshot_pin(&project),
+        color_enabled,
+    )
 }
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
@@ -1900,7 +1989,7 @@ fn run_project_invocation_with_arguments(
         })?;
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1923,8 +2012,9 @@ fn run_project_invocation_with_arguments(
             "retry the durable project invocation",
         )
     })?;
+    let std_snapshot = sys_host::std_snapshot_pin(&project);
     let project = execution_project(&project);
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1936,34 +2026,48 @@ fn run_project_invocation_with_arguments(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_request_with_arguments(
-                orna_conformance_v1::RuntimeTarget {
-                    repository: &repository,
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
                     identity,
-                    owner_id,
-                    initial_digest,
-                },
-                request,
-                fingerprint,
-                &project,
-                root_entry,
-                arguments,
-            ),
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_request_with_arguments(
+                    orna_conformance_v1::RuntimeTarget {
+                        repository: &repository,
+                        identity,
+                        owner_id,
+                        initial_digest,
+                    },
+                    request,
+                    fingerprint,
+                    &project,
+                    root_entry,
+                    arguments,
+                ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            )
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project invocation was rejected",
-            "the project transaction failed atomically; no partial changes were committed",
-        )),
+        StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
+            Some(mut published) => {
+                published.detail = Some(
+                    "the project transaction failed atomically; no partial changes were committed"
+                        .into(),
+                );
+                published
+            }
+            None => {
+                let mut rejection = Diagnostic::target(
+                    "E2200",
+                    "durable project invocation was rejected",
+                    "the project transaction failed atomically; no partial changes were committed",
+                );
+                rejection.detail = Some(failure_detail(&diagnostic));
+                rejection
+            }
+        }),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -1982,6 +2086,7 @@ fn run_project_stream_invocation_with_project(
     endpoint: &Endpoint,
     root_entry: &str,
     project: &ProjectUnit,
+    std_snapshot: StdSnapshotPin,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -1993,7 +2098,7 @@ fn run_project_stream_invocation_with_project(
             )
         })?;
     let (identity, initial_digest) = runtime_identity(&repository)?;
-    let owner_id = invocation_owner_id(identity);
+    let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2005,29 +2110,26 @@ fn run_project_stream_invocation_with_project(
             )
         })?
         .block_on(
-            DurableTransactionalEvaluator::default().execute_project_stream(
-                &repository,
-                identity,
-                owner_id,
-                initial_digest,
-                project,
-                root_entry,
-            ),
+            DurableTransactionalEvaluator::default()
+                .with_sys_host_context(sys_host::sys_host_context(
+                    repository.worktree(),
+                    identity,
+                    RuntimeMode::Run,
+                    std_snapshot,
+                ))
+                .execute_project_stream(
+                    &repository,
+                    identity,
+                    owner_id,
+                    initial_digest,
+                    project,
+                    root_entry,
+                ),
         )
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "durable project invocation failed",
-                "retry the project transaction after checking its durable state",
-            )
-        })?;
+        .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(_) => Err(Diagnostic::target(
-            "E2200",
-            "durable project stream delivery failed",
-            "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
-        )),
+        StageOutcome::Failed(diagnostic) => Err(stream_delivery_failed(&diagnostic)),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "durable project stream invocation is not available",
@@ -2035,12 +2137,101 @@ fn run_project_stream_invocation_with_project(
         )),
     }
 }
+
+/// Publishes a runtime failure under its catalogued Orna code, with the
+/// catalogue title and help. Uncatalogued evaluator codes return `None` so each
+/// caller keeps its own fallback; no unpublished code is promoted.
+fn published_runtime_failure(diagnostic: &orna_foundation_v1::Diagnostic) -> Option<Diagnostic> {
+    let documentation = diagnostic_documentation(diagnostic.code())?;
+    Some(Diagnostic {
+        code: documentation.code,
+        title: Cow::Borrowed(documentation.title),
+        help: documentation.help,
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    })
+}
+
+/// Carries the runtime failure's public code, or its non-disclosing display
+/// text, into the diagnostic detail. The detail is shown with `--debug` only
+/// (ORNA-UX-004 keeps technical causes out of the default rendering).
+fn runtime_failure_detail(error: &orna_runtime_v1::RuntimeError) -> String {
+    if let orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) = error {
+        return format!("runtime failure: {} ({})", refusal.code(), refusal.title());
+    }
+    let cause = error
+        .public_code()
+        .map_or_else(|| error.to_string(), str::to_owned);
+    format!("runtime failure: {cause}")
+}
+
+/// Renders the evaluator failure code with the codes of its nested causes.
+/// Messages and spans stay redacted at the evaluator boundary.
+fn failure_detail(diagnostic: &orna_foundation_v1::Diagnostic) -> String {
+    let causes = diagnostic.causes();
+    if causes.is_empty() {
+        return format!("failure code: {}", diagnostic.code());
+    }
+    let codes = causes
+        .iter()
+        .map(orna_foundation_v1::Diagnostic::code)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("failure code: {} (causes: {codes})", diagnostic.code())
+}
+
+/// Maps a failed durable project invocation to `E2200`. The runtime's public
+/// code, or its non-disclosing display text, is carried in the detail, which
+/// renders only with `--debug` (ORNA-UX-004). A legacy head refusal names its
+/// own remedy, because retrying the transaction cannot clear it.
+fn durable_invocation_failed(error: &orna_runtime_v1::RuntimeError) -> Diagnostic {
+    let help = match error {
+        orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(refusal) => refusal.remedy(),
+        _ => "retry the project transaction after checking its durable state",
+    };
+    let mut diagnostic = Diagnostic::target("E2200", "durable project invocation failed", help);
+    diagnostic.detail = Some(runtime_failure_detail(error));
+    diagnostic
+}
+
+/// Maps a stream delivery the runtime rolled back to `E2200`, carrying the
+/// evaluator failure code and its nested cause codes in the `--debug` detail.
+fn stream_delivery_failed(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
+    let mut delivery = Diagnostic::target(
+        "E2200",
+        "durable project stream delivery failed",
+        "the failed delivery was rolled back; prior committed deliveries and their checkpoint progress remain; inspect the recorded failure before retrying the stream",
+    );
+    delivery.detail = Some(failure_detail(diagnostic));
+    delivery
+}
+
+/// A multi-module project that declares a table cannot run one-shot: the bounded
+/// pure evaluator rejects any table declaration, and the committed-table route
+/// admits a single module only. Single-module projects never reach this check.
+fn multi_module_declares_tables(project: &orna_project_v1::LoadedProject) -> bool {
+    project.modules().len() != 1
+        && project.modules().iter().any(|module| {
+            orna_syntax_v1::parse_module(&module.source)
+                .value
+                .items
+                .iter()
+                .any(|item| matches!(item.declaration, orna_syntax_v1::Declaration::Table { .. }))
+        })
+}
+
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
+    // Single-module projects that import pinned standard modules take the
+    // authority route only when they need publication metadata. Every other
+    // standard-importing project takes the bounded path below, which loads the
+    // reachable standard bodies through the verified profile.
+    let std_imports = !project.standard_runtime_modules().is_empty();
     if project.modules().len() == 1 {
         let identity = &project.identities()[0];
         let module = &project.modules()[0];
@@ -2051,9 +2242,19 @@ fn run_pure_invocation(
             module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
-            let authority =
-                ApplicationAuthority::new(semantic_catalogue(&project)?, Limits::default());
-            let admitted = authority
+            let authority = ApplicationAuthority::new(
+                orna_semantic_v1::Catalogue::authoritative_core(),
+                Limits::default(),
+            )
+            .with_loaded_standard(&project)
+            .map_err(|_| {
+                Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                )
+            })?;
+            let admission = authority
                 .admit_module(identity.logical_path(), module.source.clone(), function)
                 .map_err(|error| {
                     Diagnostic::target_with_detail(
@@ -2062,47 +2263,78 @@ fn run_pure_invocation(
                         "fix the first reported source contract error, then run check again",
                         error.to_string(),
                     )
-                })?;
-            if admitted.requires_publication_metadata() {
-                let publication_rows = runtime_publication_metadata_rows(endpoint)?;
-                let activation = authority
-                    .evaluate_staged_with_publication_rows(
+                });
+            let admitted = match admission {
+                Ok(admitted) => Some(admitted),
+                // The bounded path reports the analysis error for std-importing projects.
+                Err(_) if std_imports => None,
+                Err(error) => return Err(error),
+            };
+            if let Some(admitted) = admitted
+                .filter(|candidate| !std_imports || candidate.requires_publication_metadata())
+            {
+                if !admitted.table_schemas().is_empty() && admitted.entry_references_tables() {
+                    run_committed_table_invocation(
+                        endpoint,
+                        authority,
                         &admitted,
-                        &Environment::new(),
-                        publication_rows,
-                    )
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
-                        )
-                    })?;
-                if !activation.mutations().is_empty() {
-                    return Err(Diagnostic::unavailable(
-                        "one-shot invocation cannot commit table mutations",
-                        "use a supported table transaction; stream roots require the explicit stream runtime",
-                    ));
+                        identity.logical_path(),
+                        &module.source,
+                        sys_host::std_snapshot_pin(&project),
+                    )?;
+                    write_success_line("invocation completed", color_enabled)?;
+                    return Ok(());
                 }
-            } else {
-                authority
-                    .evaluate(&admitted, &Environment::new())
-                    .map_err(|error| {
-                        Diagnostic::target_with_detail(
-                            "E2200",
-                            "pure project invocation failed",
-                            "fix the admitted function or retry the invocation",
-                            error.to_string(),
+                if admitted.requires_publication_metadata() {
+                    let (publication_rows, sys_host_context) = runtime_publication_metadata_rows(
+                        endpoint,
+                        sys_host::std_snapshot_pin(&project),
+                    )?;
+                    let authority = authority.with_sys_host_context(sys_host_context);
+                    let activation = authority
+                        .evaluate_staged_with_publication_rows(
+                            &admitted,
+                            &Environment::new(),
+                            publication_rows,
                         )
-                    })?;
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
+                    if !activation.mutations().is_empty() {
+                        return Err(Diagnostic::unavailable(
+                            "one-shot invocation cannot commit table mutations",
+                            "use a supported table transaction; stream roots require the explicit stream runtime",
+                        ));
+                    }
+                } else {
+                    let std_snapshot = sys_host::std_snapshot_pin(&project);
+                    let authority = match pure_sys_host_context(endpoint, std_snapshot) {
+                        Some(sys_host_context) => authority.with_sys_host_context(sys_host_context),
+                        None => authority,
+                    };
+                    authority
+                        .evaluate(&admitted, &Environment::new())
+                        .map_err(|error| {
+                            Diagnostic::target_with_detail(
+                                "E2200",
+                                "pure project invocation failed",
+                                "fix the admitted function or retry the invocation",
+                                error.to_string(),
+                            )
+                        })?;
+                }
+                write_success_line("invocation completed", color_enabled)?;
+                return Ok(());
             }
-            write_success_line("invocation completed", color_enabled)?;
-            return Ok(());
         }
     }
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2110,12 +2342,56 @@ fn run_pure_invocation(
             "fix the first reported source contract error, then run check again",
         ));
     }
+    if multi_module_declares_tables(&project) {
+        return Err(Diagnostic::target(
+            "E2200",
+            "table reads in multi-module projects are not supported by one-shot invocation; use the REPL or orna run",
+            "one-shot invocation admits table declarations only in single-module projects",
+        ));
+    }
 
     let mut evaluator = BoundedEvaluator::default();
-    match evaluator.evaluate_project(&execution_project(&project)) {
+    if let Some(profile) = project.standard_profile() {
+        // Admission supplies the runtime-reachable closure (requested roots plus
+        // `main`) and the profile must accept exactly that key set, so every
+        // supplied module digest is verified before any body is evaluated.
+        let sources = project.standard_sources().to_vec();
+        match evaluator.load_standard_sources(profile, sources) {
+            StageOutcome::Passed => {}
+            StageOutcome::Cancelled(diagnostic) => {
+                return Err(cancellation_diagnostic(&diagnostic));
+            }
+            StageOutcome::Failed(diagnostic) => {
+                return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                    Diagnostic::target_with_detail(
+                        "ORNA-S010-IMPORT",
+                        "imported module is unavailable",
+                        "use a captured standard dependency or remove the import",
+                        format!("standard dependency load rejected with {}", diagnostic.code()),
+                    )
+                }));
+            }
+            StageOutcome::Skipped { .. } => {
+                return Err(Diagnostic::target(
+                    "ORNA-S010-IMPORT",
+                    "imported module is unavailable",
+                    "use a captured standard dependency or remove the import",
+                ));
+            }
+        }
+    }
+    match evaluator.evaluate_project(&pure_execution_project(&project)) {
         StageOutcome::Passed => {}
         StageOutcome::Cancelled(diagnostic) => return Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => {
+        StageOutcome::Failed(diagnostic) => {
+            return Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "one-shot invocation requires an executable function-only project",
+                    "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
+                )
+            }));
+        }
+        StageOutcome::Skipped { .. } => {
             return Err(Diagnostic::unavailable(
                 "one-shot invocation requires an executable function-only project",
                 "use reachable modules containing only pure functions; tables, effects, and streams require the integrated runtime",
@@ -2125,7 +2401,11 @@ fn run_pure_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(_) | StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
+        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| Diagnostic::unavailable(
+            "requested invocation is not available",
+            "define a reachable zero-argument pure function with the requested name",
+        ))),
+        StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
@@ -2159,9 +2439,357 @@ struct ReplTransactions {
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
     host_bindings: Rc<RefCell<Option<SysHostBindingRegistry>>>,
+    faults: Arc<dyn FaultInjector>,
     lease: Option<WriterLease>,
     // Drop the runtime owner lock only after capture candidates release their refs.
     state: Option<RuntimeState>,
+}
+
+/// Reads the committed identity of each named admitted table from `commit`.
+/// Each name must resolve to exactly one live table record; the error names the
+/// table that does not, so the caller fails closed with a reason. The REPL and
+/// one-shot `run` both bind tables through this function, so neither resolves a
+/// table by name alone.
+fn committed_table_identities(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    table_names: Vec<String>,
+) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)
+        .map_err(|_| {
+            unavailable_table_identity(
+                "the committed object identity manifest could not be read".to_owned(),
+            )
+        })?;
+    let mut tables = Vec::with_capacity(table_names.len());
+    for name in table_names {
+        let mut matching = identities.records().iter().filter(|record| {
+            record.kind() == orna_project_v1::ObjectKind::Table
+                && !record.is_retired()
+                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
+        });
+        let record = matching.next().ok_or_else(|| {
+            unavailable_table_identity(format!("table `{name}` has no live identity at HEAD"))
+        })?;
+        if matching.next().is_some() {
+            return Err(unavailable_table_identity(format!(
+                "table `{name}` has more than one live identity at HEAD"
+            )));
+        }
+        let identity = RuntimeTableIdentity::new(name.clone(), TableObjectId::new(*record.id()))
+            .map_err(|_| {
+                unavailable_table_identity(format!(
+                    "table `{name}` has an invalid identity at HEAD"
+                ))
+            })?;
+        tables.push(identity);
+    }
+    Ok(tables)
+}
+
+fn unavailable_table_identity(detail: String) -> Diagnostic {
+    Diagnostic::target_with_detail(
+        "E2200",
+        "committed table identities are unavailable",
+        "commit the project so every table has exactly one identity",
+        detail,
+    )
+}
+
+/// Committed `HEAD` rows of every admitted table, pinned to the published
+/// generation they were read at. The rows are stored tuples in the runtime
+/// keyspace: the runtime merges them with the live tail, so they stay in the
+/// stored form. `storage_orders` names the stored fields each table's tuples
+/// list, which is what converts the merged rows to evaluator records.
+struct PinnedCommittedTables {
+    rows: PinnedCommittedRows,
+    storage_orders: BTreeMap<String, Vec<String>>,
+}
+
+/// Evaluates an admitted module over the activation at `state`: the snapshot
+/// holds the committed rows of every admitted table, and the staged result
+/// carries only the mutations this activation produced. `publication_rows`
+/// supplies the durable publication snapshot when the module scans `sys`
+/// relations.
+///
+/// This is the single merge point where stored tuples become evaluator records:
+/// the runtime merges the committed base with the live tail in stored form, and
+/// the admitted schemas then receive evaluator form only.
+fn evaluate_over_committed_tables(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    authority: &ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+    committed: PinnedCommittedTables,
+    publication_rows: Option<RuntimePublicationMetadataRows>,
+) -> Result<(RuntimeTableActivationSnapshot, StagedActivation), Diagnostic> {
+    let PinnedCommittedTables {
+        rows,
+        storage_orders,
+    } = committed;
+    let snapshot = runtime
+        .block_on(state.begin_admitted_table_activation_over_committed(tables, rows))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let evaluator_rows = evaluator_snapshot_rows(&snapshot, admitted, &storage_orders)?;
+    let staged = authority
+        .evaluate_staged_with_table_snapshot_rows(
+            admitted,
+            &Environment::new(),
+            &snapshot,
+            evaluator_rows,
+            publication_rows,
+        )
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2200",
+                "pure project invocation failed",
+                "fix the admitted function or retry the invocation",
+                error.to_string(),
+            )
+        })?;
+    Ok((snapshot, staged))
+}
+
+/// Converts every admitted table's merged stored rows in `snapshot` to
+/// evaluator records, keyed by table name.
+fn evaluator_snapshot_rows(
+    snapshot: &RuntimeTableActivationSnapshot,
+    admitted: &AdmittedApplication,
+    storage_orders: &BTreeMap<String, Vec<String>>,
+) -> Result<RuntimeTableRows, Diagnostic> {
+    let mut rows = BTreeMap::new();
+    for (name, table) in admitted.table_schemas() {
+        let storage_order = storage_orders
+            .get(name)
+            .ok_or_else(committed_rows_read_error)?;
+        let stored = snapshot
+            .table_rows()
+            .get(name)
+            .map_or(&[][..], Vec::as_slice);
+        let table_rows =
+            orna_project_v1::evaluator_rows_from_stored(table.schema(), storage_order, stored)
+                .map_err(|_| committed_rows_read_error())?;
+        rows.insert(name.clone(), table_rows);
+    }
+    Ok(rows)
+}
+
+/// Reads the committed rows of every admitted table at `commit` and pins them
+/// to the runtime's published generation.
+fn committed_invocation_rows(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<PinnedCommittedTables, Diagnostic> {
+    let (rows, storage_orders) = committed_rows_at(repository, commit, admitted, tables).map_err(
+        |error| match error {
+            CommittedRowsError::Limit => Diagnostic::target(
+                "E2200",
+                "committed table rows exceed the read bound",
+                "keep each table within the evaluator collection limit and the source byte limit",
+            ),
+            CommittedRowsError::Unavailable => committed_rows_read_error(),
+        },
+    )?;
+    pin_committed_tables(runtime, state, rows, storage_orders)
+        .map_err(|_| committed_rows_read_error())
+}
+
+/// Pins committed rows read at a commit to the runtime's published generation.
+fn pin_committed_tables(
+    runtime: &tokio::runtime::Runtime,
+    state: &RuntimeState,
+    rows: RuntimeTableRows,
+    storage_orders: BTreeMap<String, Vec<String>>,
+) -> Result<PinnedCommittedTables, RuntimeError> {
+    let pin = runtime.block_on(state.published_pin())?;
+    Ok(PinnedCommittedTables {
+        rows: PinnedCommittedRows::new(pin, rows)?,
+        storage_orders,
+    })
+}
+
+fn committed_rows_read_error() -> Diagnostic {
+    Diagnostic::target(
+        "E2200",
+        "committed table rows could not be read",
+        "retry the invocation after checking local runtime state",
+    )
+}
+
+/// Why the committed rows of the admitted tables could not be returned.
+enum CommittedRowsError {
+    /// The committed base could not be read or does not match the admitted schemas.
+    Unavailable,
+    /// The committed base holds more rows or bytes than the committed read bound allows.
+    Limit,
+}
+
+/// The stored tuples of every admitted table at `commit`, read from the
+/// committed format-3 base, with the stored field order each table lists.
+/// Shared by the one-shot invocation and `serve`. The read stops at the first
+/// row past `orna_application_v1::committed_read_limits`.
+fn committed_rows_at(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    admitted: &AdmittedApplication,
+    tables: &[RuntimeTableIdentity],
+) -> Result<(RuntimeTableRows, BTreeMap<String, Vec<String>>), CommittedRowsError> {
+    let format = repository
+        .open_pinned_format_context(commit.as_str())
+        .map_err(|_| CommittedRowsError::Unavailable)?;
+    let schemas: BTreeMap<String, orna_semantic_v1::TableSchema> = admitted
+        .table_schemas()
+        .iter()
+        .map(|(name, table)| (name.clone(), table.schema().clone()))
+        .collect();
+    let table_ids: BTreeMap<String, TableObjectId> = tables
+        .iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect();
+    let mut committed = orna_project_v1::committed_tables(
+        repository,
+        &format,
+        commit,
+        &schemas,
+        &table_ids,
+        orna_application_v1::ApplicationAuthority::committed_read_limits(),
+    )
+    .map_err(|error| match error {
+        orna_project_v1::CommittedReadError::Limit { .. } => CommittedRowsError::Limit,
+        orna_project_v1::CommittedReadError::Storage(_) => CommittedRowsError::Unavailable,
+    })?;
+    let mut rows = BTreeMap::new();
+    let mut storage_orders = BTreeMap::new();
+    for name in schemas.keys() {
+        let table = committed
+            .remove(name)
+            .ok_or(CommittedRowsError::Unavailable)?;
+        rows.insert(name.clone(), table.rows);
+        storage_orders.insert(name.clone(), table.storage_order);
+    }
+    Ok((rows, storage_orders))
+}
+
+/// One-shot `run` of a single admitted module that declares tables and reads
+/// them. Tables bind to their committed identities at `HEAD`, so reads see the
+/// same committed rows as the REPL. The sys host context and publication
+/// snapshot follow the pure path: a module that needs publication metadata runs
+/// as an embedded host, and any other module runs with the run host. `run` never
+/// commits the activation's table mutations.
+fn run_committed_table_invocation(
+    endpoint: &Endpoint,
+    authority: ApplicationAuthority,
+    admitted: &AdmittedApplication,
+    logical_path: &str,
+    source: &str,
+    std_snapshot: StdSnapshotPin,
+) -> Result<(), Diagnostic> {
+    let path = local_project_path(endpoint)?;
+    let repository = orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Diagnostic::target(
+            "E2200",
+            "committed table identities could not be read",
+            "run the command inside an initialized local Orna repository",
+        )
+    })?;
+    let commit = repository.head().ok().flatten().ok_or_else(|| {
+        Diagnostic::target(
+            "E2200",
+            "table reads need a committed project",
+            "commit the project, then run the command again",
+        )
+    })?;
+    let names = admitted.table_schemas().keys().cloned().collect::<Vec<_>>();
+    let tables = committed_table_identities(&repository, &commit, names)?;
+    let entry = admitted.entry().to_owned();
+    let committed = tables
+        .iter()
+        .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
+    let admitted = authority
+        .admit_module_with_committed_table_metadata(logical_path, source, entry, committed)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2101",
+                "project semantic analysis failed",
+                "fix the first reported source contract error, then run check again",
+                error.to_string(),
+            )
+        })?;
+    let (identity, initial_digest) = runtime_identity(&repository)?;
+    let mode = if admitted.requires_publication_metadata() {
+        RuntimeMode::Embedded
+    } else {
+        RuntimeMode::Run
+    };
+    let authority = authority.with_sys_host_context(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        mode,
+        std_snapshot,
+    ));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let state = runtime
+        .block_on(RuntimeState::open(&repository, identity, initial_digest))
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    let publication_rows = if admitted.requires_publication_metadata() {
+        Some(
+            runtime
+                .block_on(state.publication_metadata_rows())
+                .map_err(|_| {
+                    Diagnostic::target(
+                        "E2200",
+                        "local runtime publication metadata could not be read",
+                        "retry the invocation after checking local runtime state",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    let committed =
+        committed_invocation_rows(&repository, &commit, &runtime, &state, &admitted, &tables)?;
+    let (_snapshot, activation) = evaluate_over_committed_tables(
+        &runtime,
+        &state,
+        &authority,
+        &admitted,
+        &tables,
+        committed,
+        publication_rows,
+    )?;
+    if !activation.mutations().is_empty() {
+        return Err(Diagnostic::unavailable(
+            "one-shot invocation cannot commit table mutations",
+            "use a supported table transaction; stream roots require the explicit stream runtime",
+        ));
+    }
+    Ok(())
 }
 
 fn repl_transactions(
@@ -2183,7 +2811,7 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
+    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return None;
     }
@@ -2205,27 +2833,7 @@ fn repl_transactions(
     {
         return None;
     }
-    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
-        .ok()?;
-    let mut tables = Vec::with_capacity(table_names.len());
-    for name in table_names {
-        let mut matching = identities.records().iter().filter(|record| {
-            record.kind() == orna_project_v1::ObjectKind::Table
-                && !record.is_retired()
-                && record.qualified_name().rsplit('.').next() == Some(name.as_str())
-        });
-        let record = matching.next()?;
-        if matching.next().is_some() {
-            return None;
-        }
-        tables.push(
-            RuntimeTableIdentity::new(
-                name,
-                TableObjectId::new(*record.id()),
-            )
-            .ok()?,
-        );
-    }
+    let tables = committed_table_identities(repository, &commit, table_names).ok()?;
     let capture_relation_id = tables.first()?.object_id().bytes();
     let (identity, initial_digest) = runtime_identity(repository).ok()?;
     if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
@@ -2239,7 +2847,14 @@ fn repl_transactions(
         project,
         commit,
         format_context,
-        authority: ApplicationAuthority::new(catalogue, Limits::default()),
+        authority: ApplicationAuthority::new(catalogue, Limits::default()).with_sys_host_context(
+            sys_host::sys_host_context(
+                repository.worktree(),
+                identity,
+                RuntimeMode::Repl,
+                sys_host::std_snapshot_pin(workspace_project),
+            ),
+        ),
         runtime,
         identity,
         initial_digest,
@@ -2249,6 +2864,7 @@ fn repl_transactions(
         state: None,
         lease: None,
         host_bindings: Rc::new(RefCell::new(None)),
+        faults: Arc::new(NoFault),
     })
 }
 
@@ -2266,21 +2882,39 @@ fn same_repl_project_inputs(
         && workspace.standard_modules() == committed.standard_modules()
 }
 
+/// The activation facts a project REPL session reports through
+/// `sys.rt.info()`. `None` leaves the session unattached, so the evaluator
+/// reports `sys.version.incompatible` rather than inventing host facts.
+fn repl_sys_host_context(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Option<SysHostContext> {
+    let (identity, _) = runtime_identity(repository).ok()?;
+    Some(sys_host::sys_host_context(
+        repository.worktree(),
+        identity,
+        RuntimeMode::Repl,
+        sys_host::std_snapshot_pin(project),
+    ))
+}
+
 fn repl_runtime(
     repository: Option<orna_repository_v1::Repository>,
 ) -> Result<ReplRuntime, Diagnostic> {
     let (session, transactions) = if let Some(repository) = &repository {
         let project = orna_project_v1::ProjectLoader::default()
             .load(repository)
-            .map_err(|_| {
-                Diagnostic::target(
-                    "E2100",
-                    "project source could not be loaded",
-                    "fix the project module graph and source boundaries, then run check again",
-                )
-            })?;
-        let session = AdmittedReplSession::from_loaded_project(&project, [], Limits::default())
+            .map_err(project_load_diagnostic)?;
+        let session = AdmittedReplSession::from_loaded_project(
+            &project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
             .map_err(|error| repl_session_error(&error))?;
+        let session = match repl_sys_host_context(repository, &project) {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        };
         let transactions = repl_transactions(repository, &project);
         (session, transactions)
     } else {
@@ -2355,10 +2989,22 @@ impl ReplSnapshotSessionLoader<'_> {
         self.repository.ok_or(())
     }
 
-    fn admit(project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
-        // Keep the existing standard-import boundary intact: no host standard
-        // sources are supplied, so uncaptured imports remain inadmissible.
-        AdmittedReplSession::from_loaded_project(project, [], Limits::default()).map_err(|_| ())
+    fn admit(&self, project: &orna_project_v1::LoadedProject) -> Result<AdmittedReplSession, ()> {
+        // Admit the project's own pinned standard sources; uncaptured imports
+        // remain inadmissible because the project has no standard profile.
+        let session = AdmittedReplSession::from_loaded_project(
+            project,
+            project.standard_sources().iter().cloned(),
+            Limits::default(),
+        )
+        .map_err(|_| ())?;
+        let context = self
+            .repository
+            .and_then(|repository| repl_sys_host_context(repository, project));
+        Ok(match context {
+            Some(context) => session.with_sys_host_context(context),
+            None => session,
+        })
     }
 }
 
@@ -2374,7 +3020,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load(self.repository()?)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Head => {
                 let repository = self.repository()?;
@@ -2382,7 +3028,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
             repl::SnapshotTarget::Ref(reference) => {
                 let repository = self.repository()?;
@@ -2390,7 +3036,7 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
                 let project = orna_project_v1::ProjectLoader::default()
                     .load_committed_snapshot(repository, &commit)
                     .map_err(|_| ())?;
-                Self::admit(&project)?
+                self.admit(&project)?
             }
         };
         self.host_bindings.borrow_mut().take();
@@ -2398,24 +3044,76 @@ impl repl::SnapshotSessionLoader for ReplSnapshotSessionLoader<'_> {
     }
 }
 
+/// A located `ORNA-REPL-EFFECT` failure for a project binding the REPL cannot
+/// honour, naming what is wrong and the remedy to apply.
+fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
+    repl::ReplFailure {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            message: message.to_owned(),
+            span: None,
+            notes: Vec::new(),
+            help: vec![remedy.to_owned()],
+        }),
+    }
+}
+
+/// Binds one REPL request row to its session, query, source text and the
+/// project digest it was evaluated against, so a replayed identity cannot
+/// adopt a different request's effects.
+fn repl_request_fingerprint(
+    session_id: [u8; 16],
+    query_id: [u8; 16],
+    source: &str,
+    initial_digest: [u8; 32],
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"orna.repl.request.v1");
+    hasher.update(session_id);
+    hasher.update(query_id);
+    hasher.update(initial_digest);
+    hasher.update(u64::try_from(source.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(source.as_bytes());
+    hasher.finalize().into()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Running request rows counted when the first sys binding dispatches.
+    static FIRST_SYS_DISPATCH_RUNNING: std::cell::Cell<Option<usize>> =
+        const { std::cell::Cell::new(None) };
+}
+
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
     session: &mut AdmittedReplSession,
     source: &str,
-) -> Result<Option<CanonicalValue>, String> {
+) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
     let staged = match session.stage_activation(source) {
         Ok(staged) => staged,
-        Err(_) => return session.submit(source).map_err(|error| error.code().to_owned()),
+        Err(_) => return session.submit(source).map_err(repl::ReplFailure::from),
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
-        return Err("ORNA-REPL-EFFECT".to_owned());
+        return Err(repl::ReplFailure::from(
+            orna_evaluator_v1::effect_rejection(staged.effects()),
+        ));
     };
     let (current_commit, _) = repository
         .open_pinned_format_context_with_commit("HEAD")
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    if current_commit != transactions.commit || !transactions.format_context.supports_writes() {
-        return Err("ORNA-REPL-EFFECT".to_owned());
+    if current_commit != transactions.commit {
+        return Err(repl_effect_failure(
+            "the project changed since this REPL session started",
+            "restart the REPL to bind to the current HEAD",
+        ));
+    }
+    if !transactions.format_context.supports_writes() {
+        return Err(repl_effect_failure(
+            "this repository's format does not accept REPL writes",
+            "open a repository whose format supports writes, then restart the REPL",
+        ));
     }
     if transactions.state.is_none() {
         let state = transactions
@@ -2462,7 +3160,7 @@ fn run_repl_input(
                     .state
                     .as_ref()
                     .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id(transactions.identity)),
+                    .acquire_lease(invocation_owner_id()),
             )
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         transactions.lease = Some(lease);
@@ -2484,13 +3182,27 @@ fn run_repl_input(
         session_id: transactions.session_id,
         request_id: query_id,
     };
-    let scope = ReplTransactionScope {
-        project: &transactions.project,
-        repository,
-        format_context: &transactions.format_context,
-        runtime_context: snapshot.context(),
-        request,
+    #[cfg(test)]
+    let observe_first_dispatch = || {
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| {
+            if first.get().is_none() {
+                let running = transactions
+                    .runtime
+                    .block_on(state.running_requests())
+                    .expect("running requests at first sys dispatch");
+                first.set(Some(running.len()));
+            }
+        });
     };
+    let scope = ReplTransactionScope::new(
+        &transactions.project,
+        repository,
+        &transactions.format_context,
+        snapshot.context(),
+        request,
+    );
+    #[cfg(test)]
+    let scope = scope.with_dispatch_observer(&observe_first_dispatch);
     let writer = transactions.lease.expect("runtime writer lease initialized");
     transactions
         .runtime
@@ -2508,20 +3220,116 @@ fn run_repl_input(
             .runtime
             .block_on(state.finish_query_observation(writer, query_id, status))
             .map(|_| ())
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())
+            .map_err(|_| REPL_EFFECT_UNCERTAIN.to_owned())
     };
+    let terminal = |prefix: &'static [u8]| {
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(&query_id);
+        TerminalOutcome::new(bytes).ok()
+    };
+    // A row whose input never reached an external binding is cancelled before
+    // any observation is recorded, so a failed observation write cannot strand
+    // it. A failed cancellation leaves the row unsettled, which is uncertain.
+    // REQUEST-1 (Orna-1.1.0 30-protocol.md:104): the request row is reserved
+    // and started before evaluation, so an external sys effect dispatched while
+    // the input evaluates is covered by a durable Running row. A panic between
+    // reservation and settlement leaves that row Running, which is the same
+    // state as a crash and is settled by fenced recovery.
+    let fingerprint = repl_request_fingerprint(
+        transactions.session_id,
+        query_id,
+        source,
+        transactions.initial_digest,
+    );
+    let abandon = |original: repl::ReplFailure| -> repl::ReplFailure {
+        let cancelled = terminal(b"orna.repl.cancel.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.cancel_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if finish_query(orna_runtime_v1::InvocationObservationStatus::Failed).is_err() {
+            eprintln!("warning: query observation not recorded");
+        }
+        if cancelled {
+            original
+        } else {
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        }
+    };
+    let admission = match transactions
+        .runtime
+        .block_on(state.reserve_request_with_admission(request, fingerprint))
+    {
+        Ok((_, Some(admission))) => admission,
+        _ => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err("ORNA-REPL-EFFECT".to_owned().into());
+        }
+    };
+    if transactions
+        .runtime
+        .block_on(state.start_request_with_owner_and_admission(
+            request,
+            fingerprint,
+            writer,
+            admission,
+        ))
+        .is_err()
+    {
+        // The failed start leaves the row Reserved and no binding has run.
+        return Err(abandon("ORNA-REPL-EFFECT".to_owned().into()));
+    }
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
     let (value, successor, activation) = match evaluation {
         Ok(result) => result,
-        Err(error) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error));
+        Err(failure) => {
+            if failure.external_effects_possible {
+                // The row stays Running: fenced recovery settles it and the
+                // input is never replayed.
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+                return Err(repl_evaluation_failure(failure));
+            }
+            return Err(abandon(repl_evaluation_failure(failure)));
+        }
+    };
+    // Known once evaluation succeeded: an external binding may already have run.
+    let external_possible = matches!(
+        activation.effects(),
+        orna_runtime_v1::ActivationEffectReport::ExternalPossible
+    );
+    // The request is committed, so an observation write failure is only a
+    // warning and never reports the committed input as uncertain.
+    let record_committed = |status: orna_runtime_v1::InvocationObservationStatus| {
+        if finish_query(status).is_err() {
+            eprintln!("warning: committed; query observation not recorded");
+        }
+    };
+    // Failure after evaluation: uncertain when external effects may have run
+    // (the row stays Running for fenced recovery); otherwise cancelled.
+    let unsettled_after_evaluation = || -> repl::ReplFailure {
+        if external_possible {
+            let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
+            REPL_EFFECT_UNCERTAIN.to_owned().into()
+        } else {
+            abandon("ORNA-REPL-EFFECT".to_owned().into())
         }
     };
     if activation.mutations().is_empty() {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
+        // Read-only results are retained: the request completes with its
+        // terminal outcome instead of being left running.
+        let completed = terminal(b"orna.repl.read.v1").is_some_and(|outcome| {
+            transactions
+                .runtime
+                .block_on(state.complete_request_with_owner(request, fingerprint, writer, outcome))
+                .is_ok()
+        });
+        if !completed {
+            return Err(unsettled_after_evaluation());
+        }
+        record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
         *session = successor;
         return Ok(value);
     }
@@ -2529,28 +3337,45 @@ fn run_repl_input(
         .stage_for_request(&transactions.authority, snapshot.context(), request)
     {
         Ok(activation) => activation,
-        Err(error) => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(repl_application_error(error));
-        }
+        Err(_) => return Err(unsettled_after_evaluation()),
+    };
+    // The application stages with NoFault; rebuild the identical unit carrying
+    // the runtime's injector so the request boundary owns the fault seam.
+    let request_staged = match StagedTableActivation::from_source(
+        activation.context().clone(),
+        activation.mutations().to_vec(),
+        activation.next_digest(),
+        Arc::clone(&transactions.faults),
+        activation.effects(),
+    ) {
+        Ok(staged) => staged,
+        Err(_) => return Err(unsettled_after_evaluation()),
+    };
+    let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
+        return Err(unsettled_after_evaluation());
     };
     let committed = transactions
         .runtime
-        .block_on(state.commit_table_activation(
+        .block_on(state.commit_staged_table_request_activation(
             writer,
-            activation.context(),
-            activation.mutations(),
-            activation.next_digest(),
-            activation.faults(),
+            request,
+            fingerprint,
+            &request_staged,
+            outcome,
         ));
     if committed.is_err() {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err("ORNA-REPL-EFFECT".to_owned());
+        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
     }
-    finish_query(orna_runtime_v1::InvocationObservationStatus::Succeeded)?;
+    record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
     *session = successor;
     Ok(value)
 }
+
+/// Reported when external effects may already have happened after evaluation
+/// and no terminal outcome is proven. The request row stays Running for fenced
+/// recovery; the input is never replayed.
+const REPL_EFFECT_UNCERTAIN: &str = "ORNA-REPL-EFFECT-UNCERTAIN";
 
 fn repl_application_error(error: ApplicationError) -> String {
     match error {
@@ -2566,6 +3391,32 @@ fn repl_application_error(error: ApplicationError) -> String {
     }
 }
 
+/// Maps a failed REPL evaluation to its submission failure. When external
+/// effects may already have happened, the code stays
+/// `ORNA-REPL-EFFECT-UNCERTAIN` and the evaluator cause moves to the detail,
+/// so the uncertain outcome stays diagnosable without a replay.
+fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure {
+    let cause = repl_application_error(failure.error);
+    if !failure.external_effects_possible {
+        return repl::ReplFailure::from(cause);
+    }
+    repl::ReplFailure {
+        code: REPL_EFFECT_UNCERTAIN.to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: REPL_EFFECT_UNCERTAIN.to_owned(),
+            message: format!(
+                "external effects may already have happened after evaluation failed with {cause}"
+            ),
+            span: None,
+            notes: Vec::new(),
+            help: vec![
+                "the input is not replayed; the request row stays running for fenced recovery"
+                    .to_owned(),
+            ],
+        }),
+    }
+}
+
 fn run_repl_submission<W: io::Write>(
     session: &mut AdmittedReplSession,
     source: &str,
@@ -2573,7 +3424,7 @@ fn run_repl_submission<W: io::Write>(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
-        session.submit(source).map_err(|error| error.code().to_owned())
+        session.submit(source).map_err(repl::ReplFailure::from)
     };
     run_repl_submission_with(session, source, writer, color_enabled, &mut submitter)
 }
@@ -2587,7 +3438,7 @@ fn run_repl_submission_with<W, S>(
 ) -> Result<(), Diagnostic>
 where
     W: io::Write,
-    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, String>,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, repl::ReplFailure>,
 {
     if source.trim() == ":quit" {
         return Ok(());
@@ -2623,8 +3474,12 @@ where
             Ok(())
         }
         Ok(None) => Ok(()),
-        Err(code) => {
-            let diagnostic = diagnostic_documentation(&code).map_or_else(
+        Err(failure) => {
+            let body = failure
+                .detail
+                .is_some()
+                .then(|| repl::render_repl_failure(&failure, source));
+            let mut diagnostic = diagnostic_documentation(&failure.code).map_or_else(
                 || {
                     Diagnostic::unavailable(
                         "REPL expression could not be evaluated",
@@ -2639,6 +3494,7 @@ where
                     )
                 },
             );
+            diagnostic.body = body;
             Err(diagnostic)
         }
     }
@@ -2785,6 +3641,25 @@ fn initialize_repository(
         .map_err(|error| repository_init_diagnostic(&error))?;
     write_success_line("initialized Orna repository", color_enabled)
 }
+/// Maps a fetch failure to its documented exit status: an unavailable remote is a
+/// connection failure (3) and a malformed advertisement is a protocol failure (7);
+/// every other fetch refusal keeps the target status.
+fn fetch_failure(error: &orna_repository_v1::FetchError) -> Diagnostic {
+    let exit = match error {
+        orna_repository_v1::FetchError::RemoteUnavailable => Exit::Connection,
+        orna_repository_v1::FetchError::MalformedAdvertisement => Exit::Protocol,
+        _ => Exit::Target,
+    };
+    Diagnostic {
+        code: "E2100",
+        title: Cow::Borrowed("Git fetch failed"),
+        help: "check the configured remote and retry `fetch`",
+        exit,
+        detail: Some(error.to_string()),
+        body: None,
+    }
+}
+
 fn run_fetch(
     endpoint: &Endpoint,
     remote: &str,
@@ -2811,14 +3686,7 @@ fn run_fetch(
     )?;
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
-        .map_err(|error| {
-            Diagnostic::target_with_detail(
-                "E2100",
-                "Git fetch failed",
-                "check the configured remote and retry `fetch`",
-                error.to_string(),
-            )
-        })?;
+        .map_err(|error| fetch_failure(&error))?;
     if let Some(continuity) = report.continuity() {
         if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);
@@ -3108,7 +3976,7 @@ mod tests {
         let error = parse_cli(&["--color".into(), "invalid".into(), "status".into()])
             .expect_err("invalid color mode is rejected");
         assert_eq!(
-            (error.code, error.title, error.help),
+            (error.code, error.title.as_ref(), error.help),
             (
                 "E1002",
                 "unsupported value for `--color`",
@@ -3117,7 +3985,7 @@ mod tests {
         );
         let error = parse_cli(&["--color".into()]).expect_err("color mode value is required");
         assert_eq!(
-            (error.code, error.title),
+            (error.code, error.title.as_ref()),
             ("E1001", "option `--color` needs a value")
         );
         assert_eq!(
@@ -3172,7 +4040,7 @@ mod tests {
             .expect_err("status format is exact");
         assert_eq!(error.code, "E1002");
         assert_eq!(
-            (error.title, error.help),
+            (error.title.as_ref(), error.help),
             (
                 "unsupported `status` option or option placement",
                 "use `status`, `status --porcelain`, `status --short`, `status --format human|short|json`, or `--format human|short|json status`"
@@ -3220,13 +4088,13 @@ mod tests {
         );
         assert_eq!(
             parse_cli(&["serve".into()]).unwrap().command,
-            Command::Serve { port: 8080 }
+            Command::Serve { port: 8080, allow_push: false }
         );
         assert_eq!(
             parse_cli(&["serve".into(), "--port".into(), "0".into()])
                 .unwrap()
                 .command,
-            Command::Serve { port: 0 }
+            Command::Serve { port: 0, allow_push: false }
         );
     }
 
@@ -3547,10 +4415,11 @@ mod tests {
                 .as_slice();
         let mut output = Vec::new();
         repl::run(&mut input, &mut output, &mut runtime.session).expect("scripted session");
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "> > > error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it\n> 42 : Int\n> "
-        );
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.contains("error[ORNA-S012-UNRESOLVED]: "), "{output}");
+        assert!(output.contains("hidden"), "{output}");
+        assert!(output.contains("line 1, column 9"), "{output}");
+        assert!(output.contains("> 42 : Int\n> "), "{output}");
     }
 
     #[test]
@@ -3936,6 +4805,66 @@ mod tests {
     }
 
     #[test]
+    fn durable_invocation_failure_carries_public_code_and_hides_it_without_debug() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::AdminBusy);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: sys.admin.busy")
+        );
+
+        let mut plain = Vec::new();
+        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain write");
+        let plain = String::from_utf8(plain).expect("diagnostic is UTF-8");
+        assert!(!plain.contains("sys.admin.busy"), "plain output: {plain}");
+        assert!(!plain.contains("runtime failure"), "plain output: {plain}");
+
+        let mut debug = Vec::new();
+        write_diagnostic(&mut debug, &diagnostic, false, true).expect("debug write");
+        let debug = String::from_utf8(debug).expect("diagnostic is UTF-8");
+        assert!(
+            debug.contains("runtime failure: sys.admin.busy"),
+            "debug output: {debug}"
+        );
+    }
+
+    #[test]
+    fn durable_invocation_failure_without_public_code_carries_display_text() {
+        let diagnostic = durable_invocation_failed(&orna_runtime_v1::RuntimeError::LeaseHeld);
+        assert_eq!(diagnostic.code, "E2200");
+        assert_eq!(
+            diagnostic.detail.as_deref(),
+            Some("runtime failure: runtime writer is held")
+        );
+    }
+
+    #[test]
+    fn failure_detail_formats_attached_cause_codes() {
+        let severity = orna_foundation_v1::DiagnosticSeverity::Error;
+        let message = || orna_foundation_v1::SafeText::new("redacted").expect("safe text");
+        let cause = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-DIVIDE-BY-ZERO").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("cause diagnostic");
+        let failure = orna_foundation_v1::Diagnostic::new(
+            orna_foundation_v1::SafeText::new("ORNA-EVAL-SURFACE").expect("safe code"),
+            severity,
+            message(),
+        )
+        .expect("failure diagnostic")
+        .with_cause(cause);
+
+        let delivery = stream_delivery_failed(&failure);
+        assert_eq!(delivery.code, "E2200");
+        assert_eq!(
+            delivery.detail.as_deref(),
+            Some("failure code: ORNA-EVAL-SURFACE (causes: ORNA-EVAL-DIVIDE-BY-ZERO)")
+        );
+    }
+
+    #[test]
     fn single_expression_repl_reports_visible_success_failure_and_quit() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let mut output = Vec::new();
@@ -3946,15 +4875,11 @@ mod tests {
         let error = run_repl_submission(&mut session, "missing()", &mut output, false)
             .expect_err("failure is reported");
         assert_eq!(error.code, "ORNA-S012-UNRESOLVED");
-        assert_eq!(error.title, "name could not be resolved");
-        assert_eq!(
-            error.help,
-            "declare the name or add the matching `use` import before using it"
-        );
         assert_eq!(error.exit, Exit::Target);
+        let rendered = error.to_string();
         assert_eq!(
-            error.to_string(),
-            "error[ORNA-S012-UNRESOLVED]: name could not be resolved\nhelp: declare the name or add the matching `use` import before using it"
+            rendered,
+            "error[ORNA-S012-UNRESOLVED]: name `missing` cannot be resolved\n  --> line 1, column 1\n  |\n1 | missing()\n  | ^^^^^^^\nnote: `missing` is not declared in this session and is not imported\nhelp: declare `missing` before using it, for example `let missing = <value>`"
         );
         assert_eq!(
             run_repl_submission(&mut session, ":quit", &mut output, false),
@@ -4221,7 +5146,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4251,7 +5176,7 @@ mod tests {
         let endpoint = Endpoint::Path(directory.path().to_string_lossy().into_owned());
         let error = check_project(&endpoint, false).expect_err("unbundled standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4284,7 +5209,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4317,7 +5242,7 @@ mod tests {
         };
         let error = execute(&parsed).expect_err("uncaptured standard module");
         assert_eq!(
-            (error.code, error.exit, error.title, error.help),
+            (error.code, error.exit, error.title.as_ref(), error.help),
             (
                 "ORNA-S010-IMPORT",
                 Exit::Target,
@@ -4738,5 +5663,264 @@ mod tests {
             advanced
         );
         assert!(git(&local, &["status", "--porcelain"]).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod repl_request_effect_tests {
+    use super::*;
+    use crate::format3::format3_repository_for_table;
+    use orna_runtime_v1::{FaultPoint, RecoveryDisposition, RuntimeError};
+
+    const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+    const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
+
+    struct FailAt(FaultPoint);
+
+    impl FaultInjector for FailAt {
+        fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+            if point == self.0 {
+                Err(RuntimeError::FaultInjected(point))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    #[test]
+    fn committed_repl_insert_finishes_its_request_row() {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        assert!(
+            run_repl_input(
+                repository.as_ref(),
+                Some(&mut transactions),
+                &mut session,
+                INSERT_LONDON,
+            )
+            .is_ok(),
+            "the REPL insert commits"
+        );
+        let state = transactions.state.as_ref().expect("runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(running.is_empty(), "a committed REPL insert leaves no running request");
+    }
+
+    #[test]
+    fn sys_dispatch_observes_request_row_already_running() {
+        let (directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        FIRST_SYS_DISPATCH_RUNNING.with(|first| first.set(None));
+        std::fs::write(directory.path().join("probe.bin"), b"probe").expect("probe file");
+        let input = format!(
+            "sys.blob.capture_file({:?}, \"probe.bin\", 65536)",
+            directory.path().to_string_lossy().as_ref()
+        );
+        run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            &input,
+        )
+        .expect("the blob capture succeeds");
+        let running_at_first_dispatch = FIRST_SYS_DISPATCH_RUNNING.with(std::cell::Cell::get);
+        assert_eq!(
+            running_at_first_dispatch,
+            Some(1),
+            "the request row is reserved before the first sys binding runs"
+        );
+    }
+
+    /// Runs an insert whose commit fails at `point` and asserts the uncertain
+    /// diagnostic and the still-running request row, then that fenced recovery
+    /// settles it without proving a rollback.
+    fn assert_commit_fault_reports_uncertain(point: FaultPoint) {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        transactions.faults = Arc::new(FailAt(point));
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            INSERT_LONDON,
+        )
+        .err()
+        .unwrap_or_else(|| panic!("{point:?}: the injected fault fails the REPL request"));
+        assert_eq!(failure.code, "ORNA-REPL-EFFECT-UNCERTAIN", "{point:?}");
+
+        let state = transactions.state.as_ref().expect("runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert_eq!(
+            running.len(),
+            1,
+            "{point:?}: the failed commit leaves its own row running"
+        );
+        let row = &running[0];
+        let lost = transactions
+            .runtime
+            .block_on(state.request_owner(row.identity, row.fingerprint))
+            .expect("request owner")
+            .expect("the running row has an owner");
+        let fence = transactions
+            .runtime
+            .block_on(state.recover_abandoned(lost.owner_id, [0x52; 16]))
+            .expect("fence the abandoned writer");
+        let rollback = TerminalOutcome::new(b"orna.repl.rollback.v1".to_vec()).expect("outcome");
+        let uncertain = TerminalOutcome::new(b"orna.repl.uncertain.v1".to_vec()).expect("outcome");
+        let recovered = transactions
+            .runtime
+            .block_on(state.recover_running_request_with_outcomes(
+                row.identity,
+                row.fingerprint,
+                lost,
+                fence,
+                rollback,
+                uncertain,
+            ))
+            .expect("recover the running request");
+        assert_ne!(
+            recovered.disposition,
+            RecoveryDisposition::RollbackProven,
+            "{point:?}: a REPL activation declares ExternalPossible effects, so a rollback is never proven"
+        );
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain,
+            "{point:?}"
+        );
+        let after = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests after recovery");
+        assert!(
+            after.is_empty(),
+            "{point:?}: recovery settles the fenced request row"
+        );
+    }
+
+    #[test]
+    fn repl_commit_fault_reports_uncertain_and_keeps_its_request_row_running() {
+        for point in [
+            FaultPoint::BeforeTableWrite,
+            FaultPoint::AfterTableWrite,
+            FaultPoint::BeforeTerminalClaim,
+            FaultPoint::AfterTerminalClaim,
+        ] {
+            assert_commit_fault_reports_uncertain(point);
+        }
+    }
+
+    #[test]
+    fn repl_pure_evaluation_failure_keeps_its_evaluator_code() {
+        let (_directory, repository, _relation) =
+            format3_repository_for_table(MUSIC_SOURCE, "Music");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            "1 / 0",
+        )
+        .err()
+        .expect("the division by zero fails");
+        assert_eq!(
+            failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
+            "a failure with no external effect keeps the evaluator code"
+        );
+    }
+
+    #[test]
+    fn repl_effect_uncertain_failure_keeps_the_evaluation_cause() {
+        let failure = repl_evaluation_failure(ReplEvaluationFailure {
+            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+            external_effects_possible: true,
+        });
+        assert_eq!(failure.code, REPL_EFFECT_UNCERTAIN);
+        let detail = failure
+            .detail
+            .expect("an uncertain outcome carries its cause in the detail");
+        assert_eq!(detail.code, REPL_EFFECT_UNCERTAIN);
+        assert!(
+            detail.message.contains("ORNA-EVAL-DIVIDE-BY-ZERO"),
+            "the detail names the evaluation cause: {}",
+            detail.message
+        );
+    }
+
+    #[test]
+    fn repl_effect_free_failure_keeps_its_own_code_without_detail() {
+        let failure = repl_evaluation_failure(ReplEvaluationFailure {
+            error: ApplicationError::Evaluation("ORNA-EVAL-DIVIDE-BY-ZERO".to_owned()),
+            external_effects_possible: false,
+        });
+        assert_eq!(failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO");
+        assert!(failure.detail.is_none());
+    }
+
+    #[test]
+    fn repl_effectful_failure_before_any_external_binding_leaves_no_running_row() {
+        // `n` is an Int, so `1 / 0` type-checks and the insert stages as an
+        // effectful activation that fails during evaluation, before any binding.
+        let (_directory, repository, _relation) =
+            format3_repository_for_table("pub table Counter(id: Str) { n: Int, }\n", "Counter");
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            r#"main.Counter.insert({ id: "zero", n: 1 / 0 })"#,
+        )
+        .err()
+        .expect("the division by zero fails before any write");
+        assert_ne!(
+            failure.code, "ORNA-REPL-EFFECT-UNCERTAIN",
+            "no external binding ran, so the failure is not uncertain"
+        );
+        let state = transactions
+            .state
+            .as_ref()
+            .expect("the effectful input opened the runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(
+            running.is_empty(),
+            "a failure before any external effect cancels its reserved row"
+        );
     }
 }

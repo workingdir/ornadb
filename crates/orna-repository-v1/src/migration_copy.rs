@@ -247,6 +247,10 @@ pub fn prepare_format3_migration(
     if destination == source_root || destination.starts_with(&source_root) {
         return Err(RepositoryError::InvalidSelector);
     }
+    if path_exists(&quarantine_for(&destination)?)? {
+        // A pending abort owns the reserved quarantine name; finish it first.
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
     if path_exists(&destination)? {
         return recover_prepared_copy(source, &destination, continuity, annotation_defaults);
     }
@@ -269,17 +273,7 @@ pub fn prepare_format3_migration(
         let parent = destination
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?;
-        crate::init::publish_directory_noreplace(parent, &staging, &destination).map_err(
-            |error| match error {
-                crate::RepositoryInitError::MetadataChanged => {
-                    RepositoryError::PublicationRecoveryConflict
-                }
-                crate::RepositoryInitError::PlatformUnsupported => {
-                    RepositoryError::PlatformUnsupported
-                }
-                _ => RepositoryError::LocalStateUnavailable,
-            },
-        )?;
+        publish_copy_noreplace(parent, &staging, &destination)?;
         copy.destination = destination;
         Ok(copy)
     })();
@@ -287,6 +281,180 @@ pub fn prepare_format3_migration(
         let _ = fs::remove_dir_all(&staging);
     }
     result
+}
+
+/// What [`discard_prepared_format3_migration`] found at the destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// The prepared copy, or the quarantine an interrupted discard left behind,
+    /// was removed.
+    Discarded,
+    /// Neither the destination nor its quarantine exists; nothing changed.
+    NothingToDiscard,
+}
+
+/// The reserved sibling a prepared copy is renamed to before it is removed.
+///
+/// The name depends only on the destination's final component, so a discard
+/// interrupted after the rename finds the same quarantine again.
+pub fn discard_quarantine_path(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    quarantine_for(&canonical_destination(destination)?)
+}
+
+fn quarantine_for(destination: &Path) -> Result<PathBuf, RepositoryError> {
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    let name = destination
+        .file_name()
+        .ok_or(RepositoryError::InvalidSelector)?;
+    let mut hash = Sha256::new();
+    hash.update(b"orna.migration-abort-quarantine.v1\0");
+    hash.update(name.as_encoded_bytes());
+    let digest: [u8; 32] = hash.finalize().into();
+    let suffix: String = digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(parent.join(format!(".orna-migration-abort-{suffix}")))
+}
+
+/// Discards a prepared format-3 migration copy at `destination`, leaving the
+/// source worktree and its snapshot untouched.
+///
+/// The destination must be the disposable copy this module prepared from
+/// `source`: a worktree root of its own that still holds the prepared journal
+/// and the working tree that journal recorded. Anything else is refused before
+/// a byte is removed, so a directory the operator owns is never a discard
+/// target.
+///
+/// Removal survives a crash at every step. A verified copy is first renamed to
+/// its quarantine in one atomic step, which is the commit point: from then on
+/// `destination` is absent and only the quarantine's removal remains. Running
+/// the discard again finishes an interrupted removal, and reports
+/// [`DiscardOutcome::NothingToDiscard`] once nothing is left.
+pub fn discard_prepared_format3_migration(
+    source: &Repository,
+    destination: &Path,
+) -> Result<DiscardOutcome, RepositoryError> {
+    let destination = canonical_destination(destination)?;
+    let source_root = source
+        .worktree()
+        .canonicalize()
+        .map_err(|_| RepositoryError::NotAWorktree)?;
+    let quarantine = quarantine_for(&destination)?;
+    if destination == source_root
+        || destination.starts_with(&source_root)
+        || source_root.starts_with(&destination)
+        || quarantine == source_root
+        || source_root.starts_with(&quarantine)
+    {
+        return Err(RepositoryError::InvalidSelector);
+    }
+    let parent = destination
+        .parent()
+        .ok_or(RepositoryError::LocalStateUnavailable)?;
+    match (path_exists(&destination)?, path_exists(&quarantine)?) {
+        (false, false) => {
+            sync_directory(parent)?;
+            Ok(DiscardOutcome::NothingToDiscard)
+        }
+        (true, true) => Err(RepositoryError::PublicationRecoveryConflict),
+        (true, false) => {
+            require_directory(&destination)?;
+            let journal =
+                copy_journal(&destination)?.ok_or(RepositoryError::PublicationRecoveryConflict)?;
+            let (continuity, annotation_defaults) = migration_coordinates(&journal)?;
+            recover_prepared_copy(source, &destination, continuity, annotation_defaults)?;
+            publish_copy_noreplace(parent, &destination, &quarantine)?;
+            remove_quarantined_copy(parent, &quarantine)?;
+            Ok(DiscardOutcome::Discarded)
+        }
+        (false, true) => {
+            // The rename that created this quarantine validated the copy and is
+            // the commit point. The quarantine is not re-validated: a source
+            // changed since then must not strand the removal.
+            require_directory(&quarantine)?;
+            remove_quarantined_copy(parent, &quarantine)?;
+            Ok(DiscardOutcome::Discarded)
+        }
+    }
+}
+
+/// Installs `staging` as `destination` without replacing anything there. A
+/// concurrent occupant of `destination` is a recovery conflict.
+fn publish_copy_noreplace(
+    parent: &Path,
+    staging: &Path,
+    destination: &Path,
+) -> Result<(), RepositoryError> {
+    crate::init::publish_directory_noreplace(parent, staging, destination).map_err(|error| {
+        match error {
+            crate::RepositoryInitError::MetadataChanged => {
+                RepositoryError::PublicationRecoveryConflict
+            }
+            crate::RepositoryInitError::PlatformUnsupported => RepositoryError::PlatformUnsupported,
+            _ => RepositoryError::LocalStateUnavailable,
+        }
+    })
+}
+
+/// Reads the journal of a copy that is its own repository. A path with no Git
+/// metadata has no journal. So does a repository without a runtime directory:
+/// that directory is not created here, because opening the journal would.
+fn copy_journal(copy: &Path) -> Result<Option<PublicationJournal>, RepositoryError> {
+    let Some(repository) = owned_copy_repository(copy)? else {
+        return Ok(None);
+    };
+    if !repository.runtime_paths().root().is_dir() {
+        return Ok(None);
+    }
+    repository.read_publication_journal()
+}
+
+fn migration_coordinates(
+    journal: &PublicationJournal,
+) -> Result<(MigrationContinuityRecord, MigrationAnnotationDefaults), RepositoryError> {
+    let continuity = journal
+        .migration_continuity()
+        .cloned()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    let annotation_defaults = journal
+        .migration_annotation_defaults()
+        .ok_or(RepositoryError::PublicationRecoveryConflict)?;
+    Ok((continuity, annotation_defaults))
+}
+
+fn require_directory(path: &Path) -> Result<(), RepositoryError> {
+    let metadata =
+        fs::symlink_metadata(path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(())
+}
+
+/// Opens `path` as a Git worktree of its own, or returns `None` when it has no
+/// Git metadata. Discovery walks up to any enclosing repository, so a worktree
+/// that is not `path` itself is refused rather than mistaken for the copy.
+fn owned_copy_repository(path: &Path) -> Result<Option<Repository>, RepositoryError> {
+    if !path_exists(&path.join(".git"))? {
+        return Ok(None);
+    }
+    let repository = Repository::discover(path)?;
+    if repository.worktree().canonicalize().ok().as_deref() != Some(path) {
+        return Err(RepositoryError::PublicationRecoveryConflict);
+    }
+    Ok(Some(repository))
+}
+
+/// Removes a quarantined copy and flushes the removal to `parent`. Only a
+/// discard creates the quarantine name, so a directory there is a copy the
+/// discard already committed to removing. An interrupted removal is finished
+/// by running the discard again.
+fn remove_quarantined_copy(parent: &Path, copy: &Path) -> Result<(), RepositoryError> {
+    fs::remove_dir_all(copy).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    sync_directory(parent)
 }
 
 fn prepare_format3_migration_in(
@@ -297,7 +465,7 @@ fn prepare_format3_migration_in(
 ) -> Result<MigratedCopy, RepositoryError> {
     let context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if context.supports_writes() {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -364,6 +532,14 @@ fn prepare_format3_migration_in(
         ],
         &candidate_message(source_format, annotation_defaults, &continuity),
     )?;
+    let runtime_intent_id = migration_runtime_intent_id(
+        source_index_generation
+            .tree()
+            .ok_or(RepositoryError::InvalidFormatMigration)?,
+        &source_working_tree_identity,
+        &record,
+        &continuity,
+    );
     let candidate_journal = PublicationJournal::new_with_runtime_intent(
         source_commit.clone(),
         candidate.commit().clone(),
@@ -371,7 +547,7 @@ fn prepare_format3_migration_in(
             .tree()
             .cloned()
             .ok_or(RepositoryError::InvalidFormatMigration)?,
-        fresh_runtime_intent_id()?,
+        runtime_intent_id,
         vec![
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(".orna/database.orna")?,
@@ -380,7 +556,7 @@ fn prepare_format3_migration_in(
             ),
             PublicationJournalEntry::new(
                 crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
-                Some(legacy_format_bytes(source_format)),
+                Some(committed_legacy_format(&context)?),
                 None,
             ),
             PublicationJournalEntry::new(
@@ -417,9 +593,7 @@ fn require_legacy_worktree_metadata_matches(
     let format_path = source.worktree().join(LEGACY_FORMAT_PATH);
     let worktree_format =
         read_regular_metadata_file(&format_path)?.ok_or(RepositoryError::InvalidFormatMigration)?;
-    let committed_format = context
-        .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
-        .map_err(|_| RepositoryError::InvalidFormatMigration)?;
+    let committed_format = committed_legacy_format(context)?;
     if worktree_format != committed_format {
         return Err(RepositoryError::InvalidFormatMigration);
     }
@@ -511,7 +685,6 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     let zero = "0".repeat(object_id.len());
     let mut command = git_command(root);
     command.args(["update-ref", "--no-deref", &reference, &object_id, &zero]);
-    crate::scrub_git_routing_environment(&mut command);
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -521,7 +694,6 @@ fn pin_migration_index_blob(root: &Path, object_id: &str) -> Result<(), Reposito
     }
     let mut verify = git_command(root);
     verify.args(["rev-parse", "--verify", &reference]);
-    crate::scrub_git_routing_environment(&mut verify);
     let output = verify
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -537,7 +709,6 @@ fn pin_migration_index(repository: &Repository, tree: &str) -> Result<(), Reposi
     let zero = "0".repeat(tree.len());
     let mut command = git_command(repository.worktree());
     command.args(["update-ref", "--no-deref", &reference, tree, &zero]);
-    crate::scrub_git_routing_environment(&mut command);
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -552,7 +723,6 @@ fn require_migration_index_pin(repository: &Repository, tree: &str) -> Result<()
     let reference = migration_index_ref(tree);
     let mut command = git_command(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
-    crate::scrub_git_routing_environment(&mut command);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -579,7 +749,6 @@ fn pin_migration_candidate(
         commit.as_str(),
         &zero,
     ]);
-    crate::scrub_git_routing_environment(&mut command);
     if command
         .status()
         .map_err(|_| RepositoryError::GitUnavailable)?
@@ -597,7 +766,6 @@ fn require_migration_candidate_pin(
     let reference = migration_candidate_ref(commit);
     let mut command = git_command(repository.worktree());
     command.args(["rev-parse", "--verify", &reference]);
-    crate::scrub_git_routing_environment(&mut command);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -615,7 +783,7 @@ fn recover_prepared_copy(
 ) -> Result<MigratedCopy, RepositoryError> {
     let source_context = source
         .open_format_context()
-        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+        .map_err(RepositoryError::FormatContext)?;
     if source_context.supports_writes()
         || !matches!(
             source_context.repository_format(),
@@ -686,7 +854,7 @@ fn recover_prepared_copy(
         ),
         PublicationJournalEntry::new(
             crate::ManagedPath::new(LEGACY_FORMAT_PATH)?,
-            Some(legacy_format_bytes(source_format)),
+            Some(committed_legacy_format(&source_context)?),
             None,
         ),
         PublicationJournalEntry::new(
@@ -761,7 +929,6 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
     ] {
         let mut command = git_command(root);
         command.args(["config", "--local", key, value]);
-        crate::scrub_git_routing_environment(&mut command);
         let output = command
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -772,9 +939,13 @@ fn configure_migration_commit_identity(root: &Path) -> Result<(), RepositoryErro
     Ok(())
 }
 
-/// The recorded `format.orna` bytes of one legacy source.
-fn legacy_format_bytes(format: RepositoryFormat) -> Vec<u8> {
-    format!("format {}\n", format.number()).into_bytes()
+/// The committed `format.orna` bytes of one legacy source, exactly as its
+/// writer recorded them. The journal names these bytes as the file the
+/// migration removes, so they are never rebuilt from the format number.
+fn committed_legacy_format(context: &RepositoryFormatContext) -> Result<Vec<u8>, RepositoryError> {
+    context
+        .read_committed_file(LEGACY_FORMAT_PATH, FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        .map_err(|_| RepositoryError::InvalidFormatMigration)
 }
 
 /// Names the migration transition in the candidate's own message.
@@ -855,7 +1026,6 @@ fn clone_source_graph(source_root: &Path, destination: &Path) -> Result<PathBuf,
         .args(["clone", "--no-local", "--quiet", "--"])
         .arg(&canonical_source)
         .arg(&root);
-    crate::scrub_git_routing_environment(&mut command);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -912,7 +1082,6 @@ fn copy_submodule_admin(source: &Path, destination: &Path) -> Result<(), Reposit
 fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
     let mut command = git_command(root);
     command.args(["rev-parse", "--path-format=absolute", "--git-path", name]);
-    crate::scrub_git_routing_environment(&mut command);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -929,7 +1098,6 @@ fn git_path(root: &Path, name: &str) -> Result<PathBuf, RepositoryError> {
 fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryError> {
     let mut command = git_command(source);
     command.args(["ls-files", "--stage", "-z"]);
-    crate::scrub_git_routing_environment(&mut command);
     let output = command
         .output()
         .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -963,7 +1131,6 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
             .env("GIT_NO_LAZY_FETCH", "1")
             .args(["cat-file", "-e"])
             .arg(format!("{object_id}^{{blob}}"));
-        crate::scrub_git_routing_environment(&mut exists);
         if exists
             .stderr(Stdio::null())
             .status()
@@ -978,14 +1145,12 @@ fn copy_index_blobs(source: &Path, destination: &Path) -> Result<(), RepositoryE
         read.env("GIT_NO_LAZY_FETCH", "1")
             .args(["cat-file", "blob", object_id])
             .stdout(Stdio::piped());
-        crate::scrub_git_routing_environment(&mut read);
         let mut read = read.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
         let mut write = git_command(destination);
         write
             .args(["hash-object", "-w", "--stdin"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
-        crate::scrub_git_routing_environment(&mut write);
         let mut write = write.spawn().map_err(|_| RepositoryError::GitUnavailable)?;
         std::io::copy(
             &mut read
@@ -1161,12 +1326,51 @@ fn require_index_tree(generation: &IndexGeneration) -> Result<(), RepositoryErro
     Ok(())
 }
 
-fn fresh_runtime_intent_id() -> Result<[u8; 16], RepositoryError> {
-    let uuid = crate::Uuid::new_v4().into_bytes();
-    if uuid == [0; 16] {
-        return Err(RepositoryError::InvalidFormatMigration);
+/// Names the migration's inputs, so a retried preparation of the same source
+/// carries the same runtime intent instead of a fresh random one. The candidate
+/// commit is excluded: the intent identifies the migration, not one written commit.
+/// The source's working tree identity is included: two sources at the same
+/// commit and index that differ only in unstaged or untracked work are different
+/// migrations.
+fn migration_runtime_intent_id(
+    index_tree: &crate::IndexTreeRef,
+    source_working_tree_identity: &[u8; 32],
+    record: &[u8],
+    continuity: &MigrationContinuityRecord,
+) -> [u8; 16] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.migration-runtime-intent.v2\0");
+    hash_length_prefixed(&mut hash, index_tree.as_str().as_bytes());
+    hash.update(source_working_tree_identity);
+    hash_length_prefixed(&mut hash, record);
+    hash.update((continuity.predecessors().len() as u64).to_be_bytes());
+    for predecessor in continuity.predecessors() {
+        hash.update(predecessor.legacy_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.legacy_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.legacy_partition_identity());
+        hash.update(predecessor.format3_consumer_identity());
+        hash_length_prefixed(&mut hash, predecessor.format3_source_identity());
+        hash_optional_length_prefixed(&mut hash, predecessor.format3_partition_identity());
     }
-    Ok(uuid)
+    let digest: [u8; 32] = hash.finalize().into();
+    let mut intent = [0; 16];
+    intent.copy_from_slice(&digest[..16]);
+    intent
+}
+
+fn hash_length_prefixed(hash: &mut Sha256, bytes: &[u8]) {
+    hash.update((bytes.len() as u64).to_be_bytes());
+    hash.update(bytes);
+}
+
+fn hash_optional_length_prefixed(hash: &mut Sha256, bytes: Option<&[u8]>) {
+    match bytes {
+        Some(bytes) => {
+            hash.update([1]);
+            hash_length_prefixed(hash, bytes);
+        }
+        None => hash.update([0]),
+    }
 }
 
 /// Settles the copy's index, repairing the stat entries its own checkout left
@@ -1174,7 +1378,6 @@ fn fresh_runtime_intent_id() -> Result<[u8; 16], RepositoryError> {
 fn settle_index(root: &Path) -> Result<(), RepositoryError> {
     let mut command = git_command(root);
     command.args(["update-index", "--refresh", "--quiet"]);
-    crate::scrub_git_routing_environment(&mut command);
     // A refresh that reports `needs update` still repaired every stat entry it
     // could, which is the whole purpose here; only a missing Git or a killed
     // process is fatal.
@@ -1219,6 +1422,7 @@ fn dependency_entries(
     repository: &Repository,
     commit: &GitCommitRef,
 ) -> Result<usize, RepositoryError> {
+    repository.objects().check_expansion(commit.as_str(), "")?;
     let mut command = repository.observer_command();
     command.args(["ls-tree", "-r", "-z", commit.as_str()]);
     let output = repository.run(command)?;
@@ -1324,7 +1528,6 @@ fn hash_nested_git_state(root: &Path, hash: &mut Sha256) -> Result<(), Repositor
     hash.update(b"nested-git-state.v1\0");
     let mut head = git_command(root);
     head.args(["rev-parse", "--verify", "HEAD"]);
-    crate::scrub_git_routing_environment(&mut head);
     let output = head.output().map_err(|_| RepositoryError::GitUnavailable)?;
     if output.status.success() {
         let object = crate::trim_output(&output.stdout);
@@ -1444,10 +1647,17 @@ fn migration_record(
     .into_bytes()
 }
 
-/// A Git command bound to one directory, before routing is scrubbed.
+/// A Git command bound to one directory, with inherited routing scrubbed and
+/// repository discovery stopped at the directory's parent. Every call site in
+/// this module names a repository root (the discovered worktree, a migration
+/// copy, a dependency clone, or an index source/destination). The bind is
+/// unconditional so a directory that is not a root cannot reach an enclosing
+/// repository's refs or objects.
 fn git_command(directory: &Path) -> Command {
     let mut command = Command::new("git");
     command.current_dir(directory);
+    crate::scrub_git_routing_environment(&mut command);
+    crate::bind_git_ceiling_above(&mut command, directory);
     command
 }
 
@@ -1458,4 +1668,81 @@ fn hex(bytes: &[u8]) -> String {
         text.push(char::from_digit(u32::from(byte & 0x0f), 16).unwrap_or('0'));
     }
     text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{migration_index_ref, pin_migration_index, require_migration_index_pin};
+    use crate::Repository;
+    use std::process::Command;
+
+    /// Git's well-known empty tree; update-ref accepts it without storage.
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    fn git(directory: &std::path::Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    #[test]
+    fn migration_index_pins_do_not_fall_through_a_corrupt_child_head() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        let child = parent.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        git(&child, &["init", "-q"]);
+        let repository = Repository::discover(&child).unwrap();
+        pin_migration_index(&repository, EMPTY_TREE).unwrap();
+        require_migration_index_pin(&repository, EMPTY_TREE).unwrap();
+
+        // The enclosing repository carries a pin that the child must not see.
+        git(
+            parent.path(),
+            &["update-ref", &migration_index_ref(EMPTY_TREE), EMPTY_TREE],
+        );
+        std::fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(require_migration_index_pin(&repository, EMPTY_TREE).is_err());
+        assert!(pin_migration_index(&repository, EMPTY_TREE).is_err());
+    }
+
+    #[test]
+    fn copy_index_blobs_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let parent = tempfile::TempDir::new().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(parent.path());
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        git(&destination, &["init", "-q"]);
+        assert!(super::copy_index_blobs(&child, &destination).is_err());
+    }
+
+    #[test]
+    fn migration_git_commands_do_not_reach_an_enclosing_repository_from_a_plain_subdirectory() {
+        let parent = tempfile::TempDir::new().unwrap();
+        git(parent.path(), &["init", "-q"]);
+        git(
+            parent.path(),
+            &["update-ref", &migration_index_ref(EMPTY_TREE), EMPTY_TREE],
+        );
+        let plain = parent.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+
+        // Without the unconditional bind, discovery would read the parent's refs.
+        let pin = super::git_command(&plain)
+            .args(["rev-parse", "--verify", &migration_index_ref(EMPTY_TREE)])
+            .output()
+            .unwrap();
+        assert!(!pin.status.success());
+        assert!(super::git_path(&plain, "HEAD").is_err());
+
+        let destination = parent.path().join("destination");
+        std::fs::create_dir(&destination).unwrap();
+        git(&destination, &["init", "-q"]);
+        assert!(super::copy_index_blobs(&plain, &destination).is_err());
+    }
 }

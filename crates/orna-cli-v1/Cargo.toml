@@ -6,7 +6,7 @@ rust-version = "1.95"
 license = "Apache-2.0"
 
 [[bin]]
-name = "orna-cli-v1"
+name = "orna"
 path = "src/main.rs"
 
 [features]
@@ -22,10 +22,8 @@ module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 
 [dependencies]
-base64 = { workspace = true }
 sha2 = "0.10"
 orna-application-v1 = { path = "../orna-application-v1" }
-orna-client = { path = "../orna-client" }
 orna-conformance-v1 = { path = "../orna-conformance-v1" }
 orna-evaluator-v1 = { path = "../orna-evaluator-v1" }
 orna-foundation-v1 = { path = "../orna-foundation-v1" }
@@ -52,9 +50,10 @@ required-features = ["crash-barriers"]
 
 [dev-dependencies]
 bytes = "1.11.1"
+libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
-tungstenite = { version = "0.26.2", features = ["handshake"] }
+orna-application-v1 = { path = "../orna-application-v1", features = ["test-support"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"
-rustix = { version = "0.38.44", features = ["fs"] }
+rustix = { version = "0.38.44", features = ["fs", "process"] }

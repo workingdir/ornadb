@@ -105,3 +105,6 @@ Client operations are `subscribe`, `unsubscribe`, `resync`, `event`, `eval`, `wa
 
 A production server-profile claim requires independent client/server interoperability, loss/reorder/reconnect simulation, malformed-input fuzzing, bounded slow-client tests and equality with the reference vectors. These are evidence obligations for an implementation, not unresolved semantics.
 
+## Minimal interfaces and large values
+
+The [minimal devtools profile](#source-apps) is a delivery slice, not a replacement of the live system. Static results and manual refresh do not imply live queries. Large Blob contents are not substituted with unregistered reference tags in the protocol; render safe metadata and use an explicitly authorised byte response. Local drafts and server revisions remain distinct, and a captured value does not become a reactive slot.

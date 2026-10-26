@@ -85,6 +85,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.66.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,6 +115,21 @@ dependencies = [
  "syn 2.0.119",
  "which",
 ]
+
+[[package]]
+name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec",
+]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bitflags"
@@ -233,7 +257,7 @@ checksum = "157a8ba7b480713b56f4c09fd13fc3e0a22a5dfab8097ba61cbc5feef950788a"
 dependencies = [
  "glob",
  "libc",
- "libloading 0.8.9",
+ "libloading",
 ]
 
 [[package]]
@@ -384,12 +408,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "data-encoding"
-version = "2.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
-
-[[package]]
 name = "der"
 version = "0.7.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -475,6 +493,17 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.16.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -725,25 +754,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
-name = "h2"
-version = "0.4.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef8e5e5a340588f4452631496976cf8636d4a7ecf600239fdc27615d2530bc16"
-dependencies = [
- "atomic-waker",
- "bytes",
- "fnv",
- "futures-core",
- "futures-sink",
- "http",
- "indexmap",
- "slab",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -834,7 +844,6 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "httparse",
@@ -858,7 +867,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1112,16 +1121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libloading"
-version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
-dependencies = [
- "cfg-if",
- "windows-link",
-]
-
-[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1167,6 +1166,12 @@ dependencies = [
  "tracing",
  "zerocopy 0.7.35",
 ]
+
+[[package]]
+name = "linked-hash-map"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0717cef1bc8b636c6e1c1bbdefc09e6322da8a9321966e8928ef80d20f7f770f"
 
 [[package]]
 name = "linux-raw-sys"
@@ -1401,7 +1406,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "num-bigint 0.4.8",
- "orna-client",
+ "orna-application-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-live-v1",
@@ -1417,23 +1422,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-artifact"
-version = "1.0.0"
-dependencies = [
- "orna-core",
-]
-
-[[package]]
 name = "orna-cli-v1"
 version = "0.1.0"
 dependencies = [
- "base64",
  "bytes",
  "fuser",
  "getrandom 0.3.4",
  "libc",
+ "libsql",
  "orna-application-v1",
- "orna-client",
  "orna-conformance-v1",
  "orna-evaluator-v1",
  "orna-foundation-v1",
@@ -1455,28 +1452,6 @@ dependencies = [
  "sha2 0.10.9",
  "tempfile",
  "tokio",
- "tungstenite",
-]
-
-[[package]]
-name = "orna-client"
-version = "1.0.0"
-dependencies = [
- "futures-util",
- "libloading 0.9.0",
- "orna-artifact",
- "orna-core",
- "orna-foundation-v1",
- "orna-protocol",
- "orna-protocol-v1",
- "orna-runtime-tty",
- "orna-standard",
- "reqwest",
- "serde_json",
- "sha2 0.11.0",
- "stacker",
- "tokio",
- "tokio-tungstenite",
 ]
 
 [[package]]
@@ -1528,9 +1503,9 @@ dependencies = [
 name = "orna-evaluator-v1"
 version = "1.0.0"
 dependencies = [
- "base64",
  "getrandom 0.3.4",
  "icu_properties",
+ "libm",
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
@@ -1538,7 +1513,7 @@ dependencies = [
  "orna-project-v1",
  "orna-repository-v1",
  "orna-semantic-v1",
- "orna-standard",
+ "orna-standard-sources",
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
@@ -1562,14 +1537,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-execution-v1"
-version = "1.0.0"
-dependencies = [
- "orna-runtime-v1",
- "orna-stream-v1",
-]
-
-[[package]]
 name = "orna-foundation-v1"
 version = "1.0.0"
 dependencies = [
@@ -1589,12 +1556,14 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "orna-foundation-v1",
+ "orna-live-v1",
  "orna-protocol-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-security-v1",
  "orna-serving-v1",
  "orna-stream-v1",
+ "orna-value-v1",
 ]
 
 [[package]]
@@ -1608,7 +1577,6 @@ dependencies = [
  "orna-semantic-v1",
  "orna-standard-sources",
  "orna-syntax-v1",
- "serde",
  "serde_json",
  "tempfile",
  "url",
@@ -1629,15 +1597,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-protocol"
-version = "1.0.0"
-dependencies = [
- "orna-core",
- "orna-standard",
- "proptest",
-]
-
-[[package]]
 name = "orna-protocol-v1"
 version = "1.0.0"
 dependencies = [
@@ -1652,7 +1611,6 @@ name = "orna-repository-v1"
 version = "1.0.0"
 dependencies = [
  "bytes",
- "ed25519-dalek",
  "fs2",
  "libc",
  "num-bigint 0.4.8",
@@ -1668,18 +1626,12 @@ dependencies = [
  "orna-value-v1",
  "parquet",
  "rustix 0.38.44",
+ "serde_json",
  "sha1",
  "sha2 0.11.0",
  "tempfile",
  "tokio",
  "uuid",
-]
-
-[[package]]
-name = "orna-runtime-tty"
-version = "1.0.0"
-dependencies = [
- "orna-core",
 ]
 
 [[package]]
@@ -1689,7 +1641,6 @@ dependencies = [
  "ed25519-dalek",
  "libsql",
  "num-bigint 0.4.8",
- "orna-core",
  "orna-evaluator-v1",
  "orna-foundation-v1",
  "orna-repository-v1",
@@ -1697,6 +1648,7 @@ dependencies = [
  "orna-syntax-v1",
  "orna-sys-v1",
  "orna-value-v1",
+ "serde_json",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -1743,17 +1695,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "orna-standard"
-version = "1.0.0"
-dependencies = [
- "orna-artifact",
- "orna-core",
- "orna-semantic-v1",
- "orna-standard-sources",
- "orna-syntax-v1",
-]
-
-[[package]]
 name = "orna-standard-sources"
 version = "1.0.0"
 
@@ -1787,8 +1728,8 @@ name = "orna-syntax-v1"
 version = "1.0.0"
 dependencies = [
  "orna-foundation-v1",
- "proptest",
  "serde_json",
+ "syntect",
  "unicode-ident",
  "unicode-normalization",
 ]
@@ -1801,6 +1742,7 @@ version = "1.0.0"
 name = "orna-sys-v1"
 version = "1.1.0"
 dependencies = [
+ "orna-foundation-v1",
  "orna-security-v1",
  "orna-syntax-v1",
  "orna-sys-macros",
@@ -2248,7 +2190,6 @@ dependencies = [
  "futures-channel",
  "futures-core",
  "futures-util",
- "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -2268,16 +2209,14 @@ dependencies = [
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
- "tokio-util",
  "tower",
  "tower-http",
  "tower-service",
  "url",
  "wasm-bindgen",
  "wasm-bindgen-futures",
- "wasm-streams",
  "web-sys",
- "webpki-roots 1.0.9",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -2387,6 +2326,15 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "same-file"
+version = "1.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
+dependencies = [
+ "winapi-util",
+]
 
 [[package]]
 name = "scopeguard"
@@ -2643,6 +2591,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "syntect"
+version = "5.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "656b45c05d95a5704399aeef6bd0ddec7b2b3531b7c9e900abbf7c4d2190c925"
+dependencies = [
+ "bincode",
+ "fancy-regex",
+ "flate2",
+ "fnv",
+ "once_cell",
+ "regex-syntax",
+ "serde",
+ "serde_derive",
+ "thiserror 2.0.20",
+ "walkdir",
+ "yaml-rust",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2767,36 +2734,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tokio-tungstenite"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a9daff607c6d2bf6c16fd681ccb7eecc83e4e2cdc1ca067ffaadfca5de7f084"
-dependencies = [
- "futures-util",
- "log",
- "rustls",
- "rustls-pki-types",
- "tokio",
- "tokio-rustls",
- "tungstenite",
- "webpki-roots 0.26.11",
-]
-
-[[package]]
-name = "tokio-util"
-version = "0.7.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
-dependencies = [
- "bytes",
- "futures-core",
- "futures-sink",
- "libc",
- "pin-project-lite",
- "tokio",
-]
-
-[[package]]
 name = "toml_datetime"
 version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2909,25 +2846,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
-name = "tungstenite"
-version = "0.26.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4793cb5e56680ecbb1d843515b23b6de9a75eb04b66643e256a396d43be33c13"
-dependencies = [
- "bytes",
- "data-encoding",
- "http",
- "httparse",
- "log",
- "rand 0.9.5",
- "rustls",
- "rustls-pki-types",
- "sha1",
- "thiserror 2.0.20",
- "utf-8",
-]
-
-[[package]]
 name = "twox-hash"
 version = "2.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2991,12 +2909,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "utf-8"
-version = "0.7.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
-
-[[package]]
 name = "utf8_iter"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3018,6 +2930,16 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "walkdir"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
+dependencies = [
+ "same-file",
+ "winapi-util",
+]
 
 [[package]]
 name = "want"
@@ -3100,19 +3022,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "wasm-streams"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15053d8d85c7eccdbefef60f06769760a563c7f0a9d6902a13d35c7800b0ad65"
-dependencies = [
- "futures-util",
- "js-sys",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
-]
-
-[[package]]
 name = "web-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3130,15 +3039,6 @@ checksum = "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.9",
 ]
 
 [[package]]
@@ -3183,6 +3083,15 @@ name = "winapi-i686-pc-windows-gnu"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac3b87c63620426dd9b991e5ce0329eff545bccbbb34f3be09ff6fb6ab51b7b6"
+
+[[package]]
+name = "winapi-util"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
+dependencies = [
+ "windows-sys 0.61.2",
+]
 
 [[package]]
 name = "winapi-x86_64-pc-windows-gnu"
@@ -3360,6 +3269,15 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "yaml-rust"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56c1936c4cc7a1c9ab21a1ebb602eb942ba868cbd44a99cb7cdc5892335e1c85"
+dependencies = [
+ "linked-hash-map",
+]
 
 [[package]]
 name = "yoke"

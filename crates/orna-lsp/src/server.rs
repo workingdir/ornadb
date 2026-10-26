@@ -1,46 +1,56 @@
 //! The LSP server loop and request dispatch.
 //!
-//! The server is synchronous and single-threaded. Compiler checks for one
-//! document are fast, so no worker pool is needed for the first version.
+//! The loop applies notifications in order and hands every request, with a
+//! snapshot of the open documents it arrived after, to worker threads
+//! (`crate::requests`). Requests read analyses cached per document version.
+//! Diagnostics run the project check on a separate worker
+//! (`crate::diagnostics`), so edits never wait for semantic analysis.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufReader};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
-use crate::analysis::{self, EditorParse as Parse};
+use crate::analysis;
+use crate::diagnostics::{self, DiagnosticsWorker, Publisher, Snapshot};
 use crate::documents::{Document, PositionMapper};
-use crate::{editor_ranges, inlay, semantic};
-use lsp_server::{Connection, ErrorCode, Message, Notification, Request, Response, ResponseError};
-use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
-use orna_repository_v1::Repository;
-use orna_semantic_v1::ModuleInput;
+use crate::names::{DeclaredKind, Role};
+use crate::project::{ProjectHome, ProjectLocator};
+use crate::rename::{self, ModuleEdits, Refusal};
+use crate::requests::RequestPool;
+use crate::views::{Documents, Views};
+use crate::workspace::{OpenDocument, Target, Workspace};
+use crate::{editor_ranges, hierarchy, inlay, semantic};
+use lsp_server::{
+    Connection, ErrorCode, Message, Notification, Request, RequestId, Response, ResponseError,
+};
 use lsp_types::{
-    CallHierarchyItem, CallHierarchyOptions, CallHierarchyServerCapability, CodeAction,
-    CodeActionKind, CodeActionOptions, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, CodeLens, CodeLensOptions, CodeLensParams, Command,
-    CompletionOptions, CompletionParams, CompletionResponse, Diagnostic, DiagnosticOptions,
-    DiagnosticServerCapabilities, DocumentDiagnosticParams, DocumentDiagnosticReport,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentLink, DocumentLinkOptions, DocumentLinkParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    FoldingRangeProviderCapability, FullDocumentDiagnosticReport, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
+    CallHierarchyOptions, CallHierarchyServerCapability, CodeAction, CodeActionKind,
+    CodeActionOptions, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
+    CodeLensOptions, CodeLensParams, CompletionOptions, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DocumentDiagnosticParams,
+    DocumentDiagnosticReport, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
+    DocumentHighlightParams, DocumentLink, DocumentLinkOptions, DocumentLinkParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, FoldingRangeProviderCapability, FullDocumentDiagnosticReport,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InlayHintOptions, InlayHintParams, InlayHintServerCapabilities, InlineValue,
     InlineValueOptions, InlineValueParams, InlineValueServerCapabilities,
     InlineValueVariableLookup, LinkedEditingRangeParams, LinkedEditingRangeServerCapabilities,
-    LinkedEditingRanges, Moniker, MonikerKind, MonikerParams, NumberOrString, OneOf, Position,
-    PositionEncodingKind, PrepareRenameResponse, PublishDiagnosticsParams, Range, ReferenceParams,
-    RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport, RenameOptions,
-    RenameParams, SelectionRangeParams, SelectionRangeProviderCapability, SemanticToken,
-    SemanticTokens, SemanticTokensDeltaParams, SemanticTokensFullOptions, SemanticTokensLegend,
-    SemanticTokensOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelpOptions,
-    TextDocumentContentChangeEvent, TextDocumentSyncCapability, TextDocumentSyncKind,
-    TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit, TypeHierarchyItem,
+    LinkedEditingRanges, MonikerParams, NumberOrString, OneOf, Position, PositionEncodingKind,
+    PrepareRenameResponse, Range, ReferenceParams, RelatedFullDocumentDiagnosticReport,
+    RelatedUnchangedDocumentDiagnosticReport, RenameOptions, RenameParams, SelectionRangeParams,
+    SelectionRangeProviderCapability, SemanticToken, SemanticTokens, SemanticTokensDeltaParams,
+    SemanticTokensFullOptions, SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensServerCapabilities, ServerCapabilities,
+    SignatureHelpOptions, TextDocumentContentChangeEvent, TextDocumentSyncCapability,
+    TextDocumentSyncKind, TextDocumentSyncOptions, TextDocumentSyncSaveOptions, TextEdit,
     TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
-    UnchangedDocumentDiagnosticReport, UniquenessLevel, Uri, WorkspaceEdit,
+    UnchangedDocumentDiagnosticReport, Uri, WorkspaceEdit,
 };
+use orna_project_v1::{ObjectIdentityManifest, ObjectIdentityRename, ObjectKind, ProjectLoader};
+use orna_repository_v1::{Repository, RepositoryFormat};
 
 /// Transport threads for the server's standard input and output streams.
 ///
@@ -122,12 +132,28 @@ struct PendingIdentityRename {
     applied_version: Option<i32>,
 }
 
-/// Shared state across requests and notifications.
-struct ServerState {
-    documents: HashMap<Uri, Document>,
-    semantic_tokens: HashMap<Uri, SemanticTokenSnapshot>,
-    next_semantic_token_result: u64,
-    pending_identity_renames: HashMap<Uri, Vec<Vec<PendingIdentityRename>>>,
+/// Identity renames returned to the client and not yet saved, per document.
+type PendingRenames = HashMap<Uri, Vec<Vec<PendingIdentityRename>>>;
+
+/// What requests read: the open documents when they arrived, and the caches
+/// every request shares. Each request runs on a worker thread with its own
+/// clone.
+#[derive(Clone, Default)]
+struct RequestContext {
+    documents: Arc<Documents>,
+    projects: Arc<ProjectLocator>,
+    views: Arc<Views>,
+    semantic_tokens: Arc<Mutex<SemanticTokenResults>>,
+    pending_identity_renames: Arc<Mutex<PendingRenames>>,
+    /// Sends `window/showMessage` to the client from request workers.
+    client: Option<Arc<dyn Fn(Message) + Send + Sync>>,
+}
+
+/// The last semantic tokens sent for each document, for delta requests.
+#[derive(Default)]
+struct SemanticTokenResults {
+    by_uri: HashMap<Uri, SemanticTokenSnapshot>,
+    next: u64,
 }
 
 struct SemanticTokenSnapshot {
@@ -135,24 +161,129 @@ struct SemanticTokenSnapshot {
     data: Vec<SemanticToken>,
 }
 
-impl ServerState {
-    fn new() -> Self {
-        Self {
-            pending_identity_renames: HashMap::new(),
-            documents: HashMap::new(),
-            semantic_tokens: HashMap::new(),
-            next_semantic_token_result: 0,
+impl RequestContext {
+    fn document(&self, uri: &Uri) -> Option<&Document> {
+        self.documents.get(uri).map(|open| &open.document)
+    }
+
+    /// Shows the client a warning the user must see, as `window/showMessage`.
+    fn show_warning(&self, message: &str) {
+        if let Some(client) = &self.client {
+            let params = lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::WARNING,
+                message: message.to_owned(),
+            };
+            client(Message::Notification(Notification {
+                method: "window/showMessage".to_owned(),
+                params: serde_json::to_value(params).unwrap_or_default(),
+            }));
         }
     }
 
-    fn document(&self, uri: &Uri) -> Option<&Document> {
-        self.documents.get(uri)
+    /// The open documents, for diagnostics.
+    fn snapshot(&self) -> Snapshot {
+        Arc::new(self.documents.values().cloned().collect())
     }
 
-    fn next_semantic_token_result_id(&mut self) -> String {
-        self.next_semantic_token_result += 1;
-        format!("orna-semantic-{}", self.next_semantic_token_result)
+    /// The workspace containing `uri`, its module, and the byte offset of
+    /// `position` in it.
+    fn locate(&self, uri: &Uri, position: Position) -> Option<(Arc<Workspace>, usize, usize)> {
+        let (workspace, module) = self.views.workspace(&self.documents, uri)?;
+        let byte = PositionMapper::new(workspace.file(module).text()).byte_offset(position);
+        Some((workspace, module, byte))
     }
+
+    /// Records the tokens sent for `uri` and returns their result id.
+    fn record_semantic_tokens(&self, uri: Uri, data: Vec<SemanticToken>) -> String {
+        let mut results = lock(&self.semantic_tokens);
+        results.next += 1;
+        let result_id = format!("orna-semantic-{}", results.next);
+        results.by_uri.insert(
+            uri,
+            SemanticTokenSnapshot {
+                result_id: result_id.clone(),
+                data,
+            },
+        );
+        result_id
+    }
+}
+
+/// The server loop's state: the request context it keeps current, and the
+/// workers that answer requests and publish diagnostics.
+struct ServerState {
+    context: RequestContext,
+    /// Publishes diagnostics; absent when no client is attached.
+    diagnostics: Option<DiagnosticsWorker>,
+    /// Answers requests; absent in tests, which call `dispatch` directly.
+    requests: Option<RequestPool<RequestContext>>,
+    /// Sends messages to the client; absent in tests.
+    client: Option<Arc<dyn Fn(Message) + Send + Sync>>,
+}
+
+impl ServerState {
+    fn new() -> Self {
+        Self {
+            context: RequestContext::default(),
+            diagnostics: None,
+            requests: None,
+            client: None,
+        }
+    }
+
+    /// Shows the client an error the user must see, as `window/showMessage`.
+    fn show_error(&self, message: &str) {
+        if let Some(client) = &self.client {
+            let params = lsp_types::ShowMessageParams {
+                typ: lsp_types::MessageType::ERROR,
+                message: message.to_owned(),
+            };
+            client(Message::Notification(Notification {
+                method: "window/showMessage".to_owned(),
+                params: serde_json::to_value(params).unwrap_or_default(),
+            }));
+        }
+    }
+
+    /// Opens or replaces one document version.
+    fn set_document(&mut self, document: Document, home: Option<ProjectHome>) {
+        Arc::make_mut(&mut self.context.documents).insert(
+            document.uri.clone(),
+            Arc::new(OpenDocument::new(document, home)),
+        );
+    }
+
+    /// Queues diagnostics for `uri` and whatever its project check changes.
+    fn schedule_diagnostics(&self, uri: &Uri, home: Option<ProjectHome>) {
+        if let Some(worker) = &self.diagnostics {
+            worker.schedule(self.context.snapshot(), vec![(uri.clone(), home)]);
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// A request that cannot be served, with a reason for the user
+/// (`RequestFailed`, -32803).
+#[derive(Debug)]
+struct RequestFailed(String);
+
+impl std::fmt::Display for RequestFailed {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RequestFailed {}
+
+/// Worker threads answering requests: enough that a slow request leaves
+/// others answered, few enough to leave cores to the diagnostics check.
+fn request_threads() -> usize {
+    thread::available_parallelism().map_or(2, |count| count.get().clamp(2, 4))
 }
 
 /// Runs the server until the client exits.
@@ -168,6 +299,23 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         return Err(error);
     }
     let mut state = ServerState::new();
+    let sender = connection.sender.clone();
+    state.diagnostics = Some(DiagnosticsWorker::spawn(Publisher::new(move |message| {
+        let _ = sender.send(message);
+    })));
+    let sender = connection.sender.clone();
+    state.requests = Some(RequestPool::spawn(
+        request_threads(),
+        Arc::new(dispatch),
+        Arc::new(move |message| {
+            let _ = sender.send(message);
+        }),
+    ));
+    let sender = connection.sender.clone();
+    state.client = Some(Arc::new(move |message| {
+        let _ = sender.send(message);
+    }));
+    state.context.client = state.client.clone();
 
     for message in &connection.receiver {
         match message {
@@ -175,10 +323,12 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if connection.handle_shutdown(&request)? {
                     break;
                 }
-                handle_request(&mut state, &connection, request);
+                if let Some(requests) = &state.requests {
+                    requests.submit(state.context.clone(), request);
+                }
             }
             Message::Notification(notification) => {
-                if handle_notification(&mut state, &connection, notification) {
+                if handle_notification(&mut state, notification) {
                     break;
                 }
             }
@@ -186,8 +336,10 @@ pub fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    // Drop the connection first: the writer thread terminates only when its
-    // channel sender is gone.
+    // Stop the request and diagnostics workers, which hold senders, then
+    // drop the connection: the writer thread terminates only when every
+    // sender is gone.
+    drop(state);
     drop(connection);
     io_threads.join()?;
     Ok(())
@@ -233,6 +385,10 @@ fn initialize(
         request_id,
         serde_json::json!({
             "capabilities": capabilities,
+            "serverInfo": {
+                "name": "orna-lsp",
+                "version": env!("CARGO_PKG_VERSION"),
+            },
         }),
     )?;
     Ok(())
@@ -298,8 +454,8 @@ fn server_capabilities() -> serde_json::Value {
             },
         ))),
         diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
-            identifier: Some("orna-syntax-v1".to_owned()),
-            inter_file_dependencies: false,
+            identifier: Some(analysis::DIAGNOSTIC_SOURCE.to_owned()),
+            inter_file_dependencies: true,
             workspace_diagnostics: false,
             work_done_progress_options: Default::default(),
         })),
@@ -328,10 +484,9 @@ fn server_capabilities() -> serde_json::Value {
     capabilities
 }
 
-/// Handles one client request and sends its response.
-fn handle_request(state: &mut ServerState, connection: &Connection, request: Request) {
+/// Answers one request against the state it arrived after.
+fn dispatch(state: &RequestContext, request: Request) -> Result<serde_json::Value, ResponseError> {
     let method = request.method.clone();
-    let id = request.id.clone();
     let result = match method.as_str() {
         "textDocument/hover" => request_hover(state, request),
         "textDocument/signatureHelp" => request_signature_help(state, request),
@@ -365,33 +520,26 @@ fn handle_request(state: &mut ServerState, connection: &Connection, request: Req
         "textDocument/moniker" => request_moniker(state, request),
         "textDocument/diagnostic" => request_document_diagnostic(state, request),
         _ => {
-            let _ = connection.sender.send(Message::Response(Response {
-                id,
-                response_result: Err(ResponseError {
-                    code: ErrorCode::MethodNotFound as i32,
-                    message: format!("unknown method {method}"),
-                    data: None,
-                }),
-            }));
-            return;
+            return Err(ResponseError {
+                code: ErrorCode::MethodNotFound as i32,
+                message: format!("unknown method {method}"),
+                data: None,
+            });
         }
     };
-    let _ = connection.sender.send(Message::Response(Response {
-        id,
-        response_result: result.map_err(|error| ResponseError {
-            code: ErrorCode::InternalError as i32,
-            message: error.to_string(),
-            data: None,
-        }),
-    }));
+    result.map_err(|error| ResponseError {
+        code: if error.downcast_ref::<RequestFailed>().is_some() {
+            ErrorCode::RequestFailed as i32
+        } else {
+            ErrorCode::InternalError as i32
+        },
+        message: error.to_string(),
+        data: None,
+    })
 }
 
 /// Handles one client notification. Returns true when the server must exit.
-fn handle_notification(
-    state: &mut ServerState,
-    connection: &Connection,
-    notification: Notification,
-) -> bool {
+fn handle_notification(state: &mut ServerState, notification: Notification) -> bool {
     let method = notification.method.clone();
     match method.as_str() {
         "exit" => true,
@@ -408,10 +556,11 @@ fn handle_notification(
                 params.text_document.text,
                 params.text_document.version,
             );
-            state.pending_identity_renames.remove(&uri);
-            state.semantic_tokens.remove(&uri);
-            state.documents.insert(uri.clone(), document);
-            publish_diagnostics(state, connection, &uri);
+            discard_pending_identity_renames(&state.context, &uri);
+            lock(&state.context.semantic_tokens).by_uri.remove(&uri);
+            let home = state.context.projects.home(&uri);
+            state.set_document(document, home.clone());
+            state.schedule_diagnostics(&uri, home);
             false
         }
         "textDocument/didChange" => {
@@ -422,33 +571,34 @@ fn handle_notification(
             };
             let uri = params.text_document.uri.clone();
             let version = params.text_document.version;
-            let text = {
-                let Some(document) = state.documents.get(&uri) else {
-                    return false;
-                };
-                if version <= document.version {
-                    return false;
-                }
-                let Some(text) = apply_content_changes(&document.text, &params.content_changes) else {
-                    return false;
-                };
-                text
-            };
-            mark_applied_identity_rename(state, &uri, version, &text);
-            let Some(document) = state.documents.get_mut(&uri) else {
+            let Some(open) = state.context.documents.get(&uri).cloned() else {
                 return false;
             };
-            document.text = text;
-            document.version = version;
-            publish_diagnostics(state, connection, &uri);
+            if version <= open.document.version {
+                return false;
+            }
+            let Some(text) = apply_content_changes(&open.document.text, &params.content_changes)
+            else {
+                return false;
+            };
+            mark_applied_identity_rename(&state.context, &uri, version, &text);
+            state.set_document(Document::new(uri.clone(), text, version), open.home.clone());
+            state.schedule_diagnostics(&uri, open.home.clone());
             false
         }
         "textDocument/didSave" => {
             if let Ok(params) =
                 serde_json::from_value::<lsp_types::DidSaveTextDocumentParams>(notification.params)
             {
-                persist_pending_rename_identity(state, &params.text_document.uri);
-                publish_diagnostics(state, connection, &params.text_document.uri);
+                let uri = params.text_document.uri;
+                if let Err(error) = persist_pending_rename_identity(&state.context, &uri) {
+                    state.context.show_warning(&identity_not_carried(&error));
+                }
+                // Saved files are read from disk for closed modules.
+                state.context.views.invalidate();
+                if let Some(open) = state.context.documents.get(&uri) {
+                    state.schedule_diagnostics(&uri, open.home.clone());
+                }
             }
             false
         }
@@ -457,17 +607,28 @@ fn handle_notification(
                 serde_json::from_value::<lsp_types::DidCloseTextDocumentParams>(notification.params)
             {
                 let uri = params.text_document.uri;
-                state.pending_identity_renames.remove(&uri);
-                state.semantic_tokens.remove(&uri);
-                let _ = connection.sender.send(Message::Notification(Notification {
-                    method: "textDocument/publishDiagnostics".to_owned(),
-                    params: serde_json::to_value(PublishDiagnosticsParams {
-                        uri,
-                        diagnostics: Vec::new(),
-                        version: None,
-                    })
-                    .expect("serialisable diagnostics"),
-                }));
+                discard_pending_identity_renames(&state.context, &uri);
+                lock(&state.context.semantic_tokens).by_uri.remove(&uri);
+                let home = Arc::make_mut(&mut state.context.documents)
+                    .remove(&uri)
+                    .and_then(|open| open.home.clone());
+                state.schedule_diagnostics(&uri, home);
+            }
+            false
+        }
+        "workspace/didChangeWatchedFiles" => {
+            state.context.views.invalidate();
+            false
+        }
+        "$/cancelRequest" => {
+            if let Some(requests) = &state.requests
+                && let Ok(params) =
+                    serde_json::from_value::<lsp_types::CancelParams>(notification.params)
+            {
+                requests.cancel(&match params.id {
+                    NumberOrString::Number(id) => RequestId::from(id),
+                    NumberOrString::String(id) => RequestId::from(id),
+                });
             }
             false
         }
@@ -499,74 +660,37 @@ fn apply_content_changes(
     Some(candidate)
 }
 
-/// Recomputes and publishes the diagnostics for one document.
-fn publish_diagnostics(state: &ServerState, connection: &Connection, uri: &Uri) {
-    let Some(document) = state.document(uri) else {
-        return;
-    };
-    let mapper = PositionMapper::new(&document.text);
-    let diagnostics = analysis::check_document(document, &mapper);
-    let params = PublishDiagnosticsParams {
-        uri: uri.clone(),
-        diagnostics,
-        version: Some(document.version),
-    };
-    let _ = connection.sender.send(Message::Notification(Notification {
-        method: "textDocument/publishDiagnostics".to_owned(),
-        params: serde_json::to_value(params).expect("serialisable diagnostics"),
-    }));
-}
-
-/// Parses one document with its current mapper.
-fn parse_document(document: &Document) -> (Parse, PositionMapper<'_>) {
-    let mapper = PositionMapper::new(&document.text);
-    let parse = analysis::parse_document(document);
-    (parse, mapper)
-}
-
 fn request_hover(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<HoverParams>("textDocument/hover")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let hover: Option<Hover> = analysis::hover(&document, &parse, position, &mapper);
+    let hover: Option<Hover> = analysis::hover(&workspace, module, byte);
     Ok(serde_json::to_value(hover)?)
 }
 
 fn request_signature_help(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<lsp_types::SignatureHelpParams>("textDocument/signatureHelp")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let help = analysis::signature_help(&document, &parse, position, &mapper);
+    let help = analysis::signature_help(&workspace, module, byte);
     Ok(serde_json::to_value(help)?)
 }
 
 fn request_code_actions(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<CodeActionParams>("textDocument/codeAction")?;
@@ -574,12 +698,14 @@ fn request_code_actions(
     if !uri.as_str().ends_with(".orna") || !requests_quickfix(params.context.only.as_deref()) {
         return Ok(serde_json::to_value(Vec::<CodeActionOrCommand>::new())?);
     }
-    let Some(document) = state.document(&uri) else {
+    let Some(open) = state.documents.get(&uri) else {
         return Ok(serde_json::to_value(Vec::<CodeActionOrCommand>::new())?);
     };
+    let file = open.analysis();
+    let document = &open.document;
+    let parse = &file.parse;
     let mapper = PositionMapper::new(&document.text);
-    let parse = analysis::parse_document(document);
-    let diagnostics = analysis::check_document(document, &mapper);
+    let diagnostics = analysis::syntax_diagnostics(&uri, parse, &mapper);
     let request_start = mapper.byte_offset(params.range.start);
     let request_end = mapper.byte_offset(params.range.end);
     let mut actions = Vec::new();
@@ -599,7 +725,7 @@ fn request_code_actions(
             continue;
         }
         let Some(edit_position) =
-            missing_semicolon_position(document, &parse, &diagnostic, &mapper)
+            missing_semicolon_position(document, &file.tokens, parse, &diagnostic, &mapper)
         else {
             continue;
         };
@@ -662,14 +788,14 @@ fn matches_missing_semicolon_diagnostic(diagnostic: &Diagnostic) -> bool {
 
 fn missing_semicolon_position(
     document: &Document,
-    parse: &Parse,
+    tokens: &[orna_syntax_v1::Token],
+    parse: &analysis::EditorParse,
     diagnostic: &Diagnostic,
     mapper: &PositionMapper<'_>,
 ) -> Option<Position> {
     let diagnostic_byte = mapper.byte_offset(diagnostic.range.start);
-    let previous = orna_syntax_v1::lex(&document.text)
-        .ok()?
-        .into_iter()
+    let previous = tokens
+        .iter()
         .filter(|token| {
             !matches!(&token.kind, orna_syntax_v1::TokenKind::Eof)
                 && token.span.end <= diagnostic_byte
@@ -681,9 +807,8 @@ fn missing_semicolon_position(
 
     let mut repaired_source = document.text.clone();
     repaired_source.insert_str(previous.span.end, ";");
-    let repaired_document = Document::new(document.uri.clone(), repaired_source, document.version);
-    let repaired_parse = analysis::parse_document(&repaired_document);
-    let diagnostic_count = |parse: &Parse| {
+    let repaired_parse = orna_syntax_v1::parse_module(&repaired_source);
+    let diagnostic_count = |parse: &analysis::EditorParse| {
         parse
             .diagnostics
             .iter()
@@ -699,208 +824,391 @@ fn missing_semicolon_position(
 }
 
 fn request_definition(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<GotoDefinitionParams>("textDocument/definition")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
-    else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let location = analysis::definition(&document, &parse, position, &mapper)
-        .and_then(|location| project_location(location, &mapper, &segments));
-    let response = location.map(GotoDefinitionResponse::Scalar);
+    let response =
+        analysis::definition(&workspace, module, byte).map(GotoDefinitionResponse::Scalar);
     Ok(serde_json::to_value(response)?)
 }
 
 fn request_references(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<ReferenceParams>("textDocument/references")?;
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
-    else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let locations = analysis::references(
-        &document,
-        &parse,
-        position,
-        &mapper,
-        params.context.include_declaration,
-    )
-    .into_iter()
-    .filter_map(|location| project_location(location, &mapper, &segments))
-    .collect::<Vec<_>>();
+    let locations =
+        analysis::references(&workspace, module, byte, params.context.include_declaration);
     Ok(serde_json::to_value(locations)?)
 }
 
 fn request_document_highlights(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<DocumentHighlightParams>("textDocument/documentHighlight")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
-    else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
+    let Some(target) = workspace
+        .resolve_at(module, byte)
+        .and_then(|(_, resolved)| resolved.target())
     else {
-        return Ok(serde_json::Value::Null);
+        return Ok(serde_json::to_value(Vec::<DocumentHighlight>::new())?);
     };
-
-    let mut write_ranges = analysis::local_declaration_spans(&parse);
-    write_ranges.extend(crate::locals::write_spans(&parse.value));
-    write_ranges.extend(
-        analysis::declaration_symbols(&parse, &document.text)
-            .into_iter()
-            .map(|symbol| symbol.selection),
-    );
-    let write_ranges = write_ranges
-        .iter()
-        .map(|span| mapper.range(span))
-        .collect::<Vec<_>>();
-
-    let highlights = analysis::references(&document, &parse, position, &mapper, true)
+    let names = &workspace.file(module).names;
+    let mapper = PositionMapper::new(workspace.file(module).text());
+    let highlights = workspace
+        .search(&target)
+        .found
         .into_iter()
-        .filter_map(|location| {
-            let kind = if write_ranges.contains(&location.range) {
-                DocumentHighlightKind::WRITE
-            } else {
-                DocumentHighlightKind::READ
-            };
-            project_location(location, &mapper, &segments)
-                .filter(|projected| projected.uri == uri)
-                .map(|projected| DocumentHighlight {
-                    kind: Some(kind),
-                    range: projected.range,
-                })
+        .filter(|(found_module, _)| *found_module == module)
+        .map(|(_, span)| {
+            let declaration = names.binding_at(&span).is_some_and(|binding| {
+                let selection = &names.binding(binding).selection;
+                selection.start == span.start && selection.end == span.end
+            }) || names.declared_at(&span).is_some();
+            let write = names.occurrence(&span).is_some_and(|occurrence| {
+                matches!(
+                    occurrence.role,
+                    Role::Value { write: true } | Role::Member { write: true, .. }
+                )
+            });
+            DocumentHighlight {
+                kind: Some(if declaration || write {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                }),
+                range: mapper.range(&span),
+            }
         })
         .collect::<Vec<_>>();
     Ok(serde_json::to_value(highlights)?)
 }
 
+/// The table or field identity rename a rename request implies. `Ok(None)`
+/// when the file is outside a repository or the rename changes no identity.
 fn identity_rename_for_request(
-    state: &ServerState,
+    state: &RequestContext,
     uri: &Uri,
     position: Position,
     new_name: &str,
-) -> Option<ObjectIdentityRename> {
-    let document = state.document(uri)?;
-    let url = url::Url::parse(uri.as_str()).ok()?;
-    let path = url.to_file_path().ok()?;
-    let repository = Repository::discover(&path).ok()?;
-    let root = repository.worktree();
-    let relative = path.strip_prefix(root).ok()?;
+) -> Result<Option<ObjectIdentityRename>, String> {
+    let Some(document) = state.document(uri) else {
+        return Ok(None);
+    };
+    let Ok(url) = url::Url::parse(uri.as_str()) else {
+        return Ok(None);
+    };
+    let Ok(path) = url.to_file_path() else {
+        return Ok(None);
+    };
+    // Outside a repository there is no identity store to keep.
+    let Ok(repository) = Repository::discover(&path) else {
+        return Ok(None);
+    };
+    let Ok(relative) = path.strip_prefix(repository.worktree()) else {
+        return Ok(None);
+    };
     let logical_path = relative.to_string_lossy().replace('\\', "/");
-    let old_name = identifier_at(&document.text, position)?;
+    let Some(old_name) = identifier_at(&document.text, position) else {
+        return Ok(None);
+    };
     let namespace = module_namespace(&logical_path);
-    let qualify = |name: &str| if namespace.is_empty() { name.to_owned() } else { format!("{namespace}.{name}") };
+    let qualify = |name: &str| {
+        if namespace.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{namespace}.{name}")
+        }
+    };
     let table = qualify(&old_name);
-    let pending = state.pending_identity_renames.get(uri).map(Vec::as_slice).unwrap_or(&[]);
+    let pending_renames = lock(&state.pending_identity_renames);
+    let pending = pending_renames.get(uri).map(Vec::as_slice).unwrap_or(&[]);
 
-    if pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).any(|rename| {
-        rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table
-    }) {
-        return Some(ObjectIdentityRename::new(ObjectKind::Table, table, qualify(new_name)));
+    if pending
+        .iter()
+        .filter_map(|chain| chain.last().map(|step| &step.rename))
+        .any(|rename| rename.kind() == ObjectKind::Table && rename.new_qualified_name() == table)
+    {
+        return Ok(Some(ObjectIdentityRename::new(
+            ObjectKind::Table,
+            table,
+            qualify(new_name),
+        )));
     }
 
     let suffix = format!(".{old_name}");
-    let mut pending_fields = pending.iter().filter_map(|chain| chain.last().map(|step| &step.rename)).filter(|rename| {
-        let target = rename.new_qualified_name();
-        rename.kind() == ObjectKind::Field
-            && target.ends_with(&suffix)
-            && target[..target.len() - suffix.len()].starts_with(&namespace)
-    });
-    if let Some(rename) = pending_fields.next() {
-        if pending_fields.next().is_some() { return None; }
-        let current = rename.new_qualified_name();
-        let parent = &current[..current.len() - old_name.len()];
-        return Some(ObjectIdentityRename::new(
-            ObjectKind::Field, current, format!("{parent}{new_name}"),
+    let pending_fields = pending
+        .iter()
+        .filter_map(|chain| chain.last().map(|step| &step.rename))
+        .filter(|rename| {
+            let target = rename.new_qualified_name();
+            rename.kind() == ObjectKind::Field
+                && target.ends_with(&suffix)
+                && target[..target.len() - suffix.len()].starts_with(&namespace)
+        })
+        .collect::<Vec<_>>();
+    if pending_fields.len() > 1 {
+        return Err(format!(
+            "the field name {old_name} matches several pending renames"
         ));
     }
+    if let Some(rename) = pending_fields.first() {
+        let current = rename.new_qualified_name();
+        let parent = &current[..current.len() - old_name.len()];
+        return Ok(Some(ObjectIdentityRename::new(
+            ObjectKind::Field,
+            current,
+            format!("{parent}{new_name}"),
+        )));
+    }
 
-    let previous = ObjectIdentityManifest::read_worktree(&repository).ok()??;
-    let (kind, old_qualified, new_qualified) = if previous.id(ObjectKind::Table, &table).is_some() {
-        (ObjectKind::Table, table, qualify(new_name))
-    } else {
-        let mut matches = previous.records().iter().filter(|record| {
-            !record.is_retired() && record.kind() == ObjectKind::Field && record.qualified_name().ends_with(&suffix)
-                && record.qualified_name()[..record.qualified_name().len() - suffix.len()].starts_with(&namespace)
-        });
-        let record = matches.next()?;
-        if matches.next().is_some() { return None; }
-        let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
-        (ObjectKind::Field, record.qualified_name().to_owned(), format!("{parent}{new_name}"))
+    let Some(previous) = staged_identities(&repository)? else {
+        return Err("the staged object identities are missing".to_owned());
     };
-    Some(ObjectIdentityRename::new(kind, old_qualified, new_qualified))
+    if previous.id(ObjectKind::Table, &table).is_some() {
+        return Ok(Some(ObjectIdentityRename::new(
+            ObjectKind::Table,
+            table,
+            qualify(new_name),
+        )));
+    }
+    let mut matches = previous.records().iter().filter(|record| {
+        !record.is_retired()
+            && record.kind() == ObjectKind::Field
+            && record.qualified_name().ends_with(&suffix)
+            && record.qualified_name()[..record.qualified_name().len() - suffix.len()]
+                .starts_with(&namespace)
+    });
+    let Some(record) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() {
+        return Err(format!("the field name {old_name} matches several fields"));
+    }
+    let parent = &record.qualified_name()[..record.qualified_name().len() - old_name.len()];
+    Ok(Some(ObjectIdentityRename::new(
+        ObjectKind::Field,
+        record.qualified_name().to_owned(),
+        format!("{parent}{new_name}"),
+    )))
 }
 
-fn persist_pending_rename_identity(state: &mut ServerState, uri: &Uri) {
-    let Some(chains) = state.pending_identity_renames.remove(uri) else { return; };
-    let Ok(url) = url::Url::parse(uri.as_str()) else { return; };
-    let Ok(path) = url.to_file_path() else { return; };
-    let Some(document) = state.documents.get(uri) else { return; };
-    let saved_version = document.version;
-    let Ok(saved_text) = std::fs::read_to_string(&path) else { return; };
-    if saved_text != document.text { return; }
-    let Ok(repository) = Repository::discover(&path) else { return; };
-    let Ok(project) = ProjectLoader::default().load(&repository) else { return; };
+/// Reads the identity inventory the staged index carries, refusing a store
+/// that is not retained, so renames never write to an unverified store.
+fn staged_identities(repository: &Repository) -> Result<Option<ObjectIdentityManifest>, String> {
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| format!("{error:?}"))?;
+    require_identity_format(repository)?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| format!("{error:?}"))?;
+    ObjectIdentityManifest::read_staged(repository, &staged).map_err(|error| format!("{error:?}"))
+}
+
+/// Object identities exist only in format 3. Older repositories refuse the
+/// carry rather than renaming without an identity.
+fn require_identity_format(repository: &Repository) -> Result<(), String> {
+    let format = repository
+        .open_format_context()
+        .map_err(|error| format!("{error:?}"))?;
+    if format.repository_format() == RepositoryFormat::Format3 {
+        Ok(())
+    } else {
+        Err("this repository uses a legacy format without object identities".to_owned())
+    }
+}
+
+/// Whether a rename of `target` concerns an object identity. Only declared
+/// tables and fields have one; local names, functions and modules do not.
+fn carries_identity(workspace: &Workspace, target: &Target) -> bool {
+    match target {
+        Target::Declared { module, index } => matches!(
+            workspace.declaration(*module, *index).kind,
+            DeclaredKind::Table
+                | DeclaredKind::Field
+                | DeclaredKind::KeyField
+                | DeclaredKind::PayloadField
+        ),
+        _ => false,
+    }
+}
+
+/// The warning for an object identity that a rename or save did not carry.
+/// The text is already changed, so the remedy is `orna mv`.
+fn identity_not_carried(reason: &str) -> String {
+    format!(
+        "ORNA-LSP-RENAME-001: object identity was not carried ({reason}); use orna mv to rename a table with its identity"
+    )
+}
+
+/// Drops the pending identity renames of a closed or re-opened document. A
+/// rename applied to the buffer but never saved is reported, because its
+/// identity is not carried; a declined rename is dropped silently.
+fn discard_pending_identity_renames(state: &RequestContext, uri: &Uri) {
+    let removed = lock(&state.pending_identity_renames).remove(uri);
+    if removed.is_some_and(|chains| {
+        chains
+            .iter()
+            .flatten()
+            .any(|step| step.applied_version.is_some())
+    }) {
+        state.show_warning(&identity_not_carried("the rename was not saved"));
+    }
+}
+
+/// Saves the identity renames the saved source applies, into the staged store.
+/// Every pending rename that cannot be carried is returned as an error for the
+/// caller to report; the saved text is saved either way.
+fn persist_pending_rename_identity(state: &RequestContext, uri: &Uri) -> Result<(), String> {
+    let Some(chains) = lock(&state.pending_identity_renames).remove(uri) else {
+        return Ok(());
+    };
+    let url = url::Url::parse(uri.as_str()).map_err(|error| format!("{error:?}"))?;
+    let path = url
+        .to_file_path()
+        .map_err(|()| format!("{uri:?} is not a file"))?;
+    let Some(open) = state.documents.get(uri) else {
+        return Err("the document is no longer open".to_owned());
+    };
+    let saved_version = open.document.version;
+    let saved_text = std::fs::read_to_string(&path).map_err(|error| format!("{error:?}"))?;
+    if saved_text != open.document.text {
+        return Err("the saved text differs from the editor buffer".to_owned());
+    }
+    let repository = Repository::discover(&path).map_err(|error| format!("{error:?}"))?;
+    let project = ProjectLoader::default()
+        .load(&repository)
+        .map_err(|error| format!("{error:?}"))?;
     let modules = project.into_modules();
-    let Ok(Some(previous)) = ObjectIdentityManifest::read_worktree(&repository) else { return; };
-    let applicable = chains.into_iter().filter_map(|chain| {
-        let first = chain.first()?;
-        let mut furthest_saved_rename = None;
-        for step in &chain {
-            if !step.applied_version.is_some_and(|version| version <= saved_version) {
-                break;
-            }
-            let rename = ObjectIdentityRename::new(
-                first.rename.kind(),
-                first.rename.old_qualified_name(),
-                step.rename.new_qualified_name(),
-            );
-            let Ok(_reconciled) = ObjectIdentityManifest::reconcile_with_renames(
-                &modules, Some(&previous), std::slice::from_ref(&rename),
-            ) else {
-                break;
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(|error| format!("{error:?}"))?;
+    require_identity_format(&repository)?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(|error| format!("{error:?}"))?;
+    let previous = ObjectIdentityManifest::read_staged(&repository, &staged)
+        .map_err(|error| format!("{error:?}"))?
+        .ok_or_else(|| "the staged object identities are missing".to_owned())?;
+    // Intermediate destinations are not in the saved source, so the furthest
+    // applied step that reconciles against it is the one saved.
+    // `Ok(None)`: no step of the chain reached the saved text, so the rename was
+    // declined and there is no identity to carry.
+    let rename_for =
+        |chain: &[PendingIdentityRename]| -> Result<Option<ObjectIdentityRename>, String> {
+            let Some(first) = chain.first() else {
+                return Ok(None);
             };
-            // Reconciliation confirms the acknowledged destination exists in saved source.
-            // The didChange version/text match above is the evidence of application.
-            furthest_saved_rename = Some(rename);
+            let applied = chain
+                .iter()
+                .take_while(|step| {
+                    step.applied_version
+                        .is_some_and(|version| version <= saved_version)
+                })
+                .collect::<Vec<_>>();
+            if applied.is_empty() {
+                return Ok(None);
+            }
+            let mut reason = format!(
+                "the saved source does not show the rename of {}",
+                first.rename.old_qualified_name()
+            );
+            for step in applied.into_iter().rev() {
+                let rename = ObjectIdentityRename::new(
+                    first.rename.kind(),
+                    first.rename.old_qualified_name(),
+                    step.rename.new_qualified_name(),
+                );
+                match previous.with_renames(&modules, std::slice::from_ref(&rename)) {
+                    Ok(_) => return Ok(Some(rename)),
+                    Err(error) => reason = format!("{error:?}"),
+                }
+            }
+            Err(reason)
+        };
+    let mut applicable = Vec::new();
+    let mut failures = Vec::new();
+    for chain in &chains {
+        match rename_for(chain) {
+            // Field renames change the committed schema, which this build does
+            // not admit (ORNA-EVOL-002), so nothing is staged for them.
+            Ok(Some(rename)) if rename.kind() == ObjectKind::Field => {
+                failures.push("schema evolution is not admitted".to_owned());
+            }
+            Ok(Some(rename)) => applicable.push(rename),
+            Ok(None) => {}
+            Err(reason) => failures.push(reason),
         }
-        furthest_saved_rename
-    }).collect::<Vec<_>>();
-    if applicable.is_empty() { return; }
-    let _ = ObjectIdentityManifest::reconcile_and_write_worktree_with_renames(
-        &repository, &modules, &applicable,
-    );
+    }
+    if !applicable.is_empty() {
+        let relative = path
+            .strip_prefix(repository.worktree())
+            .map_err(|error| format!("{error:?}"))?;
+        let logical_path = relative.to_string_lossy().replace('\\', "/");
+        // The save stages the whole file, so it is only written when the index
+        // entry is still HEAD's or the text this edit started from; otherwise
+        // partial staging the user made would be overwritten.
+        let index = repository
+            .index_file_bytes(&logical_path)
+            .map_err(|error| format!("{error:?}"))?;
+        let head = repository
+            .head_file_bytes(&logical_path)
+            .map_err(|error| format!("{error:?}"))?;
+        let clean = index == head
+            || chains.iter().any(|chain| {
+                chain
+                    .first()
+                    .is_some_and(|step| index.as_deref() == Some(step.pre_edit_text.as_bytes()))
+            });
+        if clean {
+            let next = applicable.iter().try_fold(previous, |manifest, rename| {
+                manifest
+                    .with_renames(&modules, std::slice::from_ref(rename))
+                    .map_err(|error| format!("{error:?}"))
+            })?;
+            repository
+                .stage_object_identities(
+                    &staged,
+                    &next.to_stored(),
+                    &[(logical_path.as_str(), saved_text.as_bytes())],
+                )
+                .map_err(|error| format!("{error:?}"))?;
+        } else {
+            failures.push(format!(
+                "index entry for {logical_path} differs from HEAD; stage manually"
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
-fn mark_applied_identity_rename(state: &mut ServerState, uri: &Uri, version: i32, text: &str) {
-    let Some(chains) = state.pending_identity_renames.get_mut(uri) else { return; };
+fn mark_applied_identity_rename(state: &RequestContext, uri: &Uri, version: i32, text: &str) {
+    let mut pending = lock(&state.pending_identity_renames);
+    let Some(chains) = pending.get_mut(uri) else {
+        return;
+    };
     for step in chains.iter_mut().flatten() {
         if version > step.requested_version && text == step.expected_text {
             step.applied_version = Some(version);
@@ -909,70 +1217,125 @@ fn mark_applied_identity_rename(state: &mut ServerState, uri: &Uri, version: i32
 }
 
 fn module_namespace(path: &str) -> String {
-    let mut parts = path.strip_suffix(".orna").unwrap_or(path).split('/').collect::<Vec<_>>();
+    let mut parts = path
+        .strip_suffix(".orna")
+        .unwrap_or(path)
+        .split('/')
+        .collect::<Vec<_>>();
     let file = parts.pop().unwrap_or_default();
-    if file != "main" { parts.push(file); }
+    if file != "main" {
+        parts.push(file);
+    }
     parts.join(".")
 }
 
 fn identifier_at(source: &str, position: Position) -> Option<String> {
     let mapper = PositionMapper::new(source);
     let byte = mapper.byte_offset(position).min(source.len());
-    let start = source[..byte].char_indices().rev().find_map(|(index, ch)| (!is_identifier_char(ch)).then_some(index + ch.len_utf8())).unwrap_or(0);
-    let end = source[byte..].char_indices().find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(byte + offset)).unwrap_or(source.len());
+    let start = source[..byte]
+        .char_indices()
+        .rev()
+        .find_map(|(index, ch)| (!is_identifier_char(ch)).then_some(index + ch.len_utf8()))
+        .unwrap_or(0);
+    let end = source[byte..]
+        .char_indices()
+        .find_map(|(offset, ch)| (!is_identifier_char(ch)).then_some(byte + offset))
+        .unwrap_or(source.len());
     let identifier = source.get(start..end)?;
     (!identifier.is_empty()).then(|| identifier.to_owned())
 }
 
-fn is_identifier_char(ch: char) -> bool { ch == '_' || ch.is_alphanumeric() }
+fn is_identifier_char(ch: char) -> bool {
+    ch == '_' || ch.is_alphanumeric()
+}
 
 fn apply_text_edits(source: &str, edits: &[TextEdit]) -> Option<String> {
     let mapper = PositionMapper::new(source);
-    let mut edits = edits.iter().map(|edit| {
-        Some((mapper.byte_offset(edit.range.start), mapper.byte_offset(edit.range.end), edit.new_text.as_str()))
-    }).collect::<Option<Vec<_>>>()?;
+    let mut edits = edits
+        .iter()
+        .map(|edit| {
+            Some((
+                mapper.byte_offset(edit.range.start),
+                mapper.byte_offset(edit.range.end),
+                edit.new_text.as_str(),
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     edits.sort_by_key(|(start, _, _)| std::cmp::Reverse(*start));
     let mut updated = source.to_owned();
     for (start, end, replacement) in edits {
-        if start > end || end > updated.len() { return None; }
+        if start > end || end > updated.len() {
+            return None;
+        }
         updated.replace_range(start..end, replacement);
     }
     Some(updated)
 }
 fn request_rename(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<RenameParams>("textDocument/rename")?;
     let uri = params.text_document_position.text_document.uri;
     let position = params.text_document_position.position;
-    let Some(changes) = semantic_rename(&state.documents, &uri, position, &params.new_name) else {
-        return Ok(serde_json::Value::Null);
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
+        return Err(RequestFailed("cannot rename: the document is not open".to_owned()).into());
     };
-    if let Some(rename) = identity_rename_for_request(state, &uri, position, &params.new_name) {
-        let Some(document) = state.document(&uri) else {
-            return Ok(serde_json::to_value(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })?);
-        };
-        let Some(expected_text) = changes.get(&uri).and_then(|edits| apply_text_edits(&document.text, edits)) else {
-            return Ok(serde_json::to_value(WorkspaceEdit { changes: Some(changes), document_changes: None, change_annotations: None })?);
-        };
-        let requested_version = document.version;
-        let pre_edit_text = document.text.clone();
-        let pending = state.pending_identity_renames.entry(uri.clone()).or_default();
-        if let Some(chain) = pending.iter_mut().find(|chain| {
-            chain.last().is_some_and(|last| {
-                last.rename.kind() == rename.kind()
-                    && last.rename.new_qualified_name() == rename.old_qualified_name()
-                    && last.expected_text == pre_edit_text
-            })
-        }) {
-            chain.push(PendingIdentityRename {
-                rename, requested_version, pre_edit_text, expected_text, applied_version: None,
-            });
-        } else {
-            pending.push(vec![PendingIdentityRename {
-                rename, requested_version, pre_edit_text, expected_text, applied_version: None,
-            }]);
+    let (renamable, edits) =
+        rename::plan(&workspace, module, byte, &params.new_name).map_err(refused)?;
+    if let Some(home) = state.documents.get(&uri).and_then(|open| open.home.clone()) {
+        verify_project_check(state, &home, &workspace, &edits)?;
+    }
+    let changes = workspace_changes(&workspace, &edits);
+    // Only declared tables and fields have identities. Local names, functions
+    // and modules never consult the identity store, so they never warn. An
+    // identity that cannot be carried never fails an ordinary rename: the plain
+    // workspace edit is returned with a warning.
+    let identity = if carries_identity(&workspace, &renamable.target) {
+        identity_rename_for_request(state, &uri, position, &params.new_name).unwrap_or_else(
+            |error| {
+                state.show_warning(&identity_not_carried(&error));
+                None
+            },
+        )
+    } else {
+        None
+    };
+    if let Some(rename) = identity {
+        let matched = state.document(&uri).and_then(|document| {
+            changes
+                .get(&uri)
+                .and_then(|edits| apply_text_edits(&document.text, edits))
+                .map(|expected_text| (document, expected_text))
+        });
+        match matched {
+            Some((document, expected_text)) => {
+                let requested_version = document.version;
+                let pre_edit_text = document.text.clone();
+                let mut pending_renames = lock(&state.pending_identity_renames);
+                let pending = pending_renames.entry(uri.clone()).or_default();
+                let continues = pending.iter().position(|chain| {
+                    chain.last().is_some_and(|last| {
+                        last.rename.kind() == rename.kind()
+                            && last.rename.new_qualified_name() == rename.old_qualified_name()
+                            && last.expected_text == pre_edit_text
+                    })
+                });
+                let step = PendingIdentityRename {
+                    rename,
+                    requested_version,
+                    pre_edit_text,
+                    expected_text,
+                    applied_version: None,
+                };
+                match continues {
+                    Some(index) => pending[index].push(step),
+                    None => pending.push(vec![step]),
+                }
+            }
+            None => state.show_warning(&identity_not_carried(
+                "the renamed text could not be matched to the document",
+            )),
         }
     }
     let workspace_edit = WorkspaceEdit {
@@ -983,444 +1346,161 @@ fn request_rename(
     Ok(serde_json::to_value(workspace_edit)?)
 }
 
+fn refused(refusal: Refusal) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(RequestFailed(format!("cannot rename: {}", refusal.0)))
+}
+
+/// Text edits per document URI.
+fn workspace_changes(workspace: &Workspace, edits: &ModuleEdits) -> HashMap<Uri, Vec<TextEdit>> {
+    edits
+        .iter()
+        .map(|(module, module_edits)| {
+            let file = workspace.file(*module);
+            let mapper = PositionMapper::new(file.text());
+            (
+                file.uri().clone(),
+                module_edits
+                    .iter()
+                    .map(|(span, new_text)| TextEdit {
+                        range: mapper.range(span),
+                        new_text: new_text.clone(),
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// Refuses a rename after which `orna check` would report a diagnostic it
+/// does not report now.
+fn verify_project_check(
+    state: &RequestContext,
+    home: &ProjectHome,
+    workspace: &Workspace,
+    edits: &ModuleEdits,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let before = state
+        .documents
+        .values()
+        .filter_map(|open| {
+            let open_home = open.home.as_ref()?;
+            Arc::ptr_eq(&open_home.project, &home.project)
+                .then(|| (open_home.logical_path.clone(), open.document.text.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut after = before.clone();
+    for (module, module_edits) in edits {
+        if let Some(logical_path) = &workspace.modules[*module].logical_path {
+            after.insert(
+                logical_path.clone(),
+                rename::apply(workspace.file(*module).text(), module_edits),
+            );
+        }
+    }
+    let counts_before = check_counts(&home.project, &before);
+    for ((logical_path, code, message), count) in check_counts(&home.project, &after) {
+        let previous = counts_before
+            .get(&(logical_path.clone(), code.clone(), message.clone()))
+            .copied()
+            .unwrap_or(0);
+        if count > previous {
+            return Err(Box::new(RequestFailed(format!(
+                "cannot rename: `orna check` would then report {code} in {logical_path}: {}",
+                message.lines().next().unwrap_or_default()
+            ))));
+        }
+    }
+    Ok(())
+}
+
+fn check_counts(
+    project: &crate::project::Project,
+    sources: &std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<(String, String, String), usize> {
+    let open = sources
+        .iter()
+        .map(|(logical_path, text)| crate::project::OpenModule {
+            logical_path,
+            text,
+            has_syntax_errors: !orna_syntax_v1::parse_module(text).diagnostics.is_empty(),
+        })
+        .collect::<Vec<_>>();
+    let mut counts = std::collections::BTreeMap::new();
+    for (logical_path, diagnostics) in crate::project::check(project, &open).diagnostics {
+        for diagnostic in diagnostics {
+            let code = match &diagnostic.code {
+                Some(NumberOrString::String(code)) => code.clone(),
+                Some(NumberOrString::Number(code)) => code.to_string(),
+                None => String::new(),
+            };
+            *counts
+                .entry((logical_path.clone(), code, diagnostic.message))
+                .or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
 fn request_prepare_rename(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<lsp_types::TextDocumentPositionParams>("textDocument/prepareRename")?;
-    let uri = params.text_document.uri;
-    let response = semantic_prepare_rename(&state.documents, &uri, params.position);
-    Ok(serde_json::to_value(response)?)
-}
-
-struct SourceSegment<'a> {
-    document: &'a Document,
-    start: usize,
-    end: usize,
-}
-
-/// Builds a deterministic source view from open Orna documents so editor
-/// features can resolve declarations and references across file boundaries.
-fn combined_workspace<'a>(
-    documents: &'a HashMap<Uri, Document>,
-    uri: &Uri,
-) -> Option<(Document, Vec<SourceSegment<'a>>, usize)> {
-    let mut sources: Vec<_> = documents
-        .values()
-        .filter(|document| document.uri.as_str().ends_with(".orna"))
-        .collect();
-    sources.sort_unstable_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
-
-    let mut combined_source = String::new();
-    let mut segments = Vec::with_capacity(sources.len());
-    for document in sources {
-        if !segments.is_empty() {
-            combined_source.push('\n');
-        }
-        let start = combined_source.len();
-        combined_source.push_str(&document.text);
-        let end = combined_source.len();
-        segments.push(SourceSegment {
-            document,
-            start,
-            end,
-        });
-    }
-    let selected = segments
-        .iter()
-        .find(|segment| &segment.document.uri == uri)?;
-    let selected_start = selected.start;
-    let version = selected.document.version;
-    Some((
-        Document::new(uri.clone(), combined_source, version),
-        segments,
-        selected_start,
-    ))
-}
-
-fn workspace_position(
-    workspace: &Document,
-    selected_start: usize,
-    position: Position,
-    documents: &HashMap<Uri, Document>,
-    uri: &Uri,
-) -> Option<Position> {
-    let selected = documents.get(uri)?;
-    let selected_mapper = PositionMapper::new(&selected.text);
-    let workspace_mapper = PositionMapper::new(&workspace.text);
-    let byte = selected_start.checked_add(selected_mapper.byte_offset(position))?;
-    Some(workspace_mapper.position(byte))
-}
-
-fn project_location(
-    location: lsp_types::Location,
-    workspace_mapper: &PositionMapper<'_>,
-    segments: &[SourceSegment<'_>],
-) -> Option<lsp_types::Location> {
-    let start = workspace_mapper.byte_offset(location.range.start);
-    let end = workspace_mapper.byte_offset(location.range.end);
-    let segment = segments
-        .iter()
-        .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
-    let mapper = PositionMapper::new(&segment.document.text);
-    Some(lsp_types::Location {
-        uri: segment.document.uri.clone(),
-        range: mapper.range(&orna_syntax_v1::SyntaxSpan::new(
-            start - segment.start,
-            end - segment.start,
-        )),
-    })
-}
-
-/// Edits rewrite the declaration and every reference that resolves to the same
-/// symbol, so a follow-up query on the new name finds the same identity.
-fn semantic_rename(
-    documents: &HashMap<Uri, Document>,
-    uri: &Uri,
-    position: Position,
-    new_name: &str,
-) -> Option<HashMap<Uri, Vec<TextEdit>>> {
-    let (workspace_document, segments, selected_start) = combined_workspace(documents, uri)?;
-    let combined_position = workspace_position(
-        &workspace_document,
-        selected_start,
-        position,
-        documents,
-        uri,
-    )?;
-    let workspace_parse = analysis::parse_document(&workspace_document);
-    let workspace_mapper = PositionMapper::new(&workspace_document.text);
-    let edits = semantic_rename_in_source(
-        &workspace_document,
-        &workspace_parse,
-        combined_position,
-        &workspace_mapper,
-        new_name,
-    )?;
-
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
-    for edit in edits {
-        let start = workspace_mapper.byte_offset(edit.range.start);
-        let end = workspace_mapper.byte_offset(edit.range.end);
-        let segment = segments
-            .iter()
-            .find(|segment| start >= segment.start && end <= segment.end && start < end)?;
-        let source_mapper = PositionMapper::new(&segment.document.text);
-        let range = source_mapper.range(&orna_syntax_v1::SyntaxSpan::new(
-            start - segment.start,
-            end - segment.start,
-        ));
-        changes
-            .entry(segment.document.uri.clone())
-            .or_default()
-            .push(TextEdit {
-                range,
-                new_text: edit.new_text,
-            });
-    }
-    Some(changes)
-}
-
-fn semantic_prepare_rename(
-    documents: &HashMap<Uri, Document>,
-    uri: &Uri,
-    position: Position,
-) -> Option<PrepareRenameResponse> {
-    let (workspace_document, segments, selected_start) = combined_workspace(documents, uri)?;
-    let selected_document = documents.get(uri)?;
-    if !uri.as_str().ends_with(".orna") {
-        return None;
-    }
-    let combined_position = workspace_position(
-        &workspace_document,
-        selected_start,
-        position,
-        documents,
-        uri,
-    )?;
-    let parse = analysis::parse_document(&workspace_document);
-    if !parse.diagnostics.is_empty() {
-        return None;
-    }
-    let workspace_mapper = PositionMapper::new(&workspace_document.text);
-    let (placeholder, span) =
-        analysis::identifier_at(&workspace_document, combined_position, &workspace_mapper)?;
-    semantic_rename_in_source(
-        &workspace_document,
-        &parse,
-        combined_position,
-        &workspace_mapper,
-        &placeholder,
-    )?;
-
-    let projected = project_location(
-        lsp_types::Location {
-            uri: workspace_document.uri.clone(),
-            range: workspace_mapper.range(&span),
-        },
-        &workspace_mapper,
-        &segments,
-    )?;
-    let selected_mapper = PositionMapper::new(&selected_document.text);
-    let selected_token = analysis::identifier_at(selected_document, position, &selected_mapper)?;
-    if selected_token.0 != placeholder {
-        return None;
-    }
-    Some(PrepareRenameResponse::RangeWithPlaceholder {
-        range: projected.range,
-        placeholder,
-    })
-}
-
-fn semantic_rename_in_source(
-    document: &Document,
-    parse: &Parse,
-    position: Position,
-    mapper: &PositionMapper<'_>,
-    new_name: &str,
-) -> Option<Vec<TextEdit>> {
-    if !document.uri.as_str().ends_with(".orna") || !parse.diagnostics.is_empty() {
-        return None;
-    }
-    let definition = analysis::definition(document, parse, position, mapper)?;
-    if definition.uri != document.uri {
-        return None;
-    }
-    let declarations = persistent_declaration_ranges(parse, &document.text, mapper);
-    let target = declarations
-        .iter()
-        .find(|(_, name_range)| name_range == &definition.range)?;
-    let target_name_range = target.1.clone();
-
-    let references = analysis::references(document, parse, position, mapper, true);
-    if references.is_empty()
-        || references
-            .iter()
-            .any(|reference| reference.uri != document.uri)
-    {
-        return None;
-    }
-    let resolved_declarations = references
-        .iter()
-        .filter(|reference| {
-            declarations
-                .iter()
-                .any(|(_, name_range)| name_range == &reference.range)
-        })
-        .count();
-    if resolved_declarations != 1
-        || !references
-            .iter()
-            .any(|reference| reference.range == target_name_range)
-        || !valid_rename_identifier(new_name)
-        || !rename_preserves_unique_resolution(
-            document,
-            &declarations,
-            &target_name_range,
-            &references,
-            mapper,
-            new_name,
-        )
-    {
-        return None;
-    }
-
-    Some(
-        references
-            .into_iter()
-            .map(|reference| TextEdit {
-                range: reference.range,
-                new_text: new_name.to_owned(),
-            })
-            .collect(),
-    )
-}
-
-fn persistent_declaration_ranges(
-    parse: &Parse,
-    text: &str,
-    mapper: &PositionMapper<'_>,
-) -> Vec<(Range, Range)> {
-    let mut declarations = analysis::declaration_symbols(parse, text)
-        .into_iter()
-        .map(|symbol| (mapper.range(&symbol.full), mapper.range(&symbol.selection)))
-        .collect::<Vec<_>>();
-    declarations.extend(
-        analysis::local_declaration_spans(parse)
-            .into_iter()
-            .map(|span| {
-                let selection = mapper.range(&span);
-                (selection.clone(), selection)
-            }),
-    );
-    declarations
-}
-
-/// A rename target must parse as a declaration name under orna-syntax-v1, so a
-/// reserved word (ORNA-LEX-007) is rejected before any edit is produced.
-fn valid_rename_identifier(new_name: &str) -> bool {
-    let source = format!("fn {new_name}() = 0;");
-    let parse = orna_syntax_v1::parse_module(&source);
-    parse.diagnostics.is_empty()
-        && analysis::declaration_symbols(&parse, &source)
-            .iter()
-            .any(|symbol| {
-                symbol.name == new_name
-                    && source[symbol.selection.start..symbol.selection.end] == *new_name
-            })
-}
-
-fn rename_preserves_unique_resolution(
-    document: &Document,
-    declarations: &[(Range, Range)],
-    target_name_range: &Range,
-    references: &[lsp_types::Location],
-    mapper: &PositionMapper<'_>,
-    new_name: &str,
-) -> bool {
-    let mut byte_edits = Vec::with_capacity(references.len());
-    for reference in references {
-        let start = mapper.byte_offset(reference.range.start);
-        let end = mapper.byte_offset(reference.range.end);
-        if start >= end || end > document.text.len() {
-            return false;
-        }
-        byte_edits.push((start, end));
-    }
-    byte_edits.sort_unstable_by_key(|(start, _)| *start);
-    if byte_edits
-        .windows(2)
-        .any(|pair| pair[0].1 > pair[1].0 || pair[0].0 == pair[1].0)
-    {
-        return false;
-    }
-
-    let mut expected_ranges = Vec::with_capacity(byte_edits.len());
-    let mut prior_shift = 0i128;
-    for (start, end) in &byte_edits {
-        let Ok(updated_start) = usize::try_from(*start as i128 + prior_shift) else {
-            return false;
-        };
-        let Some(updated_end) = updated_start.checked_add(new_name.len()) else {
-            return false;
-        };
-        expected_ranges.push((updated_start, updated_end));
-        prior_shift += new_name.len() as i128 - (end - start) as i128;
-    }
-
-    let target_start = mapper.byte_offset(target_name_range.start);
-    let shift: i128 = byte_edits
-        .iter()
-        .filter(|(start, _)| *start < target_start)
-        .map(|(start, end)| new_name.len() as i128 - (end - start) as i128)
-        .sum();
-    let Ok(updated_target_start) = usize::try_from(target_start as i128 + shift) else {
-        return false;
-    };
-
-    let mut updated_source = document.text.clone();
-    for (start, end) in byte_edits.into_iter().rev() {
-        updated_source.replace_range(start..end, new_name);
-    }
-    let updated_document = Document::new(document.uri.clone(), updated_source, document.version);
-    let updated_parse = analysis::parse_document(&updated_document);
-    if !updated_parse.diagnostics.is_empty() {
-        return false;
-    }
-    let updated_mapper = PositionMapper::new(&updated_document.text);
-    let updated_position = updated_mapper.position(updated_target_start);
-    let Some(updated_definition) = analysis::definition(
-        &updated_document,
-        &updated_parse,
-        updated_position,
-        &updated_mapper,
-    ) else {
-        return false;
-    };
-    let updated_declarations =
-        persistent_declaration_ranges(&updated_parse, &updated_document.text, &updated_mapper);
-    let Some((_, updated_target_name_range)) = updated_declarations
-        .iter()
-        .find(|(_, name_range)| name_range == &updated_definition.range)
+    let Some((workspace, module, byte)) = state.locate(&params.text_document.uri, params.position)
     else {
-        return false;
+        return Ok(serde_json::Value::Null);
     };
-    let updated_references = analysis::references(
-        &updated_document,
-        &updated_parse,
-        updated_position,
-        &updated_mapper,
-        true,
-    );
-    let mut resolved_ranges = Vec::with_capacity(updated_references.len());
-    for reference in &updated_references {
-        let start = updated_mapper.byte_offset(reference.range.start);
-        let end = updated_mapper.byte_offset(reference.range.end);
-        if start >= end || end > updated_document.text.len() {
-            return false;
-        }
-        resolved_ranges.push((start, end));
-    }
-    resolved_ranges.sort_unstable();
-    if resolved_ranges != expected_ranges {
-        return false;
-    }
-    updated_references
-        .iter()
-        .filter(|reference| {
-            updated_declarations
-                .iter()
-                .any(|(_, name_range)| name_range == &reference.range)
-        })
-        .count()
-        == 1
-        && updated_references
-            .iter()
-            .any(|reference| reference.range == *updated_target_name_range)
-        && declarations
-            .iter()
-            .any(|(_, name_range)| name_range == target_name_range)
+    let renamable = rename::prepare(&workspace, module, byte).map_err(refused)?;
+    let mapper = PositionMapper::new(workspace.file(module).text());
+    Ok(serde_json::to_value(
+        PrepareRenameResponse::RangeWithPlaceholder {
+            range: mapper.range(&renamable.span),
+            placeholder: renamable.placeholder,
+        },
+    )?)
 }
 
 fn request_document_symbols(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentSymbolParams>("textDocument/documentSymbol")?;
     let uri = params.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some(open) = state.documents.get(&uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(document);
-    let symbols = analysis::document_symbols(&parse, &document.text, &mapper);
+    let file = open.analysis();
+    let mapper = PositionMapper::new(file.text());
+    let symbols = analysis::document_symbols(&file.symbols, &mapper);
     let response = DocumentSymbolResponse::Nested(symbols);
     Ok(serde_json::to_value(response)?)
 }
 
 fn request_workspace_symbols(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<lsp_types::WorkspaceSymbolParams>("workspace/symbol")?;
     let query = params.query.trim().to_lowercase();
     let mut symbols = Vec::new();
-    for document in state
+    for open in state
         .documents
         .values()
-        .filter(|document| document.uri.as_str().ends_with(".orna"))
+        .filter(|open| open.document.uri.as_str().ends_with(".orna"))
     {
-        let (parse, mapper) = parse_document(document);
-        if !parse.diagnostics.is_empty() {
+        let file = open.analysis();
+        if !file.parse.diagnostics.is_empty() {
             continue;
         }
-        for symbol in analysis::document_symbols(&parse, &document.text, &mapper) {
+        let mapper = PositionMapper::new(file.text());
+        for symbol in analysis::document_symbols(&file.symbols, &mapper) {
             if let Some(score) = workspace_symbol_score(&symbol.name, &query) {
                 let range = symbol.selection_range;
                 symbols.push((
                     score,
                     symbol.name.to_lowercase(),
-                    document.uri.as_str().to_owned(),
+                    file.uri().as_str().to_owned(),
                     range.start,
                     lsp_types::WorkspaceSymbol {
                         name: symbol.name,
@@ -1428,7 +1508,7 @@ fn request_workspace_symbols(
                         tags: symbol.tags,
                         container_name: None,
                         location: lsp_types::OneOf::Left(lsp_types::Location {
-                            uri: document.uri.clone(),
+                            uri: file.uri().clone(),
                             range,
                         }),
                         data: None,
@@ -1498,711 +1578,142 @@ fn workspace_symbol_score(name: &str, query: &str) -> Option<u32> {
     Some(100 + first as u32 + gaps * 4 - boundary_bonus)
 }
 
-#[derive(Debug, Clone)]
-struct WorkspaceFunction {
-    document: Document,
-    definition: analysis::FunctionDefinition,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceDeclaration {
-    document: Document,
-    symbol: analysis::EditorSymbol,
-    public: bool,
-    protocols: Vec<String>,
-}
-
-fn workspace_declarations(state: &ServerState) -> Vec<WorkspaceDeclaration> {
-    let mut documents = state
-        .documents
-        .values()
-        .filter(|document| document.uri.as_str().ends_with(".orna"))
-        .collect::<Vec<_>>();
-    documents.sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
-
-    let mut declarations = Vec::new();
-    for document in documents {
-        let parse = analysis::parse_document(document);
-        if !parse.diagnostics.is_empty() {
-            continue;
-        }
-        for symbol in analysis::declaration_symbols(&parse, &document.text) {
-            let Some(item) = parse.value.items.iter().find(|item| {
-                item.span.start == symbol.full.start && item.span.end == symbol.full.end
-            }) else {
-                continue;
-            };
-            let public = matches!(&item.visibility, orna_syntax_v1::Visibility::Public { .. });
-            let protocols = implementation_protocols(&item.declaration);
-            declarations.push(WorkspaceDeclaration {
-                document: document.clone(),
-                symbol,
-                public,
-                protocols,
-            });
-        }
-    }
-    declarations.sort_by(|left, right| {
-        left.document
-            .uri
-            .as_str()
-            .cmp(right.document.uri.as_str())
-            .then_with(|| {
-                left.symbol
-                    .selection
-                    .start
-                    .cmp(&right.symbol.selection.start)
-            })
-    });
-    declarations
-}
-
-fn implementation_protocols(declaration: &orna_syntax_v1::Declaration) -> Vec<String> {
-    let mut protocols = Vec::new();
-    let mut add = |implementation: &orna_syntax_v1::Implementation| {
-        if let orna_syntax_v1::TypeExpr::Name { path, .. } = &implementation.protocol
-            && let Some(name) = path.last()
-        {
-            protocols.push(name.clone());
-        }
-    };
-    match declaration {
-        orna_syntax_v1::Declaration::Table { members, .. } => {
-            for member in members {
-                if let orna_syntax_v1::TableMember::Implementation { implementation, .. } = member {
-                    add(implementation);
-                }
-            }
-        }
-        orna_syntax_v1::Declaration::Type {
-            representation:
-                orna_syntax_v1::TypeRepresentation::Alias { refinements, .. }
-                | orna_syntax_v1::TypeRepresentation::Nominal {
-                    members: refinements,
-                },
-            ..
-        } => {
-            for member in refinements {
-                if let orna_syntax_v1::TypeMember::Implementation { implementation, .. } = member {
-                    add(implementation);
-                }
-            }
-        }
-        _ => {}
-    }
-    protocols.sort_by_key(|name| analysis::normalized_identifier(name));
-    protocols.dedup_by(|left, right| {
-        analysis::normalized_identifier(left) == analysis::normalized_identifier(right)
-    });
-    protocols
-}
-
-fn is_hierarchy_declaration(declaration: &WorkspaceDeclaration) -> bool {
-    matches!(
-        declaration.symbol.kind,
-        analysis::EditorSymbolKind::Type
-            | analysis::EditorSymbolKind::Table
-            | analysis::EditorSymbolKind::Protocol
-    )
-}
-
-fn hierarchy_symbol_kind(kind: analysis::EditorSymbolKind) -> Option<lsp_types::SymbolKind> {
-    match kind {
-        analysis::EditorSymbolKind::Type => Some(lsp_types::SymbolKind::STRUCT),
-        analysis::EditorSymbolKind::Table => Some(lsp_types::SymbolKind::CLASS),
-        analysis::EditorSymbolKind::Protocol => Some(lsp_types::SymbolKind::INTERFACE),
-        _ => None,
-    }
-}
-
-fn type_hierarchy_item(declaration: &WorkspaceDeclaration) -> Option<TypeHierarchyItem> {
-    let mapper = PositionMapper::new(&declaration.document.text);
-    Some(TypeHierarchyItem {
-        name: declaration.symbol.name.clone(),
-        kind: hierarchy_symbol_kind(declaration.symbol.kind)?,
-        tags: None,
-        detail: declaration.symbol.detail.clone(),
-        uri: declaration.document.uri.clone(),
-        range: mapper.range(&declaration.symbol.full),
-        selection_range: mapper.range(&declaration.symbol.selection),
-        data: Some(serde_json::json!({
-            "scheme": "orna-syntax-v1",
-            "uri": declaration.document.uri.as_str(),
-            "name": analysis::normalized_identifier(&declaration.symbol.name),
-            "start": declaration.symbol.selection.start,
-            "end": declaration.symbol.selection.end,
-        })),
-    })
-}
-
-fn same_type_hierarchy_declaration(
-    item: &TypeHierarchyItem,
-    declaration: &WorkspaceDeclaration,
-) -> bool {
-    hierarchy_symbol_kind(declaration.symbol.kind).is_some_and(|kind| {
-        let mapper = PositionMapper::new(&declaration.document.text);
-        item.uri == declaration.document.uri
-            && item.name == declaration.symbol.name
-            && item.kind == kind
-            && item.selection_range == mapper.range(&declaration.symbol.selection)
-    })
-}
-
-fn uniquely_resolved_protocol(declarations: &[WorkspaceDeclaration], name: &str) -> Option<usize> {
-    let key = analysis::normalized_identifier(name);
-    let mut matches = declarations.iter().enumerate().filter(|(_, declaration)| {
-        declaration.symbol.kind == analysis::EditorSymbolKind::Protocol
-            && analysis::normalized_identifier(&declaration.symbol.name) == key
-    });
-    let found = matches.next()?.0;
-    matches.next().is_none().then_some(found)
-}
-
-fn workspace_declaration_at<'a>(
-    declarations: &'a [WorkspaceDeclaration],
-    document: &Document,
-    selection: &orna_syntax_v1::SyntaxSpan,
-    mapper: &PositionMapper<'_>,
-    segments: &[SourceSegment<'_>],
-) -> Option<&'a WorkspaceDeclaration> {
-    let selected = project_location(
-        lsp_types::Location {
-            uri: document.uri.clone(),
-            range: mapper.range(selection),
-        },
-        mapper,
-        segments,
-    )?;
-    declarations.iter().find(|declaration| {
-        declaration.document.uri == selected.uri
-            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
-                == selected.range
-    })
-}
-
-fn workspace_functions(state: &ServerState) -> Vec<WorkspaceFunction> {
-    let mut documents = state
-        .documents
-        .values()
-        .filter(|document| document.uri.as_str().ends_with(".orna"))
-        .collect::<Vec<_>>();
-    documents.sort_by(|left, right| left.uri.as_str().cmp(right.uri.as_str()));
-    let mut functions = Vec::new();
-    for document in documents {
-        let parse = analysis::parse_document(document);
-        if !parse.diagnostics.is_empty() {
-            continue;
-        }
-        functions.extend(
-            analysis::function_definitions(&parse, &document.text)
-                .into_iter()
-                .map(|definition| WorkspaceFunction {
-                    document: document.clone(),
-                    definition,
-                }),
-        );
-    }
-    functions.sort_by(|left, right| {
-        left.document
-            .uri
-            .as_str()
-            .cmp(right.document.uri.as_str())
-            .then_with(|| {
-                left.definition
-                    .selection
-                    .start
-                    .cmp(&right.definition.selection.start)
-            })
-    });
-    functions
-}
-
-fn call_hierarchy_item(function: &WorkspaceFunction) -> CallHierarchyItem {
-    let mapper = PositionMapper::new(&function.document.text);
-    CallHierarchyItem {
-        name: function.definition.name.clone(),
-        kind: lsp_types::SymbolKind::FUNCTION,
-        tags: None,
-        detail: function.definition.detail.clone(),
-        uri: function.document.uri.clone(),
-        range: mapper.range(&function.definition.full),
-        selection_range: mapper.range(&function.definition.selection),
-        data: None,
-    }
-}
-
-fn same_call_hierarchy_function(item: &CallHierarchyItem, function: &WorkspaceFunction) -> bool {
-    let expected = call_hierarchy_item(function);
-    item.uri == expected.uri && item.selection_range == expected.selection_range
-}
-
-fn uniquely_resolved_function(functions: &[WorkspaceFunction], name: &str) -> Option<usize> {
-    let key = analysis::normalized_identifier(name);
-    let mut matches = functions
-        .iter()
-        .enumerate()
-        .filter(|(_, function)| analysis::normalized_identifier(&function.definition.name) == key);
-    let found = matches.next()?.0;
-    matches.next().is_none().then_some(found)
-}
-
 fn request_prepare_call_hierarchy(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request
         .extract::<lsp_types::CallHierarchyPrepareParams>("textDocument/prepareCallHierarchy")?;
     let uri = params.text_document_position_params.text_document.uri;
-    let functions = workspace_functions(state);
-    let Some(document) = state.document(&uri) else {
+    let position = params.text_document_position_params.position;
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let parse = analysis::parse_document(document);
-    if !parse.diagnostics.is_empty() {
+    // A module with syntax errors has no reliable declarations to prepare,
+    // so preparation fails closed as the other parser-error refusals do.
+    if !workspace.file(module).parse.diagnostics.is_empty() {
         return Ok(serde_json::Value::Null);
     }
-    let mapper = PositionMapper::new(&document.text);
-    let byte = mapper.byte_offset(params.text_document_position_params.position);
-    if let Some(function) = functions.iter().find(|function| {
-        function.document.uri == uri
-            && function.definition.selection.start <= byte
-            && byte <= function.definition.selection.end
-    }) {
-        return Ok(serde_json::to_value(vec![call_hierarchy_item(function)])?);
-    }
-
-    let target_name = analysis::function_definitions(&parse, &document.text)
-        .into_iter()
-        .flat_map(|function| {
-            function
-                .calls
-                .into_iter()
-                .map(move |call| (function.selection.start, call))
-        })
-        .filter(|(_, call)| call.selection.start <= byte && byte <= call.selection.end)
-        .min_by_key(|(_, call)| call.selection.end.saturating_sub(call.selection.start))
-        .map(|(_, call)| call.name);
-    let Some(target_name) = target_name else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(target) = uniquely_resolved_function(&functions, &target_name) else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(vec![call_hierarchy_item(
-        &functions[target],
-    )])?)
+    Ok(serde_json::to_value(hierarchy::prepare_call_hierarchy(
+        &workspace, module, byte,
+    ))?)
 }
 
 fn request_incoming_calls(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request
         .extract::<lsp_types::CallHierarchyIncomingCallsParams>("callHierarchy/incomingCalls")?;
-    let functions = workspace_functions(state);
-    let Some(target) = functions
-        .iter()
-        .position(|function| same_call_hierarchy_function(&params.item, function))
-    else {
-        return Ok(serde_json::to_value(Vec::<
-            lsp_types::CallHierarchyIncomingCall,
-        >::new())?);
-    };
-    let target_name = analysis::normalized_identifier(&functions[target].definition.name);
-    let mut incoming = Vec::new();
-    for caller in &functions {
-        let mut spans = caller
-            .definition
-            .calls
-            .iter()
-            .filter(|call| {
-                uniquely_resolved_function(&functions, &call.name) == Some(target)
-                    && analysis::normalized_identifier(&call.name) == target_name
-            })
-            .map(|call| call.selection.clone())
-            .collect::<Vec<_>>();
-        if spans.is_empty() {
-            continue;
-        }
-        spans.sort_by_key(|span| (span.start, span.end));
-        let mapper = PositionMapper::new(&caller.document.text);
-        incoming.push(lsp_types::CallHierarchyIncomingCall {
-            from: call_hierarchy_item(caller),
-            from_ranges: spans.iter().map(|span| mapper.range(span)).collect(),
-        });
-    }
-    Ok(serde_json::to_value(incoming)?)
+    let calls = state
+        .views
+        .workspace_containing(&state.documents, &params.item.uri)
+        .map(|(workspace, module)| hierarchy::incoming_calls(&workspace, module, &params.item))
+        .unwrap_or_default();
+    Ok(serde_json::to_value(calls)?)
 }
 
 fn request_outgoing_calls(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request
         .extract::<lsp_types::CallHierarchyOutgoingCallsParams>("callHierarchy/outgoingCalls")?;
-    let functions = workspace_functions(state);
-    let Some(source) = functions
-        .iter()
-        .position(|function| same_call_hierarchy_function(&params.item, function))
-    else {
-        return Ok(serde_json::to_value(Vec::<
-            lsp_types::CallHierarchyOutgoingCall,
-        >::new())?);
-    };
-    let mut groups: Vec<(usize, Vec<orna_syntax_v1::SyntaxSpan>)> = Vec::new();
-    for call in &functions[source].definition.calls {
-        let Some(target) = uniquely_resolved_function(&functions, &call.name) else {
-            continue;
-        };
-        if let Some((_, spans)) = groups.iter_mut().find(|(index, _)| *index == target) {
-            spans.push(call.selection.clone());
-        } else {
-            groups.push((target, vec![call.selection.clone()]));
-        }
-    }
-    groups.sort_by_key(|(target, _)| *target);
-    let mapper = PositionMapper::new(&functions[source].document.text);
-    let outgoing = groups
-        .into_iter()
-        .map(|(target, mut spans)| {
-            spans.sort_by_key(|span| (span.start, span.end));
-            lsp_types::CallHierarchyOutgoingCall {
-                to: call_hierarchy_item(&functions[target]),
-                from_ranges: spans.iter().map(|span| mapper.range(span)).collect(),
-            }
-        })
-        .collect::<Vec<_>>();
-    Ok(serde_json::to_value(outgoing)?)
+    let calls = state
+        .views
+        .workspace_containing(&state.documents, &params.item.uri)
+        .map(|(workspace, module)| hierarchy::outgoing_calls(&workspace, module, &params.item))
+        .unwrap_or_default();
+    Ok(serde_json::to_value(calls)?)
 }
 
 fn request_prepare_type_hierarchy(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<TypeHierarchyPrepareParams>("textDocument/prepareTypeHierarchy")?;
     let uri = params.text_document_position_params.text_document.uri;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
-    else {
+    let position = params.text_document_position_params.position;
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) = workspace_position(
-        &document,
-        selected_start,
-        params.text_document_position_params.position,
-        &state.documents,
-        &uri,
-    ) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let declarations = workspace_declarations(state);
-    if let Some((_, selection)) = analysis::identifier_at(&document, position, &mapper)
-        && let Some(declaration) =
-            workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments)
-        && is_hierarchy_declaration(declaration)
-    {
-        let Some(item) = type_hierarchy_item(declaration) else {
-            return Ok(serde_json::Value::Null);
-        };
-        return Ok(serde_json::to_value(vec![item])?);
-    }
-    let Some(definition) = analysis::definition(&document, &parse, position, &mapper) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(definition) = project_location(definition, &mapper, &segments) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(declaration) = declarations.iter().find(|declaration| {
-        is_hierarchy_declaration(declaration)
-            && declaration.document.uri == definition.uri
-            && PositionMapper::new(&declaration.document.text).range(&declaration.symbol.selection)
-                == definition.range
-    }) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(item) = type_hierarchy_item(declaration) else {
-        return Ok(serde_json::Value::Null);
-    };
-    Ok(serde_json::to_value(vec![item])?)
+    Ok(serde_json::to_value(hierarchy::prepare_type_hierarchy(
+        &workspace, module, byte,
+    ))?)
 }
 
 fn request_type_hierarchy_supertypes(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<TypeHierarchySupertypesParams>("typeHierarchy/supertypes")?;
-    let declarations = workspace_declarations(state);
-    let Some(target) = declarations.iter().find(|declaration| {
-        is_hierarchy_declaration(declaration)
-            && same_type_hierarchy_declaration(&params.item, declaration)
-    }) else {
-        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
-    };
-
-    let mut supertypes = target
-        .protocols
-        .iter()
-        .filter_map(|name| uniquely_resolved_protocol(&declarations, name))
-        .filter_map(|index| type_hierarchy_item(&declarations[index]))
-        .collect::<Vec<_>>();
-    sort_type_hierarchy_items(&mut supertypes);
+    let supertypes = state
+        .views
+        .workspace_containing(&state.documents, &params.item.uri)
+        .map(|(workspace, module)| hierarchy::supertypes(&workspace, module, &params.item))
+        .unwrap_or_default();
     Ok(serde_json::to_value(supertypes)?)
 }
 
 fn request_type_hierarchy_subtypes(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<TypeHierarchySubtypesParams>("typeHierarchy/subtypes")?;
-    let declarations = workspace_declarations(state);
-    let Some((target_index, target)) = declarations.iter().enumerate().find(|(_, declaration)| {
-        is_hierarchy_declaration(declaration)
-            && same_type_hierarchy_declaration(&params.item, declaration)
-    }) else {
-        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
-    };
-
-    if target.symbol.kind != analysis::EditorSymbolKind::Protocol
-        || uniquely_resolved_protocol(&declarations, &target.symbol.name) != Some(target_index)
-    {
-        return Ok(serde_json::to_value(Vec::<TypeHierarchyItem>::new())?);
-    }
-    let mut subtypes = declarations
-        .iter()
-        .filter(|declaration| {
-            matches!(
-                declaration.symbol.kind,
-                analysis::EditorSymbolKind::Type | analysis::EditorSymbolKind::Table
-            ) && declaration
-                .protocols
-                .iter()
-                .any(|name| uniquely_resolved_protocol(&declarations, name) == Some(target_index))
-        })
-        .filter_map(type_hierarchy_item)
-        .collect::<Vec<_>>();
-    sort_type_hierarchy_items(&mut subtypes);
+    let subtypes = state
+        .views
+        .workspace_containing(&state.documents, &params.item.uri)
+        .map(|(workspace, module)| hierarchy::subtypes(&workspace, module, &params.item))
+        .unwrap_or_default();
     Ok(serde_json::to_value(subtypes)?)
 }
 
-fn sort_type_hierarchy_items(items: &mut [TypeHierarchyItem]) {
-    items.sort_by(|left, right| {
-        left.uri
-            .as_str()
-            .cmp(right.uri.as_str())
-            .then_with(|| {
-                left.selection_range
-                    .start
-                    .line
-                    .cmp(&right.selection_range.start.line)
-            })
-            .then_with(|| {
-                left.selection_range
-                    .start
-                    .character
-                    .cmp(&right.selection_range.start.character)
-            })
-            .then_with(|| left.name.cmp(&right.name))
-    });
-}
-
 fn request_moniker(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<MonikerParams>("textDocument/moniker")?;
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
-    else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some((name, selection)) = analysis::identifier_at(&document, position, &mapper) else {
-        return Ok(serde_json::Value::Null);
-    };
-
-    if let Some(binding) = crate::locals::binding_at(&parse.value, &name, &selection) {
-        let binding_location = project_location(
-            lsp_types::Location {
-                uri: document.uri.clone(),
-                range: mapper.range(&binding.selection),
-            },
-            &mapper,
-            &segments,
-        );
-        let Some(binding_location) = binding_location else {
-            return Ok(serde_json::Value::Null);
-        };
-        let Some(binding_document) = state.document(&binding_location.uri) else {
-            return Ok(serde_json::Value::Null);
-        };
-        let binding_mapper = PositionMapper::new(&binding_document.text);
-        let byte = binding_mapper.byte_offset(binding_location.range.start);
-        return Ok(serde_json::to_value(vec![Moniker {
-            scheme: "orna-syntax-v1".to_owned(),
-            identifier: format!(
-                "{}#local:{}:{}",
-                binding_location.uri.as_str(),
-                byte,
-                analysis::normalized_identifier(&binding.name)
-            ),
-            unique: UniquenessLevel::Document,
-            kind: Some(MonikerKind::Local),
-        }])?);
-    }
-
-    let declarations = workspace_declarations(state);
-    let clicked = project_location(
-        lsp_types::Location {
-            uri: document.uri.clone(),
-            range: mapper.range(&selection),
-        },
-        &mapper,
-        &segments,
-    );
-    let direct_declaration =
-        workspace_declaration_at(&declarations, &document, &selection, &mapper, &segments);
-    let resolved_declaration = analysis::definition(&document, &parse, position, &mapper)
-        .and_then(|definition| project_location(definition, &mapper, &segments))
-        .and_then(|definition| {
-            declarations.iter().find(|declaration| {
-                declaration.document.uri == definition.uri
-                    && PositionMapper::new(&declaration.document.text)
-                        .range(&declaration.symbol.selection)
-                        == definition.range
-            })
-        });
-    let Some(declaration) = direct_declaration.or(resolved_declaration) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let at_declaration = clicked.is_some_and(|clicked| {
-        clicked.uri == declaration.document.uri
-            && clicked.range
-                == PositionMapper::new(&declaration.document.text)
-                    .range(&declaration.symbol.selection)
-    });
-    let kind = if !declaration.public {
-        MonikerKind::Local
-    } else if at_declaration {
-        MonikerKind::Export
-    } else if declaration.document.uri != uri {
-        MonikerKind::Import
-    } else {
-        MonikerKind::Local
-    };
-    let moniker_kind = match declaration.symbol.kind {
-        analysis::EditorSymbolKind::Function => "function",
-        analysis::EditorSymbolKind::Type => "type",
-        analysis::EditorSymbolKind::Enum => "enum",
-        analysis::EditorSymbolKind::EnumVariant => "enum-member",
-        analysis::EditorSymbolKind::Table => "table",
-        analysis::EditorSymbolKind::Protocol => "protocol",
-        analysis::EditorSymbolKind::Method => "method",
-        analysis::EditorSymbolKind::Field => "field",
-        analysis::EditorSymbolKind::Constant => "constant",
-        analysis::EditorSymbolKind::Other => "symbol",
-    };
-    Ok(serde_json::to_value(vec![Moniker {
-        scheme: "orna-syntax-v1".to_owned(),
-        identifier: format!(
-            "{}#{}:{}",
-            declaration.document.uri.as_str(),
-            moniker_kind,
-            analysis::normalized_identifier(&declaration.symbol.name)
-        ),
-        unique: UniquenessLevel::Project,
-        kind: Some(kind),
-    }])?)
+    Ok(serde_json::to_value(hierarchy::moniker(
+        &workspace, module, byte,
+    ))?)
 }
 
 fn request_code_lenses(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<CodeLensParams>("textDocument/codeLens")?;
-    let uri = params.text_document.uri;
-    if state.document(&uri).is_none() {
+    let Some((workspace, module)) = state
+        .views
+        .workspace(&state.documents, &params.text_document.uri)
+    else {
         return Ok(serde_json::Value::Null);
-    }
-    let functions = workspace_functions(state);
-    let mut references_by_target = (0..functions.len())
-        .map(|_| Vec::new())
-        .collect::<Vec<Vec<lsp_types::Location>>>();
-    for caller in &functions {
-        let mapper = PositionMapper::new(&caller.document.text);
-        for call in &caller.definition.calls {
-            if let Some(target_index) = uniquely_resolved_function(&functions, &call.name) {
-                references_by_target[target_index].push(lsp_types::Location {
-                    uri: caller.document.uri.clone(),
-                    range: mapper.range(&call.selection),
-                });
-            }
-        }
-    }
-
-    let mut lenses = Vec::new();
-    for (target_index, target) in functions
-        .iter()
-        .enumerate()
-        .filter(|(_, function)| function.document.uri == uri)
-    {
-        let references = &mut references_by_target[target_index];
-        references.sort_by(|left, right| {
-            left.uri
-                .as_str()
-                .cmp(right.uri.as_str())
-                .then_with(|| left.range.start.line.cmp(&right.range.start.line))
-                .then_with(|| left.range.start.character.cmp(&right.range.start.character))
-        });
-        let mapper = PositionMapper::new(&target.document.text);
-        let selection = &target.definition.selection;
-        let lens_position = mapper.position(selection.start);
-        let reference_count = references.len();
-        let arguments = Some(vec![
-            serde_json::to_value(&target.document.uri)?,
-            serde_json::to_value(lens_position)?,
-            serde_json::to_value(&*references)?,
-        ]);
-        lenses.push(CodeLens {
-            range: mapper.range(selection),
-            command: Some(Command {
-                title: format!("{reference_count} incoming calls"),
-                command: "editor.action.showReferences".to_owned(),
-                arguments,
-            }),
-            data: None,
-        });
-    }
-    Ok(serde_json::to_value(lenses)?)
+    };
+    Ok(serde_json::to_value(hierarchy::code_lenses(
+        &workspace, module,
+    ))?)
 }
 
 fn request_semantic_tokens_full(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<SemanticTokensParams>("textDocument/semanticTokens/full")?;
     let uri = params.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some((workspace, module)) = state.views.workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let mapper = PositionMapper::new(&document.text);
-    let data = semantic::semantic_tokens(&document.text, &mapper, None);
-    let result_id = state.next_semantic_token_result_id();
-    state.semantic_tokens.insert(
-        uri,
-        SemanticTokenSnapshot {
-            result_id: result_id.clone(),
-            data: data.clone(),
-        },
-    );
+    let mapper = PositionMapper::new(workspace.file(module).text());
+    let data = semantic::semantic_tokens(&workspace, module, &mapper, None);
+    let result_id = state.record_semantic_tokens(uri, data.clone());
     Ok(serde_json::to_value(SemanticTokens {
         result_id: Some(result_id),
         data,
@@ -2210,30 +1721,23 @@ fn request_semantic_tokens_full(
 }
 
 fn request_semantic_tokens_delta(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<SemanticTokensDeltaParams>("textDocument/semanticTokens/full/delta")?;
     let uri = params.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some((workspace, module)) = state.views.workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let mapper = PositionMapper::new(&document.text);
-    let data = semantic::semantic_tokens(&document.text, &mapper, None);
-    let edits = state
-        .semantic_tokens
+    let mapper = PositionMapper::new(workspace.file(module).text());
+    let data = semantic::semantic_tokens(&workspace, module, &mapper, None);
+    let edits = lock(&state.semantic_tokens)
+        .by_uri
         .get(&uri)
         .filter(|snapshot| snapshot.result_id == params.previous_result_id)
         .map(|snapshot| semantic_token_delta_edits(&snapshot.data, &data));
-    let result_id = state.next_semantic_token_result_id();
-    state.semantic_tokens.insert(
-        uri,
-        SemanticTokenSnapshot {
-            result_id: result_id.clone(),
-            data: data.clone(),
-        },
-    );
+    let result_id = state.record_semantic_tokens(uri, data.clone());
     match edits {
         Some(edits) => Ok(serde_json::json!({
             "resultId": result_id,
@@ -2296,17 +1800,17 @@ fn semantic_token_delta_edits(
 }
 
 fn request_semantic_tokens_range(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<SemanticTokensRangeParams>("textDocument/semanticTokens/range")?;
     let uri = params.text_document.uri;
-    let Some(document) = state.document(&uri) else {
+    let Some((workspace, module)) = state.views.workspace(&state.documents, &uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let mapper = PositionMapper::new(&document.text);
-    let data = semantic::semantic_tokens(&document.text, &mapper, Some(&params.range));
+    let mapper = PositionMapper::new(workspace.file(module).text());
+    let data = semantic::semantic_tokens(&workspace, module, &mapper, Some(&params.range));
     Ok(serde_json::to_value(SemanticTokens {
         result_id: None,
         data,
@@ -2314,37 +1818,37 @@ fn request_semantic_tokens_range(
 }
 
 fn request_inlay_hints(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<InlayHintParams>("textDocument/inlayHint")?;
-    let Some(document) = state.document(&params.text_document.uri) else {
+    let Some((workspace, module)) = state
+        .views
+        .workspace(&state.documents, &params.text_document.uri)
+    else {
         return Ok(serde_json::Value::Null);
     };
-    let parse = analysis::parse_document(document);
-    let mapper = PositionMapper::new(&document.text);
     Ok(serde_json::to_value(inlay::inlay_hints(
-        &parse,
-        &document.text,
-        &mapper,
+        &workspace,
+        module,
         &params.range,
     ))?)
 }
 
 fn request_inline_values(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<InlineValueParams>("textDocument/inlineValue")?;
-    let Some(document) = state.document(&params.text_document.uri) else {
+    let Some(open) = state.documents.get(&params.text_document.uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let parse = analysis::parse_document(document);
-    if !parse.diagnostics.is_empty() {
+    let file = open.analysis();
+    if !file.parse.diagnostics.is_empty() {
         return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
     }
 
-    let mapper = PositionMapper::new(&document.text);
+    let mapper = PositionMapper::new(file.text());
     let requested_start = mapper.byte_offset(params.range.start);
     let requested_end = mapper.byte_offset(params.range.end);
     let stopped_at = mapper.byte_offset(params.context.stopped_location.end);
@@ -2353,13 +1857,16 @@ fn request_inline_values(
         return Ok(serde_json::to_value(Vec::<InlineValue>::new())?);
     }
 
-    let mut values = crate::locals::visible_bindings(&parse.value, stopped_at)
+    let names = &file.names;
+    let mut values = names
+        .visible_bindings(stopped_at)
         .into_iter()
         .filter_map(|binding| {
-            let mut occurrences = crate::locals::references(&parse.value, &binding);
-            occurrences.push(binding.selection);
-            occurrences
-                .into_iter()
+            let index = names.binding_at(&binding.selection)?;
+            names
+                .references(index)
+                .map(|occurrence| &occurrence.span)
+                .chain(std::iter::once(&binding.selection))
                 .filter(|span| {
                     span.start >= requested_start
                         && span.end <= requested_end
@@ -2370,8 +1877,8 @@ fn request_inline_values(
                     (
                         span.start,
                         InlineValue::VariableLookup(InlineValueVariableLookup {
-                            range: mapper.range(&span),
-                            variable_name: Some(binding.name),
+                            range: mapper.range(span),
+                            variable_name: Some(binding.name.clone()),
                             case_sensitive_lookup: false,
                         }),
                     )
@@ -2388,83 +1895,63 @@ fn request_inline_values(
 }
 
 fn request_linked_editing_range(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
         request.extract::<LinkedEditingRangeParams>("textDocument/linkedEditingRange")?;
     let uri = params.text_document_position_params.text_document.uri;
-    let Some((document, segments, selected_start)) = combined_workspace(&state.documents, &uri)
+    let position = params.text_document_position_params.position;
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
+        return Ok(serde_json::Value::Null);
+    };
+    let file = workspace.file(module);
+    if !file.parse.diagnostics.is_empty() {
+        return Ok(serde_json::Value::Null);
+    }
+    let Some((span, target)) = workspace
+        .resolve_at(module, byte)
+        .and_then(|(span, resolved)| Some((span, resolved.target()?)))
     else {
         return Ok(serde_json::Value::Null);
     };
-    let (parse, mapper) = parse_document(&document);
-    if !parse.diagnostics.is_empty() {
-        return Ok(serde_json::Value::Null);
-    }
-    let Some(position) = workspace_position(
-        &document,
-        selected_start,
-        params.text_document_position_params.position,
-        &state.documents,
-        &uri,
-    ) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some((name, _)) = analysis::identifier_at(&document, position, &mapper) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let Some(selected_document) = state.document(&uri) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let selected_mapper = PositionMapper::new(&selected_document.text);
-    let mut ranges = analysis::references(&document, &parse, position, &mapper, true)
+    let name = &file.text()[span.start..span.end];
+    let mapper = PositionMapper::new(file.text());
+    let ranges = workspace
+        .search(&target)
+        .found
         .into_iter()
-        .filter_map(|location| project_location(location, &mapper, &segments))
-        .filter(|location| location.uri == uri)
-        .filter_map(|location| {
-            let start = selected_mapper.byte_offset(location.range.start);
-            let end = selected_mapper.byte_offset(location.range.end);
-            (selected_document.text.get(start..end) == Some(name.as_str()))
-                .then_some((start, location.range))
+        .filter(|(found_module, found)| {
+            *found_module == module && file.text().get(found.start..found.end) == Some(name)
         })
+        .map(|(_, found)| mapper.range(&found))
         .collect::<Vec<_>>();
-    ranges.sort_by_key(|(start, _)| *start);
-    ranges.dedup_by_key(|(start, range)| (*start, range.end));
     if ranges.len() < 2 {
         return Ok(serde_json::Value::Null);
     }
     Ok(serde_json::to_value(LinkedEditingRanges {
-        ranges: ranges.into_iter().map(|(_, range)| range).collect(),
+        ranges,
         word_pattern: None,
     })?)
 }
 
 fn request_completion(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<CompletionParams>("textDocument/completion")?;
     let uri = params.text_document_position.text_document.uri;
-    let Some((document, _, selected_start)) = combined_workspace(&state.documents, &uri) else {
-        return Ok(serde_json::Value::Null);
-    };
-    let (parse, mapper) = parse_document(&document);
     let position = params.text_document_position.position;
-    let Some(position) =
-        workspace_position(&document, selected_start, position, &state.documents, &uri)
-    else {
+    let Some((workspace, module, byte)) = state.locate(&uri, position) else {
         return Ok(serde_json::Value::Null);
     };
-    let byte = mapper.byte_offset(position);
-    let items =
-        analysis::completion_at(&parse, &document.text, Some(byte), params.context.as_ref());
+    let items = analysis::completion_at(&workspace, module, Some(byte), params.context.as_ref());
     let response = CompletionResponse::Array(items);
     Ok(serde_json::to_value(response)?)
 }
 
 fn request_formatting(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentFormattingParams>("textDocument/formatting")?;
@@ -2477,7 +1964,7 @@ fn request_formatting(
 }
 
 fn request_range_formatting(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) =
@@ -2491,20 +1978,15 @@ fn request_range_formatting(
 }
 
 fn request_document_diagnostic(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentDiagnosticParams>("textDocument/diagnostic")?;
     let uri = params.text_document.uri;
-    let (version, diagnostics) = if let Some(document) = state.document(&uri) {
-        let mapper = PositionMapper::new(&document.text);
-        (
-            Some(document.version),
-            analysis::check_document(document, &mapper),
-        )
-    } else {
-        (None, Vec::new())
-    };
+    let (version, diagnostics) = diagnostics::document_report(&state.snapshot(), &uri)
+        .map_or((None, Vec::new()), |report| {
+            (report.version, report.diagnostics)
+        });
     let result_id = diagnostic_result_id(&uri, version, &diagnostics);
     let report = if params.previous_result_id.as_deref() == Some(result_id.as_str()) {
         DocumentDiagnosticReport::Unchanged(RelatedUnchangedDocumentDiagnosticReport {
@@ -2528,169 +2010,265 @@ fn diagnostic_result_id(uri: &Uri, version: Option<i32>, diagnostics: &[Diagnost
     // server session. Include the document version as well as the report so
     // same-version edits cannot accidentally retain a stale pull result.
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    "orna-syntax-v1-diagnostics".hash(&mut hasher);
+    "orna-diagnostics".hash(&mut hasher);
     uri.as_str().hash(&mut hasher);
     version.hash(&mut hasher);
     serde_json::to_vec(diagnostics)
-        .expect("serialisable syntax diagnostics")
+        .expect("serialisable diagnostics")
         .hash(&mut hasher);
-    format!("orna-syntax-v1-{:016x}", hasher.finish())
+    format!("orna-{:016x}", hasher.finish())
 }
 
 fn request_document_links(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<DocumentLinkParams>("textDocument/documentLink")?;
     let links: Vec<DocumentLink> = state
-        .document(&params.text_document.uri)
-        .map(|document| analysis::document_links(document, &state.documents))
+        .views
+        .workspace(&state.documents, &params.text_document.uri)
+        .map(|(workspace, module)| analysis::document_links(&workspace, module))
         .unwrap_or_default();
     Ok(serde_json::to_value(links)?)
 }
 
 fn request_folding_ranges(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<FoldingRangeParams>("textDocument/foldingRange")?;
-    let Some(document) = state.document(&params.text_document.uri) else {
+    let Some(open) = state.documents.get(&params.text_document.uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let parse = analysis::parse_document(document);
-    let mapper = PositionMapper::new(&document.text);
+    let file = open.analysis();
+    let mapper = PositionMapper::new(file.text());
     let ranges: Vec<FoldingRange> =
-        editor_ranges::folding_ranges(&parse.value, &document.text, &mapper);
+        editor_ranges::folding_ranges(&file.parse.value, file.text(), &mapper);
     Ok(serde_json::to_value(ranges)?)
 }
 
 fn request_selection_ranges(
-    state: &mut ServerState,
+    state: &RequestContext,
     request: Request,
 ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
     let (_, params) = request.extract::<SelectionRangeParams>("textDocument/selectionRange")?;
-    let Some(document) = state.document(&params.text_document.uri) else {
+    let Some(open) = state.documents.get(&params.text_document.uri) else {
         return Ok(serde_json::Value::Null);
     };
-    let parse = analysis::parse_document(document);
-    let mapper = PositionMapper::new(&document.text);
+    let file = open.analysis();
+    let mapper = PositionMapper::new(file.text());
     let ranges =
-        editor_ranges::selection_ranges(&parse.value, &document.text, &params.positions, &mapper);
+        editor_ranges::selection_ranges(&file.parse.value, file.text(), &params.positions, &mapper);
     Ok(serde_json::to_value(ranges)?)
 }
 
 #[cfg(test)]
-mod rename_reserved_word_tests {
+mod analysis_cache_tests {
+    use super::*;
+    use crate::workspace::ANALYSES;
+    use serde_json::json;
+
+    const SOURCE: &str = "/// Adds two values.\n\
+        pub fn add(left: Int, right: Int): Int = left + right;\n\
+        pub fn twice(value: Int): Int = add(value, value);\n";
+
+    fn notify(state: &mut ServerState, method: &str, params: serde_json::Value) {
+        handle_notification(
+            state,
+            Notification {
+                method: method.to_owned(),
+                params,
+            },
+        );
+    }
+
+    fn analyses() -> usize {
+        ANALYSES.with(std::cell::Cell::get)
+    }
+
+    /// Every request the server answers from analyses, at the call of `add`.
+    fn requests(uri: &Uri, text: &str) -> Vec<(&'static str, serde_json::Value)> {
+        let mapper = PositionMapper::new(text);
+        let position = mapper.position(text.find("add(value").unwrap() + 1);
+        let at = json!({"textDocument": {"uri": uri}, "position": position});
+        let document = json!({"textDocument": {"uri": uri}});
+        let whole = json!({
+            "textDocument": {"uri": uri},
+            "range": {"start": mapper.position(0), "end": mapper.position(text.len())},
+        });
+        vec![
+            ("textDocument/hover", at.clone()),
+            ("textDocument/definition", at.clone()),
+            (
+                "textDocument/references",
+                json!({
+                    "textDocument": {"uri": uri},
+                    "position": position,
+                    "context": {"includeDeclaration": true},
+                }),
+            ),
+            ("textDocument/documentHighlight", at.clone()),
+            ("textDocument/signatureHelp", at.clone()),
+            ("textDocument/completion", at.clone()),
+            ("textDocument/prepareRename", at.clone()),
+            ("textDocument/linkedEditingRange", at.clone()),
+            ("textDocument/prepareCallHierarchy", at.clone()),
+            ("textDocument/moniker", at),
+            ("textDocument/documentSymbol", document.clone()),
+            ("textDocument/semanticTokens/full", document.clone()),
+            ("textDocument/codeLens", document.clone()),
+            ("textDocument/foldingRange", document.clone()),
+            ("textDocument/documentLink", document),
+            ("textDocument/semanticTokens/range", whole.clone()),
+            ("textDocument/inlayHint", whole),
+            ("workspace/symbol", json!({"query": "add"})),
+        ]
+    }
+
+    fn answer_all(state: &ServerState, uri: &Uri, text: &str) {
+        for (method, params) in requests(uri, text) {
+            let response = dispatch(
+                &state.context,
+                Request::new(1.into(), method.to_owned(), params),
+            );
+            assert!(response.is_ok(), "{method}: {response:?}");
+        }
+    }
+
+    #[test]
+    fn requests_share_one_analysis_per_document_version() {
+        let mut state = ServerState::new();
+        let uri: Uri = "file:///workspace/cached.orna".parse().unwrap();
+        notify(
+            &mut state,
+            "textDocument/didOpen",
+            json!({"textDocument": {"uri": uri, "languageId": "orna", "version": 1, "text": SOURCE}}),
+        );
+        let before = analyses();
+        answer_all(&state, &uri, SOURCE);
+        assert_eq!(analyses() - before, 1, "one analysis serves every request");
+
+        let edited = SOURCE.replace("left + right", "right + left");
+        notify(
+            &mut state,
+            "textDocument/didChange",
+            json!({"textDocument": {"uri": uri, "version": 2}, "contentChanges": [{"text": edited}]}),
+        );
+        answer_all(&state, &uri, &edited);
+        assert_eq!(analyses() - before, 2, "an edit costs one more analysis");
+    }
+}
+
+#[cfg(test)]
+mod rename_request_tests {
     use super::*;
     use orna_syntax_v1::Keyword;
 
     const EXPRESSIONS_SOURCE: &str = include_str!("../tests/fixtures/expressions-v1.orna");
+    const RENAME_TARGET_SOURCE: &str =
+        include_str!("../tests/fixtures/rename-reserved-target-v1.orna");
+    const IDENTITY_SOURCE: &str = include_str!("../tests/fixtures/identity-rename-follow-v1.orna");
+
+    fn open(uri: &Uri, text: &str) -> ServerState {
+        let mut state = ServerState::new();
+        let home = state.context.projects.home(uri);
+        state.set_document(Document::new(uri.clone(), text.to_owned(), 1), home);
+        state
+    }
+
+    /// The edits renaming the name at `byte`, or the refusal message.
+    fn rename(
+        state: &mut ServerState,
+        uri: &Uri,
+        byte: usize,
+        new_name: &str,
+    ) -> Result<HashMap<Uri, Vec<TextEdit>>, String> {
+        let text = state.context.document(uri).unwrap().text.clone();
+        let request = Request::new(
+            1.into(),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": PositionMapper::new(&text).position(byte),
+                "newName": new_name,
+            }),
+        );
+        match request_rename(&state.context, request) {
+            Ok(response) => Ok(serde_json::from_value::<WorkspaceEdit>(response)
+                .unwrap()
+                .changes
+                .unwrap_or_default()),
+            Err(error) => {
+                assert!(error.downcast_ref::<RequestFailed>().is_some(), "{error}");
+                Err(error.to_string())
+            }
+        }
+    }
 
     #[test]
     fn every_reserved_word_is_rejected_as_a_rename_target() {
         for keyword in Keyword::ALL {
             assert!(
-                !valid_rename_identifier(keyword.spelling()),
+                !rename::valid_identifier(keyword.spelling()),
                 "reserved word `{}` must not be a rename target",
                 keyword.spelling()
             );
         }
-        assert!(valid_rename_identifier("total"));
+        assert!(rename::valid_identifier("total"));
     }
 
     #[test]
-    fn rename_to_a_reserved_word_returns_no_edits_and_a_plain_name_does() {
+    fn rename_to_a_reserved_word_is_refused_and_a_plain_name_is_not() {
         let uri: Uri = "file:///workspace/expressions.orna".parse().unwrap();
-        let mut documents = HashMap::new();
-        documents.insert(
-            uri.clone(),
-            Document::new(uri.clone(), EXPRESSIONS_SOURCE.to_owned(), 1),
-        );
+        let mut state = open(&uri, EXPRESSIONS_SOURCE);
         let call_byte = EXPRESSIONS_SOURCE.find("add(value, 2)").unwrap() + 1;
-        let position = PositionMapper::new(EXPRESSIONS_SOURCE).position(call_byte);
 
         for keyword in Keyword::ALL {
-            assert!(
-                semantic_rename(&documents, &uri, position, keyword.spelling()).is_none(),
-                "rename to `{}` must produce no edits",
-                keyword.spelling()
-            );
+            let refusal = rename(&mut state, &uri, call_byte, keyword.spelling())
+                .expect_err("a reserved word is refused");
+            assert!(refusal.starts_with("cannot rename: "), "{refusal}");
         }
-        let edits = semantic_rename(&documents, &uri, position, "total")
+        let edits = rename(&mut state, &uri, call_byte, "total")
             .expect("a plain identifier renames the function");
         assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
     }
-}
-
-#[cfg(test)]
-mod rename_reserved_target_fixture_tests {
-    use super::*;
-    use orna_syntax_v1::Keyword;
-
-    const RENAME_TARGET_SOURCE: &str =
-        include_str!("../tests/fixtures/rename-reserved-target-v1.orna");
 
     #[test]
-    fn reserved_word_target_from_a_real_fixture_produces_no_edits() {
-        let uri: Uri = "file:///workspace/rename-reserved-target-v1.orna".parse().unwrap();
-        let mut documents = HashMap::new();
-        documents.insert(
-            uri.clone(),
-            Document::new(uri.clone(), RENAME_TARGET_SOURCE.to_owned(), 1),
-        );
+    fn reserved_word_target_from_a_real_fixture_is_refused() {
+        let uri: Uri = "file:///workspace/rename-reserved-target-v1.orna"
+            .parse()
+            .unwrap();
+        let mut state = open(&uri, RENAME_TARGET_SOURCE);
         let declared_byte = RENAME_TARGET_SOURCE.find("total(value").unwrap() + 1;
-        let position = PositionMapper::new(RENAME_TARGET_SOURCE).position(declared_byte);
 
         for keyword in Keyword::ALL {
             assert!(
-                semantic_rename(&documents, &uri, position, keyword.spelling()).is_none(),
-                "rename of `total` to `{}` must be rejected",
+                rename(&mut state, &uri, declared_byte, keyword.spelling()).is_err(),
+                "rename of `total` to `{}` must be refused",
                 keyword.spelling()
             );
         }
-        let edits = semantic_rename(&documents, &uri, position, "sum")
+        let edits = rename(&mut state, &uri, declared_byte, "sum")
             .expect("a plain identifier renames the function");
         assert_eq!(edits.values().map(Vec::len).sum::<usize>(), 2);
-    }
-}
-
-#[cfg(test)]
-mod identity_rename_follow_tests {
-    use super::*;
-
-    const IDENTITY_SOURCE: &str =
-        include_str!("../tests/fixtures/identity-rename-follow-v1.orna");
-
-    fn open(text: &str, uri: &Uri) -> HashMap<Uri, Document> {
-        HashMap::from([(uri.clone(), Document::new(uri.clone(), text.to_owned(), 1))])
     }
 
     #[test]
     fn rename_then_query_keeps_one_identity_for_the_renamed_function() {
-        let uri: Uri = "file:///workspace/identity-rename-follow-v1.orna".parse().unwrap();
+        let uri: Uri = "file:///workspace/identity-rename-follow-v1.orna"
+            .parse()
+            .unwrap();
+        let mut state = open(&uri, IDENTITY_SOURCE);
         let declared = IDENTITY_SOURCE.find("total(value").unwrap() + 1;
-        let position = PositionMapper::new(IDENTITY_SOURCE).position(declared);
-        let mut edits = semantic_rename(&open(IDENTITY_SOURCE, &uri), &uri, position, "sum")
+        let mut edits = rename(&mut state, &uri, declared, "sum")
             .expect("a plain identifier renames the function");
         let file_edits = edits.remove(&uri).unwrap();
-        assert_eq!(file_edits.len(), 2, "declaration and call are both rewritten");
-
-        let mapper = PositionMapper::new(IDENTITY_SOURCE);
-        let mut spans = file_edits
-            .iter()
-            .map(|edit| {
-                (
-                    mapper.byte_offset(edit.range.start),
-                    mapper.byte_offset(edit.range.end),
-                    edit.new_text.as_str(),
-                )
-            })
-            .collect::<Vec<_>>();
-        spans.sort_by(|left, right| right.0.cmp(&left.0));
-        let mut renamed = IDENTITY_SOURCE.to_owned();
-        for (start, end, text) in spans {
-            renamed.replace_range(start..end, text);
-        }
+        assert_eq!(
+            file_edits.len(),
+            2,
+            "declaration and call are both rewritten"
+        );
+        let renamed = apply_text_edits(IDENTITY_SOURCE, &file_edits).unwrap();
         assert_eq!(renamed, IDENTITY_SOURCE.replace("total", "sum"));
 
         let parse = orna_syntax_v1::parse_module(&renamed);
@@ -2699,10 +2277,20 @@ mod identity_rename_follow_tests {
         assert!(symbols.iter().any(|symbol| symbol.name == "sum"));
         assert!(!symbols.iter().any(|symbol| symbol.name == "total"));
 
-        // Query the renamed function again: the same identity is renamed once more.
+        // Query the renamed function again: the same declaration is renamed
+        // once more.
+        handle_notification(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": &renamed }],
+                }),
+            },
+        );
         let declared = renamed.find("sum(value").unwrap() + 1;
-        let position = PositionMapper::new(&renamed).position(declared);
-        let again = semantic_rename(&open(&renamed, &uri), &uri, position, "count")
+        let again = rename(&mut state, &uri, declared, "count")
             .expect("the follow-up rename resolves the renamed declaration");
         assert_eq!(again.values().map(Vec::len).sum::<usize>(), 2);
     }
@@ -2711,11 +2299,21 @@ mod identity_rename_follow_tests {
 #[cfg(test)]
 mod persisted_object_rename_tests {
     use super::*;
-    use std::{fs, process::Command};
+    use orna_semantic_v1::ModuleInput;
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     fn notify(state: &mut ServerState, notification: Notification) {
-        let (connection, _transport) = Connection::memory();
-        handle_notification(state, &connection, notification);
+        handle_notification(state, notification);
+    }
+
+    /// Opens `source` as `didOpen` does, in its project when it has one.
+    fn open_document(state: &mut ServerState, uri: &Uri, source: &str) {
+        let home = state.context.projects.home(uri);
+        state.set_document(Document::new(uri.clone(), source.to_owned(), 1), home);
     }
 
     fn did_save(state: &mut ServerState, uri: &Uri) {
@@ -2740,270 +2338,623 @@ mod persisted_object_rename_tests {
         )
     }
     fn apply_rename(state: &mut ServerState, uri: &Uri, new_name: &str, version: i32) -> String {
-        let response = request_rename(state, rename_request(uri.clone(), new_name)).unwrap();
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), new_name)).unwrap();
         let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
-        let source = state.document(uri).unwrap().text.clone();
+        let source = state.context.document(uri).unwrap().text.clone();
         let edits = workspace_edit.changes.unwrap().remove(uri).unwrap();
         let renamed_source = apply_text_edits(&source, &edits).unwrap();
-        notify(state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": version },
-                "contentChanges": [{ "text": &renamed_source }],
-            }),
-        });
+        notify(
+            state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": version },
+                    "contentChanges": [{ "text": &renamed_source }],
+                }),
+            },
+        );
         renamed_source
+    }
+
+    fn git(directory: &Path, args: &[&str]) {
+        assert!(
+            Command::new("git")
+                .args(args)
+                .current_dir(directory)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+
+    /// A format-3 repository whose `main.orna` is committed as `source`, with no
+    /// identity inventory staged.
+    fn format3_committed(source: &str) -> (tempfile::TempDir, Repository, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = orna_repository_v1::initialize_repository(directory.path())
+            .unwrap()
+            .into_repository();
+        let source_path = directory.path().join("main.orna");
+        fs::write(&source_path, source).unwrap();
+        git(
+            directory.path(),
+            &["add", "main.orna", ".orna/database.orna"],
+        );
+        git(
+            directory.path(),
+            &[
+                "-c",
+                "user.name=orna-test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                "base",
+            ],
+        );
+        (directory, repository, source_path)
+    }
+
+    /// A format-3 repository whose index stages `main.orna` as `source`, with
+    /// the identity inventory `orna commit` would stage for it.
+    fn format3_fixture(
+        source: &str,
+    ) -> (
+        tempfile::TempDir,
+        Repository,
+        PathBuf,
+        ObjectIdentityManifest,
+    ) {
+        let (directory, repository, source_path) = format3_committed(source);
+        let module = ModuleInput::new("main.orna", source);
+        let initial =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let staged = repository.capture_staged_candidate().unwrap();
+        repository
+            .stage_object_identities(&staged, &initial.to_stored(), &[])
+            .unwrap();
+        (directory, repository, source_path, initial)
+    }
+
+    /// The identity inventory the staged index carries now.
+    fn staged_manifest(repository: &Repository) -> ObjectIdentityManifest {
+        let staged = repository.capture_staged_candidate().unwrap();
+        ObjectIdentityManifest::read_staged(repository, &staged)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn file_uri(path: &Path) -> Uri {
+        url::Url::from_file_path(path)
+            .unwrap()
+            .as_str()
+            .parse::<Uri>()
+            .unwrap()
+    }
+
+    /// Records every message the server sends to its client.
+    fn capture_client(state: &mut ServerState) -> Arc<Mutex<Vec<Message>>> {
+        let messages = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&messages);
+        state.client = Some(Arc::new(move |message| lock(&sink).push(message)));
+        state.context.client = state.client.clone();
+        messages
+    }
+
+    /// The warnings shown to the client, as `window/showMessage`.
+    fn shown_warnings(messages: &Mutex<Vec<Message>>) -> Vec<String> {
+        lock(messages)
+            .iter()
+            .filter_map(|message| match message {
+                Message::Notification(notification)
+                    if notification.method == "window/showMessage" =>
+                {
+                    let params: lsp_types::ShowMessageParams =
+                        serde_json::from_value(notification.params.clone()).unwrap();
+                    (params.typ == lsp_types::MessageType::WARNING).then_some(params.message)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Asserts exactly one warning was shown, carrying the rename code and remedy.
+    fn assert_one_rename_warning(messages: &Mutex<Vec<Message>>, reason: &str) {
+        let warnings = shown_warnings(messages);
+        assert_eq!(warnings.len(), 1, "exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].starts_with("ORNA-LSP-RENAME-001"),
+            "{warnings:?}"
+        );
+        assert!(
+            warnings[0].contains(reason),
+            "{warnings:?} should mention {reason}"
+        );
+        assert!(
+            warnings[0].contains("orna mv"),
+            "{warnings:?} should name the orna mv remedy"
+        );
     }
 
     #[test]
     fn sequential_unsaved_renames_preserve_original_object_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
         apply_rename(&mut state, &uri, "Archive", 2);
         let vault_source = apply_rename(&mut state, &uri, "Vault", 3);
         fs::write(&source_path, &vault_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
     }
 
     #[test]
     fn declined_followup_rename_saves_latest_applied_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        let declined_response = request_rename(&mut state, rename_request(uri.clone(), "Vault")).unwrap();
+        let declined_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
         assert!(!declined_response.is_null());
         drop(declined_response);
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
 
     #[test]
     fn fully_applied_rename_chain_with_reused_intermediate_name_keeps_id_at_final_target() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
         apply_rename(&mut state, &uri, "Archive", 2);
         let vault_source = apply_rename(&mut state, &uri, "Vault", 3);
-        let saved_source = format!("{vault_source}\npub table Archive(id: Str) {{ payload: Blob, }}");
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 4 },
-                "contentChanges": [{ "text": &saved_source }],
-            }),
-        });
+        let saved_source =
+            format!("{vault_source}\npub table Archive(id: Str) {{ payload: Blob, }}");
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 4 },
+                    "contentChanges": [{ "text": &saved_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
         assert_ne!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
     }
+
     #[test]
     fn unrelated_declaration_matching_declined_target_does_not_steal_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
         let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
-        let declined_response = request_rename(&mut state, rename_request(uri.clone(), "Vault")).unwrap();
+        let declined_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Vault")).unwrap();
         assert!(!declined_response.is_null());
         drop(declined_response);
         let saved_source = format!("{saved_source}\npub table Vault(id: Str) {{ payload: Blob, }}");
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 3 },
-                "contentChanges": [{ "text": &saved_source }],
-            }),
-        });
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 3 },
+                    "contentChanges": [{ "text": &saved_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &saved_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
         assert_ne!(updated.id(ObjectKind::Table, "Vault"), Some(&original_id));
     }
+
     #[test]
     fn sequential_rename_chain_not_saved_does_not_persist_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        let original_bytes = fs::read(&manifest_path).unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
         apply_rename(&mut state, &uri, "Archive", 2);
         apply_rename(&mut state, &uri, "Vault", 3);
         did_save(&mut state, &uri);
 
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
-        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
+        assert_eq!(staged_manifest(&repository), initial);
     }
 
     #[test]
     fn rename_preserves_object_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
         let original_id = *initial.id(ObjectKind::Table, "Media").unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
-        let response = request_rename(&mut state, rename_request(uri.clone(), "Archive")).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        assert_eq!(staged_manifest(&repository), initial);
 
         let workspace_edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
         let edits = workspace_edit.changes.unwrap().remove(&uri).unwrap();
         let renamed_source = apply_text_edits(source, &edits).unwrap();
-        notify(&mut state, Notification {
-            method: "textDocument/didChange".to_owned(),
-            params: serde_json::json!({
-                "textDocument": { "uri": uri, "version": 2 },
-                "contentChanges": [{ "text": renamed_source }],
-            }),
-        });
+        notify(
+            &mut state,
+            Notification {
+                method: "textDocument/didChange".to_owned(),
+                params: serde_json::json!({
+                    "textDocument": { "uri": uri, "version": 2 },
+                    "contentChanges": [{ "text": renamed_source }],
+                }),
+            },
+        );
         fs::write(&source_path, &renamed_source).unwrap();
         did_save(&mut state, &uri);
 
-        let updated = ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap();
+        let updated = staged_manifest(&repository);
         assert_eq!(updated.id(ObjectKind::Table, "Archive"), Some(&original_id));
-        assert!(manifest_path.is_file());
     }
 
     #[test]
     fn declined_or_lost_rename_response_does_not_persist_identity() {
-        let directory = tempfile::tempdir().unwrap();
-        assert!(Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap()
-            .success());
         let source = "pub table Media(id: Str) { payload: Blob, }";
-        let source_path = directory.path().join("main.orna");
-        fs::write(&source_path, source).unwrap();
-        let repository = Repository::discover(directory.path()).unwrap();
-        let module = ModuleInput::new("main.orna", source);
-        let initial = ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository, std::slice::from_ref(&module),
-        ).unwrap();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        let original_bytes = fs::read(&manifest_path).unwrap();
-        let uri = url::Url::from_file_path(&source_path).unwrap().as_str().parse::<Uri>().unwrap();
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
         let mut state = ServerState::new();
-        state.documents.insert(uri.clone(), Document::new(uri.clone(), source.to_owned(), 1));
+        open_document(&mut state, &uri, source);
 
-        let lost_response = request_rename(&mut state, rename_request(uri.clone(), "Archive")).unwrap();
+        let lost_response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
         assert!(!lost_response.is_null());
         drop(lost_response);
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
+        assert_eq!(staged_manifest(&repository), initial);
         did_save(&mut state, &uri);
 
-        assert_eq!(ObjectIdentityManifest::read_worktree(&repository).unwrap().unwrap(), initial);
-        assert_eq!(fs::read(&manifest_path).unwrap(), original_bytes);
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn rename_request_returns_the_plain_edit_when_staged_identities_are_unreadable() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, _repository, source_path, _initial) = format3_fixture(source);
+        git(
+            directory.path(),
+            &["rm", "--cached", "-q", "-r", ".orna/store"],
+        );
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let response = request_rename(&state.context, rename_request(uri, "Archive"))
+            .expect("an unreadable identity never fails an ordinary rename");
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert_eq!(
+            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
+            1
+        );
+        assert_one_rename_warning(&messages, "object identity was not carried");
+    }
+
+    #[test]
+    fn rename_during_a_merge_returns_the_plain_edit_and_keeps_identity() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, repository, source_path, initial) = format3_fixture(source);
+        let merge_head = directory.path().join(".git/MERGE_HEAD");
+        fs::write(&merge_head, "0000000000000000000000000000000000000000\n").unwrap();
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let response = request_rename(&state.context, rename_request(uri.clone(), "Archive"))
+            .expect("a merge in progress never fails the plain rename edit");
+        // The index cannot be read mid-merge, which is a typed error: the plain
+        // edit still returns, and the client is told the identity was not carried.
+        assert_one_rename_warning(&messages, "RepositoryBusy");
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert_eq!(
+            edit.changes.unwrap().values().map(Vec::len).sum::<usize>(),
+            1
+        );
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+        // `apply_rename` issues a second rename request, which warns the same way.
+        // The save adds no warning: no identity was recorded to carry.
+        assert_eq!(
+            shown_warnings(&messages).len(),
+            2,
+            "one warning per rename request, none on save"
+        );
+        fs::remove_file(merge_head).unwrap();
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    /// A rename request at `line`/`character`, for any declaration in the buffer.
+    fn rename_request_at(uri: &Uri, line: u32, character: u32, new_name: &str) -> Request {
+        Request::new(
+            1.into(),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": line, "character": character },
+                "newName": new_name,
+            }),
+        )
+    }
+
+    /// The number of text edits in a rename response.
+    fn edit_count(response: serde_json::Value) -> usize {
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        edit.changes.unwrap().values().map(Vec::len).sum()
+    }
+
+    #[test]
+    fn rename_of_an_uncommitted_table_is_plain_and_silent() {
+        // Only `Media` has a committed identity; `Draft` exists in the buffer alone.
+        let committed = "pub table Media(id: Str) { payload: Blob, }\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(committed);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(
+            &mut state,
+            &uri,
+            &format!("{committed}pub table Draft(id: Str) {{ note: Str, }}\n"),
+        );
+
+        // No committed identity for `Draft`: the lookup is `Ok(None)`, so the
+        // plain edit is returned and nothing is shown.
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 1, 11, "Final")).unwrap();
+        assert!(edit_count(response) > 0);
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "an uncommitted table has no identity to carry"
+        );
+    }
+
+    #[test]
+    fn ambiguous_field_rename_warns_when_a_committed_identity_exists() {
+        let source =
+            "pub table Media(id: Str) { title: Str, }\npub table Music(id: Str) { title: Str, }\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Both tables hold a committed `title`, so the field cannot be matched to one identity.
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 0, 28, "heading")).unwrap();
+        assert!(edit_count(response) > 0, "the plain edit still returns");
+        assert_one_rename_warning(&messages, "matches several fields");
+    }
+
+    #[test]
+    fn legacy_format_rename_warns_that_identity_is_not_carried() {
+        let directory = tempfile::tempdir().unwrap();
+        orna_repository_v1::write_legacy_format1_fixture(directory.path());
+        let source_path = directory.path().join("main.orna");
+        let source = "pub table Media(id: Str) { payload: Blob, }\n";
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Format 1 and 2 repositories have no object identities to carry.
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        assert_eq!(edit_count(response), 1);
+        assert_one_rename_warning(&messages, "object identity was not carried");
+    }
+
+    #[test]
+    fn rename_without_a_staged_identity_inventory_warns_and_keeps_the_text() {
+        let source = "pub table Media(id: Str) { payload: Blob, }\n";
+        let (_directory, _repository, source_path) = format3_committed(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let response =
+            request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap();
+        assert_eq!(edit_count(response), 1);
+        assert_one_rename_warning(&messages, "the staged object identities are missing");
+    }
+
+    #[test]
+    fn local_rename_never_warns() {
+        let source = "pub fn total(value: Int): Int = value;\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Column 15 is inside the parameter `value`, a local name with no identity.
+        let response =
+            request_rename(&state.context, rename_request_at(&uri, 0, 15, "amount")).unwrap();
+        assert!(edit_count(response) > 0);
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a local rename carries no identity"
+        );
+    }
+
+    #[test]
+    fn failed_identity_persist_is_reported_to_client() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        git(
+            directory.path(),
+            &["rm", "--cached", "-q", "-r", ".orna/store"],
+        );
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "object identity was not carried");
+    }
+
+    #[test]
+    fn declined_rename_saves_without_warning() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // The client asks for the rename, then never applies it: the chain is
+        // declined, so there is no identity to carry and no warning to show.
+        drop(request_rename(&state.context, rename_request(uri.clone(), "Archive")).unwrap());
+        did_save(&mut state, &uri);
+
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a declined rename is not a warning"
+        );
+    }
+
+    #[test]
+    fn saved_text_that_differs_from_the_buffer_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(
+            &source_path,
+            "pub table Other(id: Str) { payload: Blob, }\n",
+        )
+        .unwrap();
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "differs from the editor buffer");
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn save_after_the_document_closed_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        fs::write(&source_path, &saved_source).unwrap();
+        Arc::get_mut(&mut state.context.documents)
+            .expect("no other owner")
+            .remove(&uri);
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "the document is no longer open");
+        assert_eq!(staged_manifest(&repository), initial);
+    }
+
+    #[test]
+    fn identity_that_cannot_be_carried_warns_with_the_remedy() {
+        let source = "pub table Media(id: Str) { payload: Blob, }";
+        let (_directory, repository, source_path, initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        let saved_source = apply_rename(&mut state, &uri, "Archive", 2);
+        // Stage an inventory that already holds `Archive`, so carrying `Media`
+        // to that name collides and `with_renames` refuses it.
+        let both = "pub table Media(id: Str) { payload: Blob, }\npub table Archive(id: Str) { payload: Blob, }\n";
+        let module = ModuleInput::new("main.orna", both);
+        let widened =
+            ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None).unwrap();
+        let staged = repository.capture_staged_candidate().unwrap();
+        repository
+            .stage_object_identities(&staged, &widened.to_stored(), &[])
+            .unwrap();
+        fs::write(&source_path, &saved_source).unwrap();
+        did_save(&mut state, &uri);
+
+        assert_one_rename_warning(&messages, "object identity was not carried");
+        assert_eq!(staged_manifest(&repository), widened);
+        assert_ne!(initial, widened);
+    }
+
+    #[test]
+    fn function_rename_never_warns() {
+        let source = "pub fn total(value: Int): Int = value;\n";
+        let (_directory, _repository, source_path, _initial) = format3_fixture(source);
+        let uri = file_uri(&source_path);
+        let mut state = ServerState::new();
+        let messages = capture_client(&mut state);
+        open_document(&mut state, &uri, source);
+
+        // Column 8 is inside `total`. A function has no identity, so the rename
+        // is plain and the client is shown nothing.
+        let request = Request::new(
+            1.into(),
+            "textDocument/rename".to_owned(),
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "position": { "line": 0, "character": 8 },
+                "newName": "sum",
+            }),
+        );
+        let response = request_rename(&state.context, request).unwrap();
+        let edit: WorkspaceEdit = serde_json::from_value(response).unwrap();
+        assert!(edit.changes.unwrap().values().map(Vec::len).sum::<usize>() > 0);
+        assert!(
+            shown_warnings(&messages).is_empty(),
+            "a function rename carries no identity"
+        );
     }
 }

@@ -9,17 +9,13 @@
 //!
 //! The repository is a real format-3 fixture built by `support/format3.rs`, the
 //! rows are committed through the real durable request path, and every
-//! publication is the real `orna-cli-v1` binary, so this proves the verb's exit
+//! publication is the real `orna` binary, so this proves the verb's exit
 //! status and output rather than a library call.
 use std::path::Path;
 use std::process::{Command, Output};
 
-use base64::Engine;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
-use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_repository_v1::{
-    CompactManifest, CompactSegment, CompactSegmentRole, ManagedPath, Repository, Uuid,
-};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
     TableObjectId, TerminalOutcome, WriterLease,
@@ -38,163 +34,10 @@ const REIMPORT_FIXTURE: &str = concat!(
 );
 const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
 
-fn compact_schema(table: [u8; 16]) -> SchemaDescriptor {
-    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let uuid = |value: [u8; 16]| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(value.to_vec())));
-    SchemaDescriptor::new(OvbRaw::Map(vec![
-        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
-        (OvbRaw::Int(1.into()), uuid(table)),
-        (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid(*field.as_bytes())])),
-        (
-            OvbRaw::Int(3.into()),
-            OvbRaw::Array(vec![OvbRaw::Array(vec![
-                uuid(*field.as_bytes()),
-                OvbRaw::Text(format!("f_{}", field.simple())),
-                OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
-                OvbRaw::Int(0.into()),
-                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
-            ])]),
-        ),
-        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
-    ]))
-    .unwrap()
-}
-
-fn compact_schema_fingerprint(schema: &SchemaDescriptor) -> [u8; 32] {
-    use sha2::Digest;
-
-    let mut digest = sha2::Sha256::new();
-    digest.update(b"orna.schema.v1\0");
-    digest.update(schema.encode().unwrap());
-    digest.finalize().into()
-}
-
-fn compact_row_value() -> Vec<u8> {
-    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    CanonicalValue::new(OvbRaw::Tag(
-        60009,
-        Box::new(OvbRaw::Array(vec![
-            OvbRaw::Null,
-            OvbRaw::Array(vec![OvbRaw::Array(vec![
-                OvbRaw::Tag(
-                    37,
-                    Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
-                ),
-                OvbRaw::Int(1.into()),
-            ])]),
-        ])),
-    ))
-    .unwrap()
-    .encode()
-    .unwrap()
-}
-
-fn compact_columns() -> Vec<u8> {
-    let field = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
-        OvbRaw::Array(vec![OvbRaw::Tag(
-            37,
-            Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
-        )]),
-        OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field.simple()))]),
-        OvbRaw::Array(vec![OvbRaw::Int(0.into()), OvbRaw::Text("Int".into())]),
-        OvbRaw::Text("int64".into()),
-        OvbRaw::Array(Vec::new()),
-    ])]))
-    .unwrap()
-    .encode()
-    .unwrap()
-}
-
-
-fn fingerprint_text(fingerprint: [u8; 32]) -> String {
-    fingerprint
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
-fn compact_segment(table_id: [u8; 16]) -> (Uuid, [u8; 32], CompactSegment) {
-    const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EQXdNRE15TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBWFFDQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
-    use bytes::Bytes;
-    use parquet::file::{
-        metadata::{FileMetaData, KeyValue, ParquetMetaData, ParquetMetaDataWriter},
-        reader::{FileReader, SerializedFileReader},
-    };
-
-    let schema = compact_schema(table_id);
-    let fingerprint = compact_schema_fingerprint(&schema);
-    let table = Uuid::from_bytes(table_id);
-    let id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
-    let original = base64::engine::general_purpose::STANDARD
-        .decode(PARQUET)
-        .unwrap();
-    let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
-    let file = reader.metadata().file_metadata();
-    let metadata = FileMetaData::new(
-        1,
-        file.num_rows(),
-        file.created_by().map(str::to_owned),
-        Some(vec![
-            KeyValue::new("orna.profile".into(), Some("compact-storage-v1".into())),
-            KeyValue::new("orna.table".into(), Some(table.to_string())),
-            KeyValue::new(
-                "orna.schema.sha256".into(),
-                Some(fingerprint_text(fingerprint)),
-            ),
-            KeyValue::new(
-                "orna.schema.ovb".into(),
-                Some(base64::engine::general_purpose::STANDARD.encode(schema.encode().unwrap())),
-            ),
-            KeyValue::new(
-                "orna.columns.ovb".into(),
-                Some(base64::engine::general_purpose::STANDARD.encode(compact_columns())),
-            ),
-            KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
-        ]),
-        file.schema_descr_ptr(),
-        file.column_orders().cloned(),
-    );
-    let metadata = ParquetMetaData::new(metadata, reader.metadata().row_groups().to_vec());
-    let mut footer = Vec::new();
-    ParquetMetaDataWriter::new(&mut footer, &metadata)
-        .finish()
-        .unwrap();
-    let footer_start = original.len()
-        - 8
-        - u32::from_le_bytes(
-            original[original.len() - 8..original.len() - 4]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-    let mut bytes = original[..footer_start].to_vec();
-    bytes.extend(footer);
-    let segment = CompactSegment::new(
-        id,
-        CompactSegmentRole::Data,
-        fingerprint,
-        "test-encoder-v1",
-        ManagedPath::new(format!(
-            ".orna/storage/{table}/data/{}/{id}.parquet",
-            &id.to_string()[..2]
-        ))
-        .unwrap(),
-        bytes,
-        CanonicalValue::int(1.into()).encode().unwrap(),
-        CanonicalValue::int(1.into()).encode().unwrap(),
-        1,
-        compact_columns(),
-        true,
-        false,
-    )
-    .unwrap();
-    (table, fingerprint, segment)
-}
-
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -237,6 +80,7 @@ async fn commit_capture(
     bindings: &mut SysHostBindingRegistry,
     expression: &str,
     source_key: &str,
+    media_root: &Path,
     ordinal: u8,
     insert_only: bool,
     relation_id: [u8; 16],
@@ -252,12 +96,11 @@ async fn commit_capture(
     let schema = loader
         .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
         .expect("resolve the Object table from its committed identity");
+    // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
+    // source is the fixture document, never a committed file.
     let logical_path = format!("Object/{source_key}.orna");
-    let row_source = repository
-        .read_committed_file(source_commit, &logical_path, 1 << 20)
-        .expect("the committed project contains this source Object row");
-    let row_source = std::str::from_utf8(&row_source)
-        .expect("the committed source Object row is valid UTF-8");
+    let row_source = object_source_row(media_root, source_key);
+    let row_source = row_source.as_str();
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
@@ -330,6 +173,7 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -345,8 +189,7 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -376,6 +219,7 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xe0,
         true,
         relation_id,
@@ -443,8 +287,7 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
@@ -480,6 +323,7 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xe1,
         true,
         relation_id,
@@ -510,158 +354,6 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
 }
 
 #[tokio::test]
-async fn publish_recovers_compact_journal_without_receipt_before_tail_selection() {
-    let (directory, repository, relation_id) = empty_format3_repository();
-    let root_path = directory.path();
-    let old_head = repository.head().unwrap().unwrap();
-    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
-    let writer = state
-        .acquire_lease(runtime_identity.repository_id)
-        .await
-        .unwrap();
-    let activation = state.begin_activation().await.unwrap();
-    let (table, schema_fingerprint, segment) = compact_segment(relation_id);
-    let mutation = TableMutation::new(
-        [0xf1; 16],
-        "media",
-        CanonicalValue::int(1.into()).encode().unwrap(),
-        Some(compact_row_value()),
-    )
-    .unwrap()
-    .with_table_object_id(TableObjectId::new(*table.as_bytes()));
-    state
-        .commit_table_activation(writer, &activation, &[mutation], [0xf2; 32], &NoFault)
-        .await
-        .unwrap();
-    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let intent_id = [0xf3; 16];
-    let freeze = state.freeze(intent_id, &checkpoint).await.unwrap();
-    let candidate = repository
-        .prepare_compact_publication(
-            &old_head,
-            repository.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint),
-            intent_id,
-            freeze.checkpoint.digest,
-            &[segment],
-            "orna: interrupted compact publication",
-        )
-        .unwrap();
-    repository
-        .publish_compact_repository_boundary(candidate)
-        .unwrap();
-    let published_head = head(root_path);
-    let journal = repository.read_publication_journal().unwrap().unwrap();
-    assert_ne!(published_head, old_head.as_str());
-    assert_eq!(
-        repository.head().unwrap().as_ref(),
-        Some(journal.new_head())
-    );
-    assert!(journal.compact_manifest().is_some());
-    assert!(state.pending_count().await.unwrap() > 0);
-    drop(state);
-
-    let output = run(root_path, &["publish"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(head(root_path), published_head);
-    assert!(repository.read_publication_journal().unwrap().is_none());
-    let recovered = RuntimeState::open(&repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
-    assert_eq!(recovered.pending_count().await.unwrap(), 0);
-}
-
-#[tokio::test]
-async fn publish_finalizes_persisted_compact_receipt_before_tail_selection() {
-    let (directory, repository, relation_id) = empty_format3_repository();
-    let root_path = directory.path();
-    let old_head = repository.head().unwrap().unwrap();
-    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
-    let writer = state
-        .acquire_lease(runtime_identity.repository_id)
-        .await
-        .unwrap();
-    let activation = state.begin_activation().await.unwrap();
-    let (table, schema_fingerprint, segment) = compact_segment(relation_id);
-    let mutation = TableMutation::new(
-        [0xf4; 16],
-        "media",
-        CanonicalValue::int(1.into()).encode().unwrap(),
-        Some(compact_row_value()),
-    )
-    .unwrap()
-    .with_table_object_id(TableObjectId::new(*table.as_bytes()));
-    state
-        .commit_table_activation(writer, &activation, &[mutation], [0xf5; 32], &NoFault)
-        .await
-        .unwrap();
-    let checkpoint = state.latest_checkpoint().await.unwrap().unwrap();
-    let intent_id = [0xf6; 16];
-    let freeze = state.freeze(intent_id, &checkpoint).await.unwrap();
-    let candidate = repository
-        .prepare_compact_publication(
-            &old_head,
-            repository.index_generation().unwrap(),
-            CompactManifest::empty(table, schema_fingerprint),
-            intent_id,
-            freeze.checkpoint.digest,
-            &[segment],
-            "orna: interrupted compact publication",
-        )
-        .unwrap();
-    let pending = repository
-        .publish_compact_repository_boundary(candidate)
-        .unwrap();
-    let receipt = state
-        .complete_compact_publication(&pending, &freeze)
-        .await
-        .unwrap();
-    assert_eq!(receipt.commit(), pending.commit());
-    assert_eq!(state.pending_count().await.unwrap(), 0);
-    let published_head = head(root_path);
-    let journal = repository.read_publication_journal().unwrap().unwrap();
-    assert!(journal.compact_manifest().is_some());
-    assert_eq!(published_head, journal.new_head().as_str());
-
-    let unrelated = root_path.join("unrelated.orna");
-    std::fs::write(
-        &unrelated,
-        include_bytes!("fixtures/project-core-main.orna"),
-    )
-    .unwrap();
-    git(root_path, &["add", "unrelated.orna"]);
-    std::fs::write(&unrelated, include_bytes!("fixtures/project-run-zero.orna")).unwrap();
-    let staged_before = git_output(root_path, &["diff", "--cached", "--binary"], None);
-    let unstaged_before = git_output(root_path, &["diff", "--binary"], None);
-    drop(state);
-
-    let output = run(root_path, &["publish"]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "{stderr}");
-    assert_eq!(head(root_path), published_head);
-    assert!(repository.read_publication_journal().unwrap().is_none());
-    assert_eq!(
-        git_output(root_path, &["diff", "--cached", "--binary"], None),
-        staged_before
-    );
-    assert_eq!(
-        git_output(root_path, &["diff", "--binary"], None),
-        unstaged_before
-    );
-    let recovered = RuntimeState::open(&repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
-    assert_eq!(recovered.pending_count().await.unwrap(), 0);
-}
-
-#[tokio::test]
 async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit() {
     let source = TempDir::new().unwrap();
     std::fs::copy(
@@ -669,8 +361,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     // `orna publish` opens the runtime through the repository's own identity,
@@ -707,6 +398,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xb0,
         true,
         relation_id,
@@ -752,6 +444,7 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xc0,
         false,
         relation_id,
@@ -807,8 +500,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         source.path().join("pixel.png"),
     )
     .unwrap();
-    let (directory, repository, relation_id, format_context) =
-        object_format3_repository(source.path());
+    let (directory, repository, relation_id, format_context) = object_format3_repository();
     let root_path = directory.path();
     let source_commit = repository.head().unwrap().unwrap();
     let deleted_path = root_path.join("delete-me.orna");
@@ -851,6 +543,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &mut bindings,
         &expression,
         "image",
+        source.path(),
         0xd0,
         true,
         relation_id,

@@ -1,7 +1,7 @@
 //! End-to-end protocol and editor artifact proofs for the Orna 1.0 language.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, VecDeque},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -209,6 +209,9 @@ struct Client {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     next_id: i64,
+    /// Notifications read while waiting for a response. Diagnostics are
+    /// published by a worker thread, so they may interleave with responses.
+    pending: VecDeque<Value>,
 }
 
 impl Client {
@@ -224,6 +227,7 @@ impl Client {
             reader: BufReader::new(child.stdout.take().unwrap()),
             child,
             next_id: 1,
+            pending: VecDeque::new(),
         }
     }
 
@@ -255,7 +259,13 @@ impl Client {
         let id = self.next_id;
         self.next_id += 1;
         self.send(json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-        let response = self.read();
+        let response = loop {
+            let message = self.read();
+            if message.get("method").is_none() {
+                break message;
+            }
+            self.pending.push_back(message);
+        };
         assert_eq!(response["id"], id, "response for {method}: {response}");
         assert!(response.get("error").is_none(), "{method}: {response}");
         response["result"].clone()
@@ -266,9 +276,20 @@ impl Client {
     }
 
     fn notification(&mut self, method: &str) -> Value {
-        let response = self.read();
-        assert_eq!(response["method"], method, "notification: {response}");
-        response["params"].clone()
+        if let Some(index) = self
+            .pending
+            .iter()
+            .position(|message| message["method"] == method)
+        {
+            return self.pending.remove(index).unwrap()["params"].clone();
+        }
+        loop {
+            let message = self.read();
+            if message["method"] == method {
+                return message["params"].clone();
+            }
+            self.pending.push_back(message);
+        }
     }
 
     fn shutdown(&mut self) {
@@ -649,7 +670,7 @@ fn protocol_conformance_uses_v1_for_every_advertised_editor_feature() {
     assert_no_legacy_words(&broken, "syntax diagnostic");
     let diagnostics = broken["diagnostics"].as_array().unwrap();
     assert_eq!(diagnostics.len(), 1, "{broken}");
-    assert_eq!(diagnostics[0]["source"], "orna-syntax-v1");
+    assert_eq!(diagnostics[0]["source"], "orna");
     assert_eq!(
         diagnostics[0]["range"]["start"],
         position_of(INVALID_SOURCE, ";", 0)
@@ -2009,6 +2030,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     let script = temporary_path("el");
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
+    let emacs_signature_fixture = isolated_fixture("signature-actions-v1.orna", SIGNATURE_SOURCE);
+    let emacs_action_fixture = isolated_fixture("missing-semicolon-code-action-v1.orna", ACTION_SOURCE);
+    let emacs_hover_fixture = isolated_fixture("ji3t0-lsp-v1-self-contained.orna", SOURCE);
+    let emacs_semantic_fixture = isolated_fixture("editor-semantic-tokens.orna", SEMANTIC_SOURCE);
+    let emacs_hints_fixture = isolated_fixture("editor-lsp-hints.orna", HINTS_SOURCE);
     let elisp = format!(
         r#";; -*- lexical-binding: t; -*-
 (require 'package)
@@ -2021,7 +2047,10 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 (orna-setup-eglot)
 
 (defun orna-test-wait-managed (buffer)
+  ;; `eglot-ensure' defers its connect to a one-shot `post-command-hook'.
+  ;; `--batch' never runs a command loop, so run that hook explicitly.
   (with-current-buffer buffer
+    (run-hooks 'post-command-hook)
     (let ((deadline (+ (float-time) 12.0)))
       (while (and (not (eglot-managed-p)) (< (float-time) deadline))
         (accept-process-output nil 0.05)))
@@ -2111,10 +2140,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 (defun orna-test-folding-selection-positions ()
   (let ((positions (json-parse-string (getenv "ORNA_FOLDING_SELECTION_REQUESTS")
                                       :array-type 'list :object-type 'hash-table)))
-    (mapcar (lambda (position)
-              (list :line (gethash "line" position)
-                    :character (gethash "character" position)))
-            (gethash "selection_positions" positions))))
+    ;; LSP `positions' is a JSON array; a Lisp list would serialize as an object.
+    (apply #'vector
+           (mapcar (lambda (position)
+                     (list :line (gethash "line" position)
+                           :character (gethash "character" position)))
+                   (gethash "selection_positions" positions)))))
 (defun orna-test-location-key (location)
   (let* ((range (orna-test-get location "range"))
          (start (orna-test-get range "start")))
@@ -2656,11 +2687,12 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
             (let ((inhibit-read-only t))
               (erase-buffer)
               (insert (getenv "ORNA_DIAGNOSTIC_RECOVERY_SOURCE")))
+            (eglot--signal-textDocument/didChange)
             (setq diagnostic-recovered
                   (orna-test-get
                    (jsonrpc-request server :textDocument/diagnostic
                                     (list :textDocument (list :uri uri)))
-                   "items")))
+                   "items"))))
         (setq document-links-buffer
               (find-file-noselect (getenv "ORNA_DOCUMENT_LINKS_FIXTURE")))
         (with-current-buffer document-links-buffer
@@ -2759,11 +2791,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
 "#,
         elisp_string(&plugin.display().to_string()),
         elisp_string(env!("CARGO_BIN_EXE_orna-lsp")),
-        elisp_string(&hover_fixture.display().to_string()),
-        elisp_string(&semantic_fixture.display().to_string()),
-        elisp_string(&hints_fixture.display().to_string()),
-        elisp_string(&signature_fixture.display().to_string()),
-        elisp_string(&action_fixture.display().to_string()),
+        elisp_string(&emacs_hover_fixture.display().to_string()),
+        elisp_string(&emacs_semantic_fixture.display().to_string()),
+        elisp_string(&emacs_hints_fixture.display().to_string()),
+        elisp_string(&emacs_signature_fixture.display().to_string()),
+        elisp_string(&emacs_action_fixture.display().to_string()),
     );
     fs::write(&script, elisp).expect("write Emacs Eglot hover/token probe");
     let output = Command::new(&emacs)
@@ -2827,6 +2859,11 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
         .output()
         .unwrap_or_else(|error| panic!("start Emacs at {}: {error}", emacs.display()));
     let _ = fs::remove_file(script);
+    remove_isolated_fixture(&emacs_signature_fixture);
+    remove_isolated_fixture(&emacs_action_fixture);
+    remove_isolated_fixture(&emacs_hover_fixture);
+    remove_isolated_fixture(&emacs_semantic_fixture);
+    remove_isolated_fixture(&emacs_hints_fixture);
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success(),
@@ -3311,6 +3348,21 @@ fn temporary_path(extension: &str) -> PathBuf {
         "orna-ji3t0-{}-{id}.{extension}",
         std::process::id()
     ))
+}
+
+fn isolated_fixture(name: &str, source: &str) -> PathBuf {
+    let dir = temporary_path("d");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    fs::write(&path, source).unwrap();
+    path
+}
+
+fn remove_isolated_fixture(path: &Path) {
+    let _ = fs::remove_file(path);
+    if let Some(dir) = path.parent() {
+        let _ = fs::remove_dir(dir);
+    }
 }
 
 fn temporary_fixture(source: &str) -> PathBuf {

@@ -227,7 +227,7 @@ fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
         )
     })?;
     filesystem
-        .capture_file_stream(root_text, relative_path, max_bytes)
+        .capture_file(root_text, relative_path, max_bytes)
         .map_err(|error| source_error(path, error, String::new()))
 }
 
@@ -244,12 +244,7 @@ fn verify_source_before_install(
 }
 
 fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnostic {
-    let code_detail = format!(
-        "{}: {} ({})",
-        path.display(),
-        error.failure_code(),
-        error.code()
-    );
+    let code_detail = format!("{}: {}", path.display(), error.failure_code());
     let detail = if detail.is_empty() {
         code_detail
     } else {
@@ -260,6 +255,12 @@ fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnos
             "E1002",
             "annotate source exceeds the OVB-2 format maximum",
             "choose a source smaller than 2^63 bytes",
+        ),
+        // Unreachable from the CLI: it supplies no byte bound. Kept for match exhaustiveness.
+        CaptureFileError::BoundOutOfRange => Diagnostic::usage(
+            "E1002",
+            "annotate source byte bound is out of range",
+            "report this as an internal error; the CLI does not set a source byte bound",
         ),
         CaptureFileError::InvalidPath => Diagnostic::target_with_detail(
             "E2001",
@@ -301,6 +302,9 @@ mod tests {
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }
+
+    /// ORNA-INGEST-003: a same-length change detected after the streamed read
+    /// is rejected as `sys.blob.source_changed` before the output is installed.
     #[test]
     fn rejects_same_length_source_mutation_before_installing_output() {
         use std::time::{Duration, SystemTime};
@@ -340,7 +344,7 @@ mod tests {
             .unwrap();
 
         let error = verify_source_before_install(&path, &source, output).unwrap_err();
-        assert!(format!("{error:?}").contains("ORNA-INGEST-005"));
+        assert!(format!("{error:?}").contains("sys.blob.source_changed"));
         assert_eq!(std::fs::read(&output_path).unwrap(), b"existing output");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
     }

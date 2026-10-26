@@ -37,10 +37,18 @@ const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite
 /// scenario witness: the semantic adapter exposes analysis, not a compiled
 /// executable artifact, and the bounded evaluator reinterprets source.
 /// Such scenarios therefore remain explicit corpus skips.
-#[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
     transactional: TransactionalEvaluator,
+}
+
+impl Default for CompositeEvaluator {
+    fn default() -> Self {
+        Self {
+            bounded: BoundedEvaluator::default(),
+            transactional: TransactionalEvaluator::default().with_fixture_catalogue(),
+        }
+    }
 }
 
 impl RuntimeEvaluator for CompositeEvaluator {
@@ -439,7 +447,7 @@ fn transaction_project(fixture_id: &str, source: &str) -> ProjectUnit {
             environment: ProjectEnvironment {
                 network: false,
                 credentials: false,
-                intrinsics: "Orna 1.0.0 core".into(),
+                intrinsics: "Orna 1.1.0 core".into(),
                 stdlib: None,
                 initial_tables: "empty".into(),
             },
@@ -507,7 +515,7 @@ fn run_durable_transaction_scenario(scenario: &Scenario) -> StageOutcome<Diagnos
         let state = block_on(RuntimeState::open(&repository, identity, [44; 32])).ok()?;
         let matches = match scenario.id.as_str() {
             "TXN-001" => {
-                matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-ASSERT")
+                matches!(&outcome, StageOutcome::Failed(diagnostic) if diagnostic.code() == "ORNA-A091-008")
                     && block_on(state.committed_table_rows("Note"))
                         .ok()?
                         .is_empty()
@@ -1483,7 +1491,13 @@ fn report_exit_code(report: &orna_conformance_v1::RunReport) -> i32 {
             EvidenceStatus::Failed | EvidenceStatus::Cancelled | EvidenceStatus::Skipped
         )
     });
-    if fixture_failed || scenario_failed {
+    // A known-gap vector suite is unexecuted, so like a skipped scenario it
+    // never counts as a pass.
+    let vector_suite_failed = report
+        .vector_suites
+        .iter()
+        .any(|suite| suite.status != EvidenceStatus::Passed);
+    if fixture_failed || scenario_failed || vector_suite_failed {
         1
     } else {
         0
@@ -1504,14 +1518,14 @@ mod tests {
     };
     use orna_conformance_v1::{
         CoverageReport, EvidenceClass, EvidenceStatus, ImplementationClaim, RunReport,
-        ScenarioResult,
+        ScenarioResult, VectorSuiteEvidence,
     };
     use std::collections::BTreeMap;
     use std::fs;
 
     fn report_with_scenario_status(status: EvidenceStatus) -> RunReport {
         RunReport {
-            specification_version: "1.0.0".into(),
+            specification_version: "1.1.0".into(),
             implementation_claim: ImplementationClaim {
                 implementation_id: "test".into(),
                 profile: "test".into(),
@@ -1534,6 +1548,7 @@ mod tests {
             semantic_evidence: Vec::new(),
             runtime_evidence: Vec::new(),
             skipped_evidence: Vec::new(),
+            vector_suites: Vec::new(),
             coverage: CoverageReport {
                 mapped_stage_evidence: 0,
                 unmapped_stage_evidence: 0,
@@ -1554,6 +1569,25 @@ mod tests {
             report_exit_code(&report_with_scenario_status(EvidenceStatus::Passed)),
             0
         );
+    }
+
+    #[test]
+    fn report_exit_code_rejects_failed_and_known_gap_vector_suites() {
+        let with_suite = |status: EvidenceStatus| {
+            let mut report = report_with_scenario_status(EvidenceStatus::Passed);
+            report.vector_suites.push(VectorSuiteEvidence {
+                suite: "value-vectors.json".into(),
+                status,
+                detail: "test evidence".into(),
+                executed_cases: 1,
+                failures: Vec::new(),
+                known_gap: None,
+            });
+            report
+        };
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Failed)), 1);
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Skipped)), 1);
+        assert_eq!(report_exit_code(&with_suite(EvidenceStatus::Passed)), 0);
     }
 
     #[test]
@@ -1659,11 +1693,16 @@ mod tests {
             StageOutcome::Passed
         ));
 
+        let declared = Corpus::load_default()
+            .expect("reference corpus loads")
+            .scenarios["count"]
+            .as_u64()
+            .expect("declared scenario count");
         let report = run_profile(
             Corpus::load_default().expect("reference corpus loads"),
             RunnerProfile::BoundedExpressionRuntime,
         );
-        assert_eq!(report.scenarios.len(), 144);
+        assert_eq!(report.scenarios.len() as u64, declared);
         assert!(
             report
                 .implementation_claim

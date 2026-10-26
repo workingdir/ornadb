@@ -26,6 +26,7 @@ use std::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     FaultInjector, FaultPoint, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    WriterLease,
 };
 use tempfile::{Builder, TempDir};
 
@@ -39,6 +40,8 @@ const PRE_COMMIT_TEST: &str = "crash_before_the_row_commit_barrier_acknowledges_
 
 const OWNER: [u8; 16] = [4; 16];
 const REPLACEMENT: [u8; 16] = [9; 16];
+/// A different owner tried through the replacement's own lock-holding handle.
+const THIRD_OWNER: [u8; 16] = [12; 16];
 
 /// Which side of the writer transaction commit barrier the child dies on.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -242,22 +245,8 @@ fn crash_at_the_row_commit_barrier_keeps_the_committed_row() {
         );
         assert_eq!(state.pending().await.unwrap().len(), 1);
 
-        // The crashed owner is still recorded, and its write permission is
-        // only released through the explicit compare-and-swap takeover.
-        assert_eq!(
-            state.acquire_lease(REPLACEMENT).await,
-            Err(RuntimeError::LeaseHeld)
-        );
-        let replacement = state
-            .recover_abandoned(OWNER, REPLACEMENT)
-            .await
-            .expect("the abandoned owner is recoverable by compare-and-swap");
-        assert_eq!(replacement.owner_id, REPLACEMENT);
-        assert_eq!(replacement.epoch, 2, "takeover advances the writer epoch");
-        assert_eq!(
-            state.acquire_lease(OWNER).await,
-            Err(RuntimeError::LeaseHeld)
-        );
+        let replacement =
+            assert_only_the_lock_holder_fences_the_crashed_owner(&state, &repository).await;
 
         // The replacement writer can commit a further row on top of the
         // surviving one, so the crash consumed no later tail.
@@ -312,17 +301,60 @@ fn crash_before_the_row_commit_barrier_acknowledges_nothing() {
             "the uncommitted tail leaves no durable mutation record"
         );
 
-        // The crashed owner still holds the fence until an explicit takeover.
-        assert_eq!(
-            state.acquire_lease(REPLACEMENT).await,
-            Err(RuntimeError::LeaseHeld)
-        );
-        let replacement = state
-            .recover_abandoned(OWNER, REPLACEMENT)
-            .await
-            .expect("the abandoned owner is recoverable by compare-and-swap");
-        assert_eq!(replacement.epoch, 2);
+        assert_only_the_lock_holder_fences_the_crashed_owner(&state, &repository).await;
     });
+}
+
+/// ORNA-TURSO-005/006: the crashed owner's lease stays recorded until the
+/// runtime owner lock holder takes it over. A participant without the lock
+/// cannot release it, the takeover bumps the epoch, and afterwards neither the
+/// abandoned owner nor a different owner can take the live replacement's
+/// lease, not even through the lock holder.
+async fn assert_only_the_lock_holder_fences_the_crashed_owner(
+    state: &RuntimeState,
+    repository: &Repository,
+) -> WriterLease {
+    assert!(
+        state.holds_runtime_owner_lock(),
+        "the crashed child released the runtime owner lock"
+    );
+    assert_eq!(
+        state
+            .current_lease()
+            .await
+            .unwrap()
+            .map(|lease| lease.owner_id),
+        Some(OWNER),
+        "the crashed owner is still recorded"
+    );
+    let secondary = RuntimeState::open(repository, identity(), [3; 32])
+        .await
+        .expect("open a secondary participant");
+    assert!(!secondary.holds_runtime_owner_lock());
+    assert_eq!(
+        secondary.acquire_lease(REPLACEMENT).await,
+        Err(RuntimeError::LeaseHeld),
+        "a participant without the runtime owner lock cannot fence the crashed owner"
+    );
+    drop(secondary);
+
+    let replacement = state
+        .acquire_lease(REPLACEMENT)
+        .await
+        .expect("the lock holder takes over the crashed owner");
+    assert_eq!(replacement.owner_id, REPLACEMENT);
+    assert_eq!(replacement.epoch, 2, "takeover advances the writer epoch");
+    assert_eq!(
+        state.acquire_lease(OWNER).await,
+        Err(RuntimeError::LeaseHeld),
+        "the abandoned owner must not regain the writer lease"
+    );
+    assert_eq!(
+        state.acquire_lease(THIRD_OWNER).await,
+        Err(RuntimeError::LeaseHeld),
+        "holding the runtime owner lock must not fence the live replacement"
+    );
+    replacement
 }
 
 /// The non-crashing injector used by the parent's follow-up commit.

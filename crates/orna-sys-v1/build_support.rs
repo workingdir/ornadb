@@ -10,8 +10,8 @@ use syn::{
     visit::{self, Visit},
 };
 
-const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
-const GENERATED_API_SYS_VERSION: &str = "1.1";
+pub const GENERATED_API_LANGUAGE_VERSION: &str = "1.1.0";
+pub const GENERATED_API_SYS_VERSION: &str = "1.1";
 const GENERATED_API_STATUS: &str =
     "Final 1.1.0 specification contract; engine execution not claimed";
 /// Publication source-of-truth label for the generated sys API. Rust owns this
@@ -25,9 +25,38 @@ pub struct Function {
     pub metadata: Value,
     /// Compiler-known semantic role, omitted from frozen `api/sys.json`.
     pub role: Option<String>,
-    /// Rust-only failure codes from `#[ornasys(failures = "...")]`; unioned into the provider ABI and omitted from frozen `api/sys.json`.
+    /// Portable failure codes declared by `#[ornasys(failures = "...")]`.
+    /// Together with [`GLOBAL_FAILURE_CODES`] they are the operation's provider
+    /// ABI failure vocabulary; `api/sys.json` publishes no per-operation list.
     pub failures: Vec<String>,
 }
+
+/// Portable failure codes any operation may raise whatever its own contract
+/// (source/34-system-reference.md "Portable failure codes"): an unavailable
+/// API or profile coordinate (ORNA-SYS-008), a generic attempt to reveal
+/// protected content (ORNA-SYS-099, ORNA-SYS-101), a value profile the
+/// selected encoding or wire context does not accept, and a repository format
+/// without an admitted reader or writer.
+pub const GLOBAL_FAILURE_CODES: [&str; 4] = [
+    "sys.version.incompatible",
+    "sys.redaction.denied",
+    "sys.codec.unsupported_value_profile",
+    "sys.format.unsupported",
+];
+
+/// Portable failure codes that only surfaces other than callable operations
+/// raise: reading the `sys.repl` singleton outside a REPL
+/// (source/34-system-reference.md "Singleton views") and the VFS projection
+/// and its key encoding (source/41-vfs.md).
+pub const NON_CALLABLE_FAILURE_CODES: [&str; 7] = [
+    "sys.context.repl_unavailable",
+    "sys.storage.unrepresentable_key",
+    "sys.vfs.name_collision",
+    "sys.vfs.invalid_document",
+    "sys.vfs.stale_edit",
+    "sys.vfs.unsupported",
+    "sys.vfs.draft_retained",
+];
 
 #[derive(Default)]
 pub struct Collector {
@@ -234,38 +263,25 @@ fn published_function_metadata(metadata: &Value) -> Value {
 }
 
 fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, String> {
-    let declared_failures = api["failure_codes"]
+    let published_failures = api["failure_codes"]
         .as_array()
-        .ok_or_else(|| "validated API failure-code array is missing".to_owned())?;
+        .ok_or_else(|| "validated API failure-code array is missing".to_owned())?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<BTreeSet<_>>();
+    validate_failure_vocabulary(functions, &published_failures)?;
     let operations = functions
         .iter()
         .map(|function| {
             let name = function.metadata["name"]
                 .as_str()
                 .ok_or_else(|| "validated operation name is missing".to_owned())?;
-            let operation_namespace = name.find(['(', '<']).map_or(name, |end| &name[..end]);
-            let mut failures = declared_failures
+            let failures = function
+                .failures
                 .iter()
-                .filter_map(Value::as_str)
-                .filter(|code| {
-                    (name == "sys.blob.annotate"
-                        && matches!(
-                            *code,
-                            "sys.blob.incompatible_suffix"
-                                | "sys.blob.invalid_media_type"
-                                | "sys.blob.invalid_suffix"
-                        ))
-                        || *code == operation_namespace
-                        || code
-                            .strip_prefix(operation_namespace)
-                            .is_some_and(|tail| tail.starts_with('.'))
-                })
+                .map(String::as_str)
+                .chain(GLOBAL_FAILURE_CODES)
                 .collect::<Vec<_>>();
-            for code in &function.failures {
-                if !failures.contains(&code.as_str()) {
-                    failures.push(code.as_str());
-                }
-            }
             let preconditions = function.metadata["preconditions"]
                 .as_str()
                 .map(|value| vec![value])
@@ -336,6 +352,59 @@ fn generate_provider_abi(functions: &[Function], api: &Value) -> Result<Value, S
         "operations": operations,
         "roles": roles.into_values().collect::<Vec<_>>(),
     }))
+}
+
+/// Checks the explicit portable failure vocabulary (ORNA-SYS-096/097). Each
+/// operation declares published codes once, without repeating a global or
+/// non-callable code, and every published code is reachable: declared by an
+/// operation, global, or raised only by a non-callable surface.
+fn validate_failure_vocabulary(
+    functions: &[Function],
+    published: &BTreeSet<&str>,
+) -> Result<(), String> {
+    let mut reachable = BTreeSet::new();
+    for code in GLOBAL_FAILURE_CODES
+        .into_iter()
+        .chain(NON_CALLABLE_FAILURE_CODES)
+    {
+        if !published.contains(code) {
+            return Err(format!(
+                "failure code `{code}` is not published in the sys API failure codes"
+            ));
+        }
+        if !reachable.insert(code) {
+            return Err(format!("failure code `{code}` is listed twice"));
+        }
+    }
+    for function in functions {
+        let name = function.metadata["name"]
+            .as_str()
+            .ok_or_else(|| "validated operation name is missing".to_owned())?;
+        let mut declared = BTreeSet::new();
+        for code in &function.failures {
+            let code = code.as_str();
+            if !published.contains(code) {
+                return Err(format!(
+                    "`{name}` declares failure `{code}`, which the sys API does not publish"
+                ));
+            }
+            if GLOBAL_FAILURE_CODES.contains(&code) || NON_CALLABLE_FAILURE_CODES.contains(&code) {
+                return Err(format!(
+                    "`{name}` declares `{code}`, which is global or non-callable"
+                ));
+            }
+            if !declared.insert(code) {
+                return Err(format!("`{name}` declares failure `{code}` twice"));
+            }
+            reachable.insert(code);
+        }
+    }
+    match published.iter().find(|code| !reachable.contains(*code)) {
+        Some(code) => Err(format!(
+            "published failure `{code}` is declared by no operation and is neither global nor non-callable"
+        )),
+        None => Ok(()),
+    }
 }
 
 pub fn generate_binding_bundle(

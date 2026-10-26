@@ -1,0 +1,70 @@
+// Finite-list helpers over Orna's immutable [T] value type. Positional
+// operations preserve duplicates and input order; unique is the explicit
+// duplicate-removing operation. Generic transforms remain in std.collection.
+use collection;
+
+pub fn singleton<T>(value: T): [T] = [value];
+
+pub fn length<T>(values: [T]): Int = count(values);
+
+pub fn is_empty<T>(values: [T]): Bool = length(values) == 0;
+
+pub fn append<T>(values: [T], value: T): [T] =
+    union(values, [value]);
+
+pub fn prepend<T>(values: [T], value: T): [T] =
+    union([value], values);
+
+pub fn concat<T>(left: [T], right: [T]): [T] =
+    union(left, right);
+
+pub fn first<T>(values: [T]): T? =
+    if length(values) == 0 { null } else { Some(values[0]) };
+
+pub fn last<T>(values: [T]): T? =
+    if is_empty(values) {
+        null
+    } else {
+        Some(values[length(values) - 1])
+    };
+
+pub fn contains<T>(values: [T], value: T): Bool =
+    exists(values, item => item == value);
+
+fn slice_range<T>(values: [T], index: Int, end: Int, output: [T]): [T] {
+    let cursor = index;
+    let result = output;
+    while cursor < end {
+        result = append(result, values[cursor]);
+        cursor += 1;
+    };
+    result
+}
+
+pub fn take<T>(values: [T], count: Int): [T] =
+    if count < 0 {
+        fail(error(code: "std.collection.negative_count", message: "take count must be nonnegative"))
+    } else {
+        slice_range(values, 0, if count < length(values) { count } else { length(values) }, [])
+    };
+
+pub fn drop<T>(values: [T], count: Int): [T] =
+    if count < 0 {
+        fail(error(code: "std.collection.negative_count", message: "drop count must be nonnegative"))
+    } else {
+        let end = length(values);
+        slice_range(values, if count < end { count } else { end }, end, [])
+    };
+
+pub fn unique<T>(values: [T]): [T] = std.collection.unique(values);
+
+fn reverse_into<T>(remaining: [T], reversed: [T]): [T] =
+    case first(remaining) {
+        Some(value): reverse_into(
+            drop(remaining, 1),
+            union([value], reversed)
+        ),
+        null: reversed,
+    };
+
+pub fn reverse<T>(values: [T]): [T] = reverse_into(values, []);

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/unsafe-row-key-repeat.orna",
+  "failing_phase": "row-validation",
+  "primary_diagnostic": "E3004",
+  "message_contains": "loose row body must not repeat path key",
+  "status": "expected-not-executed"
+}

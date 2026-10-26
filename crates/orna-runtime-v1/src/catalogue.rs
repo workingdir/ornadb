@@ -6,10 +6,9 @@
 //! caller supplies names and semantic hashes; it never supplies an ObjectRef
 //! or an ObjectId to this boundary.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::BTreeSet;
 
 use libsql::{Connection, Transaction, params};
-use orna_core::catalogue::{CatalogueAdmissionArtifact, CatalogueAdmissionTypeForm};
 use orna_foundation_v1::{
     FunctionRef, ObjectRef, Snapshot, TypeRef, Value, function_reference, object_reference,
     type_reference, validate_type_reference,
@@ -1274,104 +1273,6 @@ pub struct CatalogueAdmission {
     pub functions: Vec<CatalogueFunctionDeclaration>,
 }
 
-impl CatalogueAdmission {
-    /// Converts a compiler-owned identity-preserving artifact into the
-    /// runtime's name-bound admission request. The runtime allocates ObjectIds
-    /// only after this conversion; no core identity is treated as a runtime
-    /// reference.
-    pub fn from_artifact(
-        artifact: &CatalogueAdmissionArtifact,
-        predecessor_capture: Option<orna_foundation_v1::CwdCapture>,
-    ) -> Result<Self, CatalogueError> {
-        let mut names: HashMap<orna_core::TypeId, String> = HashMap::new();
-        let mut type_ids: HashSet<orna_core::TypeId> = HashSet::new();
-        for entry in artifact.types() {
-            if !type_ids.insert(entry.witness().type_id()) {
-                return Err(CatalogueError::CatalogueIdentityMissing);
-            }
-            let name = entry.witness().qualified_name().to_string();
-            if names.insert(entry.witness().type_id(), name).is_some() {
-                return Err(CatalogueError::CatalogueNameConflict);
-            }
-        }
-        let types: Vec<CatalogueTypeDeclaration> = artifact
-            .types()
-            .iter()
-            .map(|entry| {
-                let name = entry.witness().qualified_name().to_string();
-                let form = match entry.form() {
-                    CatalogueAdmissionTypeForm::Named => CatalogueTypeSpec::Named,
-                    CatalogueAdmissionTypeForm::Value => CatalogueTypeSpec::Value,
-                    CatalogueAdmissionTypeForm::Reference { target } => {
-                        let target = names
-                            .get(&target)
-                            .cloned()
-                            .ok_or(CatalogueError::CatalogueTypeMissing)?;
-                        CatalogueTypeSpec::Reference { target }
-                    }
-                };
-                Ok(CatalogueTypeDeclaration {
-                    declaration: CatalogueDeclaration {
-                        qualified_name: name,
-                        kind: CatalogueObjectKind::Type,
-                        revision_id: entry.witness().revision_id(),
-                        semantic_hash: entry.witness().semantic_hash(),
-                        rename_from: entry.rename_from().map(str::to_owned),
-                    },
-                    form,
-                })
-            })
-            .collect::<Result<Vec<CatalogueTypeDeclaration>, CatalogueError>>()?;
-
-        let mut function_ids: HashSet<orna_core::FunctionId> = HashSet::new();
-        let functions: Vec<CatalogueFunctionDeclaration> = artifact
-            .functions()
-            .iter()
-            .map(|entry| {
-                if !function_ids.insert(entry.function_id()) {
-                    return Err(CatalogueError::CatalogueIdentityMissing);
-                }
-                let parameters = entry
-                    .parameters()
-                    .iter()
-                    .map(|parameter| {
-                        let type_name = names
-                            .get(&parameter.type_id())
-                            .cloned()
-                            .ok_or(CatalogueError::CatalogueTypeMissing)?;
-                        Ok(CatalogueParameterDeclaration {
-                            name: parameter.name().to_owned(),
-                            position: parameter.position(),
-                            type_name,
-                        })
-                    })
-                    .collect::<Result<Vec<_>, CatalogueError>>()?;
-                let result_type_name = names
-                    .get(&entry.result_type())
-                    .cloned()
-                    .ok_or(CatalogueError::CatalogueTypeMissing)?;
-                Ok(CatalogueFunctionDeclaration {
-                    declaration: CatalogueDeclaration {
-                        qualified_name: entry.qualified_name().to_owned(),
-                        kind: CatalogueObjectKind::Function,
-                        revision_id: entry.revision_id(),
-                        semantic_hash: entry.semantic_hash(),
-                        rename_from: entry.rename_from().map(str::to_owned),
-                    },
-                    parameters,
-                    result_type_name,
-                })
-            })
-            .collect::<Result<Vec<_>, CatalogueError>>()?;
-
-        Ok(Self {
-            predecessor_capture,
-            types,
-            functions,
-        })
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CatalogueAdmissionResult {
     pub capture: orna_foundation_v1::CwdCapture,
@@ -1487,7 +1388,6 @@ pub(crate) async fn admit_activation_catalogue_tx(
     predecessor: &orna_foundation_v1::CwdCapture,
     capture: &orna_foundation_v1::CwdCapture,
     admission: &CatalogueAdmission,
-    revision_pair: Option<orna_core::revision::RevisionPair>,
 ) -> Result<crate::Mutation, crate::RuntimeError> {
     use orna_foundation_v1::OvbRaw;
     use sha2::{Digest, Sha256};
@@ -1499,7 +1399,7 @@ pub(crate) async fn admit_activation_catalogue_tx(
     persist_capture_tx(transaction, predecessor)
         .await
         .map_err(map_catalogue_runtime_error)?;
-    admit_catalogue_batch_tx(transaction, capture, admission, revision_pair)
+    admit_catalogue_batch_tx(transaction, capture, admission)
         .await
         .map_err(map_catalogue_runtime_error)?;
 
@@ -1579,7 +1479,6 @@ async fn admit_catalogue_batch_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
     admission: &CatalogueAdmission,
-    revision_pair: Option<orna_core::revision::RevisionPair>,
 ) -> Result<CatalogueAdmissionResult, RuntimeError> {
     persist_capture_tx(transaction, capture).await?;
     let predecessor = if let Some(predecessor) = admission.predecessor_capture.as_ref() {
@@ -1594,7 +1493,6 @@ async fn admit_catalogue_batch_tx(
     reject_separate_module_rows_tx(transaction, capture).await?;
     let already_admitted = catalogue_admission_exists_tx(transaction, capture).await?;
     if already_admitted {
-        validate_revision_binding_tx(transaction, capture, revision_pair).await?;
         return replay_catalogue_tx(transaction, capture, predecessor, admission).await;
     }
     clear_catalogue_snapshot_tx(transaction, capture).await?;
@@ -1679,7 +1577,6 @@ async fn admit_catalogue_batch_tx(
     if inserted != 1 {
         return Err(RuntimeError::CatalogueCorrupt);
     }
-    insert_revision_binding_tx(transaction, capture, revision_pair).await?;
 
     let mut types = Vec::with_capacity(admission.types.len());
     for declaration in &admission.types {
@@ -1760,12 +1657,18 @@ impl RuntimeState {
             context.capture(),
             &next_capture,
             admission,
-            None,
         )
         .await?;
         encoded.push(catalogue_mutation);
+        let mut base = crate::load_candidate_base_tx(
+            &transaction,
+            context.committed_rows.as_deref(),
+            mutations,
+            None,
+        )
+        .await?;
         for mutation in mutations {
-            crate::apply_table_mutation_tx(&transaction, mutation).await?;
+            crate::apply_table_mutation_tx(&transaction, mutation, &mut base).await?;
         }
         faults.check(crate::FaultPoint::AfterTableWrite)?;
         let committed_capture = crate::append_mutations_with_catalogue_tx(
@@ -1785,46 +1688,6 @@ impl RuntimeState {
             .await
             .map_err(|_| crate::RuntimeError::StorageUnavailable)?;
         Ok(committed_capture)
-    }
-
-    /// Returns the compiler/core revision pair retained for one exact source
-    /// catalogue activation, if that activation was published through the
-    /// bound source bridge. An absent row is deliberately distinct from a
-    /// fabricated revision pair for legacy or generic catalogue admission.
-    pub async fn catalogue_revision_pair_at(
-        &self,
-        capture: &orna_foundation_v1::CwdCapture,
-    ) -> Result<Option<orna_core::revision::RevisionPair>, RuntimeError> {
-        let transaction = self.catalogue_transaction_read().await?;
-        let snapshot = retained_capture_row_tx(&transaction, capture).await?;
-        let mut rows = transaction
-            .query(
-                "SELECT source_revision_id, catalogue_revision_id
-                 FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
-                params![snapshot.clone()],
-            )
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        let pair = match rows
-            .next()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?
-        {
-            None => None,
-            Some(row) => Some(orna_core::revision::RevisionPair::new(
-                orna_core::SourceRevisionId::from_bytes(fixed(
-                    row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?,
-                )?),
-                orna_core::CatalogueRevisionId::from_bytes(fixed(
-                    row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?,
-                )?),
-            )),
-        };
-        transaction
-            .commit()
-            .await
-            .map_err(|_| RuntimeError::StorageUnavailable)?;
-        Ok(pair)
     }
 
     /// Returns the complete previously observed capture for use as a
@@ -1860,7 +1723,7 @@ impl RuntimeState {
                 current: Box::new(capture),
             });
         }
-        let result = admit_catalogue_batch_tx(&transaction, &capture, &admission, None).await?;
+        let result = admit_catalogue_batch_tx(&transaction, &capture, &admission).await?;
         transaction
             .commit()
             .await
@@ -2705,65 +2568,6 @@ async fn catalogue_admission_exists_tx(
         .is_some())
 }
 
-async fn insert_revision_binding_tx(
-    transaction: &Transaction,
-    capture: &orna_foundation_v1::CwdCapture,
-    revision_pair: Option<orna_core::revision::RevisionPair>,
-) -> Result<(), RuntimeError> {
-    let Some(revision_pair) = revision_pair else {
-        return Ok(());
-    };
-    let inserted = transaction
-        .execute(
-            "INSERT INTO runtime_catalogue_revision_binding
-             (snapshot, source_revision_id, catalogue_revision_id) VALUES (?1, ?2, ?3)",
-            params![
-                capture_bytes(capture)?,
-                revision_pair.source().to_bytes().to_vec(),
-                revision_pair.catalogue().to_bytes().to_vec(),
-            ],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    if inserted != 1 {
-        return Err(RuntimeError::CatalogueCorrupt);
-    }
-    Ok(())
-}
-
-async fn validate_revision_binding_tx(
-    transaction: &Transaction,
-    capture: &orna_foundation_v1::CwdCapture,
-    revision_pair: Option<orna_core::revision::RevisionPair>,
-) -> Result<(), RuntimeError> {
-    let Some(revision_pair) = revision_pair else {
-        return Ok(());
-    };
-    let mut rows = transaction
-        .query(
-            "SELECT source_revision_id, catalogue_revision_id
-             FROM runtime_catalogue_revision_binding WHERE snapshot = ?1",
-            params![capture_bytes(capture)?],
-        )
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
-    let Some(row) = rows
-        .next()
-        .await
-        .map_err(|_| RuntimeError::StorageUnavailable)?
-    else {
-        return Err(RuntimeError::CatalogueRevisionConflict);
-    };
-    if fixed(row.get(0).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
-        != revision_pair.source().to_bytes()
-        || fixed(row.get(1).map_err(|_| RuntimeError::CatalogueCorrupt)?)?
-            != revision_pair.catalogue().to_bytes()
-    {
-        return Err(RuntimeError::CatalogueRevisionConflict);
-    }
-    Ok(())
-}
-
 async fn clear_catalogue_snapshot_tx(
     transaction: &Transaction,
     capture: &orna_foundation_v1::CwdCapture,
@@ -2774,7 +2578,6 @@ async fn clear_catalogue_snapshot_tx(
         "runtime_catalogue_function",
         "runtime_catalogue_type",
         "runtime_catalogue_revision",
-        "runtime_catalogue_revision_binding",
     ] {
         transaction
             .execute(

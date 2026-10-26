@@ -1,4 +1,3 @@
-
-                pub fn minimum(rows: [Int]) = std.collection.min(rows);
-                pub fn maximum(rows: [Int]) = std.collection.max(rows);
-            
+use std.collection;
+pub fn minimum(rows: [Int]) = collection.min(rows);
+pub fn maximum(rows: [Int]) = collection.max(rows);

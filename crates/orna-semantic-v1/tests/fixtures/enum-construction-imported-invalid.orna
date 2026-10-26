@@ -1,0 +1,5 @@
+use types as shared;
+
+pub fn unknown() = shared.Level.medium;
+
+pub fn incomplete() = shared.SyncResult.ok {};

@@ -24,6 +24,7 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
+    ActivationEffectReport, DeclaredEffectSet,
     FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
     RuntimeActivationContext, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
     TerminalOutcome,
@@ -381,7 +382,7 @@ struct UnitApplication {
 }
 
 struct CompetingTerminalApplication {
-    repository: Repository,
+    holder: Arc<RuntimeState>,
     owner: [u8; 16],
     calls: usize,
 }
@@ -500,11 +501,11 @@ impl LiveApplication for CompetingTerminalApplication {
             },
             extensions: BTreeMap::new(),
         };
-        let repository = self.repository.clone();
+        let holder = Arc::clone(&self.holder);
         let owner = self.owner;
         let fingerprint = *fingerprint;
         std::thread::spawn(move || {
-            let runtime = open_durable_state(&repository);
+            let runtime = holder;
             let writer = block_on(runtime.acquire_lease(owner)).unwrap();
             block_on(
                 runtime.complete_observed_request_with_owner(
@@ -549,11 +550,11 @@ impl LiveApplication for CompetingTerminalApplication {
             },
             extensions: BTreeMap::new(),
         };
-        let repository = self.repository.clone();
+        let holder = Arc::clone(&self.holder);
         let owner = self.owner;
         let fingerprint = *fingerprint;
         std::thread::spawn(move || {
-            let runtime = open_durable_state(&repository);
+            let runtime = holder;
             let writer = block_on(runtime.acquire_lease(owner)).unwrap();
             block_on(
                 runtime.complete_observed_request_with_owner(
@@ -582,6 +583,7 @@ impl LiveApplication for CompetingTerminalApplication {
             )
             .unwrap()],
             [4; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::new(NoFault),
         )
         .for_request(RequestIdentity {
@@ -655,6 +657,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -700,6 +703,7 @@ impl LiveApplication for TransactionalApplication {
         let transaction = LiveEvalTransaction::new(
             self.mutations.clone(),
             [3; 32],
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::clone(&self.faults),
         )
         .for_request(RequestIdentity {
@@ -732,6 +736,28 @@ impl LiveApplication for TransactionalApplication {
         Err(Error::UnsupportedOperation)
     }
 }
+
+/// Applies its effects inside a plain Eval and answers with a response that
+/// does not correlate to the request. The host must retain the terminal
+/// without a value and never re-invoke the application for that request.
+struct MismatchedApplication {
+    calls: usize,
+}
+
+impl LiveApplication for MismatchedApplication {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], message: &Message) -> Result<Envelope, Error> {
+        let Message::Eval { fingerprint, .. } = message else {
+            return Err(Error::ApplicationRejected);
+        };
+        self.calls += 1;
+        Ok(unit_result([99; 16], *fingerprint))
+    }
+
+    fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
+        Err(Error::UnsupportedOperation)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WatchEventMode {
     Pure,
@@ -941,6 +967,7 @@ impl LiveApplication for WatchEventApplication {
                         )
                         .unwrap()],
                         [201; 32],
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
                     )
                     .for_request(RequestIdentity {
@@ -959,6 +986,7 @@ impl LiveApplication for WatchEventApplication {
                         )
                         .unwrap()],
                         [202; 32],
+                        ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(NoFault),
                     )
                     .for_request(RequestIdentity {
@@ -4289,6 +4317,205 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
     );
 }
 
+fn created_session(
+    transport: &mut LiveTransport,
+    authority: &mut Authority,
+    issuer: &mut Issuer,
+    deletion: &mut Delete,
+) -> String {
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        ),
+        0,
+        authority,
+        issuer,
+        deletion,
+    ));
+    assert_eq!(created.status, 201);
+    token(&created)
+}
+
+fn session_delete(session: u8, token: &str) -> WireRequest {
+    let mut request = wire("DELETE", &format!("/orna/session/{}", uuid(session)), "");
+    request
+        .headers
+        .push(("authorization".into(), format!("Bearer {token}")));
+    request
+}
+
+/// 30-protocol §Session creation and ownership (W20-04): 400 is for
+/// malformed requests. A session that has run application work is deleted
+/// through the child-aware route, which joins that work and answers 204.
+/// The child-free route cannot prove that the work has stopped, so it
+/// answers 503 (temporarily unavailable) rather than 400.
+#[test]
+fn deleting_a_session_that_ran_application_work_is_never_malformed() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let session_token = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1)).status,
+        101
+    );
+    let mut socket = WebSocketState::new([5; 16]);
+    let preparation = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .unwrap();
+    let WebSocketApplicationPreparation::Work(ticket) = preparation else {
+        panic!("the fixture-backed evaluation should be admitted as async work");
+    };
+    drop(ticket.reject(Error::UnsupportedOperation));
+    assert_eq!(
+        block_on(transport.close_attachment([5; 16], 2)),
+        Ok(FrameOutcome::Closed)
+    );
+    assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
+    assert!(transport.acknowledge_retired_attachment([5; 16]));
+
+    let refused = block_on(transport.handle(
+        session_delete(1, &session_token),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(refused.status, 503);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.unavailable","message":"request rejected"}"#
+    );
+    let mut children = transport.application_work_supervisor();
+    let deleted = block_on(transport.handle_with_children(
+        session_delete(1, &session_token),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+        &mut children,
+    ));
+    assert_eq!(deleted.status, 204);
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): DELETE needs the
+/// session's current token. A live session refuses any other token as
+/// unauthenticated (401) and stays deletable with its current token. 410 is
+/// left for sessions that have ended.
+#[test]
+fn deleting_a_live_session_with_another_token_is_unauthenticated() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let current = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    let wrong = "A".repeat(current.len());
+    assert_ne!(wrong, current);
+
+    let refused = block_on(transport.handle(
+        session_delete(1, &wrong),
+        1,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(refused.status, 401);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.unauthenticated","message":"request rejected"}"#
+    );
+    let deleted = block_on(transport.handle(
+        session_delete(1, &current),
+        2,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(deleted.status, 204);
+    let unknown = block_on(transport.handle(
+        session_delete(2, &current),
+        3,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    assert_eq!(unknown.status, 410);
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): a WebSocket upgrade
+/// from another origin is prohibited (403) even with the session's cookie,
+/// rather than reported as an expired session (410). The session is
+/// untouched, and its own origin can still upgrade.
+#[test]
+fn an_upgrade_from_another_origin_is_prohibited() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let credential = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    let mut foreign = websocket_upgrade(1, &credential);
+    foreign.headers[0].1 = "https://other.example".into();
+
+    let refused = transport
+        .begin_websocket_upgrade(&foreign, [5; 16], 1)
+        .unwrap_err();
+    assert_eq!(refused.status, 403);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"live.origin_denied","message":"request rejected"}"#
+    );
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &credential), [6; 16], 1)).status,
+        101
+    );
+}
+
+/// 30-protocol §Session creation and ownership (W20-09): session requests
+/// are `application/json`. The media type matches in any case and may carry
+/// `charset=utf-8`; another media type, another charset or any other
+/// parameter is malformed.
+#[test]
+fn session_requests_accept_json_with_a_utf8_charset() {
+    for (content_type, status) in [
+        ("application/json; charset=utf-8", 201),
+        ("Application/JSON;charset=\"UTF-8\"", 201),
+        ("application/json; charset=iso-8859-1", 400),
+        ("application/json; profile=orna", 400),
+        ("text/json", 400),
+    ] {
+        let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+        let mut issuer = Issuer(1, None);
+        let mut authority = Authority;
+        let mut deletion = Delete(true);
+        let mut request = wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
+        );
+        request.headers.retain(|(name, _)| name != "content-type");
+        request
+            .headers
+            .push(("content-type".into(), content_type.into()));
+        let response =
+            block_on(transport.handle(request, 0, &mut authority, &mut issuer, &mut deletion));
+        assert_eq!(response.status, status, "{content_type}");
+    }
+}
+
 #[test]
 fn async_rejection_keeps_watch_correlation_after_session_resume() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
@@ -5271,7 +5498,6 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
-    let updater = open_durable_state(&repository);
     let session = [1; 16];
     let owner = block_on(runtime.acquire_lease([75; 16])).unwrap();
     let reserved_request = eval_with_context(session, [81; 16], [2; 16], None);
@@ -5310,6 +5536,9 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     .unwrap();
 
     let mut host = durable_host_with_owner(runtime, owner.owner_id);
+    let updater = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let mut issuer = Issuer(1, None);
     let credential = create_with_expiration(&mut host, &mut issuer, 10_000);
     block_on(host.resume(ResumeRequest {
@@ -8469,7 +8698,7 @@ fn delete_requires_current_unexpired_bearer_and_original_origin() {
         .push(("authorization".into(), format!("Bearer {credential}")));
     assert_eq!(
         block_on(transport.handle(stale, 3, &mut authority, &mut issuer, &mut deletion,)).status,
-        410
+        401
     );
     assert_eq!(deletion.calls, 0);
 
@@ -8542,6 +8771,126 @@ fn delete_requires_current_unexpired_bearer_and_original_origin() {
         410
     );
     assert_eq!(expired_deletion.calls, 0);
+}
+
+/// 30-protocol §Session creation and ownership and portable codes: a session
+/// whose lifetime elapsed answers 410 with the portable `wire.session_expired`
+/// code, not the generic closed-session `live.expired`. Exercised on resume,
+/// where the expired boundary error reaches the wire mapping.
+#[test]
+fn expired_session_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let resume = wire(
+        "POST",
+        "/orna/session/01010101-0101-0101-0101-010101010101/resume",
+        &format!(r#"{{"resume_token":"{credential}","protocol":"orna.present.v1"}}"#),
+    );
+    let resumed = block_on(transport.handle(resume, 100, &mut authority, &mut issuer, &mut deletion));
+    assert_eq!(resumed.status, 410);
+    assert_eq!(
+        resumed.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
+/// 30-protocol §Session creation and ownership and portable codes: the
+/// WebSocket upgrade path reaches the same expired-boundary mapping as HTTP
+/// resume, so an elapsed session answers 410 with `wire.session_expired`
+/// before any reservation or pending upgrade is created.
+#[test]
+fn expired_session_websocket_upgrade_answers_410_with_wire_session_expired() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut authority = Authority;
+    let mut issuer = Issuer(1, None);
+    let mut deletion = RecordingDelete::default();
+    let created = block_on(transport.handle(
+        wire(
+            "POST",
+            "/orna/session",
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
+        ),
+        0,
+        &mut authority,
+        &mut issuer,
+        &mut deletion,
+    ));
+    let credential = token(&created);
+
+    let refused = transport
+        .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 100)
+        .unwrap_err();
+    assert_eq!(refused.status, 410);
+    assert_eq!(
+        refused.body,
+        br#"{"code":"wire.session_expired","message":"request rejected"}"#
+    );
+}
+
+/// 30-protocol §Protocol messages (ORNA-PROTO admission): when the per-session
+/// application work bound is full, a well-formed Eval is refused before any
+/// request state exists and receives a correlated `wire.limit` diagnostic on
+/// the same socket, leaving the socket and session usable.
+#[test]
+fn application_work_bound_refuses_admission_with_correlated_wire_limit() {
+    let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
+    let mut issuer = Issuer(1, None);
+    let mut authority = Authority;
+    let mut deletion = Delete(true);
+    let session_token = created_session(&mut transport, &mut authority, &mut issuer, &mut deletion);
+    assert_eq!(
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1)).status,
+        101
+    );
+
+    let supervisor = transport.application_work_supervisor();
+    let mut held = Vec::new();
+    for index in 0..4096_u32 {
+        let mut request = [0; 16];
+        request[..4].copy_from_slice(&index.to_be_bytes());
+        held.push(supervisor.admit([1; 16], request).unwrap());
+    }
+
+    let mut socket = WebSocketState::new([5; 16]);
+    let prepared = block_on(transport.prepare_websocket_application(
+        &mut socket,
+        2,
+        &masked_binary_payload(&eval_with_context([1; 16], [30; 16], [2; 16], None)),
+    ))
+    .expect("an admission limit is returned as a wire diagnostic, not a transport error");
+    let WebSocketApplicationPreparation::Output(WebSocketOutput::Binary { payload, .. }) = prepared
+    else {
+        panic!("a refused admission should produce a correlated diagnostic output");
+    };
+    let rejected = Envelope::decode(&payload, Limits::default().protocol).unwrap();
+    assert_eq!(rejected.request, Some([30; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    assert!(
+        payload.windows(b"wire.limit".len()).any(|window| window == b"wire.limit"),
+        "the diagnostic must carry the portable wire.limit code"
+    );
+    drop(held);
 }
 
 #[test]
@@ -8621,7 +8970,7 @@ fn decoded_server_result_is_rejected_before_durable_admission_or_application() {
 }
 
 #[test]
-fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
+fn detached_attachment_past_its_lease_rejects_a_binary_request_before_admission() {
     let (root, repository) = durable_repository();
     let mut host = durable_host_with_owner(open_durable_state(&repository), [86; 16]);
     let mut issuer = Issuer(1, None);
@@ -8644,13 +8993,18 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
         now: 1,
     }))
     .unwrap();
+    // An attached session is governed by its reconnection lease, which starts
+    // at WebSocket loss (30-protocol); detaching at 2 starts that lease.
+    block_on(host.close_attachment([85; 16], 2)).unwrap();
+    // The reconnect lease `durable_host_with_owner` configures (10 ms).
+    let lease_end = 2 + 10;
 
     let request = [84; 16];
     let mut application = UnitApplication::default();
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            3,
+            lease_end,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
@@ -8670,7 +9024,7 @@ fn expired_attachment_rejects_a_valid_binary_request_before_admission() {
     assert_eq!(
         block_on(host.dispatch_frame(
             [85; 16],
-            4,
+            lease_end + 1,
             Frame::Binary(eval([1; 16], request, "1")),
             &mut application,
         )),
@@ -9264,6 +9618,93 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
         }
     ));
     assert_eq!(replay_application.calls, 0);
+    drop(host);
+    remove_test_repository(&root);
+}
+
+#[test]
+fn durable_eval_snapshot_pins_resolve_before_effects() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let capture = block_on(open_durable_state(&repository).capture()).unwrap();
+    let database = capture.database_id();
+    let runtime = capture.runtime_id();
+    let current = CanonicalSnapshot::cwd(database, runtime, capture.generation().clone()).unwrap();
+    let never_issued = CanonicalSnapshot::cwd(database, runtime, 7.into()).unwrap();
+
+    let mut application = TransactionalApplication {
+        calls: 0,
+        faults: Arc::new(NoFault),
+        mutations: Vec::new(),
+    };
+    // 30-protocol.md, Limits: a CWD pin the runtime cannot resolve is answered
+    // with the portable `wire.snapshot_expired` code before any application
+    // effect. The pin is never rebound to the current generation.
+    let rejected = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [26; 16],
+            database,
+            Some(never_issued),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .expect("the unresolved pin is retained as a correlated diagnostic");
+    assert_eq!(rejected.request, Some([26; 16]));
+    assert!(matches!(rejected.message, Message::Diagnostic { .. }));
+    let encoded = rejected.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.snapshot_expired".len())
+            .any(|window| window == b"wire.snapshot_expired")
+    );
+    assert_eq!(application.calls, 0);
+
+    // The accepted eval must commit a real mutation; the fixture's empty batch
+    // is rejected by the runtime before it can prove acceptance.
+    application.mutations = vec![
+        TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
+    ];
+    let accepted = block_on(host.dispatch_frame(
+        [5; 16],
+        3,
+        Frame::Binary(eval_with_context(
+            [1; 16],
+            [27; 16],
+            database,
+            Some(current),
+        )),
+        &mut application,
+    ))
+    .unwrap()
+    .response
+    .unwrap();
+    assert!(matches!(
+        accepted.message,
+        Message::Result {
+            status: ResultStatus::Success,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 1);
+    assert_eq!(
+        block_on(open_durable_state(&repository).committed_table_row("books", &[1])),
+        Ok(Some(vec![2]))
+    );
     drop(host);
     remove_test_repository(&root);
 }
@@ -10522,6 +10963,72 @@ fn durable_runtime_recovery_does_not_cancel_or_replay_a_running_request() {
 }
 
 #[test]
+fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+
+    let request = eval([1; 16], [26; 16], "1");
+    let mut application = MismatchedApplication { calls: 0 };
+    let first = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
+    // The application has already applied its effects, so the uncorrelated
+    // answer must be retained without a value rather than reported as a
+    // pre-execution rejection (ORNA-PROTO-004; 30-protocol.md L121).
+    assert!(matches!(
+        first.response.as_ref().unwrap().message,
+        Message::Result {
+            status: ResultStatus::RetainedWithoutValue,
+            value: None,
+            diagnostic: None,
+            ..
+        }
+    ));
+    assert_eq!(application.calls, 1);
+    drop(host);
+
+    // A restarted durable host must replay the retained terminal under the
+    // same request ID without invoking the application again.
+    let mut restarted = durable_host(open_durable_state(&repository));
+    let mut restarted_issuer = Issuer(1, None);
+    let restarted_credential = create(&mut restarted, &mut restarted_issuer);
+    block_on(restarted.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &restarted_credential,
+        attachment: [6; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut replay_application = MismatchedApplication { calls: 0 };
+    let replay = block_on(restarted.dispatch_frame(
+        [6; 16],
+        2,
+        Frame::Binary(request),
+        &mut replay_application,
+    ))
+    .unwrap();
+    assert_eq!(replay.response, first.response);
+    assert_eq!(replay_application.calls, 0);
+    drop(restarted);
+    remove_test_repository(&root);
+}
+
+#[test]
 fn durable_runtime_recovers_a_legacy_running_eval_as_uncertain_after_takeover() {
     let (root, repository) = durable_repository();
     let request = eval([1; 16], [25; 16], "1");
@@ -10799,6 +11306,7 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -10884,6 +11392,7 @@ fn durable_replay_rejects_an_uncertain_payload_for_a_proven_rollback() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11041,6 +11550,7 @@ fn durable_runtime_replays_proven_rollback_as_redacted_orphaned_failure() {
             [3; 32],
             TerminalOutcome::new(vec![4]).unwrap(),
             &FailAt(FaultPoint::AfterTerminalClaim),
+            ActivationEffectReport::declare(DeclaredEffectSet::None),
         )),
         Err(RuntimeError::FaultInjected(FaultPoint::AfterTerminalClaim))
     );
@@ -11215,7 +11725,9 @@ fn durable_dispatch_rejects_a_fenced_owner_before_cancellation_callback() {
         request_id: [65; 16],
     };
     let target_fingerprint = request_fingerprint(&eval([1; 16], [65; 16], "target"), [1; 16]);
-    let target_runtime = open_durable_state(&repository);
+    let target_runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let old = block_on(target_runtime.acquire_lease([66; 16])).unwrap();
     let (_, capability) =
         block_on(target_runtime.reserve_request_with_admission(target, target_fingerprint))
@@ -11342,9 +11854,15 @@ fn durable_runtime_rejects_a_retained_response_with_the_wrong_message_shape() {
 #[test]
 fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
     let (root, repository) = durable_repository();
-    let runtime = open_durable_state(&repository);
     let owner = [91; 16];
+    // The host's owner-bound runtime holds the worktree owner lock and creates
+    // writer lease [91]. The racing terminal writer reuses that holder handle;
+    // the assertion handle is Secondary and only reads (ORNA-TURSO-005).
     let mut host = durable_host_with_owner(open_durable_state(&repository), owner);
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    let runtime = open_durable_state(&repository);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     block_on(host.resume(ResumeRequest {
@@ -11363,7 +11881,7 @@ fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
         request_id: [92; 16],
     };
     let mut application = CompetingTerminalApplication {
-        repository: repository.clone(),
+        holder,
         owner,
         calls: 0,
     };
@@ -11396,6 +11914,7 @@ fn completion_race_rejects_a_terminal_winner_with_mismatched_request_bytes() {
     );
     assert_eq!(application.calls, 1);
     drop(host);
+    drop(application);
     drop(runtime);
     remove_test_repository(&root);
 }
@@ -11443,6 +11962,79 @@ fn cancelling_a_terminal_request_is_idempotent_and_preserves_its_result() {
     assert_eq!(application.calls, 1);
 }
 
+fn assert_unit_acknowledgement(response: Option<&Envelope>, request: [u8; 16]) {
+    assert!(matches!(
+        response,
+        Some(Envelope {
+            request: Some(returned),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(value),
+                ..
+            },
+            ..
+        }) if *returned == request && *value == CanonicalValue::unit()
+    ));
+}
+
+#[test]
+fn cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let mut host = host();
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    // 30-protocol.md, Complete message registry: a terminal or unknown target
+    // is never turned into another request; cancellation acknowledges with a
+    // typed Unit and the connection stays open.
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+}
+
+#[test]
+fn durable_cancelling_an_unknown_request_acknowledges_unit_without_closing() {
+    let (root, repository) = durable_repository();
+    let mut host = durable_host(open_durable_state(&repository));
+    let mut issuer = Issuer(1, None);
+    let credential = create(&mut host, &mut issuer);
+    block_on(host.resume(ResumeRequest {
+        id: [1; 16],
+        origin: &origin(),
+        credential: &credential,
+        attachment: [5; 16],
+        now: 1,
+    }))
+    .unwrap();
+    let mut application = UnitApplication::default();
+    let outcome = block_on(host.dispatch_frame(
+        [5; 16],
+        2,
+        Frame::Binary(cancel_request([22; 16], [20; 16])),
+        &mut application,
+    ))
+    .unwrap();
+    assert_eq!(outcome.outcome, FrameOutcome::Cancelled);
+    assert_eq!(application.calls, 0);
+    assert_unit_acknowledgement(outcome.response.as_ref(), [22; 16]);
+    remove_test_repository(&root);
+}
+
 #[test]
 fn dispatches_request_status_and_rejects_unsupported_client_operations() {
     let mut host = host();
@@ -11472,9 +12064,29 @@ fn dispatches_request_status_and_rejects_unsupported_client_operations() {
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(status))),
         Ok(FrameOutcome::Accepted)
     );
+    // 30-protocol.md, Limits, connection errors and reconnection: "A
+    // well-formed request with a stale handle, wrong fingerprint, invalid
+    // program or forbidden effect receives a correlated diagnostic without
+    // closing unrelated watches." An operation the application does not
+    // support is rejected the same way, with the portable `wire.unsupported`
+    // code, rather than as a transport error.
     assert_eq!(
         block_on(host.handle_frame([5; 16], 2, Frame::Binary(subscribe()))),
-        Err(Error::UnsupportedOperation)
+        Ok(FrameOutcome::Accepted)
+    );
+    let mut application = UnitApplication::default();
+    let rejection =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(subscribe()), &mut application))
+            .unwrap()
+            .response
+            .expect("the rejection is retained as a correlated diagnostic");
+    assert_eq!(rejection.request, Some([3; 16]));
+    assert!(matches!(rejection.message, Message::Diagnostic { .. }));
+    let encoded = rejection.encode(Limits::default().protocol).unwrap();
+    assert!(
+        encoded
+            .windows(b"wire.unsupported".len())
+            .any(|window| window == b"wire.unsupported")
     );
 }
 
@@ -11735,13 +12347,17 @@ fn delete_cancels_durable_session_work_before_returning_success() {
         Some(status) if status.state == orna_runtime_v1::RequestState::Running
     ));
 
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         second_identity,
         second_fingerprint,
         lease,
         TerminalOutcome::new(second_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
     let second_status_request = Envelope {
         request: Some([93; 16]),
         watch: None,
@@ -12063,13 +12679,17 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
 
     let first_result = unit_result([91; 16], first_fingerprint);
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         first_identity,
         first_fingerprint,
         lease,
         TerminalOutcome::new(first_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
     let exact_retry = block_on(host.dispatch_frame(
         [6; 16],
         3,
@@ -12327,7 +12947,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [3; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         third_identity,
         third_target_fingerprint,
@@ -12788,7 +13410,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [6; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         sixth_identity,
         sixth_target_fingerprint,
@@ -13001,7 +13625,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [7; 16],
         request_id: [92; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         seventh_identity,
         seventh_target_fingerprint,
@@ -13197,7 +13823,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         ));
     }
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         eighth_identity,
         eighth_target_fingerprint,
@@ -13340,7 +13968,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
         session_id: [9; 16],
         request_id: [91; 16],
     };
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         ninth_identity,
         ninth_target_fingerprint,
@@ -13644,7 +14274,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == tenth_query_fingerprint
     ));
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         tenth_identity,
         tenth_target_fingerprint,
@@ -13877,7 +14509,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
                 && status.fingerprint == eleventh_query_fingerprint
     ));
 
-    let runtime = open_durable_state(&repository);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let (_, capability) = block_on(runtime.reserve_request_with_admission(
         eleventh_identity,
         eleventh_target_fingerprint,
@@ -14071,13 +14705,17 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     assert_eq!(running_retry, first_mismatch);
 
     let target_result = unit_result([91; 16], target_fingerprint);
-    block_on(open_durable_state(&repository).complete_request_with_owner(
+    let holder = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
+    block_on(holder.complete_request_with_owner(
         target_identity,
         target_fingerprint,
         lease,
         TerminalOutcome::new(target_result.encode(Limits::default().protocol).unwrap()).unwrap(),
     ))
     .unwrap();
+    drop(holder);
 
     // The reference requires this ID/input collision to fail, but is silent
     // on replay after the existing operation becomes terminal. Preserve the
@@ -21705,7 +22343,13 @@ fn failed_child_join_after_durable_cancellation_never_reports_delete_success() {
 #[test]
 fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let (root, repository) = durable_repository();
-    let runtime = open_durable_state(&repository);
+    // The host takes the worktree owner lock, so its delete creates the writer
+    // lease. The reserving and late-admission handle is the host's owner-bound
+    // runtime; a Secondary handle cannot reserve (ORNA-TURSO-005).
+    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
+    let runtime = host
+        .owner_runtime_for_test()
+        .expect("durable host holds the owner-bound runtime");
     let initial = RequestIdentity {
         session_id: [1; 16],
         request_id: [102; 16],
@@ -21718,7 +22362,6 @@ fn durable_admission_during_child_drain_is_rejected_by_the_close_fence() {
     let late_fingerprint = [105; 32];
     block_on(runtime.reserve_request(initial, initial_fingerprint)).unwrap();
 
-    let mut host = durable_host_with_owner(open_durable_state(&repository), [106; 16]);
     let mut issuer = Issuer(1, None);
     let credential = create(&mut host, &mut issuer);
     let origin = origin();
@@ -21827,7 +22470,7 @@ fn application_admission_requires_an_explicit_delete_join_boundary() {
 }
 
 #[test]
-fn failed_durable_drain_never_reports_delete_success() {
+fn second_writer_is_refused_before_durable_drain_begins() {
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
     let identity = RequestIdentity {
@@ -21846,7 +22489,10 @@ fn failed_durable_drain_never_reports_delete_success() {
         capability,
     ))
     .unwrap();
-    drop(runtime);
+    // Runtime [97] stays alive as the owner of the worktree lock, so this
+    // second writer cannot take the lease. It fails with LeaseHeld before any
+    // drain begins (ORNA-TURSO-005). Takeover after a dead owner's lock release
+    // is exercised by the durable_host_after_takeover tests.
 
     let mut host = durable_host_with_owner(open_durable_state(&repository), [98; 16]);
     let mut issuer = Issuer(1, None);
@@ -21885,6 +22531,7 @@ fn failed_durable_drain_never_reports_delete_success() {
         Some(status) if status.state == orna_runtime_v1::RequestState::Running
     ));
     drop(host);
+    drop(runtime);
     remove_test_repository(&root);
 }
 
@@ -22482,6 +23129,35 @@ fn websocket_output_encoder_rejects_oversized_payloads_before_encoding() {
     };
     assert_eq!(
         encode_websocket_output(&WebSocketOutput::Pong(vec![7; 126]), control_limits),
+        Err(orna_live_v1::WebSocketEncodeError::Limit)
+    );
+}
+
+/// ORNA-WIRE-005: a host keepalive Ping is an unmasked RFC 6455 control frame
+/// with the same 125-byte payload bound as every other control frame.
+#[test]
+fn websocket_output_encoder_emits_bounded_host_pings() {
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(Vec::new()),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 0])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![1, 2]),
+            TransportLimits::default()
+        )
+        .unwrap(),
+        Some(vec![0x89, 2, 1, 2])
+    );
+    assert_eq!(
+        encode_websocket_output(
+            &WebSocketOutput::Ping(vec![7; 126]),
+            TransportLimits::default()
+        ),
         Err(orna_live_v1::WebSocketEncodeError::Limit)
     );
 }
