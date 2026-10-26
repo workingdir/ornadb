@@ -54,7 +54,7 @@ use orna_application_v1::{
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
-    transactional_loaded_project_candidate_validator,
+    project_declares_assertions, transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
@@ -3491,7 +3491,7 @@ fn run_repl_input(
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
-    let (value, successor, activation) = match evaluation {
+    let (value, successor, activation, external_dispatched) = match evaluation {
         Ok(result) => result,
         Err(failure) => {
             if failure.external_effects_possible {
@@ -3562,52 +3562,70 @@ fn run_repl_input(
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
         return Err(unsettled_after_evaluation());
     };
-    let cwd_generation = u64::try_from(request_staged.context().capture().generation())
-        .ok()
-        .and_then(|runtime| {
-            repository
-                .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
-                .ok()
-        });
-    let Some(cwd_generation) = cwd_generation else {
-        return Err(unsettled_after_evaluation());
-    };
-    // ORNA-ASSERT-042: the post-mutation candidate is checked against the
-    // committed project's assertions before any row, checkpoint or terminal is
-    // published.
-    let Ok(mut validator) = transactional_loaded_project_candidate_validator(
-        &transactions.project,
-        &transactions.identities,
-        cwd_generation,
-        Arc::clone(&transactions.table_object_ids),
-        Limits::default(),
-    ) else {
-        return Err(unsettled_after_evaluation());
-    };
-    let committed = transactions
-        .runtime
-        .block_on(state.commit_validated_table_request_activation(
-            ValidatedTableRequestActivationCommit {
-                writer,
-                identity: request,
-                fingerprint,
-                context: request_staged.context(),
-                mutations: request_staged.mutations(),
-                next_digest: request_staged.next_digest(),
-                outcome,
-                validator: &mut *validator,
-                faults: request_staged.faults(),
-                effects: request_staged.effects(),
-            },
-        ));
-    match committed {
-        Ok(_) => {}
-        // Validation runs before any publication, so a failed assertion leaves
-        // the input uncommitted and the request is cancelled (ORNA-A091-009).
-        Err(TableActivationError::ValidationFailed(_)) if !external_possible => {
-            return Err(abandon("ORNA-A091-009".to_owned().into()));
+    // ORNA-ASSERT-042: a project that declares assertions checks the
+    // post-mutation candidate against them before any row, checkpoint or
+    // terminal is published. A project without assertions has nothing to
+    // check, so its commit keeps the unvalidated activation path.
+    if project_declares_assertions(&transactions.project) {
+        let cwd_generation = u64::try_from(request_staged.context().capture().generation())
+            .ok()
+            .and_then(|runtime| {
+                repository
+                    .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                    .ok()
+            });
+        let Some(cwd_generation) = cwd_generation else {
+            return Err(unsettled_after_evaluation());
+        };
+        let Ok(mut validator) = transactional_loaded_project_candidate_validator(
+            &transactions.project,
+            &transactions.identities,
+            cwd_generation,
+            Arc::clone(&transactions.table_object_ids),
+            Limits::default(),
+        ) else {
+            return Err(unsettled_after_evaluation());
+        };
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_validated_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity: request,
+                    fingerprint,
+                    context: request_staged.context(),
+                    mutations: request_staged.mutations(),
+                    next_digest: request_staged.next_digest(),
+                    outcome,
+                    validator: &mut *validator,
+                    faults: request_staged.faults(),
+                    effects: request_staged.effects(),
+                },
+            ));
+        match committed {
+            Ok(_) => {}
+            // Validation runs before any publication, so a failed assertion
+            // leaves the input uncommitted. It is cancelled unless an external
+            // binding was actually dispatched during evaluation.
+            Err(TableActivationError::ValidationFailed(_)) if !external_dispatched => {
+                return Err(abandon("ORNA-A091-009".to_owned().into()));
+            }
+            Err(_) => {
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+                return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+            }
         }
-        Err(_) => {
+    } else {
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_staged_table_request_activation(
+                writer,
+                request,
+                fingerprint,
+                &request_staged,
+                outcome,
+            ));
+        if committed.is_err() {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
             return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
         }
