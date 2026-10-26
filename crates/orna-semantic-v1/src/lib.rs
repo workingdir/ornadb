@@ -35,7 +35,9 @@ mod source_row;
 
 pub use located::{DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located};
 
-pub use source_row::{LoweredRowUnit, lower_row_unit, lower_row_unit_with_owner_fields};
+pub use source_row::{
+    LoweredRowUnit, lower_data_expression, lower_row_unit, lower_row_unit_with_owner_fields,
+};
 
 pub use semantic_payload::{
     DeclarationExplicitness, LocalSourceOrigin, NamedSemanticParameter, SEMANTIC_PAYLOAD_DOMAIN,

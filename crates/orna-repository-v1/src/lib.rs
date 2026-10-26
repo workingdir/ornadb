@@ -27,6 +27,7 @@ use fs2::FileExt;
 use sha2::{Digest, Sha256};
 pub use uuid::Uuid;
 
+pub mod allocator;
 mod blob_store;
 mod crash_barrier;
 mod compact;
@@ -47,6 +48,7 @@ pub mod publication_describe;
 mod publication_transaction;
 pub mod relation_admission;
 mod row_store;
+pub mod schema_evolution;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod transport;
@@ -4388,15 +4390,7 @@ impl Repository {
         {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
-        let Some(old_head) = review.cwd.head().cloned() else {
-            return self.commit_reviewed_root_candidate(
-                review,
-                message,
-                &result_path,
-                &intent_hex,
-                &message_digest_hex,
-            );
-        };
+
         // 16-administration `commit`: the staged candidate is validated before
         // its commit is created, and a missing identity fails before any commit
         // object exists. A refused candidate therefore leaves no object or ref.
@@ -4406,6 +4400,15 @@ impl Repository {
         }
         self.validate_format3_index_tree(&review.index_tree)
             .map_err(commit_gate_refusal)?;
+        let Some(old_head) = review.cwd.head().cloned() else {
+            return self.commit_reviewed_root_candidate(
+                review,
+                message,
+                &result_path,
+                &intent_hex,
+                &message_digest_hex,
+            );
+        };
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-p", old_head.as_str(), "-m"])
@@ -4493,14 +4496,7 @@ impl Repository {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
         let reference = self.symbolic_head_ref()?;
-        // Main's identity contract applies to the root commit too: a missing
-        // identity fails before any commit object exists.
-        self.require_configured_commit_identity()?;
-        // So does the commit gate: the first commit tracks no transitional
-        // `.orna/` entry either (ORNA-META-001), and a refused candidate leaves
-        // no commit object behind.
-        self.validate_format3_index_tree(&review.index_tree)
-            .map_err(commit_gate_refusal)?;
+
         let mut commit_tree = self.configured_identity_command();
         commit_tree
             .args(["commit-tree", review.index_tree.as_str(), "-m"])

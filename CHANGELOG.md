@@ -288,11 +288,16 @@ been published.
   table's relation and its published rows (ORNA-OBJECT-003, ORNA-CLI-001).
   `orna mv` no longer reads or writes `.orna/object-identities.cbor` and no
   longer moves loose-row directories, which format 3 does not have. Before the
-  first commit it refuses with E2101 because no identity is staged yet. If the
+  first commit it refuses with E2101 because no identity is staged yet. While an
+  interrupted publication is pending it refuses with E2100 ("an interrupted
+  publication has not been recovered") before reading the index; run
+  `orna publish` first. A rerun after an interrupted `mv` resumes: when the
+  worktree already declares the new name, only the index is restaged. If the
   index update is refused, the source edit is rolled back. The Rust API adds
   `Repository::stage_object_identities`,
   `RelationAdmissionError::SourceNotStaged` and
-  `ObjectIdentityManifest::with_renames`.
+  `ObjectIdentityManifest::with_renames`. `ObjectIdentityManifest::stage_renames`
+  takes the staged module sources as an extra `staged_sources` argument.
 - Deleted the old-stack island crates `orna-client`, `orna-artifact`, `orna-protocol`, `orna-standard` and `orna-runtime-tty` (deletion programme step 7). None had a production caller: their only remaining dependents were the `orna-application-v1` dev-dependency (now removed) and each other. The `orna-standard` snapshot oracle `v1_profile.rs` is ported to `crates/orna-evaluator-v1/tests/standard_profile_v1.rs` (imports rewired to `orna-standard-sources`, fixtures moved alongside); `orna-standard-sources` remains the canonical source. The `just` recipes for the removed demos, Qt runtime and Studio shell (`runtime-tty-demo`, `client-*-demo`, `demo-suite`, `runtime-qt-*`, `studio-qt-*`, `runtime-suite`, `runtime-display-suite`, `runtime-abi-header-check`, `runtime-abi-parity`) were removed with them.
 - The `orna` CLI no longer links `orna-client` (and its HTTP, WebSocket and Qt-ABI dependencies) for the `:watch` types. `live_presentation` moved unchanged from `orna-client` into `orna-live-v1`, which the CLI already depends on (deletion programme step 4). The public API of `orna-client` no longer exports `live_presentation`; import it from `orna-live-v1` instead.
 - A committed source tree whose walk would visit more than 2^20 entries (every interior tree and every listed entry, counting each occurrence of a shared subtree), list more than 2^27 path bytes, or nest deeper than 256 levels is refused before git expands it. A project loaded from such a snapshot reports `ProjectLoadError::SourceTreeLimit` (CLI E2100, titled as a walk-limit breach) instead of spending unbounded time and memory on the expansion (W46 F1).
@@ -343,6 +348,44 @@ been published.
   variant 10, type and variant fields 9), not a private integer. Stores written
   with the private integers are not readable, and the sidecar's version 1 codes
   are mapped only when reading an older commit.
+- `orna commit` evolves a format-3 table whose declaration changed instead of
+  refusing it. Fields are matched by their stable ObjectId, never by name, and
+  every committed row is rewritten to the staged schema and admitted against it
+  in the same commit: a renamed field keeps its values, a new optional field is
+  absent, a new required field takes its constant default (frozen into the
+  rows at that commit), a removed field is dropped, and `T` to `T?`, `T?` to
+  `T`, `Int` to `Decimal` and exact `Int` to `Float` convert. A new required
+  field without a constant default, a changed primary key, a lossy type change
+  or a row that does not fit refuses the commit and stages nothing. A removed
+  table's relation leaves the store. Schema changes wait until unpublished
+  runtime rows are published. The commit reports each evolved and removed
+  table (ORNA-EVOL-001, ORNA-EVOL-009, ORNA-FIELD-003, ORNA-FIELD-005). A
+  table with a secondary index is refused (E2101, nothing staged): index-aware
+  evolution is not implemented (ORNA-EVOL-002 gap, `ornadb-7f9c`).
+- `orna mv OLD NEW` renames a table, table field, type, type field, enum
+  variant, variant field or unit of a format-3 database by its qualified name
+  (such as `Music.title`): it edits the declaration and stages the ObjectId
+  move in the index's `.orna/store`, committing nothing, so the next
+  `orna commit` keeps the identity and the field's values (ORNA-OBJECT-003).
+  Editors can stage the same move through
+  `ObjectIdentityManifest::stage_renames`.
+- Automatic table IDs are never reused: each automatic-key table's highest
+  reserved ID lives in the hidden ref `refs/orna/ids/<table ObjectId>` outside
+  every branch, reserved before the rows that use it commit, so deleting rows,
+  `git reset`, checkout and branch switches no longer hand out an ID again
+  (ORNA-AUTOID-004). A database created before `refs/orna/ids/<table>` existed
+  has no watermark and can reuse an ID deleted before its first ref was written
+  (ORNA-AUTOID-002 gap, `ornadb-ehgy`). Every `orna commit` and every
+  publication that changes rows records each automatic-key table's watermark
+  in a sealed allocator summary relation of `.orna/store` for history;
+  checking out an older commit never rewinds the allocator (ORNA-AUTOID-005,
+  ORNA-META-004).
+- Row values are stored in the encoding their declared type requires: REPL
+  inserts of optional, record and `Float` fields, and row documents naming enum
+  variants, nominal records, refined values, money, quantities or stored
+  references, now publish. A row document that omits a field with a constant
+  default stores the default. Refined nominal values are stored as tag 60020
+  `[type, base value]` (ORNA-FORMAT-004, ORNA-FIELD-001).
 - `orna commit` refuses a staged index whose `.orna/store` is partial after `git rm --cached .orna/store`, leaving skip-worktree payload entries behind, with `E2302` naming the unstaged committed relation and its `git restore --staged .orna/store` remedy, instead of a generic staging failure.
 - A live eval or event whose CWD snapshot pin the runtime cannot resolve is answered with a correlated `wire.snapshot_expired` diagnostic before any application effect runs. The pin is never rebound to the current generation.
 - A live `cancel` whose target names no admitted request now acknowledges with a correlated Unit result and keeps the connection open. Before, the host answered `Denied` and dropped the socket. The application is not invoked for an unknown target, in memory or durable.

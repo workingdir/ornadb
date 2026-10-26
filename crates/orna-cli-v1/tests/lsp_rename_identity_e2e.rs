@@ -515,10 +515,12 @@ fn rename_without_save_through_lsp(
 #[test]
 fn plain_git_field_rename_commit_is_refused() {
     // No language server: the same source change staged by plain Git is refused
-    // by `orna commit` with the same reason.
+    // by `orna commit`. The table holds a committed row, so the new required
+    // field has no value for it (ORNA-SCHEMA-006, ORNA-FIELD-005).
     let directory = TempDir::new().expect("create the test directory");
     let root = initialized_database(&directory, MUSIC_SOURCE);
     commit_source(&root, "Declare Music");
+    insert_committed_music_row(&root);
     let head = git(&root, &["rev-parse", "HEAD"]);
     fs::write(
         root.join("main.orna"),
@@ -527,28 +529,42 @@ fn plain_git_field_rename_commit_is_refused() {
     .expect("write the renamed field");
     git(&root, &["add", "main.orna"]);
 
-    let refused = commit_refusal(&root);
+    let refused = orna(
+        &root,
+        &["--debug", "commit", "-m", "Rename Music.title to heading"],
+    );
+    let message = transcript(&refused);
+    assert_ne!(refused.status.code(), Some(0), "{message}");
     assert!(
-        refused.contains("schema evolution is not admitted"),
-        "refusal names schema evolution: {refused}"
+        message.contains("does not fit the committed rows") && message.contains("`heading`"),
+        "refusal names the new field: {message}"
     );
     assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
 }
 
-/// Runs `orna commit` on a staged field rename that must be refused and returns
-/// the transcript. The refusal detail prints only with `--debug`.
-fn commit_refusal(root: &Path) -> String {
-    let committed = orna(
-        root,
-        &["--debug", "commit", "-m", "Rename Music.title to heading"],
-    );
-    assert_eq!(
-        committed.status.code(),
-        Some(1),
-        "orna commit refuses the field rename\n{}",
-        transcript(&committed)
-    );
-    transcript(&committed)
+/// Inserts one `Music` row through the REPL and publishes it, so the row is
+/// committed before the schema changes.
+fn insert_committed_music_row(root: &Path) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
+    isolate_git(&mut command);
+    let mut child = command
+        .args(["--db", root.to_str().expect("UTF-8 test path"), "repl"])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the orna REPL starts");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(b"main.Music.insert({ id: \"london\", title: \"Live in London\" })\n:quit\n")
+        .expect("write REPL input");
+    let inserted = child.wait_with_output().expect("the orna REPL exits");
+    assert_success(&inserted, "orna REPL insert");
+    let published = orna(root, &["publish", "--message", "Add a recording"]);
+    assert_success(&published, "orna publish");
 }
 
 #[test]

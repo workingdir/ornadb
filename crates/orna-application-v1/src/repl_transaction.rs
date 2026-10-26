@@ -1,8 +1,8 @@
 use super::*;
 use orna_project_v1::{
     admit_format3_row, blob_placeholder, committed_tables, evaluator_rows, has_text_primary_key,
-    restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record,
-    CommittedTable, ProjectLoader,
+    holds_blob, restore_stored_blobs, runtime_key_from_evaluator, CommittedTable, ProjectLoader,
+    StoredSchema,
 };
 use orna_repository_v1::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
@@ -88,13 +88,16 @@ impl ApplicationAuthority {
         })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
         let (captured_rows, committed) = committed_table_rows(scope, &tables, &table_ids)?;
+        let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
+        let ids_for_storage = table_ids.clone();
         let mutations = SourceMutationEffectHandler::with_table_rows_and_table_object_ids(
             tables,
             captured_rows,
             table_ids,
         )?
-            .with_insert_defaults(defaults, functions, self.limits);
+            .with_insert_defaults(defaults, functions, self.limits)
+            .with_automatic_id_watermarks(&watermarks);
         let mut effects = ReplTransactionEffectHandler {
             bindings,
             mutations,
@@ -109,6 +112,16 @@ impl ApplicationAuthority {
             error,
             external_effects_possible,
         };
+        // Reserve before the evaluation outcome is inspected: an activation that fails
+        // after allocating an automatic ID still hands that ID out, so it must never be
+        // reused (ORNA-AUTOID-002). The gap it leaves is expected (ORNA-AUTOID-003).
+        reserve_automatic_ids(
+            scope,
+            &ids_for_storage,
+            &watermarks,
+            &effects.mutations.automatic_id_high_water(),
+        )
+        .map_err(&failure)?;
         let (value, successor) = outcome
             .map_err(|error| failure(ApplicationError::EffectRejected(error.code().to_owned())))?;
         // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`. Persistence to the ledger is not wired (ornadb-rg5g).
@@ -121,10 +134,112 @@ impl ApplicationAuthority {
                 declared,
             )
             .map_err(|error| failure(error.into()))?;
-        let activation = normalize_repl_mutations(&tables_for_storage, &committed, activation)
+        let activation = normalize_repl_mutations(
+            scope,
+            &tables_for_storage,
+            &ids_for_storage,
+            &committed,
+            activation,
+        )
             .map_err(|error| failure(error.into()))?;
         Ok((value, successor, activation))
     }
+}
+
+/// The durable allocator watermark of each automatic-key table: the highest
+/// ID ever reserved for it, whatever rows the checked-out snapshot holds
+/// (ORNA-AUTOID-002, ORNA-AUTOID-004).
+fn automatic_id_watermarks(
+    scope: &ReplTransactionScope<'_>,
+    tables: &BTreeMap<String, TableSchema>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+) -> Result<BTreeMap<String, BigInt>, ApplicationError> {
+    let mut watermarks = BTreeMap::new();
+    for (table, schema) in tables {
+        if !schema
+            .admission
+            .as_ref()
+            .is_some_and(|admission| admission.automatic_key)
+        {
+            continue;
+        }
+        let object_id = table_ids
+            .get(table)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        if let Some(watermark) = scope
+            .repository
+            .automatic_id_watermark(&object_id.bytes())
+            .map_err(|error| ApplicationError::Runtime(error.to_string()))?
+        {
+            watermarks.insert(table.clone(), watermark);
+        }
+    }
+    Ok(watermarks)
+}
+
+/// Reserves every automatic ID the activation allocated, accepted or
+/// observed before the activation can commit. The allocator ref advances
+/// first, so a commit that then fails leaves a gap (ORNA-AUTOID-003) and
+/// never an ID that a later allocation reuses.
+fn reserve_automatic_ids(
+    scope: &ReplTransactionScope<'_>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+    watermarks: &BTreeMap<String, BigInt>,
+    high_water: &BTreeMap<String, BigInt>,
+) -> Result<(), ApplicationError> {
+    for (table, high) in high_water {
+        let reserved = watermarks.get(table);
+        if reserved.is_none_or(|reserved| high > reserved) && *high > BigInt::from(0_u8) {
+            let object_id = table_ids
+                .get(table)
+                .ok_or(ApplicationError::InvalidTableMetadata)?;
+            scope
+                .repository
+                .advance_automatic_id_watermark(&object_id.bytes(), reserved, high)
+                .map_err(|error| ApplicationError::Runtime(error.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Projects an evaluator record onto the stored tuple laid out by
+/// `storage_order`. The committed descriptor directs the stored encoding of
+/// every non-Blob field (ORNA-FORMAT-004). A Blob field keeps its evaluator
+/// placeholder, which `restore_stored_blobs` replaces with a committed reference.
+fn lower_evaluator_row(
+    descriptor: &orna_value_v1::SchemaDescriptor,
+    schema: &TableSchema,
+    storage_order: &[String],
+    record: &[u8],
+) -> Result<Vec<u8>, ApplicationError> {
+    let decoded = CanonicalValue::decode(record).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let OvbRaw::Map(entries) = decoded.raw() else {
+        return Err(ApplicationError::InvalidTableMetadata);
+    };
+    let mut fields = BTreeMap::new();
+    for (name, field_value) in entries {
+        let OvbRaw::Text(name) = name else {
+            return Err(ApplicationError::InvalidTableMetadata);
+        };
+        fields.insert(name.as_str(), field_value);
+    }
+    let stored_schema = StoredSchema::new(descriptor).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let mut stored_values = Vec::with_capacity(storage_order.len());
+    for name in storage_order {
+        let field = stored_schema.field(name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let value = fields.get(name.as_str()).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let ty = schema.fields.get(name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        stored_values.push(if holds_blob(ty) {
+            (*value).clone()
+        } else {
+            stored_schema
+                .lower_field(field, value)
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?
+        });
+    }
+    CanonicalValue::new(OvbRaw::Array(stored_values))
+        .and_then(|row| row.encode())
+        .map_err(|_| ApplicationError::InvalidTableMetadata)
 }
 
 /// Projects the activation's evaluator-form mutations onto stored tuples in
@@ -132,7 +247,9 @@ impl ApplicationAuthority {
 /// the stored tuple it was read from: the row an earlier mutation of this
 /// activation left at its key, or else its committed row.
 fn normalize_repl_mutations(
+    scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
+    table_ids: &BTreeMap<String, TableObjectId>,
     committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
@@ -144,6 +261,8 @@ fn normalize_repl_mutations(
         protected_field_pins,
         effects,
     ) = activation.into_parts();
+    let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
+    let mut descriptors_by_table = BTreeMap::<String, orna_value_v1::SchemaDescriptor>::new();
     // The stored tuple this activation has left at each key so far; `None`
     // marks a removed row, which then shadows the committed one.
     let mut written = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
@@ -192,10 +311,18 @@ fn normalize_repl_mutations(
             normalized.push(mutation);
             continue;
         };
+        let object_id = table_ids.get(&table).copied().ok_or(ApplicationError::InvalidTableMetadata)?;
+        if !descriptors_by_table.contains_key(&table) {
+            let schema = ProjectLoader::default()
+                .resolve_committed_source_table_schema(scope.repository, commit, object_id)
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+            descriptors_by_table.insert(table.clone(), schema.binding().descriptor().clone());
+        }
         let storage_order = &committed_table.storage_order;
-        let encoded = storage_row_from_record(&row_value, storage_order)
+        let encoded = lower_evaluator_row(&descriptors_by_table[&table], table_schema, storage_order, &row_value)
             .and_then(|stored| {
                 restore_stored_blobs(&stored, storage_order, table_schema, source.as_deref())
+                    .map_err(|_| ApplicationError::InvalidTableMetadata)
             })
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         // A rekey moves the stored tuple: its old key is freed for later
