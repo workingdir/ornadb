@@ -35,7 +35,7 @@ fn short_status_preserves_git_rows_and_appends_runtime_summary() {
     assert!(expected_git.status.success());
     assert_eq!(expected_git.stdout, b"?? status-short.orna\n");
 
-    let cli = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--color", "never", "status", "--short"])
         .current_dir(directory.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")

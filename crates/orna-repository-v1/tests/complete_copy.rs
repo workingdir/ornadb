@@ -343,6 +343,95 @@ fn complete_copy_carries_nested_pins_and_restores_them_offline() {
     );
 }
 
+/// HIGH-1 regression at the real entry point: the process working directory is
+/// the parent of a relative dependency directory. Run in a child process so the
+/// process-global working directory cannot race sibling tests.
+#[test]
+fn complete_copy_relative_dependency_does_not_fall_through_to_the_parent() {
+    const CHILD: &str = "ORNA_COMPLETE_COPY_RELATIVE_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = PathBuf::from(std::env::var_os(CHILD).expect("child root"));
+        let project = root.join("library");
+        let dependency = root.join("std-dependency");
+        let archive = root.join("relative-archive");
+        let repository = Repository::discover(&project).expect("discover superproject");
+        let sources = [DependencySource {
+            path: "deps/std".to_owned(),
+            directory: PathBuf::from("std-dependency"),
+        }];
+        std::env::set_current_dir(&root).expect("enter parent directory");
+        let manifest = export_complete_copy(&repository, "HEAD", &archive, &sources)
+            .expect("export with a relative dependency directory");
+        assert_eq!(manifest.dependencies.len(), 1);
+        assert_eq!(manifest.dependencies[0].path, "deps/std");
+        assert_eq!(
+            manifest.dependencies[0].commit,
+            git_stdout(&dependency, &["rev-parse", "HEAD"])
+        );
+        return;
+    }
+
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(
+        &project,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
+    let status = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("complete_copy_relative_dependency_does_not_fall_through_to_the_parent")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD, root.path())
+        .status()
+        .expect("run child export");
+    assert!(status.success(), "relative dependency export failed: {status}");
+}
+
+/// Relative-path fall-through at the real entry point: the working directory is a
+/// healthy repository and the relative dependency directory is a child whose
+/// `HEAD` is corrupt. Discovery must fail closed rather than adopt the parent.
+#[test]
+fn complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent() {
+    const CHILD: &str = "ORNA_COMPLETE_COPY_CORRUPT_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let root = PathBuf::from(std::env::var_os(CHILD).expect("child root"));
+        let project = root.join("library");
+        let archive = root.join("corrupt-archive");
+        let repository = Repository::discover(&project).expect("discover superproject");
+        let sources = [DependencySource {
+            path: "deps/std".to_owned(),
+            directory: PathBuf::from("std-dependency"),
+        }];
+        std::env::set_current_dir(&root).expect("enter healthy parent");
+        let result = export_complete_copy(&repository, "HEAD", &archive, &sources);
+        assert!(result.is_err(), "corrupt relative child must not adopt parent");
+        return;
+    }
+
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    git(&project, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(root.path(), &["init", "-q"]);
+    fs::write(dependency.join(".git").join("HEAD"), b"garbage\n").expect("corrupt child HEAD");
+    let status = Command::new(std::env::current_exe().expect("test binary"))
+        .arg("complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent")
+        .arg("--exact")
+        .arg("--nocapture")
+        .env(CHILD, root.path())
+        .status()
+        .expect("run child export");
+    assert!(status.success(), "corrupt relative dependency export did not fail closed: {status}");
+}
+
 #[test]
 fn complete_copy_fails_closed_when_a_dependency_is_unavailable() {
     let root = TempDir::new().expect("create fixture root");
@@ -739,4 +828,43 @@ fn complete_copy_reconstructs_large_blob_after_source_and_origin_are_gone() {
     assert_eq!(restored_length, payload_length as u64);
     let restored_sha256: [u8; 32] = hasher.finalize().into();
     assert_eq!(restored_sha256, expected_sha256, "restored raw blob hash");
+}
+
+#[test]
+fn complete_copy_refuses_a_dependency_path_that_names_git_metadata() {
+    let root = TempDir::new().expect("create fixture root");
+    let dependency = dependency_repository(root.path());
+    let project = superproject(root.path(), &dependency);
+    let repository = Repository::discover(&project).expect("discover superproject");
+    let archive = root.path().join("archive");
+    export_complete_copy(&repository, "HEAD", &archive, &[]).expect("export complete copy");
+    let document = fs::read_to_string(archive.join("manifest.tsv")).expect("read manifest");
+
+    // Restore fetches each dependency into its path inside the copy and
+    // materialising checks it out there, so a `.git` path would write the
+    // dependency's files, hooks included, into a Git directory.
+    for (index, hostile) in [".git", "deps/.git", "deps/.GIT", "deps/git~1"]
+        .into_iter()
+        .enumerate()
+    {
+        let tampered = root.path().join(format!("tampered-{index}"));
+        copy_archive(&archive, &tampered);
+        let tampered_document =
+            document.replace("dependency\tdeps/std\t", &format!("dependency\t{hostile}\t"));
+        assert_ne!(tampered_document, document, "the dependency path changed");
+        fs::write(tampered.join("manifest.tsv"), &tampered_document).expect("write manifest");
+        let destination = root.path().join(format!("copy-{index}"));
+        let error = restore_complete_copy(&tampered, &destination)
+            .expect_err("a dependency path naming git metadata is refused");
+        assert!(
+            matches!(
+                error,
+                orna_repository_v1::complete_copy::CompleteCopyError::InvalidArchive(
+                    "dependency line"
+                )
+            ),
+            "{hostile:?} is refused while the manifest is read: {error}"
+        );
+        assert!(!destination.exists(), "nothing is restored for {hostile:?}");
+    }
 }

@@ -288,6 +288,7 @@ async fn finite_fixture_is_inert_until_dispatch_and_commits_each_item() {
     assert_eq!(state.latest_checkpoint().await, Ok(None));
     assert!(state.stream_observations().await.unwrap().is_empty());
     assert!(state.committed_table_rows("Reading").await.unwrap().is_empty());
+    drop(state);
 
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
     assert_eq!(evaluator.admit_list_stream_source(&source_unit()), StageOutcome::Passed);
@@ -304,6 +305,9 @@ async fn finite_fixture_is_inert_until_dispatch_and_commits_each_item() {
             .expect("explicit finite dispatch"),
         StageOutcome::Passed
     );
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("reopen runtime state");
 
     let key = list_checkpoint_key("main", "fixture:streams-pa0p-finite", &[1, 2]);
     let checkpoint = state
@@ -336,9 +340,6 @@ async fn finite_fixture_is_inert_until_dispatch_and_commits_each_item() {
 async fn semantic_consumer_rename_changes_the_spelling_key() {
     let (_directory, repository) = repository(FINITE_STREAM);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let first = DurableTransactionalEvaluator::new("main", Limits::default())
         .execute_list_stream_source(
             &repository,
@@ -349,6 +350,9 @@ async fn semantic_consumer_rename_changes_the_spelling_key() {
         )
         .await
         .expect("execute original consumer");
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
     assert_eq!(first, StageOutcome::Passed);
     let original_key = list_checkpoint_key("main", "fixture:streams-pa0p-finite", &[1, 2]);
     let original = state
@@ -357,6 +361,7 @@ async fn semantic_consumer_rename_changes_the_spelling_key() {
         .expect("original spelling-keyed checkpoint")
         .key
         .consumer;
+    drop(state);
 
     let renamed = DurableTransactionalEvaluator::new("ingest", Limits::default())
         .execute_list_stream_source(
@@ -368,6 +373,9 @@ async fn semantic_consumer_rename_changes_the_spelling_key() {
         )
         .await
         .expect("execute semantically renamed consumer");
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("reopen runtime state");
     assert_eq!(renamed, StageOutcome::Passed);
     let renamed_key = list_checkpoint_key("ingest", "fixture:streams-pa0p-finite", &[1, 2]);
     assert_eq!(
@@ -477,9 +485,6 @@ async fn section9_predicates_fold_complete_nested_pairs_at_each_checkpoint() {
     // the full nested pair before the next checkpoint is committed.
     let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let fixture = source_unit_with(
         PREDICATE_NESTED_PAIRS,
         "streams-jyy6a-predicate-nested-pairs",
@@ -494,6 +499,9 @@ async fn section9_predicates_fold_complete_nested_pairs_at_each_checkpoint() {
         )
         .await
         .expect("execute nested-pair source");
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
     assert_eq!(outcome, StageOutcome::Passed);
 
     let keys = [
@@ -537,9 +545,6 @@ async fn section9_predicates_fold_complete_nested_pairs_at_each_checkpoint() {
 async fn all_unique_rejects_a_nested_pair_duplicate_without_advancing_checkpoint() {
     let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_DUPLICATE);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let fixture = source_unit_with(
         PREDICATE_NESTED_PAIRS_DUPLICATE,
         "streams-jyy6a-predicate-nested-pairs-duplicate",
@@ -557,6 +562,9 @@ async fn all_unique_rejects_a_nested_pair_duplicate_without_advancing_checkpoint
             .expect("execute duplicate nested-pair source"),
         StageOutcome::Failed(_)
     ));
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
 
     let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
     let blue = nested_pair_key(1, "east", 2, "oak", 3, "blue");
@@ -592,9 +600,6 @@ async fn all_unique_rejects_a_nested_pair_duplicate_without_advancing_checkpoint
 async fn every_rejects_a_nested_pair_mismatch_at_its_checkpoint() {
     let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_EVERY_MISMATCH);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let fixture = source_unit_with(
         PREDICATE_NESTED_PAIRS_EVERY_MISMATCH,
         "streams-jyy6a-predicate-nested-pairs-every-mismatch",
@@ -612,6 +617,9 @@ async fn every_rejects_a_nested_pair_mismatch_at_its_checkpoint() {
             .expect("execute nested-pair mismatch source"),
         StageOutcome::Failed(_)
     ));
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
 
     let matching = nested_pair_key(1, "east", 2, "oak", 3, "red");
     let mismatching = nested_pair_key(1, "east", 2, "oak", 3, "blue");
@@ -661,9 +669,6 @@ async fn predicate_continuations_find_nested_pairs_across_checkpoints() {
     );
     let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let fixture = source_unit_with(
         PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD,
         "streams-yfxkj-predicate-nested-pairs-checkpoint-fold",
@@ -672,6 +677,9 @@ async fn predicate_continuations_find_nested_pairs_across_checkpoints() {
         .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture)
         .await
         .expect("execute nested-pair checkpoint fold");
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
     assert_eq!(outcome, StageOutcome::Passed);
 
     let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
@@ -712,9 +720,6 @@ async fn predicate_continuations_find_nested_pairs_across_checkpoints() {
 async fn missing_nested_pair_witness_preserves_the_previous_checkpoint() {
     let (_directory, repository) = repository(PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD_MISMATCH);
     let identity = identity();
-    let state = RuntimeState::open(&repository, identity, [0x53; 32])
-        .await
-        .expect("open runtime state");
     let fixture = source_unit_with(
         PREDICATE_NESTED_PAIRS_CHECKPOINT_FOLD_MISMATCH,
         "streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch",
@@ -724,6 +729,9 @@ async fn missing_nested_pair_witness_preserves_the_previous_checkpoint() {
         .await
         .expect("execute missing-witness pair fold");
     assert!(matches!(outcome, StageOutcome::Failed(_)));
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("open runtime state");
 
     let red = nested_pair_key(1, "east", 2, "oak", 3, "red");
     let blue = nested_pair_key(1, "east", 2, "oak", 3, "blue");

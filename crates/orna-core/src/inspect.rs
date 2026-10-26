@@ -2610,7 +2610,7 @@ mod tests {
             event.observer_invocation(),
             Some(invocation_id(PARENT_INVOCATION))
         );
-        assert_eq!(event.purpose(), Some("inspect"));
+        assert_eq!(event.purpose(), Some("<redacted>"));
     }
 
     #[test]

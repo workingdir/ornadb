@@ -4,7 +4,7 @@ use std::{
     collections::BTreeSet,
     io::{Read, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -14,6 +14,8 @@ use std::{
 };
 
 use orna_sys_macros::sys_host_operation;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessProviderError {
@@ -180,6 +182,10 @@ impl ProcessProvider {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // The child leads its own process group so a timeout/abort can kill
+        // grandchildren that inherited the output pipes.
+        #[cfg(unix)]
+        command.process_group(0);
         // An omitted API timeout still inherits the host-selected cap. This
         // keeps every admitted process bounded even when callers use `null`.
         let effective_timeout = timeout.unwrap_or(self.maximum_timeout);
@@ -229,7 +235,7 @@ impl ProcessProvider {
         };
         let status = loop {
             if abort.load(Ordering::Acquire) {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 join_reader(stdout_thread);
                 join_reader(stderr_thread);
@@ -248,7 +254,7 @@ impl ProcessProvider {
             let status = match child.try_wait() {
                 Ok(status) => status,
                 Err(_) => {
-                    let _ = child.kill();
+                    kill_process_tree(&mut child);
                     let _ = child.wait();
                     join_reader(stdout_thread);
                     join_reader(stderr_thread);
@@ -262,7 +268,7 @@ impl ProcessProvider {
                 break status;
             }
             if Instant::now() >= deadline {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
                 let _ = child.wait();
                 join_reader(stdout_thread);
                 join_reader(stderr_thread);
@@ -274,6 +280,10 @@ impl ProcessProvider {
             thread::sleep(Duration::from_millis(2));
         };
 
+        // The leader has exited, but a background grandchild may still hold the
+        // output pipes. Kill the group so the readers reach EOF; this is a no-op
+        // for the reaped leader itself (std's `kill` is inert after `wait`).
+        kill_process_tree(&mut child);
         join_reader(stdout_thread);
         join_reader(stderr_thread);
         if let Some(writer) = input_thread {
@@ -355,6 +365,23 @@ fn join_reader(reader: thread::JoinHandle<()>) {
     let _ = reader.join();
 }
 
+/// Kills the child's whole process group on Linux. The child leads its own
+/// group (`process_group(0)`), so grandchildren that inherited the output pipes
+/// are killed too and cannot hold the reader threads past the deadline.
+#[cfg(target_os = "linux")]
+fn kill_process_tree(child: &mut Child) {
+    let _ = rustix::process::kill_process_group(
+        rustix::process::Pid::from_child(child),
+        rustix::process::Signal::Kill,
+    );
+    let _ = child.kill();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn kill_process_tree(child: &mut Child) {
+    let _ = child.kill();
+}
+
 fn validate_environment_name(name: &str) -> Result<(), ProcessProviderError> {
     let mut bytes = name.bytes();
     let Some(first) = bytes.next() else {
@@ -366,4 +393,68 @@ fn validate_environment_name(name: &str) -> Result<(), ProcessProviderError> {
         return Err(ProcessProviderError::InvalidRequest);
     }
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    /// A timed-out child that spawned a grandchild holding the output pipes
+    /// must not keep the call waiting for the grandchild: the whole process
+    /// group is killed at the deadline.
+    #[test]
+    fn timeout_kills_grandchildren_that_hold_the_output_pipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut provider = ProcessProvider::new(Duration::from_secs(60), 4096).unwrap();
+        provider
+            .allow_command("/bin/sh", &root, Vec::<String>::new())
+            .unwrap();
+
+        let started = Instant::now();
+        let result = provider.run(
+            "/bin/sh",
+            &["-c".to_owned(), "sleep 30 & wait".to_owned()],
+            root.to_str().unwrap(),
+            &[],
+            None,
+            Some(Duration::from_millis(500)),
+            4096,
+        );
+
+        assert_eq!(result, Err(ProcessProviderError::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "timeout waited for a grandchild holding the output pipes"
+        );
+    }
+
+    /// A child that exits normally while a background grandchild still holds
+    /// the output pipes must not block the call on that grandchild.
+    #[test]
+    fn normal_exit_kills_background_grandchildren_that_hold_the_output_pipes() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let mut provider = ProcessProvider::new(Duration::from_secs(60), 4096).unwrap();
+        provider
+            .allow_command("/bin/sh", &root, Vec::<String>::new())
+            .unwrap();
+
+        let started = Instant::now();
+        let result = provider.run(
+            "/bin/sh",
+            &["-c".to_owned(), "sleep 30 & exit 0".to_owned()],
+            root.to_str().unwrap(),
+            &[],
+            None,
+            Some(Duration::from_secs(60)),
+            4096,
+        );
+
+        assert_eq!(result.map(|output| output.exit_status), Ok(Some(0)),);
+        assert!(
+            started.elapsed() < Duration::from_secs(15),
+            "normal exit waited for a background grandchild holding the output pipes"
+        );
+    }
 }

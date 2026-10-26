@@ -1,0 +1,1 @@
+{'scope': 'Bounded EBNF syntax probe, not an Orna compiler. ASCII lexical recognisers; strings opaque; no interpolation, Unicode-profile, type/effect checking or evaluator.', 'count': 175, 'agree': 175}

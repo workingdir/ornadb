@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/reserved-sys.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E1008",
+  "message_contains": "`sys` is reserved",
+  "status": "expected-not-executed"
+}

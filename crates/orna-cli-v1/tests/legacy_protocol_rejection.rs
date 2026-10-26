@@ -56,7 +56,7 @@ fn runtime_annotation_is_identical_through_ovb2_for_same_call() {
 }
 
 /// Value-layer export refusal. This is the only OVB-1 export boundary exercised
-/// here; it returns `InvalidProfile` and does not map to the sys code above.
+/// here; it returns `InvalidProfile`, whose stable code is the sys code above.
 #[test]
 fn value_layer_ovb1_export_refuses_annotated_blob_with_invalid_profile() {
     let blob = Blob::from_bytes_with_annotation(b"payload".to_vec(), "image/jpeg", Some("jpeg"))
@@ -65,5 +65,10 @@ fn value_layer_ovb1_export_refuses_annotated_blob_with_invalid_profile() {
         ContextValue::from_blob(&blob, ValueFormat::Ovb1).err(),
         Some(ValueError::InvalidProfile),
         "OVB-1 export must refuse an annotated Blob with InvalidProfile"
+    );
+    assert_eq!(
+        ValueError::InvalidProfile.code().map(|code| code.as_str()),
+        Some(CODE),
+        "the export refusal must carry the declared sys code"
     );
 }

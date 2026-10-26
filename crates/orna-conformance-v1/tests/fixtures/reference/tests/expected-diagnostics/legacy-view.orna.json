@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "fixture": "examples/invalid/legacy-view.orna",
   "failing_phase": "parse",
   "primary_diagnostic": "E1002",

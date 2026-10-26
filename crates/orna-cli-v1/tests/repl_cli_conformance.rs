@@ -24,7 +24,7 @@ fn project() -> TempDir {
     let directory = tempfile::tempdir().expect("temporary Orna project");
     std::fs::write(directory.path().join("main.orna"), VALID_SOURCE)
         .expect("checked-in reference Orna source");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
@@ -34,7 +34,7 @@ fn project() -> TempDir {
 }
 
 fn run(directory: &std::path::Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path")])
         .args(arguments)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -43,7 +43,7 @@ fn run(directory: &std::path::Path, arguments: &[&str]) -> Output {
 }
 
 fn run_repl(directory: &std::path::Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().expect("UTF-8 path"), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
@@ -99,7 +99,7 @@ fn commit_project(directory: &std::path::Path) {
 
 #[test]
 fn help_advertises_the_explicit_debug_output_mode() {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--help")
         .output()
         .expect("Orna help process");
@@ -170,7 +170,7 @@ fn repl_uses_ordinary_module_imports_without_a_namespace_command() {
         REPL_USE_LIBRARY_MODULE,
     )
     .expect("checked-in imported module fixture");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
@@ -202,7 +202,7 @@ fn repl_status_and_last_result_bindings_remain_session_local_and_redacted() {
 #[test]
 fn repl_repository_authority_absence_keeps_the_legacy_core_session() {
     let directory = tempfile::tempdir().expect("directory without a repository");
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("repl")
         .current_dir(directory.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -240,7 +240,7 @@ fn repl_opens_a_project_with_enums_types_and_protocols_and_evaluates_them() {
     let directory = tempfile::tempdir().expect("temporary Orna project");
     std::fs::write(directory.path().join("main.orna"), REPL_PROJECT_ITEMS)
         .expect("checked-in project item fixture");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()

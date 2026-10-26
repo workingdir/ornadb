@@ -9,6 +9,7 @@ pub fn skip_blocked_mail(reason: Str) {
     sys.admin.skip_failure(
         failure.reference,
         expected_status: failure.status,
+        expected_version: failure.version,
         reason: reason,
     )
 }

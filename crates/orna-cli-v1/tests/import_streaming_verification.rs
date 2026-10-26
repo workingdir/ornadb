@@ -67,7 +67,7 @@ fn write_song_image_bundle(directory: &Path) -> PathBuf {
 }
 
 fn run_import(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("import")
         .args(arguments)
         .output()

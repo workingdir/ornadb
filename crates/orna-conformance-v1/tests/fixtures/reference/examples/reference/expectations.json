@@ -2,7 +2,7 @@
   "environment": {
     "network": false,
     "credentials": false,
-    "intrinsics": "Orna 1.0.0 core",
+    "intrinsics": "Orna 1.1.0 core",
     "stdlib": null,
     "initial_tables": "empty"
   },

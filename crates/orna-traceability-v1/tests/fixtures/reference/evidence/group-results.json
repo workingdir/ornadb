@@ -1,0 +1,56 @@
+{
+  "current-format-model": {
+    "name": "current-format-model",
+    "command": "python3 tools/model_checks.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "MIME/path/CBOR/CAS/graph model and isolated native Git; not engine/FUSE",
+    "log": "evidence/current-format-model.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  },
+  "language-syntax": {
+    "name": "language-syntax",
+    "command": "python3 tools/syntax_probe.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "Bounded EBNF syntax probe, not compiler/type/effect checking",
+    "log": "evidence/language-syntax.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  },
+  "legacy-float-vectors": {
+    "name": "legacy-float-vectors",
+    "command": "python3 tools/check_float_vectors.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "Retained legacy numeric model only",
+    "log": "evidence/legacy-float-vectors.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  },
+  "legacy-path-vectors": {
+    "name": "legacy-path-vectors",
+    "command": "python3 tools/check_path_vectors.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "Legacy path reader compatibility, not VFS-1",
+    "log": "evidence/legacy-path-vectors.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  },
+  "legacy-live-model": {
+    "name": "legacy-live-model",
+    "command": "python3 tools/protocol_model.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "Retained wire models, not live server interoperability",
+    "log": "evidence/legacy-live-model.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  },
+  "static-publication": {
+    "name": "static-publication",
+    "command": "python3 tools/validate.py",
+    "exit_code": 0,
+    "passed": true,
+    "scope": "Cross-file source/API/profile/publication consistency",
+    "log": "evidence/static-publication.log",
+    "input_sha256": "deb9b45ed481de909472fa40031f1e5e6f29e1ca0d822f4aa03dd56a61ccebf9"
+  }
+}
