@@ -4928,7 +4928,7 @@ impl Repository {
         if !self.head_contains_commit(journal.new_head())? {
             return Err(RepositoryError::StaleHead);
         }
-        self.verify_reconciled_index(journal)?;
+        self.verify_index_at_candidate(journal)?;
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
         self.write_publication_journal_locked(journal)?;
         journal.advance(PublicationJournalStage::Complete)?;
@@ -5121,10 +5121,32 @@ impl Repository {
         journal: &PublicationJournal,
     ) -> Result<(), RepositoryError> {
         let candidate = self.candidate_from_journal(journal)?;
+        self.verify_index_matches_candidate(&candidate, journal)
+    }
+
+    /// Index-only form of `verify_reconciled_index` for finalizing a journal
+    /// whose worktree may hold unstaged edits the candidate does not carry
+    /// (reviewed candidates, ORNA-PUB-017). It checks the candidate's identity
+    /// and that the index still holds the candidate's entries; it does not
+    /// require the journal's recorded worktree contents to equal the commit.
+    fn verify_index_at_candidate(&self, journal: &PublicationJournal) -> Result<(), RepositoryError> {
+        let commit_expression = format!("{}^{{commit}}", journal.new_head().as_str());
+        let commit = self
+            .commit_optional(&commit_expression)?
+            .ok_or(RepositoryError::InvalidPublicationJournal)?;
+        let candidate = self.candidate_identity_from_journal(journal, commit)?;
+        self.verify_index_matches_candidate(&candidate, journal)
+    }
+
+    fn verify_index_matches_candidate(
+        &self,
+        candidate: &PrivateCommit,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
         let index = self.git_path("index")?;
         let _git_lock =
             GitIndexLock::acquire_owned(index.with_extension("lock"), journal.lock_binding()?)?;
-        if self.index_entries_match_candidate(&candidate, journal)? {
+        if self.index_entries_match_candidate(candidate, journal)? {
             return Ok(());
         }
         Err(RepositoryError::StaleIndex {
@@ -5152,6 +5174,25 @@ impl Repository {
         journal: &PublicationJournal,
         commit: GitCommitRef,
     ) -> Result<PrivateCommit, RepositoryError> {
+        let candidate = self.candidate_identity_from_journal(journal, commit)?;
+        if !self.candidate_entries_match_journal(&candidate, journal)? {
+            return Err(RepositoryError::InvalidPublicationJournal);
+        }
+        if journal.compact_manifest().is_some() {
+            self.verify_compact_publication_binding(journal, &candidate)?;
+        }
+        Ok(candidate)
+    }
+
+    /// The private H + P identity of the journal's candidate: the commit is
+    /// the journal's new head, its only parent is the recorded old head, and
+    /// its tree is that commit's tree. Entry contents are checked separately
+    /// by `candidate_from_journal_with_commit`.
+    fn candidate_identity_from_journal(
+        &self,
+        journal: &PublicationJournal,
+        commit: GitCommitRef,
+    ) -> Result<PrivateCommit, RepositoryError> {
         if &commit != journal.new_head() {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -5171,14 +5212,7 @@ impl Repository {
             "--verify",
             &tree_expression,
         ])?)?;
-        let candidate = PrivateCommit { tree, commit };
-        if !self.candidate_entries_match_journal(&candidate, journal)? {
-            return Err(RepositoryError::InvalidPublicationJournal);
-        }
-        if journal.compact_manifest().is_some() {
-            self.verify_compact_publication_binding(journal, &candidate)?;
-        }
-        Ok(candidate)
+        Ok(PrivateCommit { tree, commit })
     }
 
     fn recover_publication_worktree_locked(
