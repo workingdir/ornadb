@@ -666,10 +666,15 @@ impl ObjectIdentityManifest {
     /// retired, so declarations staged and unstaged differently keep theirs.
     /// `Ok(None)` when the index stages no inventory: no object has an
     /// identity to keep yet, so the rename is plain source text.
+    ///
+    /// `staged_sources` replaces the staged bytes of the source files the
+    /// rename edits, so the renamed declaration is staged with the inventory
+    /// that names it, as `git mv` stages a move. Other paths are kept.
     pub fn stage_renames(
         repository: &Repository,
         modules: &[ModuleInput],
         renames: &[ObjectIdentityRename],
+        staged_sources: &[(&str, &[u8])],
     ) -> Result<Option<Self>, ObjectIdentityError> {
         let Some(staged) = Self::capture_index_inventory(repository)? else {
             return Ok(None);
@@ -707,7 +712,7 @@ impl ObjectIdentityManifest {
             // inventory relation are created by the next `orna commit`.
             return Err(ObjectIdentityError::Io);
         }
-        repository.stage_object_identities(&staged, &next.to_stored(), &[])?;
+        repository.stage_object_identities(&staged, &next.to_stored(), staged_sources)?;
         Ok(Some(next))
     }
 
@@ -4261,7 +4266,7 @@ pub table Invoice(id: Str) {
             "Song",
         )];
         assert_eq!(
-            ObjectIdentityManifest::stage_renames(&repository, &[], &renames),
+            ObjectIdentityManifest::stage_renames(&repository, &[], &renames, &[]),
             Ok(None)
         );
     }
@@ -4283,7 +4288,7 @@ pub table Invoice(id: Str) {
             ObjectIdentityRename::new(ObjectKind::Field, "Music.title", "Song.name"),
             ObjectIdentityRename::new(ObjectKind::Variant, "Color.red", "Color.crimson"),
         ];
-        let next = ObjectIdentityManifest::stage_renames(&repository, &renamed, &renames)
+        let next = ObjectIdentityManifest::stage_renames(&repository, &renamed, &renames, &[])
             .unwrap()
             .expect("the index stages an inventory");
         for (kind, old, new) in [
@@ -4317,7 +4322,7 @@ pub table Invoice(id: Str) {
         assert!(repository.head().unwrap().is_none(), "nothing is committed");
 
         let refused = |renames: &[ObjectIdentityRename]| {
-            ObjectIdentityManifest::stage_renames(&repository, &renamed, renames).unwrap_err()
+            ObjectIdentityManifest::stage_renames(&repository, &renamed, renames, &[]).unwrap_err()
         };
         assert_eq!(
             refused(&[ObjectIdentityRename::new(
