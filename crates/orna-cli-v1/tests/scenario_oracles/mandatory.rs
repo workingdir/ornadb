@@ -11,19 +11,19 @@ use std::{
 };
 
 use crate::harness::{
-    Check, Db, Entry, Failure, Probe, check_refuses, ensure, repl_refuses, unknown_command,
+    Check, Db, Entry, Failure, Probe, check_refuses, ensure, one_line, repl_refuses, unknown_command,
 };
 
-pub const LIVE_BLOCKER: &str = "`orna serve` keeps no live watch current: a watch over a table-derived value is refused, or gets no snapshot or delta after the table changes";
+pub const LIVE_BLOCKER: &str = "the live watch socket is closed with code 1002 before the first snapshot for the spec-shaped `main.notes()` watch request, so ORNA-WIRE-001's initial snapshot is not delivered; root cause unverified (host rejection or probe envelope)";
 const SKIP_BLOCKER: &str = "an operator cannot skip a failed delivery: `sys.Failure` does not evaluate in the project REPL";
 
 pub fn entries() -> Vec<Entry> {
     vec![
         Entry::gap(
             "STATE-001",
-            "ornadb-5il1.135",
-            "the project REPL cannot read a table, so neither the CWD relation nor its `.as_of(HEAD)` view can be queried",
-            repl_cannot_read_a_table,
+            "ornadb-5afo",
+            "the CWD relation does not count uncommitted REPL inserts: `main.Contact | count()` ignores the local row (ORNA-STATE-002)",
+            cwd_overlays_head,
         ),
         Entry::gap(
             "KEY-001",
@@ -111,8 +111,8 @@ pub fn entries() -> Vec<Entry> {
         Entry::gap(
             "GIT-001",
             "ornadb-gov5.21",
-            "there is no `orna clone`, so no partial clone hydrates only the segments a query needs",
-            |db| unknown_command(db, &["clone", "--filter=blob:none", ".", "copy"]),
+            "`orna clone --filter` is ignored for local clones: the clone copies every object, so no partial clone hydrates only the segments a query needs",
+            clone_filter_is_ignored,
         ),
     ]
 }
@@ -120,9 +120,35 @@ pub fn entries() -> Vec<Entry> {
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) { name: Str, }\n";
 const INSERT_ALICE: &str = r#"main.Contact.insert({ id: "alice", name: "Alice" })"#;
 
-fn repl_cannot_read_a_table(db: &mut Db) -> Probe {
+fn cwd_overlays_head(db: &mut Db) -> Probe {
     db.declare(CONTACT_SOURCE)?;
-    repl_refuses(db, &["main.Contact | count()"], "ORNA-EVAL-NAME")
+    db.repl_effect(INSERT_ALICE)?;
+    db.publish()?.ok()?;
+    db.repl_effect(r#"main.Contact.insert({ id: "bob", name: "Bob" })"#)?;
+    let cwd = db.repl(&["main.Contact | count()"])?;
+    let head = db.repl(&["main.Contact.as_of(HEAD) | count()"])?;
+    let evidence = format!(
+        "`main.Contact | count()` after an uncommitted insert: {}; `main.Contact.as_of(HEAD) | count()`: {}",
+        cwd.output().trim(),
+        head.output().trim()
+    );
+    if cwd.output().contains("> 2 : Int") && head.output().contains("> 1 : Int") {
+        return Err(Failure(format!("the CWD relation now counts the local row and HEAD counts only the published row: {evidence}")));
+    }
+    Ok(evidence)
+}
+
+fn clone_filter_is_ignored(db: &mut Db) -> Probe {
+    let run = db.orna(&["clone", "--filter=blob:none", ".", "copy"])?;
+    ensure!(
+        run.succeeded() && run.output().contains("--filter is ignored in local clones"),
+        "`orna clone --filter=blob:none` now honours its filter in a local clone: {}",
+        run.output()
+    );
+    Ok(format!(
+        "orna clone --filter=blob:none . copy: {}",
+        one_line(&run.output(), "--filter is ignored")
+    ))
 }
 
 fn second_automatic_id_is_refused(db: &mut Db) -> Probe {
@@ -481,9 +507,14 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         ],
     )?;
     socket.send_binary(&watch_envelope(&database, "main.notes()")?)?;
-    let first = socket
-        .read_message(Duration::from_secs(60))?
-        .ok_or_else(|| Failure("no first live message within 60 s".to_owned()))?;
+    let first = match socket.read_message(Duration::from_secs(60)) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Err(Failure("no first live message within 60 s".to_owned())),
+        Err(Failure(reason)) if reason.starts_with("the host closed the live socket") => {
+            return Ok(format!("watch on `main.notes()`: {reason} before the first snapshot"));
+        }
+        Err(error) => return Err(error),
+    };
     match message_type(&first) {
         Some(SNAPSHOT) => {}
         Some(DIAGNOSTIC) => {
@@ -506,15 +537,19 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
 
     // A second process changes the watched relation's CWD.
     db.repl_effect(r#"main.Note.insert({ id: "later", text: "changes the watched count" })"#)?;
-    match socket.read_message(Duration::from_secs(10))? {
-        Some(bytes) => Err(Failure(format!(
+    match socket.read_message(Duration::from_secs(10)) {
+        Ok(Some(bytes)) => Err(Failure(format!(
             "the host now pushes message type {:?} after the change",
             message_type(&bytes)
         ))),
-        None => Ok(
+        Ok(None) => Ok(
             "watch on `main.notes()`: snapshot 0 received; no snapshot or delta within 10 s of a CWD insert"
                 .to_owned(),
         ),
+        Err(Failure(reason)) if reason.starts_with("the host closed the live socket") => Ok(format!(
+            "watch on `main.notes()`: snapshot 0 received; after a CWD insert, {reason}"
+        )),
+        Err(error) => Err(error),
     }
 }
 
@@ -680,7 +715,14 @@ impl WatchSocket {
                 0x2 => return Ok(Some(payload)),
                 0x9 => self.send_frame(0xa, &payload)?,
                 0xa => {}
-                0x8 => return Err(Failure("the host closed the live socket".to_owned())),
+                0x8 => {
+                    let code = payload
+                        .get(..2)
+                        .map_or(0, |bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+                    return Err(Failure(format!(
+                        "the host closed the live socket (close code {code})"
+                    )));
+                }
                 other => {
                     return Err(Failure(format!(
                         "unexpected live frame opcode {other:#x}"
