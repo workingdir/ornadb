@@ -1292,6 +1292,43 @@ impl Blob {
         Ok(result)
     }
 
+    /// Verifies the complete raw content against the identity in bounded
+    /// chunks. Unlike `read_to_end`, no buffer of the full length is kept: each
+    /// chunk is hashed and discarded, so memory is bounded by the read limit.
+    pub fn verify(&self) -> Result<()> {
+        let chunk_limit = self.read_chunk_limit();
+        let mut digest = Sha256::new();
+        if self.length() == 0 {
+            if let BlobContent::Reference(reference) = &self.content {
+                read_reference_range(reference, 0, 0)?;
+            }
+        }
+        let mut offset = 0_u64;
+        while offset < self.length() {
+            let size = (self.length() - offset).min(chunk_limit);
+            match &self.content {
+                BlobContent::Inline(content) => {
+                    let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
+                    let length = usize::try_from(size).map_err(|_| Error::Limit)?;
+                    let end = start.checked_add(length).ok_or(Error::Limit)?;
+                    digest.update(content.get(start..end).ok_or(Error::ContentDigestMismatch)?);
+                }
+                BlobContent::Reference(reference) => {
+                    let bytes = read_reference_range(reference, offset, size)?;
+                    digest.update(&bytes);
+                }
+                BlobContent::Descriptor(_) | BlobContent::Commitment => {
+                    return Err(Error::ContentUnavailable);
+                }
+            }
+            offset = offset.checked_add(size).ok_or(Error::Limit)?;
+        }
+        if digest.finalize()[..] != self.identity.sha256 {
+            return Err(Error::ContentDigestMismatch);
+        }
+        Ok(())
+    }
+
     /// Two descriptor-backed blobs in one admitted context with equal layout OID
     /// and equal identity are treated as equal content without streaming
     /// (ORNA-BLOB-005). A layout OID identifies an encoding, not logical content,
