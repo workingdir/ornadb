@@ -358,8 +358,9 @@ been published.
   or a row that does not fit refuses the commit and stages nothing. A removed
   table's relation leaves the store. Schema changes wait until unpublished
   runtime rows are published. The commit reports each evolved and removed
-  table (ORNA-EVOL-001, ORNA-EVOL-002, ORNA-EVOL-009, ORNA-FIELD-003,
-  ORNA-FIELD-005).
+  table (ORNA-EVOL-001, ORNA-EVOL-009, ORNA-FIELD-003, ORNA-FIELD-005). A
+  table with a secondary index is refused (E2101, nothing staged): index-aware
+  evolution is not implemented (ORNA-EVOL-002 gap, `ornadb-7f9c`).
 - `orna mv OLD NEW` renames a table, table field, type, type field, enum
   variant, variant field or unit of a format-3 database by its qualified name
   (such as `Music.title`): it edits the declaration and stages the ObjectId
@@ -371,7 +372,9 @@ been published.
   reserved ID lives in the hidden ref `refs/orna/ids/<table ObjectId>` outside
   every branch, reserved before the rows that use it commit, so deleting rows,
   `git reset`, checkout and branch switches no longer hand out an ID again
-  (ORNA-AUTOID-002, ORNA-AUTOID-004). Every `orna commit` and every
+  (ORNA-AUTOID-004). A database created before `refs/orna/ids/<table>` existed
+  has no watermark and can reuse an ID deleted before its first ref was written
+  (ORNA-AUTOID-002 gap, `ornadb-ehgy`). Every `orna commit` and every
   publication that changes rows records each automatic-key table's watermark
   in a sealed allocator summary relation of `.orna/store` for history;
   checking out an older commit never rewinds the allocator (ORNA-AUTOID-005,
