@@ -3402,6 +3402,19 @@ pub trait StreamTableCandidateValidator {
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
+
+    /// Validates a boundary whose Orna-controlled writes changed exactly
+    /// `changed_tables`. Dependency-scoped propositions (module assertions,
+    /// ORNA-ASSERT-026) override this to skip when no dependency changed;
+    /// every other validator validates the full candidate, as `validate` does.
+    fn validate_changed(
+        &mut self,
+        rows: &RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
+        let _ = changed_tables;
+        self.validate(rows)
+    }
 }
 
 /// Validates the candidate relations produced by an ordinary table
@@ -3432,6 +3445,19 @@ pub trait TableActivationCandidateValidator {
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
+
+    /// Validates a boundary whose Orna-controlled writes changed exactly
+    /// `changed_tables`. Dependency-scoped propositions (module assertions,
+    /// ORNA-ASSERT-026) override this to skip when no dependency changed;
+    /// every other validator validates the full candidate, as `validate` does.
+    fn validate_changed(
+        &mut self,
+        rows: &RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
+        let _ = changed_tables;
+        self.validate(rows)
+    }
 
     /// Confirms protected native content is represented by the accepted rows.
     /// Legacy validators accept only candidates without content pins.
@@ -7109,7 +7135,7 @@ impl RuntimeState {
         .await
         .map_err(TableActivationError::Runtime)?;
         validator
-            .validate(&rows)
+            .validate_changed(&rows, &mutated_tables(mutations))
             .map_err(TableActivationError::ValidationFailed)?;
         if !validator.validate_content_pins(&rows, &transfers) {
             return Err(TableActivationError::Runtime(
@@ -7551,7 +7577,7 @@ impl RuntimeState {
                 Ok(rows) => rows,
                 Err(error) => return Err(request_activation_rollback(transaction, error).await?),
             };
-            if let Err(diagnostic) = validator.validate(&rows) {
+            if let Err(diagnostic) = validator.validate_changed(&rows, &mutated_tables(mutations)) {
                 return Err(request_activation_validation_rollback(transaction, diagnostic).await?);
             }
         }
@@ -11097,7 +11123,7 @@ impl RuntimeState {
         .await
         .map_err(StreamTableDeliveryError::Runtime)?;
         validator
-            .validate(&rows)
+            .validate_changed(&rows, &mutated_tables(mutations))
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
         if let CommitResult::CheckpointAdvanced { checkpoint } = &result {
             record_stream_checkpoint_watermark_tx(
@@ -11356,7 +11382,7 @@ impl RuntimeState {
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
         validator
-            .validate(&rows)
+            .validate_changed(&rows, &mutated_tables(mutations))
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
         tx.commit()
             .await
@@ -19646,6 +19672,15 @@ async fn request_admission_exists_tx(
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?
         .is_some())
+}
+
+/// Tables written by a validated boundary; dependency-scoped validators skip
+/// propositions whose dependencies none of these tables touch (ORNA-ASSERT-026).
+fn mutated_tables(mutations: &[TableMutation]) -> BTreeSet<String> {
+    mutations
+        .iter()
+        .map(|mutation| mutation.table().to_owned())
+        .collect()
 }
 
 fn validate_mutations(mutations: &[Mutation], next_digest: [u8; 32]) -> Result<(), RuntimeError> {
