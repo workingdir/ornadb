@@ -63,6 +63,11 @@ impl RowRef {
             .map_err(FoundationError::Value)
     }
 
+    /// Canonical OVB-1 value of this reference, for embedding in a row.
+    pub fn to_canonical(&self) -> Result<CanonicalValue, FoundationError> {
+        Value::new(self.raw()?).map_err(FoundationError::Value)
+    }
+
     /// Decodes a canonical, snapshot-pinned row reference from OVB-1 bytes.
     /// Strict snapshot decoding preserves the exact captured CWD generation;
     /// it never substitutes a later current-CWD pin.
@@ -151,6 +156,8 @@ pub enum StreamKind {}
 pub enum CheckpointKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FailureKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaterializationKind {}
 /// Compile-time marker for `sys.AssertionRef`.
 ///
 /// This marker is non-authoritative: attaching it to a generic row reference
@@ -203,12 +210,77 @@ pub type CheckpointRef = TypedRowRef<CheckpointKind>;
 /// Typed `sys.RowRef<sys.Failure>` marker. This is not proof that a failure
 /// exists or grants retry, skip, replay, or resolution authority.
 pub type FailureRef = TypedRowRef<FailureKind>;
+/// Typed `sys.RowRef<sys.Materialization>` marker. This is not proof that a
+/// materialization exists or grants reuse, invalidation, or storage authority.
+pub type MaterializationRef = TypedRowRef<MaterializationKind>;
 
 pub mod object_reference;
 pub use object_reference::{
     SYS_OBJECT_TABLE_ID, object_reference, validate_object_reference,
     validate_object_reference_for_id,
 };
+
+/// Reports whether one path component names Git's administration entry: the
+/// `.git` directory or a linked worktree's `.git` file. It matches the names
+/// `git fsck` reports as `hasDotgit`, so a repository stays safe to check out
+/// on Windows and macOS. Git's `is_ntfs_dotgit` rule applies to the name and
+/// to each part after a `\`: `.git` or the 8.3 alias `git~1` in any ASCII
+/// case, then only dots or spaces up to the end or a `:` stream suffix. Git's
+/// `is_hfs_dotgit` rule applies to the whole name: exactly `.git` in any ASCII
+/// case once the HFS+ ignorable code points (U+200C..U+200F, U+202A..U+202E,
+/// U+206A..U+206F, U+FEFF) are removed.
+///
+/// Ordinary names such as `.gitignore`, `.github`, `.gitmodules`, `foo.git`,
+/// `git~2`, and `git-notes.md` do not match. Case folding is ASCII-only, as in
+/// Git, so `.gıt` (U+0131) and `.GİT` (U+0130) stay ordinary names: Git 2.53
+/// accepts both. Whether an NTFS `$UpCase` table folds either into ASCII is
+/// unverified on a Windows volume. `.git:x`, `.git.`, and `a\.git` are
+/// ordinary names on Linux but are refused here, as Git's default
+/// `core.protectNTFS` refuses them. A name that is not UTF-8 is compared as
+/// bytes and never meets the HFS+ rule, so `.git\xFF` stays an ordinary name
+/// although `git fsck` flags it. This is a refusal predicate for Git metadata
+/// names only, not a complete Windows or macOS path validator.
+#[must_use]
+pub fn is_git_metadata_component(name: &[u8]) -> bool {
+    name.split(|byte| *byte == b'\\').any(is_ntfs_git_name) || is_hfs_git_name(name)
+}
+
+/// Git's `is_ntfs_dotgit` for one `\`-free part of a name.
+fn is_ntfs_git_name(part: &[u8]) -> bool {
+    let stem = part.split(|byte| *byte == b':').next().unwrap_or_default();
+    let mut end = stem.len();
+    while end > 0 && matches!(stem[end - 1], b'.' | b' ') {
+        end -= 1;
+    }
+    let base = &stem[..end];
+    base.eq_ignore_ascii_case(b".git") || base.eq_ignore_ascii_case(b"git~1")
+}
+
+/// Git's `is_hfs_dotgit`: exactly `.git` once HFS+ ignorables are removed.
+fn is_hfs_git_name(name: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(name) else {
+        return false;
+    };
+    let mut visible = text
+        .chars()
+        .filter(|character| !is_hfs_ignorable(*character))
+        .map(|character| character.to_ascii_lowercase());
+    ".git"
+        .chars()
+        .all(|expected| visible.next() == Some(expected))
+        && visible.next().is_none()
+}
+
+/// Code points that macOS HFS+ ignores when comparing names.
+fn is_hfs_ignorable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200C}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{206A}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
+}
 
 /// Checks only that a row reference is pinned to the supplied CWD context,
 /// then attaches a noninterchangeable marker. It intentionally does not
@@ -294,6 +366,9 @@ pub const SYS_CHECKPOINT_TABLE_ID: [u8; 16] = [
 pub const SYS_FAILURE_TABLE_ID: [u8; 16] = [
     0xb4, 0x62, 0xcd, 0x70, 0x35, 0x2f, 0x4a, 0xb9, 0x8f, 0x3a, 0x97, 0x56, 0xe1, 0x4c, 0x28, 0x04,
 ];
+pub const SYS_MATERIALIZATION_TABLE_ID: [u8; 16] = [
+    0xf2, 0x8a, 0x19, 0x15, 0xd8, 0xc7, 0x42, 0xf4, 0x92, 0x5e, 0x0c, 0x5b, 0xe5, 0x70, 0xdc, 0x8a,
+];
 
 /// Constructs a checked `sys.CheckpointRef` from the canonical durable
 /// checkpoint natural key (`consumer_identity + source_identity + partition`).
@@ -346,6 +421,27 @@ pub fn failure_reference(
             key.push(OvbRaw::Text(position));
             OvbRaw::Array(key)
         },
+        snapshot,
+    }))
+}
+
+/// Constructs a checked `sys.MaterializationRef` from its canonical natural
+/// key (`object + snapshot`). Both key parts are 32-byte digests recorded by
+/// the evaluator's activation log; the reference is pinned to `snapshot`.
+pub fn materialization_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    object: [u8; 32],
+    output: [u8; 32],
+) -> Result<MaterializationRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_MATERIALIZATION_TABLE_ID,
+        key: OvbRaw::Array(vec![
+            OvbRaw::Bytes(object.to_vec()),
+            OvbRaw::Bytes(output.to_vec()),
+        ]),
         snapshot,
     }))
 }
@@ -1264,6 +1360,10 @@ impl Diagnostic {
     /// Structured notes attached by the producer, in attachment order.
     pub fn notes(&self) -> &[SafeText] {
         &self.notes
+    }
+    /// Nested causes attached by the producer, in attachment order.
+    pub fn causes(&self) -> &[Diagnostic] {
+        &self.causes
     }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
         Value::new(self.boundary_projection().raw()?)
@@ -2226,5 +2326,86 @@ mod tests {
         // The audit representation admits arbitrary precision coordinates as
         // decimal text; tag-60011 remains independently verified above.
         assert!(serde_json::to_vec(&diagnostic).unwrap().starts_with(b"{"));
+    }
+}
+
+#[cfg(test)]
+mod git_metadata_component_tests {
+    use super::is_git_metadata_component;
+
+    // Both lists follow what `git fsck --strict` (Git 2.53) reports as
+    // `hasDotgit` for a tree entry with that name.
+    #[test]
+    fn refuses_git_administration_names_in_every_spelling() {
+        for refused in [
+            ".git",
+            ".GIT",
+            ".Git",
+            ".gIt",
+            ".git.",
+            ".git..",
+            ".git ",
+            ".GIT. ",
+            "git~1",
+            "GIT~1",
+            "git~1.",
+            ".git:",
+            ".git:x",
+            ".git::$INDEX_ALLOCATION",
+            ".git\\config",
+            "a\\.git",
+            "a\\git~1.",
+            "x\\.GIT:y",
+            "a:b\\.git",
+            ".g\u{200C}it",
+            ".\u{FEFF}git",
+            ".gi\u{202E}t",
+            ".git\u{206F}",
+        ] {
+            assert!(
+                is_git_metadata_component(refused.as_bytes()),
+                "{refused:?} must be refused as git metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_names_that_only_resemble_git_metadata() {
+        for accepted in [
+            ".gitignore",
+            ".github",
+            "foo.git",
+            ".gitmodules",
+            "git-notes.md",
+            "git",
+            "git~2",
+            "digit",
+            "..",
+            ".",
+            "",
+            "gitx.",
+            "a.git.b",
+            "foo.git\\x",
+            "a\\.github",
+            ".gıt",
+            ".GİT",
+            "gıt~1",
+            ".g\u{200B}it",
+            ".g\u{200C}it.",
+            "git~\u{200C}1",
+            "a\\.g\u{200C}it",
+        ] {
+            assert!(
+                !is_git_metadata_component(accepted.as_bytes()),
+                "{accepted:?} must stay an ordinary name"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_names_compare_bytes_only() {
+        assert!(is_git_metadata_component(b".GIT"));
+        assert!(is_git_metadata_component(b"\xFF\\.git"));
+        assert!(!is_git_metadata_component(b".git\xFF"));
     }
 }

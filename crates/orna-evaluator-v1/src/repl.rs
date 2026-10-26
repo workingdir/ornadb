@@ -218,13 +218,17 @@ impl ReplSession {
                 candidate.evaluate_discarded(expression, None, Some(effects))?;
                 None
             }
-            ReplInput::Item(item) => match &item.declaration {
-                Declaration::Let { pattern, value, .. } => {
-                    candidate.let_binding(pattern, value, None, Some(effects))?;
-                    None
+            ReplInput::Item(item) => {
+                match &item.declaration {
+                    Declaration::Let { pattern, value, .. } => {
+                        candidate.let_binding(pattern, value, None, Some(effects))?;
+                    }
+                    // A function or import declaration evaluates nothing, so
+                    // it is declared exactly as the pure path declares it.
+                    declaration => candidate.declare_admitted(declaration, None)?,
                 }
-                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-            },
+                None
+            }
         };
         *self = candidate;
         Ok(result)
@@ -316,7 +320,7 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, cancellation, None)
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_with_effects(
@@ -325,7 +329,7 @@ impl ReplSession {
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, None, Some(effects))
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_discarded(
@@ -368,6 +372,8 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: self.sys_host_attachment(),
             cancellation,
@@ -503,6 +509,8 @@ impl ReplSession {
             effects,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: self.sys_host_attachment(),
             cancellation,
