@@ -107,12 +107,7 @@ pub fn entries() -> Vec<Entry> {
             query_reports_no_estimate,
         ),
         Entry::pass("FINAL-ROW-010", repacking_changes_no_logical_rows),
-        Entry::gap(
-            "FINAL-ROW-011",
-            "ornadb-5il1.122",
-            "the REPL admits a row that violates a table assertion `orna run` enforces",
-            repl_skips_table_assertions,
-        ),
+        Entry::pass("FINAL-ROW-011", repl_enforces_table_assertions),
         Entry::gap(
             "FINAL-ROW-012",
             "ornadb-z7v3",
@@ -2247,17 +2242,17 @@ pub fn negative() {
 }
 "#;
 
-fn repl_skips_table_assertions(db: &mut Db) -> Probe {
+fn repl_enforces_table_assertions(db: &mut Db) -> Check {
     db.declare(SCORE_SOURCE)?;
     let run = db.orna(&["run", "main.negative"])?;
-    ensure!(!run.succeeded(), "orna run now admits the violating row");
+    ensure!(!run.succeeded(), "orna run admits the violating row");
     let repl = db.repl(&[r#"main.Score.insert({ id: "repl", points: -1 })"#])?;
     ensure!(
-        !repl.output().contains("error[") && db.runtime_mutations()? == 1,
-        "the REPL now enforces the table assertion: {}",
+        repl.output().contains("ORNA-A091-009") && db.runtime_mutations()? == 0,
+        "the REPL admits `points: -1` against the table assertion: {}",
         repl.output()
     );
-    Ok("orna run refuses `points: -1`; the REPL admits it as a runtime mutation".to_owned())
+    Ok(())
 }
 
 fn edit_skips_table_assertions(db: &mut Db) -> Probe {
