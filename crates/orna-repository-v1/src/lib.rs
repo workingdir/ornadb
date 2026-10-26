@@ -2906,7 +2906,7 @@ impl Repository {
             let tree =
                 self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
-            let mut commit_tree = self.private_commit_command();
+            let mut commit_tree = self.command();
             commit_tree
                 .args([
                     "commit-tree",
@@ -3003,7 +3003,7 @@ impl Repository {
             let tree =
                 self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
-            let mut commit_tree = self.private_commit_command();
+            let mut commit_tree = self.command();
             commit_tree.args([
                 "commit-tree",
                 tree.as_str(),
@@ -4555,13 +4555,14 @@ impl Repository {
         command
     }
 
-    /// A Git command that records one of Orna's private commits: a staged
-    /// identity carrier or a publication candidate (ORNA-PUB-010). Such a
-    /// commit is written on Orna's behalf, not the user's, so it never reads
-    /// the ambient identity (configuration, `EMAIL`, account or host name).
-    /// A machine or CI runner without `user.name`/`user.email` therefore builds
-    /// it the same way. The identity is fixed here and never written to Git
-    /// config; timestamps remain Git's.
+    /// A Git command that records a private staged-identity carrier (the
+    /// unreachable commit `capture_staged_candidate` names for loading). A
+    /// carrier is never ref-advanced, so it is written on Orna's behalf and
+    /// never reads the ambient identity. A machine or CI runner without
+    /// `user.name`/`user.email` therefore builds it the same way. The identity
+    /// is fixed here and never written to Git config; timestamps remain Git's.
+    /// Publication candidates ref-advance the user's branch and keep
+    /// `command()`, so they record the configured identity (ORNA-PUB-010).
     fn private_commit_command(&self) -> Command {
         const NAME: &str = "Orna Internal";
         const EMAIL: &str = "orna-internal@localhost.invalid";
