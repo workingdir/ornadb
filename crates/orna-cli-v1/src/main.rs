@@ -2461,12 +2461,18 @@ fn committed_table_identities(
     commit: &orna_repository_v1::GitCommitRef,
     table_names: Vec<String>,
 ) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
-    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)
-        .map_err(|_| {
-            unavailable_table_identity(
-                "the committed object identity manifest could not be read".to_owned(),
-            )
-        })?;
+    let identities =
+        orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .map_err(|_| {
+                unavailable_table_identity(
+                    "the committed object identity manifest could not be read".to_owned(),
+                )
+            })?
+            .ok_or_else(|| {
+                unavailable_table_identity(
+                    "the commit carries no object identity inventory".to_owned(),
+                )
+            })?;
     let mut tables = Vec::with_capacity(table_names.len());
     for name in table_names {
         let mut matching = identities.records().iter().filter(|record| {
@@ -2497,7 +2503,7 @@ fn unavailable_table_identity(detail: String) -> Diagnostic {
     Diagnostic::target_with_detail(
         "E2200",
         "committed table identities are unavailable",
-        "commit the project so every table has exactly one identity",
+        "run `orna commit -m MESSAGE` so every table has exactly one identity",
         detail,
     )
 }
@@ -2535,8 +2541,13 @@ fn legacy_bare_module_candidates(
         .iter()
         .map(|name| ((*name).to_owned(), false))
         .collect::<Vec<_>>();
-    if let Some(commit) = commit {
-        let manifest = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)?;
+    let manifest = match commit {
+        Some(commit) => Some(orna_project_v1::ObjectIdentityManifest::read_committed(
+            repository, commit,
+        )?),
+        None => None,
+    };
+    if let Some(manifest) = manifest {
         tables.extend(
             manifest
                 .records()
@@ -2595,7 +2606,32 @@ fn refuse_legacy_bare_module_rows(
             "retry the invocation after checking local runtime state",
         )
     };
-    let commit = repository.head().ok().flatten();
+    // An unborn HEAD has no committed table relation, so only the declared
+    // names can name legacy rows. An unreadable HEAD is not evidence of
+    // absence: refuse it.
+    let commit = match repository.head() {
+        Ok(commit) => commit,
+        Err(_) => {
+            return Err(Diagnostic::target(
+                "E2200",
+                "committed HEAD is unreadable",
+                "repair the repository HEAD reference, then run again",
+            ));
+        }
+    };
+    if let Some(commit) = &commit {
+        // A commit without an identity inventory never allocated its tables'
+        // identities. Evaluating its table statements would touch no committed
+        // relation, so refuse with the remedy that allocates the identities.
+        if orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .map_err(|_| unreadable())?
+            .is_none()
+        {
+            return Err(unavailable_table_identity(
+                "the commit carries no object identity inventory".to_owned(),
+            ));
+        }
+    }
     let declared = declared.iter().map(String::as_str).collect::<Vec<_>>();
     let candidates = legacy_bare_module_candidates(repository, commit.as_ref(), &declared)
         .map_err(|_| unreadable())?;

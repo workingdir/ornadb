@@ -594,17 +594,29 @@ impl ObjectIdentityManifest {
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<Self, ObjectIdentityError> {
+        Self::read_committed_if_present(repository, commit)?.ok_or(ObjectIdentityError::Io)
+    }
+
+    /// Reads the committed identity inventory of one exact commit, or
+    /// `Ok(None)` when the commit carries no inventory at all: neither a store
+    /// identity relation nor a legacy sidecar. Such a commit never allocated
+    /// object identities, so none of its tables has a committed identity.
+    /// Unreadable state is still an error.
+    pub fn read_committed_if_present(
+        repository: &Repository,
+        commit: &GitCommitRef,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
         if let Some(stored) = repository
             .read_committed_object_identities(commit)
             .map_err(|_| ObjectIdentityError::Io)?
         {
-            return Self::from_stored(&stored);
+            return Self::from_stored(&stored).map(Some);
         }
-        let bytes = repository
+        repository
             .read_legacy_identity_sidecar(commit, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
             .map_err(|_| ObjectIdentityError::Io)?
-            .ok_or(ObjectIdentityError::Io)?;
-        Self::decode(&bytes)
+            .map(|bytes| Self::decode(&bytes))
+            .transpose()
     }
 
     /// Reads the inventory the staged candidate of the ordinary index
