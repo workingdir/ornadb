@@ -1,1 +1,1 @@
-std.collection.distinct([1], 2)
+distinct([1], 2)

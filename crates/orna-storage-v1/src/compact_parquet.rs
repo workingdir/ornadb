@@ -3052,7 +3052,7 @@ mod tests {
         git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
-        fs::write(temp.path().join(".orna/format.orna"), "format 1\n").unwrap();
+        fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
         git(temp.path(), &["add", "."]);
         git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
@@ -3815,10 +3815,11 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
+        // The drift commits below build on the fixture as the committed HEAD.
+        repository
+            .advance_current_ref(&head, plan.candidate())
             .unwrap();
-        let committed = pending.commit().clone();
+        let committed = plan.candidate_commit().clone();
         let source = CompactParquetKeySource::from_verified_manifest(
             &repository,
             &committed,
@@ -3921,12 +3922,9 @@ mod tests {
                 )
                 .unwrap();
             let manifest = plan.manifest().clone();
-            let pending = repository
-                .publish_compact_repository_boundary(plan)
-                .unwrap();
             let source = CompactParquetKeySource::from_verified_manifest(
                 &repository,
-                pending.commit(),
+                plan.candidate_commit(),
                 &manifest,
                 profile.clone(),
             )
@@ -4177,12 +4175,9 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
         let source = CompactParquetKeySource::from_verified_manifest(
             &repository,
-            pending.commit(),
+            plan.candidate_commit(),
             &manifest,
             profile,
         )
@@ -4500,12 +4495,9 @@ mod tests {
             )
             .unwrap();
         let manifest = plan.manifest().clone();
-        let pending = repository
-            .publish_compact_repository_boundary(plan)
-            .unwrap();
         let source = CompactParquetKeySource::from_verified_manifest(
             &repository,
-            pending.commit(),
+            plan.candidate_commit(),
             &manifest,
             profile,
         )

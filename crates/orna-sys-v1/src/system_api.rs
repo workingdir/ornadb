@@ -177,6 +177,7 @@ impl SystemApiFunctionBindings {
         name = "sys.object",
         effect = "read",
         signature = "fn sys.object(id: sys.ObjectId, at: sys.SnapshotRef = sys.current.snapshot): sys.ObjectRef",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_object(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.object")
@@ -188,6 +189,7 @@ impl SystemApiFunctionBindings {
         name = "sys.resolve",
         effect = "read",
         signature = "fn sys.resolve(name: Str, kind: sys.ObjectKind? = null, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.ObjectRef",
+        failures = "sys.object.not_found, sys.object.ambiguous, sys.object.wrong_kind, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_resolve(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve")
@@ -199,6 +201,7 @@ impl SystemApiFunctionBindings {
         name = "sys.resolve_function",
         effect = "read",
         signature = "fn sys.resolve_function(name: Str, at: sys.SnapshotRef = sys.current.snapshot, from: sys.ModuleRef? = null): sys.FunctionRef",
+        failures = "sys.object.not_found, sys.object.ambiguous, sys.object.wrong_kind, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_resolve_function(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.resolve_function")
@@ -210,6 +213,7 @@ impl SystemApiFunctionBindings {
         name = "sys.describe",
         effect = "read",
         signature = "fn sys.describe(object: sys.ObjectRef): sys.ObjectDescription",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_describe(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.describe")
@@ -221,6 +225,7 @@ impl SystemApiFunctionBindings {
         name = "sys.source(ObjectRef)",
         effect = "read",
         signature = "fn sys.source(object: sys.ObjectRef): sys.SourceDocument",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete, sys.source.unavailable, sys.source.redacted",
     )]
     pub fn sys_source_object_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.source(ObjectRef)")
@@ -232,6 +237,7 @@ impl SystemApiFunctionBindings {
         name = "sys.source(FileRef)",
         effect = "read",
         signature = "fn sys.source(file: sys.FileRef): sys.SourceDocument",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete, sys.source.unavailable, sys.source.redacted",
     )]
     pub fn sys_source_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.source(FileRef)")
@@ -243,6 +249,7 @@ impl SystemApiFunctionBindings {
         name = "sys.history(ObjectRef)",
         effect = "read",
         signature = "fn sys.history(object: sys.ObjectRef): Relation<sys.Revision>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_history_object_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.history(ObjectRef)")
@@ -254,6 +261,7 @@ impl SystemApiFunctionBindings {
         name = "sys.history(FileRef)",
         effect = "read",
         signature = "fn sys.history(file: sys.FileRef): Relation<sys.FileVersion>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_history_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.history(FileRef)")
@@ -265,6 +273,7 @@ impl SystemApiFunctionBindings {
         name = "sys.blame(FileRef)",
         effect = "read",
         signature = "fn sys.blame(target: sys.FileRef): Relation<sys.Attribution>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete, sys.source.unavailable, sys.source.redacted",
     )]
     pub fn sys_blame_file_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blame(FileRef)")
@@ -276,6 +285,7 @@ impl SystemApiFunctionBindings {
         name = "sys.blame(RowRef)",
         effect = "read",
         signature = "fn sys.blame<T>(target: sys.RowRef<T>): Relation<sys.Attribution>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_blame_row_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blame(RowRef)")
@@ -287,6 +297,7 @@ impl SystemApiFunctionBindings {
         name = "sys.dependencies",
         effect = "read",
         signature = "fn sys.dependencies(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_dependencies(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.dependencies")
@@ -298,6 +309,7 @@ impl SystemApiFunctionBindings {
         name = "sys.dependents",
         effect = "read",
         signature = "fn sys.dependents(object: sys.ObjectRef, transitive: Bool = false, kinds: [sys.DependencyKind]? = null): Relation<sys.Dependency>",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_dependents(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.dependents")
@@ -309,6 +321,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(SnapshotRef)",
         effect = "read",
         signature = "fn sys.snapshot(reference: sys.SnapshotRef = sys.database.cwd): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(SnapshotRef)")
@@ -320,6 +333,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(CommitRef)",
         effect = "read",
         signature = "fn sys.snapshot(reference: sys.CommitRef): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(CommitRef)")
@@ -331,6 +345,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(BranchRef)",
         effect = "read",
         signature = "fn sys.snapshot(reference: sys.BranchRef): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(BranchRef)")
@@ -342,6 +357,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(TagRef)",
         effect = "read",
         signature = "fn sys.snapshot(reference: sys.TagRef): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(TagRef)")
@@ -353,6 +369,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(GitOid)",
         effect = "read",
         signature = "fn sys.snapshot(reference: sys.GitOid): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(GitOid)")
@@ -364,6 +381,7 @@ impl SystemApiFunctionBindings {
         name = "sys.snapshot(Str)",
         effect = "read",
         signature = "fn sys.snapshot(reference: Str): sys.SnapshotRef",
+        failures = "sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_snapshot_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.snapshot(Str)")
@@ -375,6 +393,7 @@ impl SystemApiFunctionBindings {
         name = "sys.diff",
         effect = "read",
         signature = "fn sys.diff(from: sys.SnapshotRef, to: sys.SnapshotRef, scope: sys.DiffScope = sys.DiffScope.all): Relation<sys.DiffEntry>",
+        failures = "sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_diff(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.diff")
@@ -386,6 +405,7 @@ impl SystemApiFunctionBindings {
         name = "sys.changes",
         effect = "read",
         signature = "fn sys.changes(snapshot: sys.SnapshotRef = sys.database.cwd, area: sys.ChangeArea? = null): Relation<sys.Change>",
+        failures = "sys.snapshot.not_found, sys.snapshot.expired, sys.snapshot.incomplete",
     )]
     pub fn sys_changes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.changes")
@@ -398,6 +418,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.explain<T>(query: Query<T>): sys.Plan",
         role = "langitem.sys.explain@1.0",
+        failures = "sys.object.not_found, sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_explain_query(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(Query)")
@@ -410,6 +431,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.explain(function: sys.FunctionRef): sys.Plan",
         role = "langitem.sys.explain@1.0",
+        failures = "sys.object.not_found, sys.object.wrong_kind, sys.snapshot.not_found, sys.snapshot.incomplete",
     )]
     pub fn sys_explain_function_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.explain(FunctionRef)")
@@ -471,6 +493,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.invoke(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): sys.Value",
         role = "langitem.sys.invoke@1.0",
+        failures = "sys.object.not_found, sys.invoke.not_callable, sys.invoke.revision_unavailable, sys.invoke.snapshot_mismatch, sys.invoke.argument_missing, sys.invoke.argument_unknown, sys.invoke.argument_type, sys.invoke.effect_unavailable, sys.invoke.transaction_mode, sys.invoke.idempotency_mismatch",
     )]
     pub fn sys_invoke_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke(Value)")
@@ -487,6 +510,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.invoke<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.inherit, idempotency_key: Str? = null): T",
         role = "langitem.sys.invoke@1.0",
+        failures = "sys.object.not_found, sys.invoke.not_callable, sys.invoke.revision_unavailable, sys.invoke.snapshot_mismatch, sys.invoke.argument_missing, sys.invoke.argument_unknown, sys.invoke.argument_type, sys.invoke.return_type, sys.invoke.effect_unavailable, sys.invoke.transaction_mode, sys.invoke.idempotency_mismatch",
     )]
     pub fn sys_invoke_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.invoke<T>")
@@ -507,6 +531,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.start(function: sys.FunctionRef, arguments: sys.ArgumentMap, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<sys.Value>",
         role = "langitem.sys.start@1.0",
+        failures = "sys.object.not_found, sys.invoke.not_callable, sys.invoke.revision_unavailable, sys.invoke.snapshot_mismatch, sys.invoke.argument_missing, sys.invoke.argument_unknown, sys.invoke.argument_type, sys.invoke.effect_unavailable, sys.invoke.transaction_mode, sys.invoke.idempotency_mismatch",
     )]
     pub fn sys_start_value(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start(Value)")
@@ -527,6 +552,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.start<T>(function: sys.FunctionRef, arguments: sys.ArgumentMap, as: T, at: sys.SnapshotRef? = null, transaction: sys.InvokeTransaction = sys.InvokeTransaction.separate, idempotency_key: Str? = null): sys.InvocationHandle<T>",
         role = "langitem.sys.start@1.0",
+        failures = "sys.object.not_found, sys.invoke.not_callable, sys.invoke.revision_unavailable, sys.invoke.snapshot_mismatch, sys.invoke.argument_missing, sys.invoke.argument_unknown, sys.invoke.argument_type, sys.invoke.return_type, sys.invoke.effect_unavailable, sys.invoke.transaction_mode, sys.invoke.idempotency_mismatch",
     )]
     pub fn sys_start_t(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.start<T>")
@@ -539,6 +565,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.await<T>(invocation: sys.InvocationHandle<T>, timeout: Duration? = null): sys.InvocationResult<T>",
         role = "langitem.sys.await@1.0",
+        failures = "sys.invoke.await_timeout, sys.handle.foreign_runtime, sys.handle.expired",
     )]
     pub fn sys_await(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.await")
@@ -551,6 +578,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.cancel<T>(invocation: sys.InvocationHandle<T>, reason: Str? = null): Bool",
         role = "langitem.sys.cancel@1.0",
+        failures = "sys.handle.foreign_runtime, sys.handle.expired",
     )]
     pub fn sys_cancel(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.cancel")
@@ -566,6 +594,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.commit",
         effect = "admin",
         signature = "fn sys.admin.commit(message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.git.nothing_to_commit",
     )]
     pub fn sys_admin_commit(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.commit")
@@ -585,6 +614,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(SnapshotRef)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: sys.SnapshotRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(SnapshotRef)")
@@ -604,6 +634,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(CommitRef)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: sys.CommitRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(CommitRef)")
@@ -623,6 +654,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(BranchRef)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: sys.BranchRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(BranchRef)")
@@ -642,6 +674,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(TagRef)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: sys.TagRef, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(TagRef)")
@@ -661,6 +694,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(GitOid)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: sys.GitOid, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(GitOid)")
@@ -680,6 +714,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.checkout(Str)",
         effect = "admin",
         signature = "fn sys.admin.checkout(target: Str, force: Bool = false, expected_plan: Digest? = null): sys.SnapshotRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot, sys.git.dirty_conflict, sys.git.stale_plan",
     )]
     pub fn sys_admin_checkout_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.checkout(Str)")
@@ -699,6 +734,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(SnapshotRef)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: sys.SnapshotRef? = null): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(SnapshotRef)")
@@ -718,6 +754,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(CommitRef)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: sys.CommitRef): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(CommitRef)")
@@ -737,6 +774,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(BranchRef)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: sys.BranchRef): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(BranchRef)")
@@ -756,6 +794,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(TagRef)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: sys.TagRef): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(TagRef)")
@@ -775,6 +814,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(GitOid)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: sys.GitOid): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(GitOid)")
@@ -794,6 +834,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.create_branch(Str)",
         effect = "admin",
         signature = "fn sys.admin.create_branch(name: Str, at: Str): sys.BranchRef",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.snapshot.not_found, sys.git.unborn_head, sys.git.uncommitted_snapshot, sys.git.invalid_ref, sys.git.branch_exists",
     )]
     pub fn sys_admin_create_branch_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.create_branch(Str)")
@@ -809,6 +850,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.flush",
         effect = "admin",
         signature = "fn sys.admin.flush(table: sys.TableRef? = null): sys.FlushResult",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.storage.unavailable, sys.storage.corrupt",
     )]
     pub fn sys_admin_flush(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.flush")
@@ -824,6 +866,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.compact",
         effect = "admin",
         signature = "fn sys.admin.compact(table: sys.TableRef? = null): sys.CompactionResult",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.storage.unavailable, sys.storage.corrupt, sys.storage.rewrite_conflict",
     )]
     pub fn sys_admin_compact(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.compact")
@@ -871,6 +914,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.verify",
         effect = "admin",
         signature = "fn sys.admin.verify(scope: sys.VerifyScope = sys.VerifyScope.database): sys.VerificationReport",
+        failures = "sys.admin.verification_failed",
     )]
     pub fn sys_admin_verify(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.verify")
@@ -886,6 +930,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.cancel_run",
         effect = "admin",
         signature = "fn sys.admin.cancel_run(run: sys.RunRef, reason: Str? = null): Bool",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.handle.foreign_runtime",
     )]
     pub fn sys_admin_cancel_run(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.cancel_run")
@@ -901,6 +946,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.pause_stream",
         effect = "admin",
         signature = "fn sys.admin.pause_stream(stream: sys.StreamRef, reason: Str? = null): Bool",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.handle.foreign_runtime, sys.storage.unavailable",
     )]
     pub fn sys_admin_pause_stream(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.pause_stream")
@@ -916,6 +962,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.resume_stream",
         effect = "admin",
         signature = "fn sys.admin.resume_stream(stream: sys.StreamRef): Bool",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.handle.foreign_runtime, sys.checkpoint.conflict, sys.checkpoint.not_replayable, sys.storage.unavailable",
     )]
     pub fn sys_admin_resume_stream(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.resume_stream")
@@ -931,6 +978,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.reset_checkpoint",
         effect = "admin",
         signature = "fn sys.admin.reset_checkpoint(checkpoint: sys.CheckpointRef, expected_version: sys.CheckpointVersion, expected_position: sys.CheckpointPosition, to: sys.CheckpointPosition, reason: Str): sys.Checkpoint",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.checkpoint.not_found, sys.checkpoint.conflict, sys.checkpoint.not_replayable",
     )]
     pub fn sys_admin_reset_checkpoint(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.reset_checkpoint")
@@ -950,6 +998,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.retry_failure",
         effect = "admin",
         signature = "fn sys.admin.retry_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.open): sys.InvocationHandle<sys.Value>",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.failure.stale_version, sys.failure.state_conflict, sys.checkpoint.conflict, sys.checkpoint.not_replayable",
     )]
     pub fn sys_admin_retry_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.retry_failure")
@@ -969,6 +1018,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.skip_failure",
         effect = "admin",
         signature = "fn sys.admin.skip_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Checkpoint",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.failure.stale_version, sys.failure.state_conflict, sys.failure.skip_unsupported, sys.checkpoint.conflict",
     )]
     pub fn sys_admin_skip_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.skip_failure")
@@ -988,6 +1038,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.replay_failure",
         effect = "admin",
         signature = "fn sys.admin.replay_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus = sys.FailureStatus.skipped): sys.InvocationHandle<sys.Value>",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.failure.stale_version, sys.failure.state_conflict, sys.checkpoint.not_replayable",
     )]
     pub fn sys_admin_replay_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.replay_failure")
@@ -1007,6 +1058,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.resolve_failure",
         effect = "admin",
         signature = "fn sys.admin.resolve_failure(failure: sys.FailureRef, expected_version: sys.FailureVersion, expected_status: sys.FailureStatus, reason: Str): sys.Failure",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.missing_object, sys.failure.stale_version, sys.failure.state_conflict",
     )]
     pub fn sys_admin_resolve_failure(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.resolve_failure")
@@ -1018,6 +1070,7 @@ impl SystemApiFunctionBindings {
         name = "sys.consumer_identity",
         effect = "read",
         signature = "fn sys.consumer_identity(function: sys.FunctionRef, arguments: sys.ArgumentMap): sys.ConsumerIdentity",
+        failures = "sys.object.not_found, sys.invoke.not_callable, sys.invoke.revision_unavailable, sys.invoke.argument_missing, sys.invoke.argument_unknown, sys.invoke.argument_type",
     )]
     pub fn sys_consumer_identity(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.consumer_identity")
@@ -1033,6 +1086,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(SnapshotRef)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: sys.SnapshotRef): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_snapshot_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(SnapshotRef)")
@@ -1048,6 +1102,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(CommitRef)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: sys.CommitRef): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_commit_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(CommitRef)")
@@ -1063,6 +1118,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(BranchRef)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: sys.BranchRef): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_branch_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(BranchRef)")
@@ -1078,6 +1134,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(TagRef)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: sys.TagRef): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_tag_ref(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(TagRef)")
@@ -1093,6 +1150,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(GitOid)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: sys.GitOid): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_git_oid(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(GitOid)")
@@ -1108,6 +1166,7 @@ impl SystemApiFunctionBindings {
         name = "sys.admin.plan_checkout(Str)",
         effect = "read",
         signature = "fn sys.admin.plan_checkout(target: Str): sys.CheckoutPlan",
+        failures = "sys.admin.missing_object, sys.snapshot.not_found, sys.snapshot.incomplete, sys.git.uncommitted_snapshot",
     )]
     pub fn sys_admin_plan_checkout_str(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.plan_checkout(Str)")
@@ -1128,6 +1187,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.length(value: Blob): Int",
         contexts = "format-3",
+        failures = "sys.blob.reference_context",
     )]
     pub fn sys_blob_length(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.length")
@@ -1148,6 +1208,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.digest(value: Blob): Digest",
         contexts = "format-3",
+        failures = "sys.blob.reference_context",
     )]
     pub fn sys_blob_digest(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.digest")
@@ -1168,6 +1229,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.read(value: Blob, offset: Int, length: Int): Blob",
         contexts = "format-3",
+        failures = "sys.blob.bounds, sys.blob.limit, sys.blob.unavailable, sys.blob.corrupt, sys.blob.reference_context",
     )]
     pub fn sys_blob_read(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.read")
@@ -1188,6 +1250,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.verify(value: Blob): Unit",
         contexts = "format-3",
+        failures = "sys.blob.unavailable, sys.blob.corrupt, sys.blob.reference_context",
     )]
     pub fn sys_blob_verify(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.verify")
@@ -1208,6 +1271,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.from_bytes(values: [Int]): Blob",
         contexts = "format-3",
+        failures = "sys.blob.bounds, sys.blob.limit",
     )]
     pub fn sys_blob_from_bytes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.from_bytes")
@@ -1228,6 +1292,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.to_bytes(value: Blob): [Int]",
         contexts = "format-3",
+        failures = "sys.blob.limit, sys.blob.unavailable, sys.blob.corrupt, sys.blob.reference_context",
     )]
     pub fn sys_blob_to_bytes(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.to_bytes")
@@ -1248,6 +1313,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.blob.begin(expected_length: Int? = null, max_bytes: Int): sys.BlobWriter",
         contexts = "format-3",
+        failures = "sys.blob.bounds, sys.blob.limit",
     )]
     pub fn sys_blob_begin(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.begin")
@@ -1268,6 +1334,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.blob.append(writer: sys.BlobWriter, part: Blob): Unit",
         contexts = "format-3",
+        failures = "sys.blob.writer_state, sys.blob.limit, sys.blob.length_mismatch, sys.blob.unavailable, sys.blob.corrupt",
     )]
     pub fn sys_blob_append(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.append")
@@ -1288,6 +1355,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.blob.finish(writer: sys.BlobWriter): Blob",
         contexts = "format-3",
+        failures = "sys.blob.writer_state, sys.blob.length_mismatch, sys.blob.collision",
     )]
     pub fn sys_blob_finish(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.finish")
@@ -1308,6 +1376,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.blob.abort(writer: sys.BlobWriter): Unit",
         contexts = "format-3",
+        failures = "sys.blob.writer_state",
     )]
     pub fn sys_blob_abort(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.abort")
@@ -1328,6 +1397,7 @@ impl SystemApiFunctionBindings {
         effect = "invoke",
         signature = "fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob",
         contexts = "format-3",
+        failures = "sys.blob.source_denied, sys.blob.bounds, sys.blob.limit, sys.blob.source_changed",
     )]
     pub fn sys_blob_capture_file(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.capture_file")
@@ -1348,6 +1418,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.blob.resource(path: Str): Blob",
         contexts = "format-3",
+        failures = "sys.blob.source_denied, sys.source.unavailable, sys.blob.limit",
     )]
     pub fn sys_blob_resource(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.resource")
@@ -1368,6 +1439,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         signature = "fn sys.admin.review_commit(): sys.CommitReview",
         contexts = "format-3",
+        failures = "sys.admin.assertion_failed, sys.admin.missing_object, sys.snapshot.expired",
     )]
     pub fn sys_admin_review_commit(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.review_commit")
@@ -1388,6 +1460,7 @@ impl SystemApiFunctionBindings {
         effect = "admin",
         signature = "fn sys.admin.commit_reviewed(review: sys.CommitReview, message: Str, author: sys.PersonIdentity? = null): sys.CommitRef",
         contexts = "format-3",
+        failures = "sys.admin.read_only, sys.admin.busy, sys.admin.assertion_failed, sys.admin.missing_object, sys.git.stale_review, sys.git.nothing_to_commit",
     )]
     pub fn sys_admin_commit_reviewed(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.admin.commit_reviewed")
@@ -1408,6 +1481,7 @@ impl SystemApiFunctionBindings {
         signature = "fn sys.blob.media_type(value: Blob): Str",
         effect = "read",
         contexts = "format-3",
+        failures = "sys.blob.reference_context",
     )]
     pub fn sys_blob_media_type(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.media_type")
@@ -1428,6 +1502,7 @@ impl SystemApiFunctionBindings {
         signature = "fn sys.blob.suffix(value: Blob): Str?",
         effect = "read",
         contexts = "format-3",
+        failures = "sys.blob.reference_context",
     )]
     pub fn sys_blob_suffix(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.suffix")
@@ -1449,6 +1524,7 @@ impl SystemApiFunctionBindings {
         effect = "read",
         contexts = "format-3",
         role = "langitem.sys.blob.annotate@1.0",
+        failures = "sys.blob.invalid_media_type, sys.blob.invalid_suffix, sys.blob.incompatible_suffix",
     )]
     pub fn sys_blob_annotate(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.annotate")
@@ -1469,6 +1545,7 @@ impl SystemApiFunctionBindings {
         signature = "fn sys.blob.same_content(left: Blob, right: Blob): Bool",
         effect = "read",
         contexts = "format-3",
+        failures = "sys.blob.unavailable, sys.blob.corrupt, sys.blob.collision, sys.blob.reference_context",
     )]
     pub fn sys_blob_same_content(&self) -> &'static SystemFunctionDescriptor {
         system_function_descriptor("sys.blob.same_content")

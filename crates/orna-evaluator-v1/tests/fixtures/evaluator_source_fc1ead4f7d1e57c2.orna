@@ -1,1 +1,1 @@
-std.collection.first(rows: [8, 9, 10])
+first(rows: [8, 9, 10])

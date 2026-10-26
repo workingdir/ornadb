@@ -2,7 +2,7 @@ fn __list_length<T>(values: [T]): Int = 0;
 fn __list_concat<T>(left: [T], right: [T]): [T] = [];
 pub fn map<T, U>(rows: [T], transform: fn(T): U): [U] = fail(error(
     code: "ORNA-EVAL-UNSUPPORTED",
-    message: "std.collection.map requires its evaluator binding"
+    message: "map requires its evaluator binding"
 ));
 fn append<T>(values: [T], value: T): [T] = __list_concat(values, [value]);
 fn slice_range<T>(values: [T], index: Int, end: Int, output: [T]): [T] =

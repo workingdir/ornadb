@@ -1,8 +1,8 @@
 # 29. Canonical values and schema descriptors {#formats}
 
-This section defines the canonical binary representation used by compact-value fallbacks, semantic digests, request fingerprints and portable wire values. It does not replace the human-editable Orna text codec. Presentation strings, locale formatting and physical Parquet compression are not inputs to canonical logical identity.
+This section retains the OVB-1 compatibility codec and defines its boundary with OVB-2/ROV-3/SOV-3. New-format stored values and legacy wire fingerprints use explicitly different coordinates. It does not replace the human-editable Orna text codec. Presentation strings, locale formatting and physical storage compression are not inputs to canonical logical identity.
 
-## Binary value profile OVB-1
+## Frozen binary value profile OVB-1 (legacy and existing wire)
 
 OVB-1 is an application profile of [CBOR](#ref-cbor). Every length and integer argument uses the shortest permitted head. Arrays, byte strings, text strings and maps have definite length. Maps have no duplicate keys and are ordered by unsigned lexicographic comparison of each key's complete deterministic encoding. Text must be well-formed UTF-8; ordinary string data is not normalised. Indefinite items, CBOR undefined, unsupported simple values and unregistered tags are errors.
 
@@ -10,7 +10,7 @@ Orna Float always uses a CBOR binary64 item, even when a shorter float could exp
 
 Integers in the CBOR major-type 0/1 ranges use those forms. Larger positive integers use tag 2 with minimal unsigned big-endian magnitude bytes; larger negative integers use tag 3 with the minimal magnitude of `−1−n`. A bignum with a leading zero or a value representable directly in major type 0/1 is noncanonical. Zero is the single byte `00`, not an empty bignum. This rule completely defines arbitrary-size integer bytes without host endianness or signed-big-integer conventions.
 
-**ORNA-FORMAT-001** Canonical encoders MUST produce the unique OVB-1 representation for supported values. Strict decoders MUST reject noncanonical aliases before using bytes as an identity or fingerprint.
+**ORNA-FORMAT-001** Each canonical encoder MUST use the exact selected profile. OVB-1 legacy/wire encodings remain unchanged; OVB-2 uses the additions below. Strict decoders MUST reject aliases and foreign-profile tags before identity use.
 
 ### Type-preserving values
 
@@ -124,7 +124,7 @@ Canonical output is UTF-8 without a byte-order mark, uses LF, two-space indentat
 
 Int uses minimal decimal digits with no `+`, leading zeros or separators. Decimal uses its normalised coefficient followed by `e`, a minimal signed decimal exponent (no `+`) and `.decimal`; zero is `0e0.decimal`. Finite Float uses exactly 17 significant decimal digits in scientific form with lowercase `e`, a minimal exponent and suffix `f`; signed zero is retained. Nonfinite Float uses `Float.nan`, `Float.infinity` or `-Float.infinity`. Strings use JSON-style quote/backslash/newline/carriage-return/tab escapes where shared by Orna; other control scalars and a literal opening brace use minimal lowercase `\u{...}`. Ordinary non-control Unicode scalars remain UTF-8.
 
-Bool uses `true`/`false`, Option uses `null` or `Some(value)`, Unit uses `()`, and tuples use the comma distinction from the grammar. Uuid and opaque UUID-backed IDs use quoted lowercase canonical UUID text under their explicit type witness. Blob uses quoted padded standard Base64. Date/Instant use the validated literal forms; other time values use their OVB component structure rendered as data tuples under the type witness. Enums use the variant name resolved in the supplied type and an explicit record payload when needed. Nominal records use their declared field record; refined values use the base representation and are revalidated. Money and quantities use the exact numeric representation under their supplied type witness; no display symbol or locale is encoded.
+Bool uses `true`/`false`, Option uses `null` or `Some(value)`, Unit uses `()`, and tuples use the comma distinction from the grammar. Uuid and opaque UUID-backed IDs use quoted lowercase canonical UUID text under their explicit type witness. Legacy bytes-only Blob uses quoted padded standard Base64 only in that legacy full-value export contract; this is not the format-3 row or annotated-value representation. Date/Instant use the validated literal forms; other time values use their OVB component structure rendered as data tuples under the type witness. Enums use the variant name resolved in the supplied type and an explicit record payload when needed. Nominal records use their declared field record; refined values use the base representation and are revalidated. Money and quantities use the exact numeric representation under their supplied type witness; no display symbol or locale is encoded.
 
 Stored references use the target's schema-directed key representation under their declared database/table type. Independently pinned references include the snapshot descriptor and therefore cannot be confused with relative stored references. Generic standalone row encoding includes primary keys; a row-body encoding must be requested through the repository row writer. Unsupported values fail with a decode/encode diagnostic rather than losing type information or private data.
 
@@ -150,3 +150,20 @@ The UUID-backed system identifier names are `sys.DatabaseId`, `sys.FileId`, `sys
 Path and Digest are intrinsic nominal types used by the system and repository APIs. A path codec does not normalise an arbitrary host path into another filesystem's semantics. A repository-path operation validates the `repo` flavour before use. A typed `sys.Value` cannot make a protected path or secret revealable. Function closures, unbounded streams and executable process/session handles are not serialisable operational values.
 
 A finite relation may be encoded only after its complete bounded observation succeeds. Exceeding the configured resource bound fails; the codec must not emit a truncated successful relation. A stored table field may not use a live Relation in place of a finite stored list; materialisation and the field's declared type are explicit.
+
+## Current value profiles and boundary
+
+[The format-3 profile](profiles/store-format-3.md) is normative for OVB-2,
+ROV-3, SOV-3 and tags 60110..60113. OVB-1 rejects those tags. Old consumers,
+request fingerprints and saved protocol vectors retain their original domains.
+New schema/row/argument/consumer identity uses the v3 domains with explicit
+migration links. Runtime snapshot/reference identities retain their existing
+context fencing and are not interchangeable with content hashes.
+
+An explicit `std.encoding.ovb2` codec uses full annotated value encoding.
+Reference-only inspection/row export is not full-value encoding. Byte download
+exports just raw bytes and must be selected as such. Full annotated export may
+stream; a limited sink rejects oversize before successful completion.
+
+**ORNA-FORMAT-005** New annotated Blob values MUST preserve annotations through OVB-2 and MUST NOT silently lose them on old wire/export interfaces.
+**ORNA-FORMAT-006** Stored and semantic reference tags MUST be rejected outside their recorded ROV-3/SOV-3 contexts; a raw SHA or Git OID is never permission to read content.

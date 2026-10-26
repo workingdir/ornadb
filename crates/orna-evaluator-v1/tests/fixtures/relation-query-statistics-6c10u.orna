@@ -1,8 +1,8 @@
 [
-    std.query.count(rows),
-    std.query.sum(rows),
-    std.query.min(rows),
-    std.query.max(rows),
+    count(rows),
+    sum(rows),
+    min(rows),
+    max(rows),
     std.stats.mean(rows),
     std.stats.median(rows),
     std.stats.percentile(rows, 0.25, interpolation: "linear"),

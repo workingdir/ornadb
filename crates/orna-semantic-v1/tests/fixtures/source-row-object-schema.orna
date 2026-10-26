@@ -1,3 +1,7 @@
+pub dim Information;
+pub unit B : Information base;
+pub unit MiB : Information = 1048576.B;
+
 pub table Object(id: Str) {
     payload: Blob,
     size: Float<MiB>,

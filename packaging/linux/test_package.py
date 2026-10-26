@@ -6,7 +6,6 @@ from __future__ import annotations
 import copy
 import importlib.util
 import io
-import json
 import os
 from pathlib import Path
 import shutil
@@ -65,26 +64,13 @@ def main() -> None:
         scratch = Path(scratch_name)
         stale_target = scratch / "build-repository" / "target" / "linux-package"
         stale_target.mkdir(mode=0o700, parents=True)
-        (stale_target / "stale-engine-manifest.json").write_text("stale")
+        (stale_target / "stale-output").write_text("stale")
         fresh_target = package.prepare_build_target(stale_target.parents[1])
-        if (fresh_target / "stale-engine-manifest.json").exists():
+        if (fresh_target / "stale-output").exists():
             raise AssertionError("package build target retained stale output")
         executable = scratch / "orna"
         shutil.copyfile("/bin/true", executable)
         executable.chmod(0o755)
-        engine = scratch / "embedded-engine-manifest.json"
-        engine.write_text(
-            json.dumps(
-                {
-                    "format": 1,
-                    "builder": {"image_digest": "sha256:" + "3" * 64},
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        engine.chmod(0o644)
         first = scratch / "first.tar"
         second = scratch / "second.tar"
         arguments = type(
@@ -93,7 +79,6 @@ def main() -> None:
             {
                 "repository": str(repository),
                 "executable": str(executable),
-                "engine_manifest": str(engine),
                 "output": str(first),
                 "source_date_epoch": "1700000000",
             },
@@ -105,6 +90,26 @@ def main() -> None:
         if first_bytes != second.read_bytes():
             raise AssertionError("identical package inputs produced different archives")
         package.verify_archive(first, expected_epoch=1700000000)
+        with tarfile.open(first, mode="r:") as archive:
+            names = [member.name for member in archive.getmembers()]
+            manifest_text = archive.extractfile(
+                package.ARCHIVE_DISTRIBUTION_MANIFEST
+            ).read().decode("utf-8")
+        if names != [package.ARCHIVE_EXECUTABLE, package.ARCHIVE_DISTRIBUTION_MANIFEST]:
+            raise AssertionError(f"package archive inventory changed: {names}")
+        if "engine" in manifest_text or "builder_image" in manifest_text:
+            raise AssertionError("distribution manifest still binds a retired engine input")
+        retired_engine = scratch / "retired-engine.tar"
+        with tarfile.open(first, mode="r:") as archive, tarfile.open(
+            retired_engine, mode="w", format=tarfile.USTAR_FORMAT
+        ) as rewritten:
+            for member in archive.getmembers():
+                rewritten.addfile(copy.copy(member), archive.extractfile(member))
+            extra = tarfile.TarInfo("usr/share/orna/embedded-engine-manifest.json")
+            extra.size = 2
+            extra.mode = 0o644
+            rewritten.addfile(extra, io.BytesIO(b"{}"))
+        expect_failure(lambda: package.verify_archive(retired_engine))
         for override in (
             "RUSTC",
             "RUSTC_WRAPPER",
@@ -189,15 +194,9 @@ def main() -> None:
             owned_root.mkdir(mode=0o755)
             with patch.object(package.os, "geteuid", return_value=0):
                 expect_failure(lambda: package.install_archive(first, owned_root))
-        arguments.engine_manifest = None
-        expect_failure(lambda: package.make_archive(arguments))
-        arguments.engine_manifest = str(engine)
-        arguments.executable = None
-        expect_failure(lambda: package.make_archive(arguments))
-        arguments.executable = str(executable)
 
         missing = scratch / "missing.tar"
-        rewrite_archive(first, missing, remove=package.ARCHIVE_ENGINE_MANIFEST)
+        rewrite_archive(first, missing, remove=package.ARCHIVE_DISTRIBUTION_MANIFEST)
         expect_failure(lambda: package.verify_archive(missing))
 
         tampered = scratch / "tampered.tar"

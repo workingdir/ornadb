@@ -1,0 +1,9 @@
+pub enum SyncResult {
+    ok { count: Int },
+    failed { reason: Str, retryable: Bool },
+}
+
+pub enum Level {
+    low,
+    high,
+}

@@ -8,8 +8,8 @@ use orna_value_v1::Raw;
 const MODULES: [&str; 2] = ["std/collection.orna", "std/iteration.orna"];
 
 fn functions() -> Functions {
-    let mut functions = BTreeMap::new();
-    for (path, source) in orna_standard::reference_standard_sources_v1()
+    let mut functions = Functions::new();
+    for (path, source) in orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
     {
@@ -21,7 +21,6 @@ fn functions() -> Functions {
         include_str!("fixtures/iteration-traversal-ptr1b.orna"),
     );
     for name in [
-        "std.collection.count",
         "std.iteration.fold",
         "std.iteration.depth_first",
         "iteration_proof.traversal_behavior",

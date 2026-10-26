@@ -1,1 +1,1 @@
-std.collection.max([1, 2.0f])
+max([1, 2.0f])

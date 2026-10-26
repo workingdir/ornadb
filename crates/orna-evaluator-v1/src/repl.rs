@@ -1,6 +1,8 @@
 //! Ephemeral evaluator-owned REPL state.
 
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(feature = "system-host-bindings")]
+use std::sync::Arc;
 
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{
@@ -10,8 +12,11 @@ use orna_value_v1::{ContextValue, Format3Context, Raw, ValueFormat};
 
 use crate::{
     CallReuse, CancellationToken, Context, Environment, EvaluationError, Functions, Limits,
-    PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    NominalDefinitions, PureFunction, Scope, bind, error, pattern_names, validate_limits,
+    validate_nominal_definitions,
 };
+#[cfg(feature = "system-host-bindings")]
+use crate::{SysHostAttachment, SysHostContext};
 
 /// A bounded ephemeral module for one interactive Orna session.
 ///
@@ -33,6 +38,13 @@ pub struct ReplSession {
     table_bindings: BTreeSet<String>,
     last_success: Option<CanonicalValue>,
     last_status: Option<CanonicalValue>,
+    /// Declaration-owned construction plans shared by every evaluation.
+    nominal_definitions: NominalDefinitions,
+    /// Activation facts `sys.rt.info()` reports to this session. Without them
+    /// the evaluator reports `sys.version.incompatible`, as it does for any
+    /// activation the host did not attach.
+    #[cfg(feature = "system-host-bindings")]
+    sys_host: Option<Arc<SysHostAttachment>>,
 }
 
 /// Parses one REPL input after applying source bounds. Callers which also
@@ -65,6 +77,9 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
+            #[cfg(feature = "system-host-bindings")]
+            sys_host: None,
         }
     }
 
@@ -103,7 +118,29 @@ impl ReplSession {
             table_bindings: BTreeSet::new(),
             last_success: None,
             last_status: None,
+            nominal_definitions: NominalDefinitions::new(),
+            #[cfg(feature = "system-host-bindings")]
+            sys_host: None,
         })
+    }
+
+    /// Attaches the activation facts `sys.rt.info()` reports to pure
+    /// submissions. Without a context, `sys.rt.info()` reports
+    /// `sys.version.incompatible`.
+    #[cfg(feature = "system-host-bindings")]
+    pub(crate) fn with_sys_host_context(mut self, context: SysHostContext) -> Self {
+        self.sys_host = Some(Arc::new(SysHostAttachment::new(context)));
+        self
+    }
+
+    #[cfg(feature = "system-host-bindings")]
+    fn sys_host_attachment(&self) -> crate::ActivationSysHost<'_> {
+        self.sys_host.as_deref()
+    }
+
+    #[cfg(not(feature = "system-host-bindings"))]
+    fn sys_host_attachment(&self) -> crate::ActivationSysHost<'_> {
+        None
     }
 
     #[cfg(feature = "project-repl")]
@@ -117,6 +154,17 @@ impl ReplSession {
             }
         }
         self.check_retained()?;
+        Ok(self)
+    }
+
+    /// Admits the project's nominal construction plans, such as source
+    /// enums, for every later evaluation in this session.
+    pub fn with_nominal_definitions(
+        mut self,
+        definitions: NominalDefinitions,
+    ) -> Result<Self, EvaluationError> {
+        validate_nominal_definitions(&definitions, self.limits)?;
+        self.nominal_definitions = definitions;
         Ok(self)
     }
 
@@ -170,13 +218,17 @@ impl ReplSession {
                 candidate.evaluate_discarded(expression, None, Some(effects))?;
                 None
             }
-            ReplInput::Item(item) => match &item.declaration {
-                Declaration::Let { pattern, value, .. } => {
-                    candidate.let_binding(pattern, value, None, Some(effects))?;
-                    None
+            ReplInput::Item(item) => {
+                match &item.declaration {
+                    Declaration::Let { pattern, value, .. } => {
+                        candidate.let_binding(pattern, value, None, Some(effects))?;
+                    }
+                    // A function or import declaration evaluates nothing, so
+                    // it is declared exactly as the pure path declares it.
+                    declaration => candidate.declare_admitted(declaration, None)?,
                 }
-                _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
-            },
+                None
+            }
         };
         *self = candidate;
         Ok(result)
@@ -268,7 +320,7 @@ impl ReplSession {
         cancellation: Option<&CancellationToken>,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, cancellation, None)
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_with_effects(
@@ -277,7 +329,7 @@ impl ReplSession {
         effects: &mut dyn crate::EffectHandler,
     ) -> Result<CanonicalValue, EvaluationError> {
         self.evaluate_inner(expression, None, Some(effects))
-            .and_then(crate::Value::canonical)
+            .and_then(crate::Value::canonical_repl_result)
     }
 
     fn evaluate_discarded(
@@ -310,6 +362,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
@@ -321,12 +374,14 @@ impl ReplSession {
             transfer: None,
             materializations: Vec::new(),
             reuse: CallReuse::default(),
+            sys_host: self.sys_host_attachment(),
             cancellation,
         };
         context.items(self.functions.len())?;
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
@@ -443,6 +498,7 @@ impl ReplSession {
         let mut context = Context {
             limits: self.limits,
             steps: 0,
+            calls: 0,
             functions: &self.functions,
             aliases: Some(&self.aliases),
             session_functions: Some(&self.session_functions),
@@ -454,11 +510,13 @@ impl ReplSession {
             transfer: None,
             materializations: Vec::new(),
             reuse: CallReuse::default(),
+            sys_host: self.sys_host_attachment(),
             cancellation,
         };
         let mut scope = Scope::from_repl_environment(
             &environment,
             &self.contextual_environment,
+            &self.nominal_definitions,
             &mut context,
         )?;
         scope.2.extend(self.namespace_bindings.iter().cloned());
@@ -1539,7 +1597,7 @@ mod tests {
 
     #[test]
     fn discarded_results_still_propagate_nested_evaluation_errors() {
-        let value = crate::Value::List(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
+        let value = crate::Value::list(vec![crate::Value::Error(error("ORNA-EVAL-UNSUPPORTED"))]);
         assert_eq!(
             value
                 .discard_result()

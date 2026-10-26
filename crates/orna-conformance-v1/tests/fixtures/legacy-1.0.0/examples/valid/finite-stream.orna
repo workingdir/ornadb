@@ -1,0 +1,3 @@
+pub fn import(path: Str) =
+    std.encoding.csv.rows(std.io.fs.read(path))
+    | for_each(row => Contact.insert(row));

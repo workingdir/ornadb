@@ -9,7 +9,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pinned_generics_and_type_utils_are_snapshot_bound_and_core_stays_optional() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| {
             path == "std/generics.orna" || path == "std/type_utils.orna"

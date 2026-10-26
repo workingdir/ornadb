@@ -1,1 +1,1 @@
-std.collection.filter([], value => 1 / 0 == 0)
+filter([], value => 1 / 0 == 0)

@@ -17,7 +17,7 @@ use format3::*;
 const MUSIC_SOURCE: &str = "pub table music(id: Str) { title: Str, artist: Str, content: Blob, cover: Blob?, }\npub fn main() {}\n";
 
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .args(arguments)
@@ -31,7 +31,7 @@ fn stderr(output: &Output) -> String {
 }
 
 fn run_repl(directory: &Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["--db", directory.to_str().unwrap(), "repl"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .stdin(Stdio::piped())
@@ -107,7 +107,7 @@ async fn repl_update() {
 
     let invalid = run_repl(root, r#"main.music.update("london", { title: 7 })"#);
     let invalid_output = format!("{}{}", String::from_utf8_lossy(&invalid.stdout), stderr(&invalid));
-    assert!(invalid_output.contains("ORNA-S021-TYPE"), "invalid update should be rejected: {invalid_output}");
+    assert!(invalid_output.contains("E2001"), "invalid update should be rejected: {invalid_output}");
     assert!(!root.join("music/london.orna").exists(), "invalid REPL update should not create a loose row file");
     let invalid_publish = run(root, &["publish"]);
     assert_eq!(invalid_publish.status.code(), Some(0), "invalid update left a publication: {}", stderr(&invalid_publish));
@@ -397,36 +397,175 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     assert_eq!(Sha256::digest(actual_cover).as_slice(), expected_cover_sha);
 
 }
+
+const LONDON_ROW: &str = "{ title: \"Live in London\", artist: \"Kieran\", }\n";
+
+fn git_text(root: &Path, arguments: &[&str]) -> String {
+    String::from_utf8(git_output(root, arguments, None)).expect("git prints UTF-8")
+}
+
+/// Asserts a refusal of the loose row file `path`: format admission's
+/// mixed-format code, and the path itself in the message.
+fn assert_loose_row_refused(output: &Output, path: &str) {
+    let message = stderr(output);
+    assert_eq!(output.status.code(), Some(1), "{message}");
+    assert!(
+        message.contains("error[ORNA-REPO-CONTEXT-004]"),
+        "{message}"
+    );
+    assert!(
+        message.contains(path),
+        "the refusal names the row file: {message}"
+    );
+}
+
+/// Rows have no Git paths in format 3: they live only in `.orna/store`
+/// (ORNA-REPO-004, ORNA-META-001), so a loose row file in a format-3 index
+/// would make the next commit mix formats (Gate A, "unknown/mixed formats fail
+/// early"). In a database `orna init` created, `orna add --row` refuses the
+/// row file by path and stages nothing, both before the first commit and after
+/// it, and the same file staged with plain Git is refused by `orna commit`
+/// without moving `HEAD`, a ref or the index (ORNA-REPO-CONTEXT-004).
 #[test]
-fn walkthrough_five_stages_and_commits_the_selected_row_through_review() {
-    let (directory, repository, _relation_id, _context) =
-        format3::format3_repository_for_table_with_source_row(
-            MUSIC_SOURCE,
-            "music",
-            "music/london.orna",
-            "{ title: \"Live in London\", artist: \"Kieran\", }\n",
-        );
-    let root = directory.path();
+fn add_row_refuses_loose_row_in_format3_repository() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("music");
+    let init = run(directory.path(), &["init", root.to_str().unwrap()]);
+    assert_eq!(
+        init.status.code(),
+        Some(0),
+        "orna init failed: {}",
+        stderr(&init)
+    );
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::write(root.join("music/london.orna"), LONDON_ROW).unwrap();
+
+    // The branch is unborn, so the format is the one `orna init` recorded.
+    let refused = run(&root, &["add", "--row", "music", "\"london\""]);
+    assert_loose_row_refused(&refused, "music/london.orna");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        "",
+        "nothing was staged"
+    );
+
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    let committed = run(&root, &["commit", "-m", "Declare music"]);
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "first commit failed: {}",
+        stderr(&committed)
+    );
+    let head = git_text(&root, &["rev-parse", "HEAD"]);
+    let refs = git_text(&root, &["for-each-ref"]);
+    let staged = git_text(&root, &["ls-files", "--stage"]);
+
+    let refused = run(&root, &["add", "--row", "music", "\"london\""]);
+    assert_loose_row_refused(&refused, "music/london.orna");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        staged,
+        "nothing was staged"
+    );
+
+    // Plain Git can still stage the file; the commit refuses it.
+    git(&root, &["add", "music/london.orna"]);
+    let staged = git_text(&root, &["ls-files", "--stage"]);
+    let refused = run(&root, &["commit", "-m", "Commit a loose row"]);
+    assert_loose_row_refused(&refused, "music/london.orna");
+    assert_eq!(
+        git_text(&root, &["rev-parse", "HEAD"]),
+        head,
+        "no commit was made"
+    );
+    assert_eq!(git_text(&root, &["for-each-ref"]), refs, "no ref moved");
+    assert_eq!(
+        git_text(&root, &["ls-files", "--stage"]),
+        staged,
+        "the index is unchanged"
+    );
+}
+
+/// A format-3 snapshot that tracks a loose row file mixes formats, whoever
+/// committed it (ORNA-REPO-004, ORNA-UPGRADE-003; Gate A, "unknown/mixed formats
+/// fail early"). A database `orna init` and `orna commit` created gets a row
+/// file committed past `orna commit` with plain Git; the next `orna commit`,
+/// which changes only source, refuses the inherited row file with
+/// ORNA-REPO-CONTEXT-004 naming it, instead of carrying it forward unread,
+/// and moves neither `HEAD` nor a ref.
+#[test]
+fn commit_refuses_a_loose_row_already_in_a_format3_head() {
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("music");
+    let init = run(directory.path(), &["init", root.to_str().unwrap()]);
+    assert_eq!(init.status.code(), Some(0), "orna init failed: {}", stderr(&init));
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    let committed = run(&root, &["commit", "-m", "Declare music"]);
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "first commit failed: {}",
+        stderr(&committed)
+    );
+
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::write(root.join("music/london.orna"), LONDON_ROW).unwrap();
+    git(&root, &["add", "music/london.orna"]);
+    git(&root, &["commit", "--quiet", "-m", "Commit a loose row past orna commit"]);
+    let head = git_text(&root, &["rev-parse", "HEAD"]);
+    let refs = git_text(&root, &["for-each-ref"]);
+
     std::fs::write(
-        root.join("music/london.orna"),
-        "{ title: \"Live in London — remastered\", artist: \"Kieran\", }\n",
-    ).unwrap();
+        root.join("main.orna"),
+        format!("{MUSIC_SOURCE}pub fn answer(): Int = 42;\n"),
+    )
+    .unwrap();
+    git(&root, &["add", "main.orna"]);
+    let staged = git_text(&root, &["ls-files", "--stage"]);
+    let refused = run(&root, &["commit", "-m", "Change source only"]);
+    assert_loose_row_refused(&refused, "music/london.orna");
+    assert_eq!(git_text(&root, &["rev-parse", "HEAD"]), head, "no commit was made");
+    assert_eq!(git_text(&root, &["for-each-ref"]), refs, "no ref moved");
+    assert_eq!(git_text(&root, &["ls-files", "--stage"]), staged, "the index is unchanged");
+}
 
-    let staged = run(root, &["add", "--row", "music", "\"london\""]);
-    assert_eq!(staged.status.code(), Some(0), "row staging failed: {}", stderr(&staged));
-    let status = run(root, &["status", "--porcelain"]);
-    assert_eq!(status.status.code(), Some(0), "status failed: {}", stderr(&status));
-    assert!(String::from_utf8_lossy(&status.stdout).contains("music/london.orna"));
+/// Format-1/2 repositories are loose-row based, so `orna add --row` on an
+/// unborn branch whose `.orna/` holds a legacy `format.orna` beside
+/// `database.orna` still stages the row. Only format 3 refuses loose rows
+/// (ORNA-META-001). This pins that behaviour so a change is deliberate.
+#[test]
+fn add_row_stages_loose_row_on_unborn_branch_with_legacy_marker() {
+    const LEGACY_FORMAT: &str =
+        include_str!("fixtures/format-context/format-1-ornadb-1.0.orna");
+    const SIDECAR_DATABASE: &str =
+        include_str!("fixtures/format-context/database-sidecar.orna");
+    let directory = TempDir::new().unwrap();
+    let root = directory.path().join("music");
+    let init = run(directory.path(), &["init", root.to_str().unwrap()]);
+    assert_eq!(init.status.code(), Some(0), "orna init failed: {}", stderr(&init));
+    git(&root, &["config", "user.email", "tests@example.invalid"]);
+    git(&root, &["config", "user.name", "Orna tests"]);
+    git(&root, &["config", "commit.gpgsign", "false"]);
+    std::fs::remove_dir_all(root.join(".orna/store")).ok();
+    std::fs::write(root.join(".orna/format.orna"), LEGACY_FORMAT).unwrap();
+    std::fs::write(root.join(".orna/database.orna"), SIDECAR_DATABASE).unwrap();
+    std::fs::write(root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    std::fs::create_dir_all(root.join("music")).unwrap();
+    std::fs::write(root.join("music/london.orna"), LONDON_ROW).unwrap();
 
-    let committed = run(root, &["commit", "-m", "Retitle the recording"]);
-    assert_eq!(committed.status.code(), Some(0), "reviewed commit failed: {}", stderr(&committed));
-    let head = repository.head().unwrap().unwrap();
-    let published = Command::new("git")
-        .args(["show", &format!("{}:music/london.orna", head.as_str())])
-        .current_dir(root)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .output().unwrap();
-    assert!(published.status.success(), "published row missing: {}", String::from_utf8_lossy(&published.stderr));
-    assert!(String::from_utf8_lossy(&published.stdout).contains("Live in London — remastered"));
+    let staged = run(&root, &["add", "--row", "music", "\"london\""]);
+    assert_eq!(staged.status.code(), Some(0), "{}", stderr(&staged));
+    assert!(
+        git_text(&root, &["ls-files", "--stage"]).contains("music/london.orna"),
+        "the legacy row file is staged"
+    );
 }

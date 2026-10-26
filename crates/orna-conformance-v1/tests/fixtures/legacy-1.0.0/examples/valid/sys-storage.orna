@@ -1,0 +1,1 @@
+pub fn pending() = sys.Storage | filter(storage => storage.pending_rows > 0);

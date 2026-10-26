@@ -5,18 +5,29 @@
 //! an admitted native store root and schema.  Until then the boundary remains
 //! an explicit value and no raw row path is an admission API.
 
-use std::{cmp::Ordering, collections::BTreeMap, fmt, ops::Range, sync::Arc};
+use std::{
+    cmp::Ordering,
+    fmt,
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 use sha2::{Digest, Sha256};
 
-use orna_value_v1::{BlobMetadata, MediaAnnotation};
+use orna_value_v1::{
+    BlobMetadata, Decimal, MediaAnnotation, Raw, Value, canonical_uuid_text, compare_primary_keys,
+    decode_typed,
+};
 
 use crate::native_graph::{
-    decode_canonical_cbor, row_fields_dependencies, CborValue, GraphError, NativeGraphContext,
-    NativeObjectId, NativeObjectKind, RepositoryReadScope, MAX_REFS, NODE_DATA_LIMIT,
+    CborValue, GraphError, NODE_DATA_LIMIT, NativeGraphContext, NativeObjectId, NativeObjectKind,
+    RepositoryReadScope, canonical_value_bytes, decode_canonical_cbor, direct_blob_reference_count,
+    row_fields_dependencies,
 };
 
 pub const ROW_INLINE_LIMIT: usize = 8_192;
+/// Direct Blob references an inline stored value may hold.
+pub const ROW_INLINE_REF_LIMIT: usize = 32;
 pub const ROW_CANONICAL_LIMIT: usize = 1_073_741_824;
 pub const KEY_CANONICAL_LIMIT: usize = 1_048_576;
 pub const MIN_PAGE_ENTRIES: usize = 16;
@@ -155,11 +166,18 @@ impl RowMapVersion {
 }
 
 /// A bounded logical-key interval: inclusive lower bound, exclusive upper
-/// bound, and maximum number of returned rows.
+/// bound, an optional exclusive resume cursor, and maximum number of returned
+/// rows.
+///
+/// The resume cursor is what lets paging avoid successor keys: a page that
+/// ends at key `k` resumes with `k` as its cursor, and only keys strictly
+/// greater than `k` are returned. Keys are ordered by [`TypedKey`]'s total
+/// order, so this is correct for every key type, composite keys included.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct KeyRange {
     lower_inclusive: Option<TypedKey>,
     upper_exclusive: Option<TypedKey>,
+    resume_after: Option<TypedKey>,
     limit: usize,
 }
 
@@ -182,6 +200,7 @@ impl KeyRange {
         Ok(Self {
             lower_inclusive,
             upper_exclusive,
+            resume_after: None,
             limit,
         })
     }
@@ -192,6 +211,28 @@ impl KeyRange {
 
     pub fn upper_exclusive(&self) -> Option<&TypedKey> {
         self.upper_exclusive.as_ref()
+    }
+
+    pub fn resume_after(&self) -> Option<&TypedKey> {
+        self.resume_after.as_ref()
+    }
+
+    /// Narrows the range to keys strictly greater than `key`. The cursor must
+    /// be a key of the range's type that lies below the upper bound.
+    pub fn with_resume_after(mut self, key: TypedKey) -> Result<Self, RowStoreError> {
+        let lower_ok = self
+            .lower_inclusive
+            .as_ref()
+            .is_none_or(|lower| lower.same_key_type(&key));
+        let upper_ok = self
+            .upper_exclusive
+            .as_ref()
+            .is_none_or(|upper| upper.same_key_type(&key) && key < *upper);
+        if !lower_ok || !upper_ok {
+            return Err(RowStoreError::InvalidKeyRange);
+        }
+        self.resume_after = Some(key);
+        Ok(self)
     }
 
     pub const fn limit(&self) -> usize {
@@ -484,6 +525,9 @@ impl RowMapSnapshot {
         let start = range.lower_inclusive.as_ref().map_or(0, |lower| {
             entries.partition_point(|entry| entry.key < *lower)
         });
+        let start = range.resume_after.as_ref().map_or(start, |after| {
+            start.max(entries.partition_point(|entry| entry.key <= *after))
+        });
         Ok(entries[start..]
             .iter()
             .take_while(|entry| {
@@ -536,53 +580,15 @@ impl RowMapSnapshot {
     }
 }
 
-/// The identity carried across the row-root/key boundary.  A key is never
-/// looked up against a schema or store root different from this identity.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct RowMapBoundary {
-    database_id: [u8; 16],
-    store_root: NativeObjectId,
-    schema_digest: [u8; 32],
-    relation_id: [u8; 16],
-}
-
-impl RowMapBoundary {
-    pub fn new(
-        database_id: [u8; 16],
-        store_root: NativeObjectId,
-        schema_digest: [u8; 32],
-        relation_id: [u8; 16],
-    ) -> Self {
-        Self {
-            database_id,
-            store_root,
-            schema_digest,
-            relation_id,
-        }
-    }
-
-    pub fn database_id(&self) -> &[u8; 16] {
-        &self.database_id
-    }
-
-    pub fn store_root(&self) -> &NativeObjectId {
-        &self.store_root
-    }
-
-    pub fn schema_digest(&self) -> &[u8; 32] {
-        &self.schema_digest
-    }
-
-    pub fn relation_id(&self) -> &[u8; 16] {
-        &self.relation_id
-    }
-}
-
-/// The bounded set of logical key values used by the row-map seam.  Ordering
-/// is logical type/value ordering, never filename, encoded-byte, or hash
-/// order.  The enum intentionally excludes floating point and opaque storage
-/// OIDs from primary keys.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+/// The logical key values of the row-map seam. Ordering is the language's
+/// logical key order, never filename, encoded-byte or hash order, and the
+/// enum excludes floating point and opaque storage OIDs from primary keys.
+///
+/// `Int` and `UInt` are two spellings of one Orna `Int`: they compare, hash
+/// and encode identically, and decoding yields `UInt` for a non-negative value
+/// and `Int` for a negative one. Equality, ordering and hashing all follow the
+/// logical value, so `Int(5) == UInt(5)`.
+#[derive(Clone, Debug)]
 pub enum TypedKey {
     Null,
     Bool(bool),
@@ -591,26 +597,24 @@ pub enum TypedKey {
     Text(String),
     Bytes(Vec<u8>),
     Tuple(Vec<TypedKey>),
+    /// A permitted key component without a variant above: a Uuid, Decimal,
+    /// Date, Instant, payload-free enum variant, stored table reference or
+    /// tuple value, or an Int beyond the 64-bit range.
+    Value(KeyValue),
 }
 
 impl TypedKey {
+    /// The row-map key for one canonical Orna key value, using the shorthand
+    /// variant where one exists.
+    pub fn from_value(value: &Value) -> Result<Self, RowStoreError> {
+        let bytes = value
+            .encode()
+            .map_err(|_| RowStoreError::InvalidCanonicalKey)?;
+        Self::decode_canonical(&bytes)
+    }
+
     fn same_key_type(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Null, Self::Null)
-            | (Self::Bool(_), Self::Bool(_))
-            | (Self::Int(_), Self::Int(_))
-            | (Self::UInt(_), Self::UInt(_))
-            | (Self::Text(_), Self::Text(_))
-            | (Self::Bytes(_), Self::Bytes(_)) => true,
-            (Self::Tuple(left), Self::Tuple(right)) => {
-                left.len() == right.len()
-                    && left
-                        .iter()
-                        .zip(right)
-                        .all(|(left, right)| left.same_key_type(right))
-            }
-            _ => false,
-        }
+        self.type_cmp(other).is_eq()
     }
 
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
@@ -635,18 +639,15 @@ impl TypedKey {
         Ok(key)
     }
 
-
     fn from_cbor(value: CborValue) -> Result<Self, RowStoreError> {
         match value {
             CborValue::Null => Ok(Self::Null),
             CborValue::Bool(value) => Ok(Self::Bool(value)),
             CborValue::Unsigned(value) => Ok(Self::UInt(value)),
-            CborValue::Negative(magnitude) => {
-                let value = -1i128 - i128::from(magnitude);
-                Ok(Self::Int(
-                    i64::try_from(value).map_err(|_| RowStoreError::InvalidCanonicalKey)?,
-                ))
-            }
+            CborValue::Negative(magnitude) => match i64::try_from(magnitude) {
+                Ok(magnitude) => Ok(Self::Int(-1 - magnitude)),
+                Err(_) => KeyValue::from_cbor(&CborValue::Negative(magnitude)).map(Self::Value),
+            },
             CborValue::Text(value) => Ok(Self::Text(value)),
             CborValue::Bytes(value) => Ok(Self::Bytes(value)),
             CborValue::Array(values) => Ok(Self::Tuple(
@@ -655,37 +656,137 @@ impl TypedKey {
                     .map(Self::from_cbor)
                     .collect::<Result<Vec<_>, _>>()?,
             )),
-            CborValue::Map(_) | CborValue::Tag(_, _) | CborValue::Float64(_) => {
-                Err(RowStoreError::InvalidCanonicalKey)
-            }
+            tagged @ CborValue::Tag(..) => KeyValue::from_cbor(&tagged).map(Self::Value),
+            CborValue::Map(_) | CborValue::Float64(_) => Err(RowStoreError::InvalidCanonicalKey),
         }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Null => 0,
+            Self::Bool(_) => 1,
+            Self::Int(_) | Self::UInt(_) => 2,
+            Self::Text(_) => 3,
+            Self::Bytes(_) => 4,
+            Self::Value(value) => raw_key_rank(value.value.raw()),
+            Self::Tuple(_) => TUPLE_KEY_RANK,
+        }
+    }
+
+    /// Orders key types: the rank of each component, then component counts.
+    /// All keys of one table share a type and compare equal here.
+    fn type_cmp(&self, other: &Self) -> Ordering {
+        self.rank()
+            .cmp(&other.rank())
+            .then_with(|| match (self, other) {
+                (Self::Tuple(left), Self::Tuple(right)) => left
+                    .iter()
+                    .zip(right)
+                    .map(|(left, right)| left.type_cmp(right))
+                    .find(|ordering| ordering.is_ne())
+                    .unwrap_or_else(|| left.len().cmp(&right.len())),
+                (Self::Value(left), Self::Value(right)) => {
+                    raw_key_type_cmp(left.value.raw(), right.value.raw())
+                }
+                _ => Ordering::Equal,
+            })
+    }
+
+    /// Orders two keys of one type by logical value. Tagged components use
+    /// `orna_value_v1::compare_primary_keys`, the language's key comparison.
+    fn value_cmp(&self, other: &Self) -> Ordering {
+        match (self, other) {
+            (Self::Bool(left), Self::Bool(right)) => left.cmp(right),
+            (Self::Text(left), Self::Text(right)) => left.as_bytes().cmp(right.as_bytes()),
+            (Self::Bytes(left), Self::Bytes(right)) => left.cmp(right),
+            (Self::Tuple(left), Self::Tuple(right)) => left
+                .iter()
+                .zip(right)
+                .map(|(left, right)| left.value_cmp(right))
+                .find(|ordering| ordering.is_ne())
+                .unwrap_or_else(|| left.len().cmp(&right.len())),
+            // Admitted components of one type always compare; the byte order
+            // only keeps the order total should that ever fail.
+            (Self::Value(left), Self::Value(right)) => {
+                compare_primary_keys(&left.value, &right.value)
+                    .unwrap_or_else(|_| left.canonical.cmp(&right.canonical))
+            }
+            _ => match (self.narrow_int(), other.narrow_int()) {
+                (Some(left), Some(right)) => left.cmp(&right),
+                (Some(_), None) => other.wide_int_order().reverse(),
+                (None, Some(_)) => self.wide_int_order(),
+                (None, None) => Ordering::Equal,
+            },
+        }
+    }
+
+    fn narrow_int(&self) -> Option<i128> {
+        match self {
+            Self::Int(value) => Some(i128::from(*value)),
+            Self::UInt(value) => Some(i128::from(*value)),
+            _ => None,
+        }
+    }
+
+    /// Where an Int beyond the 64-bit spellings sits relative to all of them.
+    fn wide_int_order(&self) -> Ordering {
+        match self {
+            Self::Value(value) if wide_int_negative(&value.canonical) == Some(true) => {
+                Ordering::Less
+            }
+            _ => Ordering::Greater,
+        }
+    }
+
+    /// Feeds the canonical key encoding to `state` without building it, so
+    /// equal keys, including the two spellings of one Int, hash equally.
+    fn hash_canonical<H: Hasher>(&self, state: &mut H) {
+        match self {
+            Self::Null => state.write_u8(0xf6),
+            Self::Bool(value) => state.write_u8(if *value { 0xf5 } else { 0xf4 }),
+            Self::Int(value) => hash_head(state, int_head(i128::from(*value))),
+            Self::UInt(value) => hash_head(state, int_head(i128::from(*value))),
+            Self::Text(value) => {
+                hash_head(state, (3, value.len() as u64));
+                state.write(value.as_bytes());
+            }
+            Self::Bytes(value) => {
+                hash_head(state, (2, value.len() as u64));
+                state.write(value);
+            }
+            Self::Tuple(values) => {
+                hash_head(state, (4, values.len() as u64));
+                for value in values {
+                    value.hash_canonical(state);
+                }
+            }
+            Self::Value(value) => state.write(&value.canonical),
+        }
+    }
+}
+
+impl PartialEq for TypedKey {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            // One logical value has one canonical encoding.
+            (Self::Value(left), Self::Value(right)) => left == right,
+            (Self::Tuple(left), Self::Tuple(right)) => left == right,
+            _ => self.cmp(other).is_eq(),
+        }
+    }
+}
+
+impl Eq for TypedKey {}
+
+impl Hash for TypedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash_canonical(state);
     }
 }
 
 impl Ord for TypedKey {
     fn cmp(&self, other: &Self) -> Ordering {
-        use TypedKey::*;
-        let rank = |key: &TypedKey| match key {
-            Null => 0,
-            Bool(_) => 1,
-            Int(_) => 2,
-            UInt(_) => 3,
-            Text(_) => 4,
-            Bytes(_) => 5,
-            Tuple(_) => 6,
-        };
-        rank(self)
-            .cmp(&rank(other))
-            .then_with(|| match (self, other) {
-                (Null, Null) => Ordering::Equal,
-                (Bool(left), Bool(right)) => left.cmp(right),
-                (Int(left), Int(right)) => left.cmp(right),
-                (UInt(left), UInt(right)) => left.cmp(right),
-                (Text(left), Text(right)) => left.as_bytes().cmp(right.as_bytes()),
-                (Bytes(left), Bytes(right)) => left.cmp(right),
-                (Tuple(left), Tuple(right)) => left.cmp(right),
-                _ => Ordering::Equal,
-            })
+        self.type_cmp(other).then_with(|| self.value_cmp(other))
     }
 }
 
@@ -693,6 +794,164 @@ impl PartialOrd for TypedKey {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
+}
+
+/// One tagged primary-key component, held as its validated canonical value.
+///
+/// Admission comes from `orna_value_v1`: the bytes decode as a registered
+/// canonical value, and `compare_primary_keys` accepts it as a key component.
+/// A Float, Blob, payload-carrying enum variant or Option is never a key.
+#[derive(Clone, Debug)]
+pub struct KeyValue {
+    value: Value,
+    canonical: Vec<u8>,
+}
+
+impl KeyValue {
+    fn from_cbor(value: &CborValue) -> Result<Self, RowStoreError> {
+        let canonical = canonical_value_bytes(value);
+        let value = Value::decode(&canonical).map_err(|_| RowStoreError::InvalidCanonicalKey)?;
+        let admitted = match value.raw() {
+            // Ints inside the 64-bit heads are spelled `Int` or `UInt`.
+            Raw::Int(_) => wide_int_negative(&canonical).is_some(),
+            Raw::Tag(tag, _) => matches!(
+                *tag,
+                37 | 60_000 | 60_001 | 60_002 | 60_008 | 60_015 | 60_021
+            ),
+            _ => false,
+        };
+        if !admitted || compare_primary_keys(&value, &value).is_err() {
+            return Err(RowStoreError::InvalidCanonicalKey);
+        }
+        Ok(Self { value, canonical })
+    }
+
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn canonical_bytes(&self) -> &[u8] {
+        &self.canonical
+    }
+
+    /// The language's canonical key text where it needs no schema: lowercase
+    /// hyphenated Uuid, canonical Date, exact canonical Decimal and shortest
+    /// decimal Int. Instants, enum variants, references and tuples are spelled
+    /// under their schema, so they have none here.
+    pub fn canonical_text(&self) -> Option<String> {
+        match self.value.raw() {
+            Raw::Int(value) => Some(value.to_string()),
+            Raw::Tag(37, payload) => match payload.as_ref() {
+                Raw::Bytes(bytes) => Some(canonical_uuid_text(bytes.as_slice().try_into().ok()?)),
+                _ => None,
+            },
+            Raw::Tag(60_000, _) => decode_typed::<Decimal>(&self.canonical)
+                .ok()
+                .map(|decimal| decimal.canonical_text()),
+            Raw::Tag(60_001, payload) => match payload.as_ref() {
+                Raw::Text(date) => Some(date.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+impl PartialEq for KeyValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.canonical == other.canonical
+    }
+}
+
+impl Eq for KeyValue {}
+
+impl Hash for KeyValue {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write(&self.canonical);
+    }
+}
+
+const TUPLE_KEY_RANK: u8 = 12;
+
+/// Rank of each logical key type in the total key order. A table's keys share
+/// one type, so the order across types only has to be total and stable; the
+/// shorthand variants keep their earlier relative order.
+fn raw_key_rank(raw: &Raw) -> u8 {
+    match raw {
+        Raw::Null => 0,
+        Raw::Bool(_) => 1,
+        Raw::Int(_) => 2,
+        Raw::Text(_) => 3,
+        Raw::Bytes(_) => 4,
+        Raw::Tag(37, _) => 5,
+        Raw::Tag(60_000, _) => 6,
+        Raw::Tag(60_001, _) => 7,
+        Raw::Tag(60_002, _) => 8,
+        Raw::Tag(60_008, _) => 9,
+        Raw::Tag(60_015, _) => 10,
+        Raw::Tag(60_021, _) => 11,
+        Raw::Array(_) => TUPLE_KEY_RANK,
+        _ => TUPLE_KEY_RANK + 1,
+    }
+}
+
+/// Orders the types of two tagged components: rank, then the component types
+/// of a tuple value or of the key a table reference names.
+fn raw_key_type_cmp(left: &Raw, right: &Raw) -> Ordering {
+    raw_key_rank(left)
+        .cmp(&raw_key_rank(right))
+        .then_with(|| match (left, right) {
+            (Raw::Tag(60_015, left), Raw::Tag(60_015, right)) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Raw::Array(left), Raw::Array(right)) => left
+                        .iter()
+                        .zip(right)
+                        .map(|(left, right)| raw_key_type_cmp(left, right))
+                        .find(|ordering| ordering.is_ne())
+                        .unwrap_or_else(|| left.len().cmp(&right.len())),
+                    _ => Ordering::Equal,
+                }
+            }
+            (Raw::Tag(60_021, left), Raw::Tag(60_021, right)) => {
+                match (left.as_ref(), right.as_ref()) {
+                    (Raw::Array(left), Raw::Array(right)) => match (left.get(2), right.get(2)) {
+                        (Some(left), Some(right)) => raw_key_type_cmp(left, right),
+                        _ => Ordering::Equal,
+                    },
+                    _ => Ordering::Equal,
+                }
+            }
+            _ => Ordering::Equal,
+        })
+}
+
+/// The sign of an Int beyond the 64-bit `Int`/`UInt` spellings, read from its
+/// canonical encoding: a tag 2 or 3 bignum, or a negative head below
+/// `i64::MIN`. `None` for every other encoding.
+fn wide_int_negative(canonical: &[u8]) -> Option<bool> {
+    match canonical {
+        [0xc2, ..] => Some(false),
+        [0xc3, ..] => Some(true),
+        [0x3b, magnitude @ ..] => {
+            let magnitude: [u8; 8] = magnitude.try_into().ok()?;
+            (u64::from_be_bytes(magnitude) > i64::MAX as u64).then_some(true)
+        }
+        _ => None,
+    }
+}
+
+/// The CBOR major type and argument spelling one 64-bit Int.
+fn int_head(value: i128) -> (u8, u64) {
+    if value >= 0 {
+        (0, value as u64)
+    } else {
+        (1, (-1 - value) as u64)
+    }
+}
+
+fn hash_head<H: Hasher>(state: &mut H, (major, value): (u8, u64)) {
+    let (head, length) = cbor_head_bytes(major, value);
+    state.write(&head[..length]);
 }
 
 /// A direct stored-value dependency.  Blob payloads are references and never
@@ -791,6 +1050,10 @@ pub enum RowValue {
 }
 
 impl RowValue {
+    /// An inline stored value: at most 8 KiB encoded and at most 32 Blob
+    /// references of its own (store-3.json `row_inline_limit` and
+    /// `row_inline_ref_limit`). References inside a nested overflow value
+    /// belong to that value, so `dependencies` may also name overflow nodes.
     pub fn inline(
         encoded: Vec<u8>,
         dependencies: Vec<RowDependency>,
@@ -798,8 +1061,9 @@ impl RowValue {
         if encoded.len() > ROW_INLINE_LIMIT {
             return Err(RowStoreError::InlineValueTooLarge(encoded.len()));
         }
-        if dependencies.len() > 32 {
-            return Err(RowStoreError::InlineDependencyFanout(dependencies.len()));
+        let blob_references = direct_blob_reference_count(&decode_canonical_cbor(&encoded)?)?;
+        if blob_references > ROW_INLINE_REF_LIMIT {
+            return Err(RowStoreError::InlineDependencyFanout(blob_references));
         }
         if dependencies
             .iter()
@@ -885,23 +1149,6 @@ impl RowValue {
         Ok(output)
     }
 
-    pub fn encoded_metadata_len(&self) -> usize {
-        match self {
-            Self::Inline { encoded, .. } => encoded.len(),
-            Self::Overflow(reference) => {
-                1 + 8
-                    + 32
-                    + reference
-                        .native_root()
-                        .map_or(0, |root| root.as_bytes().len())
-                    + reference.byte_root().as_bytes().len()
-                    + reference
-                        .dependency_root()
-                        .map_or(1, |root| root.as_bytes().len())
-            }
-        }
-    }
-
     /// The canonical encoded field tuple of an inline row value.
     ///
     /// This is the stored representation a metadata projection decodes: row
@@ -955,497 +1202,6 @@ impl RowEntry {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct RowPage {
-    entries: Arc<[RowEntry]>,
-    range: Range<usize>,
-    height: u8,
-    encoded_size: usize,
-    direct_refs: usize,
-}
-
-impl RowPage {
-    pub fn height(&self) -> u8 {
-        self.height
-    }
-    pub fn entries(&self) -> &[RowEntry] {
-        &self.entries[self.range.clone()]
-    }
-    pub const fn encoded_size(&self) -> usize {
-        self.encoded_size
-    }
-
-    pub const fn direct_refs(&self) -> usize {
-        self.direct_refs
-    }
-}
-
-impl PartialEq for RowPage {
-    fn eq(&self, other: &Self) -> bool {
-        self.entries() == other.entries()
-            && self.height == other.height
-            && self.encoded_size == other.encoded_size
-            && self.direct_refs == other.direct_refs
-    }
-}
-
-impl Eq for RowPage {}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct OrderedRowMap {
-    boundary: RowMapBoundary,
-    entries: Arc<[RowEntry]>,
-    pages: Vec<RowPage>,
-}
-
-impl OrderedRowMap {
-    pub fn boundary(&self) -> &RowMapBoundary {
-        &self.boundary
-    }
-
-    pub fn entries(&self) -> &[RowEntry] {
-        &self.entries
-    }
-
-    pub fn pages(&self) -> &[RowPage] {
-        &self.pages
-    }
-
-    /// The boundary identity is part of lookup, so a row map cannot be used
-    /// with a different store root or schema pin by accident.
-    pub fn lookup(
-        &self,
-        boundary: &RowMapBoundary,
-        key: &TypedKey,
-    ) -> Result<Option<&RowEntry>, RowStoreError> {
-        if boundary != &self.boundary {
-            return Err(RowStoreError::BoundaryMismatch);
-        }
-        Ok(self
-            .entries
-            .binary_search_by(|entry| entry.key.cmp(key))
-            .ok()
-            .map(|index| &self.entries[index]))
-    }
-    /// Iterates a bounded key range directly over the existing leaf pages.
-    /// The cursor seeks to the first page and entry at or after the inclusive
-    /// lower bound, and never clones rows or scans pages before that position.
-    pub fn range<'a>(&'a self, range: &'a KeyRange) -> impl Iterator<Item = &'a RowEntry> + 'a {
-        let page_index = range.lower_inclusive.as_ref().map_or(0, |lower| {
-            self.pages.partition_point(|page| {
-                page.entries()
-                    .last()
-                    .is_some_and(|entry| entry.key < *lower)
-            })
-        });
-        let entry_index = range
-            .lower_inclusive
-            .as_ref()
-            .and_then(|lower| {
-                self.pages
-                    .get(page_index)
-                    .map(|page| page.entries().partition_point(|entry| entry.key < *lower))
-            })
-            .unwrap_or(0);
-        OrderedRowRange {
-            pages: &self.pages,
-            page_index,
-            entry_index,
-            upper_exclusive: range.upper_exclusive(),
-            remaining: range.limit(),
-        }
-    }
-}
-
-struct OrderedRowRange<'a> {
-    pages: &'a [RowPage],
-    page_index: usize,
-    entry_index: usize,
-    upper_exclusive: Option<&'a TypedKey>,
-    remaining: usize,
-}
-
-impl<'a> Iterator for OrderedRowRange<'a> {
-    type Item = &'a RowEntry;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining == 0 {
-            return None;
-        }
-        loop {
-            let page = self.pages.get(self.page_index)?;
-            let entries = page.entries();
-            if self.entry_index == entries.len() {
-                self.page_index += 1;
-                self.entry_index = 0;
-                continue;
-            }
-            let entry = &entries[self.entry_index];
-            self.entry_index += 1;
-            if self
-                .upper_exclusive
-                .is_some_and(|upper| entry.key >= *upper)
-            {
-                self.remaining = 0;
-                return None;
-            }
-            self.remaining -= 1;
-            return Some(entry);
-        }
-    }
-}
-
-pub struct RowMapBuilder {
-    boundary: RowMapBoundary,
-    entries: BTreeMap<TypedKey, RowValue>,
-}
-
-impl RowMapBuilder {
-    pub fn new(boundary: RowMapBoundary) -> Self {
-        Self {
-            boundary,
-            entries: BTreeMap::new(),
-        }
-    }
-
-    pub fn insert(&mut self, key: TypedKey, value: RowValue) -> Result<(), RowStoreError> {
-        let key_size = key.canonical_bytes()?.len();
-        if key_size > KEY_CANONICAL_LIMIT {
-            return Err(RowStoreError::KeyTooLarge(key_size));
-        }
-        if value.encoded_metadata_len() > ROW_CANONICAL_LIMIT {
-            return Err(RowStoreError::ValueTooLarge(
-                value.encoded_metadata_len() as u64
-            ));
-        }
-        match self.entries.entry(key) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(value);
-                Ok(())
-            }
-            std::collections::btree_map::Entry::Occupied(_) => Err(RowStoreError::DuplicateKey),
-        }
-    }
-
-    pub fn build(self) -> Result<OrderedRowMap, RowStoreError> {
-        let entries: Arc<[RowEntry]> = self
-            .entries
-            .into_iter()
-            .map(|(key, value)| RowEntry::new(key, value))
-            .collect::<Vec<_>>()
-            .into();
-        let pages = partition_pages_shared(Arc::clone(&entries), 0)?;
-        Ok(OrderedRowMap {
-            boundary: self.boundary,
-            entries,
-            pages,
-        })
-    }
-}
-
-/// One entry's cost in the pinned ORP-1 page-boundary algorithm: its canonical
-/// logical boundary token (the key itself, never a storage OID) plus the
-/// encoded node bytes and distinct native refs the entry contributes.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct BoundaryToken {
-    key: Vec<u8>,
-    size: usize,
-    refs: usize,
-}
-
-impl BoundaryToken {
-    pub(crate) fn new(key: Vec<u8>, size: usize, refs: usize) -> Self {
-        Self { key, size, refs }
-    }
-}
-
-/// Groups ordered entries into page ranges with the exact ORP-1 rule: cut
-/// before an entry that would push the page past 64 KiB, 256 entries or 256
-/// distinct native refs, and cut after an entry whose height-specific boundary
-/// anchor is set once the page holds at least 16 entries, or at exactly 256
-/// entries. The final nonempty tail is always emitted. `node_overhead` is the
-/// encoded node header, domain and entry-count cost charged to every page, so
-/// a caller that passes the real overhead gets pages that fit the node bound.
-///
-/// The same call serves successive branch levels: a branch level's entries are
-/// its children, whose token is that child's last logical key.
-pub(crate) fn partition_token_ranges(
-    tokens: &[BoundaryToken],
-    height: u8,
-    node_overhead: usize,
-) -> Result<Vec<std::ops::Range<usize>>, RowStoreError> {
-    if height > MAX_PAGE_HEIGHT {
-        return Err(RowStoreError::PageHeightExceeded(height));
-    }
-
-    if node_overhead >= NODE_DATA_LIMIT {
-        return Err(RowStoreError::EntryTooLarge(node_overhead));
-    }
-    Ok(
-        partition_token_ranges_from_iter(tokens.iter().cloned().map(Ok), height, node_overhead)?
-            .into_iter()
-            .map(|group| group.range)
-            .collect(),
-    )
-}
-
-struct PartitionGroup {
-    range: Range<usize>,
-    encoded_size: usize,
-    direct_refs: usize,
-}
-
-fn partition_token_ranges_from_iter(
-    tokens: impl Iterator<Item = Result<BoundaryToken, RowStoreError>>,
-    height: u8,
-    node_overhead: usize,
-) -> Result<Vec<PartitionGroup>, RowStoreError> {
-    if height > MAX_PAGE_HEIGHT {
-        return Err(RowStoreError::PageHeightExceeded(height));
-    }
-
-    if node_overhead >= NODE_DATA_LIMIT {
-        return Err(RowStoreError::EntryTooLarge(node_overhead));
-    }
-    let mut groups = Vec::new();
-    let mut start = 0usize;
-    let mut processed = 0usize;
-    let mut size = node_overhead;
-    let mut refs = 0usize;
-    for (index, token) in tokens.enumerate() {
-        let token = token?;
-        processed = index + 1;
-        if token.refs > MAX_REFS {
-            return Err(RowStoreError::PageFanoutExceeded(token.refs));
-        }
-        if token
-            .size
-            .checked_add(node_overhead)
-            .map_or(true, |size| size > NODE_DATA_LIMIT)
-        {
-            return Err(RowStoreError::EntryTooLarge(token.size));
-        }
-        let count = index - start;
-        if count > 0
-            && (count == MAX_PAGE_ENTRIES
-                || refs + token.refs > MAX_REFS
-                || size + token.size > NODE_DATA_LIMIT)
-        {
-            groups.push(PartitionGroup {
-                range: start..index,
-                encoded_size: size,
-                direct_refs: refs,
-            });
-            start = index;
-            size = node_overhead;
-            refs = 0;
-        }
-        size += token.size;
-        refs += token.refs;
-        let count = index - start + 1;
-        if count >= MIN_PAGE_ENTRIES
-            && (count == MAX_PAGE_ENTRIES || boundary_anchor_bytes(height, &token.key)?)
-        {
-            groups.push(PartitionGroup {
-                range: start..index + 1,
-                encoded_size: size,
-                direct_refs: refs,
-            });
-            start = index + 1;
-            size = node_overhead;
-            refs = 0;
-        }
-    }
-    if start < processed {
-        groups.push(PartitionGroup {
-            range: start..processed,
-            encoded_size: size,
-            direct_refs: refs,
-        });
-    }
-    Ok(groups)
-}
-
-/// Encoded node header and domain cost charged to every height-0 page when the
-/// caller does not supply an exact one. It covers the `[1, 1, domain, entries]`
-/// tuple head, the domain itself and the widest definite entry-count head, so
-/// the charged cost never understates a real page.
-pub(crate) fn leaf_node_overhead(domain: &[u8]) -> usize {
-    domain
-        .len()
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(3)
-}
-
-/// Encoded node header, domain and count cost charged to every branch page.
-/// It covers the `[1, 2, domain, height, entries]` tuple head.
-pub(crate) fn branch_node_overhead(domain: &[u8]) -> usize {
-    domain
-        .len()
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(1)
-        .saturating_add(3)
-}
-
-/// Encoded cost of one branch entry `[inclusive_max_key, child_oid, row_count]`
-/// for a native object width of `oid_width` bytes. Counts are bounded by the
-/// signed-length limit, so the integer head is charged at its widest definite
-/// form and the estimate never understates the encoded entry.
-pub(crate) fn branch_entry_size(fence: usize, oid_width: usize) -> usize {
-    fence
-        .saturating_add(oid_width)
-        .saturating_add(3)
-        .saturating_add(9)
-}
-
-/// The canonical ORP-1 shape of one ordered map: the page ranges at every
-/// level, level 0 the leaves and the final level the root. Every level's
-/// ranges are in logical key order and cover its whole input exactly once.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RowMapLevels {
-    levels: Vec<Vec<std::ops::Range<usize>>>,
-}
-
-impl RowMapLevels {
-    /// The root height. An empty or single-leaf map is height 0.
-    pub fn height(&self) -> u8 {
-        self.levels.len().saturating_sub(1) as u8
-    }
-
-    pub fn levels(&self) -> &[Vec<std::ops::Range<usize>>] {
-        &self.levels
-    }
-
-    /// The page ranges at one height, or nothing above the root.
-    pub fn level(&self, height: u8) -> &[std::ops::Range<usize>] {
-        self.levels
-            .get(height as usize)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
-    }
-}
-
-/// Plans every ORP-1 level of one ordered map with the pinned boundary rule:
-/// partition the leaves, then partition each successive level by its children's
-/// last logical keys until a single root remains. Child ranges are
-/// nonoverlapping and exhaustive; a root with one child collapses to that child
-/// at the next lower height. The final physical root is therefore a pure
-/// function of the ordered entries, the domain and the native object width.
-pub(crate) fn partition_levels(
-    entries: &[RowEntry],
-    domain: &[u8],
-    oid_width: usize,
-) -> Result<RowMapLevels, RowStoreError> {
-    if oid_width != 20 && oid_width != 32 {
-        return Err(RowStoreError::VersionIdentityMismatch);
-    }
-    let mut tokens = Vec::with_capacity(entries.len());
-    for entry in entries {
-        tokens.push(BoundaryToken::new(
-            entry.key.canonical_bytes()?,
-            entry_encoded_size(entry)?,
-            entry.value.dependencies().len(),
-        ));
-    }
-    let leaves = partition_token_ranges(&tokens, 0, leaf_node_overhead(domain))?;
-    let mut levels = vec![leaves];
-    let branch_overhead = branch_node_overhead(domain);
-    while levels.last().is_some_and(|level| level.len() > 1) {
-        let height =
-            u8::try_from(levels.len()).map_err(|_| RowStoreError::PageHeightExceeded(64))?;
-        if height > MAX_PAGE_HEIGHT {
-            return Err(RowStoreError::PageHeightExceeded(height));
-        }
-        let children = levels.last().ok_or(RowStoreError::InvalidKeyRange)?;
-        let mut child_tokens = Vec::with_capacity(children.len());
-        for range in children {
-            let last = range
-                .clone()
-                .next_back()
-                .and_then(|index| tokens.get(index))
-                .ok_or(RowStoreError::InvalidKeyRange)?;
-            child_tokens.push(BoundaryToken::new(
-                last.key.clone(),
-                branch_entry_size(last.key.len(), oid_width),
-                1,
-            ));
-        }
-        levels.push(partition_token_ranges(
-            &child_tokens,
-            height,
-            branch_overhead,
-        )?);
-    }
-    Ok(RowMapLevels { levels })
-}
-
-/// The pinned format-3 height bound shared with the native graph.
-pub const MAX_PAGE_HEIGHT: u8 = 64;
-
-/// Encoded node header and domain cost charged to every height-0 page when the
-/// caller does not supply an exact one.
-const PAGE_NODE_OVERHEAD: usize = 16;
-
-pub(crate) fn partition_pages(
-    entries: &[RowEntry],
-    height: u8,
-) -> Result<Vec<RowPage>, RowStoreError> {
-    partition_pages_shared(Arc::from(entries.to_vec()), height)
-}
-
-fn partition_pages_shared(
-    entries: Arc<[RowEntry]>,
-    height: u8,
-) -> Result<Vec<RowPage>, RowStoreError> {
-    let tokens = entries.iter().map(|entry| {
-        Ok(BoundaryToken::new(
-            entry.key.canonical_bytes()?,
-            entry_encoded_size(entry)?,
-            entry.value.dependencies().len(),
-        ))
-    });
-    let groups = partition_token_ranges_from_iter(tokens, height, PAGE_NODE_OVERHEAD)?;
-    Ok(groups
-        .into_iter()
-        .map(|group| RowPage {
-            entries: Arc::clone(&entries),
-            range: group.range,
-            height,
-            encoded_size: group.encoded_size,
-            direct_refs: group.direct_refs,
-        })
-        .collect())
-}
-
-fn entry_encoded_size(entry: &RowEntry) -> Result<usize, RowStoreError> {
-    let key = entry.key.canonical_bytes()?;
-    let size = key
-        .len()
-        .checked_add(entry.value.encoded_metadata_len())
-        .and_then(|size| size.checked_add(8))
-        .ok_or(RowStoreError::EntryTooLarge(usize::MAX))?;
-    Ok(size)
-}
-
-fn boundary_anchor(height: u8, key: &TypedKey) -> Result<bool, RowStoreError> {
-    boundary_anchor_bytes(height, &key.canonical_bytes()?)
-}
-
-/// The anchor test over an already-encoded logical boundary token, so a builder
-/// that has the canonical bytes never pays for a second encoding pass.
-pub(crate) fn boundary_anchor_bytes(height: u8, canonical: &[u8]) -> Result<bool, RowStoreError> {
-    let mut hasher = Sha256::new();
-    hasher.update(ORP_DOMAIN);
-    hasher.update(u32::from(height).to_be_bytes());
-    hasher.update(canonical);
-    let digest = hasher.finalize();
-    Ok(digest[31] & ((1 << ORP_ANCHOR_BITS) - 1) == 0)
-}
-
 fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError> {
     use TypedKey::*;
     match key {
@@ -1453,17 +1209,13 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
         Bool(false) => output.push(0xf4),
         Bool(true) => output.push(0xf5),
         Int(value) => {
-            if *value >= 0 {
-                cbor_head(output, 0, *value as u64);
-            } else {
-                let magnitude = value
-                    .checked_neg()
-                    .map(|value| value as u64)
-                    .unwrap_or(i64::MAX as u64 + 1);
-                cbor_head(output, 1, magnitude - 1);
-            }
+            let (major, argument) = int_head(i128::from(*value));
+            cbor_head(output, major, argument);
         }
-        UInt(value) => cbor_head(output, 0, *value),
+        UInt(value) => {
+            let (major, argument) = int_head(i128::from(*value));
+            cbor_head(output, major, argument);
+        }
         Text(value) => {
             cbor_head(output, 3, value.len() as u64);
             output.extend_from_slice(value.as_bytes());
@@ -1481,6 +1233,7 @@ fn encode_key(key: &TypedKey, output: &mut Vec<u8>) -> Result<(), RowStoreError>
                 encode_key(value, output)?;
             }
         }
+        Value(value) => output.extend_from_slice(&value.canonical),
     }
     if output.len() > KEY_CANONICAL_LIMIT {
         return Err(RowStoreError::KeyTooLarge(output.len()));
@@ -1578,31 +1331,45 @@ fn decode_blob_field_metadata(field: &CborValue) -> Result<BlobMetadata, RowStor
 }
 
 fn cbor_head(output: &mut Vec<u8>, major: u8, value: u64) {
+    let (head, length) = cbor_head_bytes(major, value);
+    output.extend_from_slice(&head[..length]);
+}
+
+/// The shortest definite CBOR head for `major` and `value`, and its length.
+fn cbor_head_bytes(major: u8, value: u64) -> ([u8; 9], usize) {
     let base = major << 5;
-    match value {
-        0..=23 => output.push(base | value as u8),
+    let mut head = [0; 9];
+    let length = match value {
+        0..=23 => {
+            head[0] = base | value as u8;
+            1
+        }
         24..=255 => {
-            output.push(base | 24);
-            output.push(value as u8);
+            head[0] = base | 24;
+            head[1] = value as u8;
+            2
         }
         256..=65_535 => {
-            output.push(base | 25);
-            output.extend_from_slice(&(value as u16).to_be_bytes());
+            head[0] = base | 25;
+            head[1..3].copy_from_slice(&(value as u16).to_be_bytes());
+            3
         }
         65_536..=4_294_967_295 => {
-            output.push(base | 26);
-            output.extend_from_slice(&(value as u32).to_be_bytes());
+            head[0] = base | 26;
+            head[1..5].copy_from_slice(&(value as u32).to_be_bytes());
+            5
         }
         _ => {
-            output.push(base | 27);
-            output.extend_from_slice(&value.to_be_bytes());
+            head[0] = base | 27;
+            head[1..].copy_from_slice(&value.to_be_bytes());
+            9
         }
-    }
+    };
+    (head, length)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowStoreError {
-    DuplicateKey,
     DuplicateDependency,
     KeyTooLarge(usize),
     InlineValueTooLarge(usize),
@@ -1610,7 +1377,6 @@ pub enum RowStoreError {
     ValueTooLarge(u64),
     EntryTooLarge(usize),
     PageFanoutExceeded(usize),
-    PageHeightExceeded(u8),
     BoundaryMismatch,
     VersionIdentityMismatch,
     RowCountExceeded,
@@ -1631,7 +1397,6 @@ pub enum RowStoreError {
 impl fmt::Display for RowStoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::DuplicateKey => f.write_str("duplicate typed row key"),
             Self::DuplicateDependency => f.write_str("duplicate direct row dependency"),
             Self::KeyTooLarge(size) => write!(f, "canonical key is {size} bytes, over 1 MiB"),
             Self::InlineValueTooLarge(size) => {
@@ -1643,9 +1408,6 @@ impl fmt::Display for RowStoreError {
             Self::ValueTooLarge(length) => write!(f, "overflow value length {length} is too large"),
             Self::EntryTooLarge(size) => write!(f, "row entry is {size} bytes, over node bound"),
             Self::PageFanoutExceeded(count) => write!(f, "row page fanout is {count}, over 256"),
-            Self::PageHeightExceeded(height) => {
-                write!(f, "row page height {height} is over the format-3 bound")
-            }
             Self::BoundaryMismatch => {
                 f.write_str("row lookup boundary does not match map identity")
             }
@@ -1762,7 +1524,7 @@ mod tests {
     }
 
     #[test]
-    fn materialized_range_seeks_across_page_boundary_and_keeps_snapshot_pin() {
+    fn materialized_range_reads_a_bounded_interval_and_keeps_snapshot_pin() {
         let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
         let version = RowMapVersion::issue(
             [0x11; 16],
@@ -1774,35 +1536,19 @@ mod tests {
             Some(600),
         )
         .expect("coherent row-map version");
-        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
-        let mut builder = RowMapBuilder::new(boundary);
         let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        for key in 0..600 {
-            builder
-                .insert(TypedKey::Int(key), value.clone())
-                .expect("insert ordered row");
-        }
-        let map = builder.build().expect("build paged row map");
-        assert!(map.pages().len() > 1, "fixture must span row pages");
-        let first_page_last_key = map.pages()[0]
-            .entries()
-            .last()
-            .expect("nonempty first page")
-            .key()
-            .clone();
-        let start = match first_page_last_key {
-            TypedKey::Int(value) => value,
-            _ => unreachable!("test keys are integers"),
-        };
-        let entries = map.entries().to_vec();
+        let entries = (0..600)
+            .map(|key| RowEntry::new(TypedKey::Int(key), value.clone()))
+            .collect::<Vec<_>>();
         let snapshot = RowMapSnapshot::issue(version.clone(), [0x77; 32], entries)
             .expect("seal materialized snapshot");
+        let start = 63;
         let range = KeyRange::new(
             Some(TypedKey::Int(start)),
             Some(TypedKey::Int(start + 4)),
             3,
         )
-        .expect("valid page-crossing range");
+        .expect("valid bounded range");
 
         let rows = snapshot.range(&range).expect("read bounded range");
         assert_eq!(
@@ -1816,46 +1562,580 @@ mod tests {
                 TypedKey::Int(start + 2),
             ]
         );
-        let cursor_range = KeyRange::new(
-            Some(TypedKey::Int(start)),
-            Some(TypedKey::Int(start + 4)),
-            10,
-        )
-        .expect("valid cursor interval");
-        assert_eq!(
-            map.range(&cursor_range)
-                .map(|entry| entry.key().clone())
-                .collect::<Vec<_>>(),
-            [
-                TypedKey::Int(start),
-                TypedKey::Int(start + 1),
-                TypedKey::Int(start + 2),
-                TypedKey::Int(start + 3),
-            ]
-        );
         assert!(rows.iter().all(|row| row.version() == &version));
     }
 
+    /// Seals an in-memory row map over `keys`, which must be strictly
+    /// ascending and of one key type.
+    fn sealed_snapshot(keys: &[TypedKey]) -> RowMapSnapshot {
+        let schema = SchemaGeneration::issue([0x11; 16], [0x22; 16], oid(0x33), [0x44; 32], 7);
+        let version = RowMapVersion::issue(
+            [0x11; 16],
+            [0x22; 16],
+            oid(0x55),
+            schema,
+            oid(0x66),
+            8,
+            Some(keys.len() as u64),
+        )
+        .expect("coherent row-map version");
+        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
+        let entries = keys
+            .iter()
+            .map(|key| RowEntry::new(key.clone(), value.clone()))
+            .collect();
+        RowMapSnapshot::issue(version, [0x77; 32], entries).expect("seal row map")
+    }
+
+    /// The keys a resume cursor must return: strictly after `after`, inside
+    /// the bounds, at most `limit` of them, in key order.
+    fn expected_after(
+        keys: &[TypedKey],
+        lower: Option<&TypedKey>,
+        upper: Option<&TypedKey>,
+        after: &TypedKey,
+        limit: usize,
+    ) -> Vec<TypedKey> {
+        keys.iter()
+            .filter(|key| lower.is_none_or(|lower| *key >= lower))
+            .filter(|key| upper.is_none_or(|upper| *key < upper))
+            .filter(|key| *key > after)
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    /// Asserts that a resume cursor returns exactly the sorted suffix that
+    /// [`expected_after`] names, and that a cursor at or above the upper
+    /// bound is refused. Cursors may be present, absent or outside the bounds.
+    fn assert_resume_skips_to_the_sorted_suffix(
+        keys: &[TypedKey],
+        lower: Option<TypedKey>,
+        upper: Option<TypedKey>,
+        cursors: &[TypedKey],
+        limit: usize,
+    ) {
+        let snapshot = sealed_snapshot(keys);
+        for cursor in cursors {
+            let range = KeyRange::new(lower.clone(), upper.clone(), limit).expect("valid range");
+            if upper.as_ref().is_some_and(|upper| cursor >= upper) {
+                assert!(
+                    range.with_resume_after(cursor.clone()).is_err(),
+                    "cursor {cursor:?} at or above the upper bound is refused"
+                );
+                continue;
+            }
+            let resumed = range
+                .with_resume_after(cursor.clone())
+                .expect("cursor below the upper bound");
+            let rows: Vec<TypedKey> = snapshot
+                .range(&resumed)
+                .expect("read the resumed range")
+                .iter()
+                .map(|row| row.key().clone())
+                .collect();
+            assert_eq!(
+                rows,
+                expected_after(keys, lower.as_ref(), upper.as_ref(), cursor, limit),
+                "resume after {cursor:?} with limit {limit}"
+            );
+        }
+    }
+
+    /// Pages every key of `[lower, upper)` with `limit` rows per page, each
+    /// page resuming after the last key the previous page returned.
+    fn page_through(
+        snapshot: &RowMapSnapshot,
+        lower: Option<TypedKey>,
+        upper: Option<TypedKey>,
+        limit: usize,
+    ) -> Vec<TypedKey> {
+        let base = KeyRange::new(lower, upper, limit).expect("valid page range");
+        let mut collected = Vec::new();
+        let mut range = base.clone();
+        loop {
+            let page: Vec<TypedKey> = snapshot
+                .range(&range)
+                .expect("read one page")
+                .iter()
+                .map(|row| row.key().clone())
+                .collect();
+            let short = page.len() < limit;
+            let last = page.last().cloned();
+            collected.extend(page);
+            let Some(last) = last.filter(|_| !short) else {
+                break;
+            };
+            range = base
+                .clone()
+                .with_resume_after(last)
+                .expect("resume cursor inside the range");
+        }
+        collected
+    }
+
+    /// ORNA-ROW-002: `Int` and `UInt` share one key rank, so a resume cursor
+    /// on either spelling skips the same keys across zero. Cursors below the
+    /// first key, on the first, middle and last keys, on absent keys, and
+    /// past the last key are each exclusive.
     #[test]
-    fn key_range_rejects_bounds_from_different_typed_key_domains() {
+    fn resume_skip_is_exclusive_for_mixed_int_spellings_across_zero() {
+        let keys = vec![
+            TypedKey::Int(-9),
+            TypedKey::Int(-2),
+            TypedKey::Int(-1),
+            TypedKey::UInt(0),
+            TypedKey::Int(3),
+            TypedKey::UInt(4),
+            TypedKey::UInt(10),
+        ];
+        assert_logical_order(&keys);
+        let cursors = [
+            TypedKey::Int(-100),
+            TypedKey::Int(-9),
+            TypedKey::Int(-5),
+            TypedKey::UInt(0),
+            TypedKey::Int(2),
+            TypedKey::UInt(10),
+            TypedKey::UInt(99),
+        ];
+        for limit in [1, 2, 7] {
+            assert_resume_skips_to_the_sorted_suffix(&keys, None, None, &cursors, limit);
+        }
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 3, 256] {
+            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+        }
+    }
+
+    /// ORNA-ROW-002: a resume cursor is checked against the range's bounds.
+    /// A cursor below the lower bound returns the intersection with the
+    /// bounds; a cursor at or above the upper bound is refused. Tuple keys
+    /// compare component by component.
+    #[test]
+    fn resume_skip_respects_tuple_bounds_and_refuses_a_cursor_at_the_upper_bound() {
+        let keys: Vec<TypedKey> = (0..3_i64)
+            .flat_map(|first| {
+                ["a", "b", "c"].into_iter().map(move |second| {
+                    TypedKey::Tuple(vec![
+                        TypedKey::Int(first),
+                        TypedKey::Text(second.to_owned()),
+                    ])
+                })
+            })
+            .collect();
+        let pair = |first: i64, second: &str| {
+            TypedKey::Tuple(vec![TypedKey::Int(first), TypedKey::Text(second.to_owned())])
+        };
+        let lower = pair(1, "b");
+        let upper = pair(2, "b");
+        let in_range: Vec<TypedKey> = keys
+            .iter()
+            .filter(|key| *key >= &lower && *key < &upper)
+            .cloned()
+            .collect();
+        assert_eq!(in_range.len(), 3, "(1,b), (1,c) and (2,a) lie in [(1,b), (2,b))");
+        let cursors = [
+            pair(0, "z"),
+            pair(1, "b"),
+            pair(1, "bb"),
+            pair(1, "c"),
+            pair(2, "a"),
+            pair(2, "b"),
+            pair(2, "c"),
+        ];
+        for limit in [1, 2, 256] {
+            assert_resume_skips_to_the_sorted_suffix(
+                &keys,
+                Some(lower.clone()),
+                Some(upper.clone()),
+                &cursors,
+                limit,
+            );
+        }
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 256] {
+            assert_eq!(
+                page_through(&snapshot, Some(lower.clone()), Some(upper.clone()), limit),
+                in_range,
+                "limit {limit}"
+            );
+        }
+    }
+
+    /// Paging crosses each page boundary by the resume cursor alone, for Text,
+    /// Bytes and Bool keys, and a composite key whose canonical encoding is
+    /// exactly 256 bytes pages in order beside a 257-byte neighbour.
+    #[test]
+    fn paging_is_exact_for_text_bytes_bool_and_a_256_byte_tuple_key() {
+        let texts: Vec<TypedKey> = ["a", "b", "c", "d", "e"]
+            .into_iter()
+            .map(|text| TypedKey::Text(text.to_owned()))
+            .collect();
+        let bytes: Vec<TypedKey> = [vec![0x00], vec![0x00, 0x01], vec![0x01], vec![0xff]]
+            .into_iter()
+            .map(TypedKey::Bytes)
+            .collect();
+        let bools = vec![TypedKey::Bool(false), TypedKey::Bool(true)];
+        for keys in [&texts, &bytes, &bools] {
+            assert_logical_order(keys);
+            let snapshot = sealed_snapshot(keys);
+            for limit in [1, 2, 3, 256] {
+                assert_eq!(page_through(&snapshot, None, None, limit), *keys, "limit {limit}");
+            }
+        }
+
+        let tuple_of = |text_len: usize, last: i64| {
+            TypedKey::Tuple(vec![
+                TypedKey::Text("x".repeat(text_len)),
+                TypedKey::Int(last),
+            ])
+        };
+        let canonical_len = |key: &TypedKey| key.canonical_bytes().expect("canonical key").len();
+        let text_len = (0..512)
+            .find(|&len| canonical_len(&tuple_of(len, 1)) == 256)
+            .expect("some text length encodes the tuple in exactly 256 bytes");
+        let exact = tuple_of(text_len, 1);
+        let longer = tuple_of(text_len + 1, 1);
+        let keys = vec![
+            TypedKey::Tuple(vec![TypedKey::Text("a".to_owned()), TypedKey::Int(1)]),
+            exact,
+            longer,
+        ];
+        assert_eq!(canonical_len(&keys[1]), 256);
+        assert_eq!(canonical_len(&keys[2]), 257);
+        assert_logical_order(&keys);
+        let snapshot = sealed_snapshot(&keys);
+        for limit in [1, 2, 256] {
+            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+        }
+    }
+
+    /// ORNA-ROW-002: a resume cursor at or above the upper bound is refused
+    /// for Text keys, and one just below it returns nothing.
+    #[test]
+    fn resume_cursor_at_or_above_a_text_upper_bound_is_refused() {
+        let keys: Vec<TypedKey> = (0..4)
+            .map(|index| TypedKey::Text(format!("row-{index}")))
+            .collect();
+        assert_resume_skips_to_the_sorted_suffix(
+            &keys,
+            None,
+            Some(TypedKey::Text("row-2".to_owned())),
+            &[
+                TypedKey::Text("row-1".to_owned()),
+                TypedKey::Text("row-2".to_owned()),
+                TypedKey::Text("row-9".to_owned()),
+            ],
+            2,
+        );
+    }
+
+    fn key_of(raw: Raw) -> TypedKey {
+        TypedKey::from_value(&Value::new(raw).expect("registered canonical value"))
+            .expect("permitted key value")
+    }
+
+    fn uuid_key_raw(byte: u8) -> Raw {
+        Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
+    }
+
+    fn hash_of(key: &TypedKey) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    /// Asserts `keys` ascend strictly, survive their canonical encoding
+    /// unchanged, and sort back into place from reverse order.
+    fn assert_logical_order(keys: &[TypedKey]) {
+        for pair in keys.windows(2) {
+            assert!(
+                pair[0] < pair[1],
+                "{:?} sorts before {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        for key in keys {
+            let bytes = key.canonical_bytes().expect("canonical key bytes");
+            let decoded = TypedKey::decode_canonical(&bytes).expect("decode the canonical key");
+            assert_eq!(&decoded, key);
+            assert_eq!(decoded.canonical_bytes().unwrap(), bytes);
+            assert_eq!(hash_of(&decoded), hash_of(key));
+        }
+        let mut sorted = keys.iter().rev().cloned().collect::<Vec<_>>();
+        sorted.sort();
+        assert_eq!(sorted, keys);
+    }
+
+    /// ORNA-ROW-002: `Int` and `UInt` spell one key type, so a range may mix
+    /// them; bounds of different key types still fail.
+    #[test]
+    fn key_range_spans_one_int_type_and_rejects_other_key_types() {
+        let range = KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1)
+            .expect("Int and UInt bounds share the Int key type");
+        assert_eq!(range.upper_exclusive(), Some(&TypedKey::Int(2)));
         assert!(matches!(
-            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::UInt(2)), 1),
+            KeyRange::new(Some(TypedKey::UInt(2)), Some(TypedKey::Int(2)), 1),
             Err(RowStoreError::InvalidKeyRange)
         ));
         assert!(matches!(
+            KeyRange::new(Some(TypedKey::Int(1)), Some(TypedKey::Text("2".into())), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+        let composite = |id: TypedKey| TypedKey::Tuple(vec![TypedKey::Text("id".into()), id]);
+        KeyRange::new(
+            Some(composite(TypedKey::Int(1))),
+            Some(composite(TypedKey::UInt(2))),
+            1,
+        )
+        .expect("composite Int components share one key type");
+        assert!(matches!(
             KeyRange::new(
-                Some(TypedKey::Tuple(vec![
-                    TypedKey::Text("id".into()),
-                    TypedKey::Int(1)
-                ])),
-                Some(TypedKey::Tuple(vec![
-                    TypedKey::Text("id".into()),
-                    TypedKey::UInt(2)
-                ])),
+                Some(composite(TypedKey::Int(1))),
+                Some(composite(TypedKey::Text("2".into()))),
                 1,
             ),
             Err(RowStoreError::InvalidKeyRange)
         ));
+        let date = |text: &str| key_of(Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned()))));
+        KeyRange::new(Some(date("2026-01-01")), Some(date("2026-02-01")), 1)
+            .expect("Date bounds share one key type");
+        assert!(matches!(
+            KeyRange::new(Some(date("2026-01-01")), Some(key_of(uuid_key_raw(1))), 1),
+            Err(RowStoreError::InvalidKeyRange)
+        ));
+    }
+
+    /// A07-storage-rows-20: one Int is one key whichever 64-bit variant spells
+    /// it: equal, hashed alike, encoded alike and ordered by value.
+    #[test]
+    fn int_and_uint_spellings_are_one_key() {
+        assert_eq!(TypedKey::Int(5), TypedKey::UInt(5));
+        assert_eq!(hash_of(&TypedKey::Int(5)), hash_of(&TypedKey::UInt(5)));
+        assert_eq!(TypedKey::Int(5).cmp(&TypedKey::UInt(5)), Ordering::Equal);
+        assert_eq!(
+            TypedKey::Int(5).canonical_bytes().unwrap(),
+            TypedKey::UInt(5).canonical_bytes().unwrap()
+        );
+        assert!(TypedKey::Int(5) > TypedKey::UInt(3));
+        assert!(TypedKey::Int(-1) < TypedKey::UInt(0));
+        assert!(TypedKey::UInt(u64::MAX) > TypedKey::Int(i64::MAX));
+
+        let composite = |id: TypedKey| TypedKey::Tuple(vec![TypedKey::Text("id".into()), id]);
+        assert_eq!(composite(TypedKey::Int(7)), composite(TypedKey::UInt(7)));
+        assert_eq!(
+            hash_of(&composite(TypedKey::Int(7))),
+            hash_of(&composite(TypedKey::UInt(7)))
+        );
+        let mut keys = std::collections::HashSet::new();
+        keys.insert(TypedKey::UInt(3));
+        assert!(keys.contains(&TypedKey::Int(3)));
+
+        let mut map = std::collections::BTreeSet::new();
+        for key in [
+            TypedKey::UInt(3),
+            TypedKey::Int(-2),
+            TypedKey::Int(5),
+            TypedKey::UInt(4),
+        ] {
+            assert!(map.insert(key), "distinct Int keys");
+        }
+        assert!(
+            !map.insert(TypedKey::Int(3)),
+            "Int(3) is the key UInt(3) already holds"
+        );
+        assert_eq!(
+            map.iter().cloned().collect::<Vec<_>>(),
+            [
+                TypedKey::Int(-2),
+                TypedKey::Int(3),
+                TypedKey::Int(4),
+                TypedKey::Int(5)
+            ]
+        );
+        assert!(map.contains(&TypedKey::Int(4)));
+    }
+
+    /// A07-storage-rows-02, ORNA-ROW-002: every permitted tagged key decodes
+    /// from its canonical encoding and orders by logical value through
+    /// `compare_primary_keys`, not by CBOR bytes.
+    #[test]
+    fn tagged_keys_round_trip_and_order_by_logical_value() {
+        use num_bigint::BigInt;
+
+        let pair = |tag: u64, first: Raw, second: Raw| {
+            Raw::Tag(tag, Box::new(Raw::Array(vec![first, second])))
+        };
+        let decimal = |coefficient: i64, exponent: i64| {
+            key_of(pair(
+                60_000,
+                Raw::Int(coefficient.into()),
+                Raw::Int(exponent.into()),
+            ))
+        };
+        let decimals = [
+            decimal(-1, 1),
+            decimal(-2, 0),
+            decimal(0, 0),
+            decimal(5, -1),
+            decimal(2, 0),
+            decimal(1, 1),
+        ];
+        assert_logical_order(&decimals);
+        // 2 sorts before 10 although the encoding of 10 sorts first.
+        assert!(decimals[4].canonical_bytes().unwrap() > decimals[5].canonical_bytes().unwrap());
+
+        let instant = |seconds: i64, nanos: u32| {
+            key_of(pair(
+                60_002,
+                Raw::Int(seconds.into()),
+                Raw::Int(nanos.into()),
+            ))
+        };
+        assert_logical_order(&[
+            instant(-5, 0),
+            instant(-1, 999_999_999),
+            instant(0, 0),
+            instant(3, 1),
+        ]);
+        let date = |text: &str| key_of(Raw::Tag(60_001, Box::new(Raw::Text(text.to_owned()))));
+        assert_logical_order(&[date("1999-12-31"), date("2026-01-02"), date("2026-10-20")]);
+        assert_logical_order(&[
+            key_of(uuid_key_raw(0x01)),
+            key_of(uuid_key_raw(0x7f)),
+            key_of(uuid_key_raw(0xff)),
+        ]);
+        let variant = |enum_type: u8, variant: u8| {
+            key_of(Raw::Tag(
+                60_008,
+                Box::new(Raw::Array(vec![
+                    uuid_key_raw(enum_type),
+                    uuid_key_raw(variant),
+                    Raw::Null,
+                ])),
+            ))
+        };
+        assert_logical_order(&[variant(1, 1), variant(1, 2), variant(2, 1)]);
+        let tuple = |number: i64, text: &str| {
+            key_of(pair(
+                60_015,
+                Raw::Int(number.into()),
+                Raw::Text(text.to_owned()),
+            ))
+        };
+        assert_logical_order(&[tuple(-2, "z"), tuple(1, "a"), tuple(1, "b"), tuple(10, "a")]);
+        let reference = |number: i64| {
+            key_of(Raw::Tag(
+                60_021,
+                Box::new(Raw::Array(vec![
+                    uuid_key_raw(3),
+                    uuid_key_raw(4),
+                    Raw::Int(number.into()),
+                ])),
+            ))
+        };
+        assert_logical_order(&[reference(-1), reference(2)]);
+
+        // Ints beyond the 64-bit spellings order with them by value.
+        let wide = |value: BigInt| key_of(Raw::Int(value));
+        let ints = [
+            wide(-BigInt::from(u64::MAX) - 2),
+            wide(BigInt::from(i64::MIN) - 1),
+            TypedKey::Int(i64::MIN),
+            TypedKey::Int(-1),
+            TypedKey::UInt(0),
+            TypedKey::UInt(u64::MAX),
+            wide(BigInt::from(u64::MAX) + 1),
+        ];
+        for index in [0, 1, 6] {
+            assert!(matches!(&ints[index], TypedKey::Value(_)));
+        }
+        assert_eq!(
+            key_of(Raw::Int(BigInt::from(i64::MIN))),
+            TypedKey::Int(i64::MIN)
+        );
+        assert_logical_order(&ints);
+
+        let text = |key: &TypedKey| match key {
+            TypedKey::Value(value) => value.canonical_text(),
+            _ => panic!("a tagged key"),
+        };
+        assert_eq!(
+            text(&key_of(uuid_key_raw(0xab))).as_deref(),
+            Some("abababab-abab-abab-abab-abababababab")
+        );
+        assert_eq!(text(&date("2026-10-20")).as_deref(), Some("2026-10-20"));
+        assert_eq!(text(&decimal(15, -1)).as_deref(), Some("15e-1.decimal"));
+        assert_eq!(text(&ints[6]).as_deref(), Some("18446744073709551616"));
+        assert_eq!(text(&instant(0, 0)), None);
+    }
+
+    /// Values outside the permitted key types fail key admission explicitly,
+    /// as do unregistered tags and noncanonical bignums.
+    #[test]
+    fn non_key_values_are_rejected_as_keys() {
+        let encoded = |raw: Raw| {
+            Value::new(raw)
+                .expect("registered canonical value")
+                .encode()
+                .expect("canonical value bytes")
+        };
+        let payload = Raw::Tag(
+            60_009,
+            Box::new(Raw::Array(vec![Raw::Null, Raw::Array(Vec::new())])),
+        );
+        for raw in [
+            Raw::Float(1.5f64.to_bits()),
+            Raw::Map(vec![(Raw::Text("k".to_owned()), Raw::Int(1.into()))]),
+            // Duration and Option are stored values but never keys.
+            Raw::Tag(
+                60_005,
+                Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Int(0.into())])),
+            ),
+            Raw::Tag(60_013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))),
+            // An enum variant carrying a payload record.
+            Raw::Tag(
+                60_008,
+                Box::new(Raw::Array(vec![uuid_key_raw(1), uuid_key_raw(2), payload])),
+            ),
+            // A tuple with a Float component.
+            Raw::Tag(
+                60_015,
+                Box::new(Raw::Array(vec![Raw::Float(0.5f64.to_bits())])),
+            ),
+        ] {
+            assert!(matches!(
+                TypedKey::decode_canonical(&encoded(raw)),
+                Err(RowStoreError::InvalidCanonicalKey)
+            ));
+        }
+
+        let tagged = |tag: u64, payload: &[u8]| {
+            let mut bytes = Vec::new();
+            cbor_head(&mut bytes, 6, tag);
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        let mut overflow = vec![0x81, 0x54];
+        overflow.extend_from_slice(&[0x77; 20]);
+        assert!(matches!(
+            TypedKey::decode_canonical(&tagged(60_113, &overflow)),
+            Err(RowStoreError::InvalidCanonicalKey)
+        ));
+        let mut narrow = vec![0x48];
+        narrow.extend_from_slice(&[0xff; 8]);
+        for bytes in [
+            tagged(60_026, &[0x80]),
+            tagged(1, &[0x00]),
+            tagged(2, &narrow),
+        ] {
+            assert!(matches!(
+                TypedKey::decode_canonical(&bytes),
+                Err(RowStoreError::Native(GraphError::NonCanonicalData))
+            ));
+        }
     }
 
     #[test]
@@ -1920,86 +2200,5 @@ mod tests {
             RepositoryVfsFieldIdentity::new(row_identity, vec![[0; 16]]),
             Err(RowStoreError::VersionIdentityMismatch)
         ));
-    }
-    #[test]
-    fn duplicate_row_map_insert_preserves_first_value() {
-        let boundary = RowMapBoundary::new([0x11; 16], oid(0x55), [0x44; 32], [0x22; 16]);
-        let key = TypedKey::Text("song".to_owned());
-        let mut builder = RowMapBuilder::new(boundary.clone());
-
-        builder
-            .insert(
-                key.clone(),
-                RowValue::decode_canonical_fields(vec![0x81, 0x01]).expect("first row value"),
-            )
-            .expect("first insertion");
-        assert!(matches!(
-            builder.insert(
-                key.clone(),
-                RowValue::decode_canonical_fields(vec![0x81, 0x02]).expect("duplicate row value"),
-            ),
-            Err(RowStoreError::DuplicateKey)
-        ));
-
-        let map = builder.build().expect("build original row map");
-        let row = map
-            .lookup(&boundary, &key)
-            .expect("matching boundary")
-            .expect("original row remains");
-        assert_eq!(row.value().encoded_fields(), Some(&[0x81, 0x01][..]));
-    }
-    #[test]
-    fn row_page_equality_uses_only_visible_entries_and_page_metadata() {
-        let value = RowValue::decode_canonical_fields(vec![0x80]).expect("empty row value");
-        let before = RowEntry::new(TypedKey::Text("before".to_owned()), value.clone());
-        let visible = RowEntry::new(TypedKey::Text("visible".to_owned()), value.clone());
-        let after = RowEntry::new(TypedKey::Text("after".to_owned()), value);
-        let left = RowPage {
-            entries: Arc::from(vec![before, visible.clone(), after]),
-            range: 1..2,
-            height: 2,
-            encoded_size: 48,
-            direct_refs: 1,
-        };
-        let right = RowPage {
-            entries: Arc::from(vec![visible]),
-            range: 0..1,
-            height: 2,
-            encoded_size: 48,
-            direct_refs: 1,
-        };
-
-        assert_eq!(left.entries(), right.entries());
-        assert_eq!(left, right);
-    }
-
-    #[test]
-    fn partition_token_ranges_rejects_heights_above_format_bound() {
-        assert_eq!(
-            partition_token_ranges(&[], MAX_PAGE_HEIGHT, 0).expect("height 64 is allowed"),
-            Vec::<std::ops::Range<usize>>::new()
-        );
-        for height in [MAX_PAGE_HEIGHT + 1, u8::MAX] {
-            assert!(matches!(
-                partition_token_ranges(&[], height, 0),
-                Err(RowStoreError::PageHeightExceeded(actual)) if actual == height
-            ));
-        }
-    }
-    #[test]
-    fn partition_token_ranges_enforces_node_size_boundary() {
-        let at_limit = BoundaryToken::new(vec![0], NODE_DATA_LIMIT - 1, 0);
-        assert_eq!(
-            partition_token_ranges(&[at_limit], 0, 1).expect("exact node limit is valid"),
-            vec![0..1]
-        );
-
-        for size in [NODE_DATA_LIMIT, usize::MAX] {
-            let token = BoundaryToken::new(vec![0], size, 0);
-            assert!(matches!(
-                partition_token_ranges(&[token], 0, 1),
-                Err(RowStoreError::EntryTooLarge(actual)) if actual == size
-            ));
-        }
     }
 }

@@ -220,6 +220,68 @@ pub use object_reference::{
     validate_object_reference_for_id,
 };
 
+/// Reports whether one path component names Git's administration entry: the
+/// `.git` directory or a linked worktree's `.git` file. It matches the names
+/// `git fsck` reports as `hasDotgit`, so a repository stays safe to check out
+/// on Windows and macOS. Git's `is_ntfs_dotgit` rule applies to the name and
+/// to each part after a `\`: `.git` or the 8.3 alias `git~1` in any ASCII
+/// case, then only dots or spaces up to the end or a `:` stream suffix. Git's
+/// `is_hfs_dotgit` rule applies to the whole name: exactly `.git` in any ASCII
+/// case once the HFS+ ignorable code points (U+200C..U+200F, U+202A..U+202E,
+/// U+206A..U+206F, U+FEFF) are removed.
+///
+/// Ordinary names such as `.gitignore`, `.github`, `.gitmodules`, `foo.git`,
+/// `git~2`, and `git-notes.md` do not match. Case folding is ASCII-only, as in
+/// Git, so `.gıt` (U+0131) and `.GİT` (U+0130) stay ordinary names: Git 2.53
+/// accepts both. Whether an NTFS `$UpCase` table folds either into ASCII is
+/// unverified on a Windows volume. `.git:x`, `.git.`, and `a\.git` are
+/// ordinary names on Linux but are refused here, as Git's default
+/// `core.protectNTFS` refuses them. A name that is not UTF-8 is compared as
+/// bytes and never meets the HFS+ rule, so `.git\xFF` stays an ordinary name
+/// although `git fsck` flags it. This is a refusal predicate for Git metadata
+/// names only, not a complete Windows or macOS path validator.
+#[must_use]
+pub fn is_git_metadata_component(name: &[u8]) -> bool {
+    name.split(|byte| *byte == b'\\').any(is_ntfs_git_name) || is_hfs_git_name(name)
+}
+
+/// Git's `is_ntfs_dotgit` for one `\`-free part of a name.
+fn is_ntfs_git_name(part: &[u8]) -> bool {
+    let stem = part.split(|byte| *byte == b':').next().unwrap_or_default();
+    let mut end = stem.len();
+    while end > 0 && matches!(stem[end - 1], b'.' | b' ') {
+        end -= 1;
+    }
+    let base = &stem[..end];
+    base.eq_ignore_ascii_case(b".git") || base.eq_ignore_ascii_case(b"git~1")
+}
+
+/// Git's `is_hfs_dotgit`: exactly `.git` once HFS+ ignorables are removed.
+fn is_hfs_git_name(name: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(name) else {
+        return false;
+    };
+    let mut visible = text
+        .chars()
+        .filter(|character| !is_hfs_ignorable(*character))
+        .map(|character| character.to_ascii_lowercase());
+    ".git"
+        .chars()
+        .all(|expected| visible.next() == Some(expected))
+        && visible.next().is_none()
+}
+
+/// Code points that macOS HFS+ ignores when comparing names.
+fn is_hfs_ignorable(character: char) -> bool {
+    matches!(
+        character,
+        '\u{200C}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{206A}'..='\u{206F}'
+            | '\u{FEFF}'
+    )
+}
+
 /// Checks only that a row reference is pinned to the supplied CWD context,
 /// then attaches a noninterchangeable marker. It intentionally does not
 /// validate a relation identity: physical relation identities and row keys
@@ -1088,208 +1150,6 @@ impl fmt::Debug for SystemDiagnostic {
             .finish()
     }
 }
-
-fn redact_system_diagnostic(diagnostic: &mut SystemDiagnostic) {
-    // SystemDiagnostic has no per-field secrecy classifier. At the
-    // explanation boundary, redact free-form payload text and typed data
-    // fail-closed; stable diagnostic codes/identity, source/object references,
-    // and the opaque trace reference remain correlation metadata, not payload.
-    diagnostic.message = "<redacted>".into();
-    for label in &mut diagnostic.labels {
-        label.message = "<redacted>".into();
-    }
-    diagnostic.help.fill("<redacted>".into());
-    diagnostic.data = None;
-    diagnostic.redacted = true;
-    for cause in &mut diagnostic.causes {
-        redact_system_diagnostic(cause);
-    }
-}
-
-/// Input envelope for the local `sys.explain` boundary.
-///
-/// The envelope retains diagnostic identity and authority fields while
-/// redacting free-form content before it reaches local explanation code.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct SystemDiagnosticExplanationInput {
-    diagnostic: SystemDiagnostic,
-}
-
-impl SystemDiagnosticExplanationInput {
-    /// Admit one canonical diagnostic after validating and redacting its
-    /// renderer-facing fields.
-    pub fn new(mut diagnostic: SystemDiagnostic) -> Result<Self, SystemDiagnosticAdapterError> {
-        validate_system_diagnostic(&diagnostic)?;
-        redact_system_diagnostic(&mut diagnostic);
-        Ok(Self { diagnostic })
-    }
-
-    pub fn diagnostic(&self) -> &SystemDiagnostic {
-        &self.diagnostic
-    }
-
-    pub fn into_diagnostic(self) -> SystemDiagnostic {
-        self.diagnostic
-    }
-
-    /// Attach renderer-independent, code-based explanation fields returned by
-    /// trusted local `sys.explain` logic. The diagnostic payload in the result
-    /// remains redacted while its stable identity and authority fields survive;
-    /// callers must not copy raw diagnostic text into the explanation fields.
-    pub fn finish(
-        self,
-        summary: impl Into<String>,
-        suggestions: impl IntoIterator<Item = String>,
-    ) -> Result<SystemDiagnosticExplanationOutput, SystemDiagnosticAdapterError> {
-        let summary = validate_diagnostic_text("summary", summary.into())?;
-        let suggestions = suggestions
-            .into_iter()
-            .map(|suggestion| validate_diagnostic_text("suggestion", suggestion))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(SystemDiagnosticExplanationOutput {
-            causes: self.diagnostic.causes.clone(),
-            diagnostic: self.diagnostic,
-            summary,
-            suggestions,
-        })
-    }
-}
-
-/// Structured output envelope for a local `sys.explain` implementation.
-///
-/// `related_objects` and `plan` are intentionally not guessed here: those
-/// fields require authority owned by the system projection. A sys/runtime
-/// consumer can add them after this envelope is produced, while every field
-/// of the canonical diagnostic remains lossless.
-#[derive(Clone, Eq, PartialEq)]
-pub struct SystemDiagnosticExplanationOutput {
-    diagnostic: SystemDiagnostic,
-    summary: String,
-    causes: Vec<SystemDiagnostic>,
-    suggestions: Vec<String>,
-}
-impl fmt::Debug for SystemDiagnosticExplanationOutput {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Summaries and suggestions are caller-provided free text. Their
-        // display API is intentional, but Debug alone is not authorization.
-        formatter
-            .debug_struct("SystemDiagnosticExplanationOutput")
-            .field("diagnostic", &self.diagnostic)
-            .field("summary", &"<redacted>")
-            .field("causes", &self.causes)
-            .field("suggestions", &"<redacted>")
-            .finish()
-    }
-}
-
-impl SystemDiagnosticExplanationOutput {
-    pub fn diagnostic(&self) -> &SystemDiagnostic {
-        &self.diagnostic
-    }
-
-    pub fn summary(&self) -> &str {
-        &self.summary
-    }
-
-    pub fn causes(&self) -> &[SystemDiagnostic] {
-        &self.causes
-    }
-
-    pub fn suggestions(&self) -> &[String] {
-        &self.suggestions
-    }
-
-    pub fn into_parts(self) -> (SystemDiagnostic, String, Vec<SystemDiagnostic>, Vec<String>) {
-        (self.diagnostic, self.summary, self.causes, self.suggestions)
-    }
-}
-
-/// Typed failures from the canonical-to-local explanation boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SystemDiagnosticAdapterError {
-    EmptyId,
-    EmptyCode,
-    UnsafeText { field: &'static str },
-    InvalidSpan,
-}
-
-impl fmt::Display for SystemDiagnosticAdapterError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyId => formatter.write_str("system diagnostic id is empty"),
-            Self::EmptyCode => formatter.write_str("system diagnostic code is empty"),
-            Self::UnsafeText { field } => {
-                write!(formatter, "system diagnostic {field} contains unsafe text")
-            }
-            Self::InvalidSpan => formatter.write_str("system diagnostic contains an invalid span"),
-        }
-    }
-}
-
-impl std::error::Error for SystemDiagnosticAdapterError {}
-
-/// Canonical-to-local explanation adapter. This named function is the
-/// Foundation-side contract consumed by sys/runtime/CLI; it never flattens a
-/// `SystemDiagnostic` into the live-protocol diagnostic.
-pub fn system_diagnostic_explanation_input(
-    diagnostic: SystemDiagnostic,
-) -> Result<SystemDiagnosticExplanationInput, SystemDiagnosticAdapterError> {
-    SystemDiagnosticExplanationInput::new(diagnostic)
-}
-
-fn validate_system_diagnostic(
-    diagnostic: &SystemDiagnostic,
-) -> Result<(), SystemDiagnosticAdapterError> {
-    if diagnostic.id.is_empty() {
-        return Err(SystemDiagnosticAdapterError::EmptyId);
-    }
-    if diagnostic.code.is_empty() {
-        return Err(SystemDiagnosticAdapterError::EmptyCode);
-    }
-    validate_diagnostic_text("id", diagnostic.id.clone())?;
-    validate_diagnostic_text("code", diagnostic.code.clone())?;
-    validate_diagnostic_text("message", diagnostic.message.clone())?;
-    if let Some(span) = &diagnostic.primary_span {
-        validate_source_span(span)?;
-    }
-    for label in &diagnostic.labels {
-        validate_source_span(&label.span)?;
-        validate_diagnostic_text("label", label.message.clone())?;
-    }
-    for help in &diagnostic.help {
-        validate_diagnostic_text("help", help.clone())?;
-    }
-    for cause in &diagnostic.causes {
-        validate_system_diagnostic(cause)?;
-    }
-    Ok(())
-}
-
-fn validate_diagnostic_text(
-    field: &'static str,
-    text: String,
-) -> Result<String, SystemDiagnosticAdapterError> {
-    SafeText::new(text.clone())
-        .map(|_| text)
-        .map_err(|_| SystemDiagnosticAdapterError::UnsafeText { field })
-}
-
-fn validate_source_span(span: &SourceSpan) -> Result<(), SystemDiagnosticAdapterError> {
-    if span.start_byte.sign() == Sign::Minus
-        || span.end_byte < span.start_byte
-        || [
-            &span.start_line,
-            &span.start_column,
-            &span.end_line,
-            &span.end_column,
-        ]
-        .iter()
-        .any(|coordinate| coordinate.sign() != Sign::Plus)
-    {
-        return Err(SystemDiagnosticAdapterError::InvalidSpan);
-    }
-    Ok(())
-}
 /// Protocol span `[snapshot, file_path, start_byte, end_byte]`. The source
 /// path is repository-relative or the explicit `<redacted>` marker.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1497,6 +1357,14 @@ impl Diagnostic {
     pub fn message(&self) -> &str {
         self.message.as_str()
     }
+    /// Structured notes attached by the producer, in attachment order.
+    pub fn notes(&self) -> &[SafeText] {
+        &self.notes
+    }
+    /// Nested causes attached by the producer, in attachment order.
+    pub fn causes(&self) -> &[Diagnostic] {
+        &self.causes
+    }
     pub fn encode_ovb(&self) -> Result<Vec<u8>, FoundationError> {
         Value::new(self.boundary_projection().raw()?)
             .map_err(FoundationError::Value)?
@@ -1504,7 +1372,8 @@ impl Diagnostic {
             .map_err(FoundationError::Value)
     }
     pub fn decode_ovb(bytes: &[u8]) -> Result<Self, FoundationError> {
-        let diagnostic = Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
+        let diagnostic =
+            Self::from_raw(Value::decode(bytes).map_err(FoundationError::Value)?.raw())?;
         // The wire redacted bit is an untrusted producer claim, not a
         // disclosure grant. Generic decoding therefore redacts every payload.
         Ok(diagnostic.redacted())
@@ -2457,5 +2326,86 @@ mod tests {
         // The audit representation admits arbitrary precision coordinates as
         // decimal text; tag-60011 remains independently verified above.
         assert!(serde_json::to_vec(&diagnostic).unwrap().starts_with(b"{"));
+    }
+}
+
+#[cfg(test)]
+mod git_metadata_component_tests {
+    use super::is_git_metadata_component;
+
+    // Both lists follow what `git fsck --strict` (Git 2.53) reports as
+    // `hasDotgit` for a tree entry with that name.
+    #[test]
+    fn refuses_git_administration_names_in_every_spelling() {
+        for refused in [
+            ".git",
+            ".GIT",
+            ".Git",
+            ".gIt",
+            ".git.",
+            ".git..",
+            ".git ",
+            ".GIT. ",
+            "git~1",
+            "GIT~1",
+            "git~1.",
+            ".git:",
+            ".git:x",
+            ".git::$INDEX_ALLOCATION",
+            ".git\\config",
+            "a\\.git",
+            "a\\git~1.",
+            "x\\.GIT:y",
+            "a:b\\.git",
+            ".g\u{200C}it",
+            ".\u{FEFF}git",
+            ".gi\u{202E}t",
+            ".git\u{206F}",
+        ] {
+            assert!(
+                is_git_metadata_component(refused.as_bytes()),
+                "{refused:?} must be refused as git metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_names_that_only_resemble_git_metadata() {
+        for accepted in [
+            ".gitignore",
+            ".github",
+            "foo.git",
+            ".gitmodules",
+            "git-notes.md",
+            "git",
+            "git~2",
+            "digit",
+            "..",
+            ".",
+            "",
+            "gitx.",
+            "a.git.b",
+            "foo.git\\x",
+            "a\\.github",
+            ".gıt",
+            ".GİT",
+            "gıt~1",
+            ".g\u{200B}it",
+            ".g\u{200C}it.",
+            "git~\u{200C}1",
+            "a\\.g\u{200C}it",
+        ] {
+            assert!(
+                !is_git_metadata_component(accepted.as_bytes()),
+                "{accepted:?} must stay an ordinary name"
+            );
+        }
+    }
+
+    #[test]
+    fn non_utf8_names_compare_bytes_only() {
+        assert!(is_git_metadata_component(b".GIT"));
+        assert!(is_git_metadata_component(b"\xFF\\.git"));
+        assert!(!is_git_metadata_component(b".git\xFF"));
     }
 }

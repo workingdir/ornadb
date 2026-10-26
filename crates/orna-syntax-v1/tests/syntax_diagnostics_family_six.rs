@@ -67,7 +67,7 @@ fn nested_interpolation_recovery_keeps_self_and_compound_suffixes() {
     assert!(matches!(
         &inner_arms[1].pattern,
         Pattern::Constructor { path, fields, .. }
-            if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Packet"]
+            if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Geo", "Packet"]
                 && fields.len() == 2
     ));
     assert!(
@@ -151,7 +151,7 @@ fn nested_guard_recovery_keeps_a_deep_compound_suffix() {
     assert!(matches!(
         &arm.pattern,
         Pattern::Constructor { path, arguments, .. }
-            if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Packet"]
+            if path.iter().map(|segment| segment.text.as_str()).collect::<Vec<_>>() == ["Geo", "Packet"]
                 && arguments.len() == 2
                 && matches!(&arguments[0], Pattern::List { elements, .. } if elements.len() == 2)
                 && matches!(&arguments[1], Pattern::Constructor { fields, .. } if fields.len() == 1)

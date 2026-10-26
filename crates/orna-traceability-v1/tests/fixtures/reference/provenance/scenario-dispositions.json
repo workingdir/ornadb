@@ -1,0 +1,167 @@
+[
+  {
+    "id": "ASSERT-REWRITE-091",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "AUTOID-REFS-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "COMPACT-GENERATION-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "COMPACT-MERGE-GENERATION-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "COMPACT-SCHEMA-PROJECTION-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "FIELD-002",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "FLOAT-STATS-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "KEY-004",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "KEY-005",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "MERGE-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "MERGE-002",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "MERGE-003",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "MERGE-004",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "MERGE-PRUNE-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "ORDER-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "PATH-CASE-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "PATH-EMPTY-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "PROFILE-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "PROJECT-LIFE-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "ROW-002",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "STORAGE-DISJOINT-001",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "SYS-STORAGE-ADMIN-100",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-BLOB-04",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-BLOB-06",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-04",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-05",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-06",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-07",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-08",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-09",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-10",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-OGB-11",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  },
+  {
+    "id": "V110-APP-03",
+    "status": "legacy-context-only",
+    "reason": "retired requirement or superseded physical row/codec policy"
+  }
+]

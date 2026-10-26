@@ -187,16 +187,6 @@ fn source_stream_argument() -> Environment {
     )])
 }
 
-fn source_cancel_arguments(invocation: CanonicalValue, reason: &str) -> Environment {
-    Environment::from([
-        ("job".to_owned(), invocation),
-        (
-            "reason".to_owned(),
-            CanonicalValue::new(OvbRaw::Text(reason.to_owned())).unwrap(),
-        ),
-    ])
-}
-
 struct RuntimePauseDispatcher<'a> {
     state: &'a RuntimeState,
     lease: WriterLease,
@@ -223,7 +213,7 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
                         .map_err(|error| {
                             error
                                 .public_code()
-                                .unwrap_or("sys.admin.unavailable")
+                                .unwrap_or("sys.storage.unavailable")
                                 .to_owned()
                         })?;
                     let accepted = matches!(
@@ -244,54 +234,22 @@ impl AsyncApplicationEffectDispatcher for RuntimePauseDispatcher<'_> {
     }
 }
 
-struct SourceCancelDispatcher {
-    seen: std::sync::Arc<std::sync::Mutex<Option<(CanonicalValue, Option<String>)>>>,
-}
-
-impl AsyncApplicationEffectDispatcher for SourceCancelDispatcher {
-    fn dispatch<'a>(
-        &'a self,
-        effect: ApplicationEffectRequest,
-        _context: &'a orna_runtime_v1::RuntimeActivationContext,
-    ) -> ApplicationEffectFuture<'a> {
-        Box::pin(async move {
-            let ApplicationEffectRequest::CancelInvocation { invocation, reason } = effect else {
-                return Err("unexpected pause".to_owned());
-            };
-            *self.seen.lock().unwrap() = Some((invocation, reason));
-            Ok(CanonicalValue::new(OvbRaw::Bool(true)).unwrap())
-        })
-    }
-}
-
 #[test]
-fn typed_sys_cancel_fixture_reaches_the_trusted_source_effect_dispatcher() {
-    let runtime = runtime_context();
+fn typed_sys_cancel_without_a_linked_provider_is_rejected_before_evaluation() {
+    // sys.cancel types against its sys.InvocationHandle<T> argument, but no
+    // production dispatcher executes it: orna serve answers CancelInvocation
+    // with a constant failure and no production source produces an
+    // invocation handle. ORNA-SYS-008 therefore rejects the fixture at
+    // admission, with version incompatibility as its only diagnostic.
     let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
-    let application = authority
+    let error = authority
         .admit_module("typed-sys-cancel.orna", CANCEL_SOURCE, "main")
-        .expect("typed cancellation fixture is admitted");
-    let invocation = CanonicalValue::new(OvbRaw::Text("opaque-invocation".to_owned())).unwrap();
-    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
-    let dispatcher = SourceCancelDispatcher {
-        seen: std::sync::Arc::clone(&seen),
-    };
+        .expect_err("sys.cancel has no linked production provider");
 
-    let staged = block_on(authority.evaluate_staged_with_async_effects(
-        &application,
-        &source_cancel_arguments(invocation.clone(), "requested by operator"),
-        &runtime.context,
-        &dispatcher,
-    ))
-    .expect("typed sys.cancel reaches the trusted dispatcher");
-
-    assert!(staged.mutations().is_empty());
-    assert_eq!(staged.value().raw(), &OvbRaw::Bool(true));
     assert_eq!(
-        *seen.lock().unwrap(),
-        Some((invocation, Some("requested by operator".to_owned())))
+        error,
+        ApplicationError::Semantic(vec!["sys.version.incompatible".to_owned()])
     );
-    runtime.cleanup();
 }
 
 #[test]

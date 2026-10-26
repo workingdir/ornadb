@@ -129,7 +129,7 @@ fn fixture_repository() -> (TempDir, Repository) {
     git(root.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(root.path().join("main.orna"), SECRET_REFERENCE_SOURCE).unwrap();
     fs::create_dir_all(root.path().join(".orna")).unwrap();
-    fs::write(root.path().join(".orna/format.orna"), "format 1\n").unwrap();
+    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "fixture repository"]);
     let repository = Repository::discover(root.path()).unwrap();

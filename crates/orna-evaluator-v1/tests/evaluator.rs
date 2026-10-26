@@ -496,6 +496,38 @@ impl EffectHandler for DistinctRelationEffects {
         }))
     }
 }
+
+/// Serves `0..rows` as Int rows in pages of the requested size, with a
+/// big-endian cursor that grows lexicographically.
+struct PagedRelationEffects {
+    rows: usize,
+}
+
+impl EffectHandler for PagedRelationEffects {
+    fn handle(&mut self, _: &Expr, _: &[Value]) -> Result<Option<Value>, EvaluationError> {
+        Ok(None)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        _: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        budget.debit(1)?;
+        let start = after.map_or(0, |cursor| {
+            u64::from_be_bytes(cursor.try_into().expect("eight-byte cursor")) as usize
+        });
+        let end = start.saturating_add(limit).min(self.rows);
+        Ok(Some(RelationPage {
+            rows: (start..end)
+                .map(|value| Value::int((value as u64).into()))
+                .collect(),
+            next: (end < self.rows).then(|| (end as u64).to_be_bytes().to_vec()),
+        }))
+    }
+}
 struct UnionRelationEffects {
     rows: BTreeMap<String, Vec<Value>>,
     cursors: Vec<(String, Option<Vec<u8>>)>,
@@ -981,7 +1013,7 @@ fn nominal_admission_rejects_malformed_named_call_captures() {
         (field_id_raw("unknown"), Raw::Int(8.into())),
         (field_id_raw("value"), Raw::Int(7.into())),
     ]);
-    let functions = BTreeMap::from([
+    let functions = Functions::from([
         (
             "run".into(),
             PureFunction {
@@ -1217,7 +1249,7 @@ fn nominal_private_field_selection_is_owner_scoped() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1248,7 +1280,7 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.make".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1274,7 +1306,7 @@ fn nominal_private_field_selection_is_rejected_outside_owner() {
                 "fixtures/evaluator_source_b054fcd571d69b72.orna"
             )),
             &environment,
-            &BTreeMap::new(),
+            &Functions::new(),
             &definitions,
             Limits::default(),
         )),
@@ -1290,7 +1322,7 @@ fn nominal_private_field_selection_works_in_owner_created_direct_closure() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.read".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1321,8 +1353,8 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
         Some("vault"),
         vec![nominal_field("secret", false, None)],
     );
-    let functions = BTreeMap::from([(
-        "vault.map".into(),
+    let functions = Functions::from([(
+        "vault.collect".into(),
         PureFunction {
             parameters: Vec::new(),
             body: parsed_expression(include_str!(
@@ -1333,7 +1365,7 @@ fn nominal_private_field_selection_works_in_owner_created_collection_closure() {
     )]);
 
     let result = invoke_named_with_nominals(
-        "vault.map",
+        "vault.collect",
         &functions,
         &Environment::new(),
         &definitions,
@@ -1511,7 +1543,7 @@ fn nominal_supplied_fields_evaluate_in_written_order_before_canonical_serializat
         })),
         span,
     };
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "run".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1586,7 +1618,7 @@ fn external_nominal_public_default_runs_in_declaration_owner_namespace() {
             )),
         )],
     );
-    let functions = BTreeMap::from([(
+    let functions = Functions::from([(
         "vault.helper".into(),
         PureFunction {
             parameters: Vec::new(),
@@ -1757,7 +1789,7 @@ fn external_nominal_construction_rejects_private_fields_but_owner_namespace_can_
         ),
     );
 
-    let functions = std::collections::BTreeMap::from([
+    let functions = Functions::from([
         (
             "vault.make".into(),
             PureFunction {
@@ -4310,7 +4342,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
 }
 
 #[test]
-fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
+fn std_collection_float_aggregates_fail_on_bad_inputs_and_yield_ieee_infinity() {
     for expression in [
         include_str!("fixtures/evaluator_source_cdab6ecfce425b19.orna"),
         include_str!("fixtures/evaluator_source_fe5013414b733c91.orna"),
@@ -4342,12 +4374,8 @@ fn std_collection_float_aggregates_reject_mixed_inputs_callbacks_and_limits() {
         );
     }
     assert_eq!(
-        code(evaluate_expression(
-            include_str!("fixtures/evaluator_source_4513747d05260e45.orna"),
-            &Environment::new(),
-            Limits::default(),
-        )),
-        "ORNA-EVAL-DIVIDE-BY-ZERO"
+        evaluate(include_str!("fixtures/evaluator_source_4513747d05260e45.orna")),
+        Value::new(Raw::Float(f64::INFINITY.to_bits())).unwrap()
     );
 
     for (expression, limits) in [
@@ -6124,14 +6152,14 @@ fn std_collection_sort_by_accepts_all_call_forms_and_preserves_stable_ties() {
 
 #[test]
 fn std_collection_asof_join_uses_latest_prior_match_and_canonical_row_ties() {
-    let collection_source = orna_standard::reference_standard_sources_v1()
+    let collection_source = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/collection.orna")
         .expect("the collection module is in the pinned standard profile")
         .1;
-    let functions = functions_from_source(&collection_source)
-        .into_iter()
-        .map(|(name, function)| (format!("std.collection.{name}"), function))
+    let functions: Functions = functions_from_source(&collection_source)
+        .iter()
+        .map(|(name, function)| (format!("std.collection.{name}"), function.clone()))
         .collect();
     let expression = include_str!("fixtures/asof_join_nearest.orna");
 
@@ -7563,15 +7591,17 @@ fn supports_comparison_boolean_and_allowlisted_math() {
 
 #[test]
 fn pinned_standard_math_source_executes_every_public_function() {
-    let (path, source) = orna_standard::reference_standard_sources_v1()
+    let (path, source) = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .next()
         .expect("pinned standard source");
     assert_eq!(path, "std/math.orna");
     let mut functions = functions_from_source(&source);
-    functions.extend(functions_from_source(include_str!(
-        "fixtures/v1_standard_math_consumer.orna"
-    )));
+    functions
+        .extend(functions_from_source(include_str!(
+            "fixtures/v1_standard_math_consumer.orna"
+        )))
+        .expect("the consumer fixture binds no second standard layer");
     assert_eq!(
         invoke_named("incremented", &functions, &Environment::new(), Limits::default())
             .unwrap(),
@@ -7686,7 +7716,7 @@ fn evaluates_local_assignments_and_finite_list_for_mutations() {
             &Environment::new(),
             Limits::default(),
         )),
-        "ORNA-EVAL-ASSERT"
+        "ORNA-A091-008"
     );
     assert_eq!(
         code(evaluate_expression(
@@ -9533,6 +9563,155 @@ fn distinct_relation_eliminates_duplicates_and_handles_empty_input() {
     assert_eq!(empty.cursors, vec![None]);
 }
 
+/// A04-05; 09 `count` ("Exact finite count. Resource failure is explicit"):
+/// rows streamed through a scan cost steps, and only values a stage or terminal
+/// retains count against the item budget.
+#[test]
+fn relation_scans_beyond_the_item_budget_count_only_retained_values() {
+    let rows = 2_100;
+    assert!(rows > Limits::default().max_collection_items);
+    let source = || relation_source_expression("Big");
+    for (label, body, expected) in [
+        ("count", relation_terminal(source(), "count"), 2_100_u64),
+        (
+            "filtered count",
+            relation_terminal(
+                relation_stage(
+                    source(),
+                    "filter",
+                    vec![parsed_expression("value => value < 10")],
+                ),
+                "count",
+            ),
+            10,
+        ),
+        (
+            "dropped count",
+            relation_terminal(
+                relation_stage(source(), "drop", vec![relation_integer(2_050)]),
+                "count",
+            ),
+            50,
+        ),
+        ("sum", relation_terminal(source(), "sum"), 2_203_950),
+    ] {
+        assert_eq!(
+            invoke_relation(body, &mut PagedRelationEffects { rows }, Limits::default())
+                .map_err(|error| error.code().to_owned()),
+            Ok(Value::int(expected.into())),
+            "{label}"
+        );
+    }
+    for (label, terminal, expected) in [("exists", "exists", true), ("every", "every", true)] {
+        let predicate = if terminal == "exists" {
+            "value => value == 2099"
+        } else {
+            "value => value >= 0"
+        };
+        let body = relation_stage(source(), terminal, vec![parsed_expression(predicate)]);
+        assert_eq!(
+            invoke_relation(body, &mut PagedRelationEffects { rows }, Limits::default())
+                .map_err(|error| error.code().to_owned()),
+            Ok(Value::new(Raw::Bool(expected)).unwrap()),
+            "{label}"
+        );
+    }
+    // Sorting retains every row, so the retained set exceeds the item budget
+    // and fails explicitly instead of returning a truncated result.
+    let sorted = relation_stage(
+        source(),
+        "sort_by",
+        vec![parsed_expression("value => 0 - value")],
+    );
+    assert_eq!(
+        code(invoke_relation(
+            relation_terminal(sorted, "first"),
+            &mut PagedRelationEffects { rows },
+            Limits::default(),
+        )),
+        "ORNA-EVAL-LIMIT"
+    );
+}
+
+/// W13-01; ORNA-COMPARE-002 ("each accepted operator yields `Bool`") and
+/// ORNA-NUM-002: ordered comparison of Decimals is exact across scales.
+#[test]
+fn decimal_ordered_comparisons_yield_bool_across_scales() {
+    for (source, expected) in [
+        ("1.5 < 2.0", true),
+        ("1.5 > 2.0", false),
+        ("2.0 <= 2.00", true),
+        ("1.50 > 1.5", false),
+        ("1.50 >= 1.5", true),
+        ("-0.5 < 0.25", true),
+        ("10.0 > 9.99", true),
+    ] {
+        assert_eq!(
+            evaluate_expression(source, &Environment::new(), Limits::default())
+                .map_err(|error| error.code().to_owned()),
+            Ok(Value::new(Raw::Bool(expected)).unwrap()),
+            "{source}"
+        );
+    }
+    let mut session = AdmittedReplSession::new(Limits::default());
+    assert_eq!(
+        session
+            .submit("[1.5, 2.5, 3.0] | filter(value => value > 2.0) == [2.5, 3.0]")
+            .map_err(|error| error.code().to_owned()),
+        Ok(Some(Value::new(Raw::Bool(true)).unwrap())),
+    );
+}
+
+/// W22-05: Decimal `%` (06 operator table) is the exact truncated remainder,
+/// matching Int `%`: the result keeps the dividend's sign (ORNA-NUM-002/005).
+#[test]
+fn decimal_remainder_is_exact_and_truncated_like_int() {
+    for source in [
+        "7.5 % 2.0 == 1.5",
+        "-7.5 % 2.0 == -1.5",
+        "7.5 % -2.0 == 1.5",
+        "1.25 % 0.5 == 0.25",
+        "6.0 % 1.5 == 0.0",
+        "-7 % 2 == -1",
+    ] {
+        assert_eq!(
+            evaluate_expression(source, &Environment::new(), Limits::default())
+                .map_err(|error| error.code().to_owned()),
+            Ok(Value::new(Raw::Bool(true)).unwrap()),
+            "{source}"
+        );
+    }
+    assert_eq!(
+        code(evaluate_expression(
+            "1.5 % 0.0",
+            &Environment::new(),
+            Limits::default()
+        )),
+        "ORNA-EVAL-DIVIDE-BY-ZERO"
+    );
+}
+
+/// W22-02; ORNA-LIT-002 and the grammar's `decimal_integer , exponent`: an
+/// exponent numeral without a fraction is an exact Decimal.
+#[test]
+fn exponent_only_decimal_numerals_evaluate_exactly() {
+    for source in [
+        "1e3 == 1000.0",
+        "1E-2 == 0.01",
+        "5e+0 == 5.0",
+        "0e5 == 0.0",
+        "2e-30 * 1e30 == 2.0",
+        "1e300 * 1e300 == 1e600",
+    ] {
+        assert_eq!(
+            evaluate_expression(source, &Environment::new(), Limits::default())
+                .map_err(|error| error.code().to_owned()),
+            Ok(Value::new(Raw::Bool(true)).unwrap()),
+            "{source}"
+        );
+    }
+}
+
 #[test]
 fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union() {
     let body = parsed_expression(include_str!(
@@ -10742,7 +10921,7 @@ fn last_relation_returns_the_final_value_through_filter_map_flat_map_sort_and_wi
 }
 
 #[test]
-fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
+fn last_relation_scans_unsorted_pages_lazily_beyond_the_item_budget() {
     let source = relation_source_expression("Note");
     let body = relation_terminal(source, "last");
     let mut effects =
@@ -10758,18 +10937,21 @@ fn last_relation_scans_unsorted_pages_lazily_and_obeys_item_bounds() {
         "unsorted last must advance one source page at a time without an eager source shortcut"
     );
 
+    // A04-05: `last` retains one value, so scanning more rows than the item
+    // budget is charged to steps, not to `max_collection_items`.
     let mut bounded =
         DistinctRelationEffects::new((1..=4).map(|value| Value::int(value.into())).collect());
     assert_eq!(
-        code(invoke_relation(
+        invoke_relation(
             body,
             &mut bounded,
             Limits {
                 max_collection_items: 3,
                 ..Limits::default()
             },
-        )),
-        "ORNA-EVAL-LIMIT"
+        )
+        .map_err(|error| error.code().to_owned()),
+        Ok(Value::option(Some(Value::int(4.into()))).expect("option is canonical"))
     );
 }
 
@@ -11126,23 +11308,31 @@ fn relation_sum_min_and_max_use_empty_identities_and_preserve_item_bounds() {
             );
         }
 
+        // A04-05: the aggregate folds in chunks of at most the item budget, so
+        // a relation longer than the budget still yields the exact result.
         let body = relation_terminal(relation_source_expression("Note"), name);
         let mut effects = DistinctRelationEffects::new(vec![
             Value::int(1.into()),
             Value::int(2.into()),
             Value::int(3.into()),
         ]);
+        let folded = match name {
+            "sum" => Value::int(6.into()),
+            "min" => Value::option(Some(Value::int(1.into()))).unwrap(),
+            _ => Value::option(Some(Value::int(3.into()))).unwrap(),
+        };
         assert_eq!(
-            code(invoke_relation(
+            invoke_relation(
                 body,
                 &mut effects,
                 Limits {
                     max_collection_items: 2,
                     ..Limits::default()
                 },
-            )),
-            "ORNA-EVAL-LIMIT",
-            "{name} must retain relation item bounds"
+            )
+            .map_err(|error| error.code().to_owned()),
+            Ok(folded),
+            "{name} must fold within the relation item bound"
         );
     }
 }
@@ -11862,7 +12052,7 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         orna_syntax_v1::ReplInput::Expression(_)
     ));
     assert!(staged.result_type().is_some());
-    assert!(staged.effects().effects.contains("network"));
+    assert!(staged.effects().effects.contains(&orna_semantic_v1::EffectKind::Network));
     assert!(staged.effects().may_fail);
     assert_eq!(
         session.preview(include_str!("fixtures/admitted_repl_last_result.orna").trim()),
@@ -11873,5 +12063,55 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         session.preview(include_str!("fixtures/admitted_repl_answer.orna").trim()),
         Ok(Value::int(41.into())),
         "staging must not alter existing bindings"
+    );
+}
+
+#[test]
+fn default_limits_pass_full_collection_list_through_std_collection_operations() {
+    let rows = Value::new(Raw::Array(
+        (0..2_048).map(|value| Raw::Int(value.into())).collect(),
+    ))
+    .unwrap();
+    let descending = Value::new(Raw::Array(
+        (0..2_048).rev().map(|value| Raw::Int(value.into())).collect(),
+    ))
+    .unwrap();
+    let environment = Environment::from([
+        ("rows".into(), rows),
+        ("descending".into(), descending),
+    ]);
+    for source in [
+        "std.collection.map(rows, value => value * 10)",
+        "std.collection.filter(rows, value => value % 2 == 0)",
+        "std.collection.sort_by(rows, value => value)",
+        "std.collection.rank(rows, value => value % 10)",
+        "std.collection.rank(descending, value => value)",
+        "std.collection.group_by(rows, value => value % 2)",
+        "std.collection.sum(rows)",
+    ] {
+        evaluate_expression(source, &environment, Limits::default())
+            .unwrap_or_else(|error| panic!("{source}: {}", error.code()));
+    }
+    let mapped = evaluate_expression(
+        "std.collection.map(rows, value => value * 10)",
+        &environment,
+        Limits::default(),
+    )
+    .unwrap();
+    let Raw::Array(items) = mapped.raw() else {
+        panic!("map must return an array");
+    };
+    assert_eq!(items.len(), 2_048);
+}
+
+#[test]
+fn default_limits_still_stop_an_infinite_while_loop_with_eval_limit() {
+    assert_eq!(
+        code(evaluate_expression(
+            "while true {}",
+            &Environment::new(),
+            Limits::default(),
+        )),
+        "ORNA-EVAL-LIMIT"
     );
 }

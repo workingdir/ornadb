@@ -6,7 +6,7 @@
 //! handles for later value/schema/store work. It does not write rows, convert
 //! data, or interpret native graph objects.
 
-use std::{fmt, process::Command, str::FromStr};
+use std::{fmt, str::FromStr};
 
 use orna_syntax_v1::{Declaration, Expr, LiteralKind, RecordField, parse_module, parse_row};
 use sha2::{Digest, Sha256};
@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::native_graph::{
     GitHashAlgorithm, GraphError, NativeGraphContext, NativeOid, RepositoryCaptureCapability,
 };
+use crate::object_reader::{ObjectKind, ObjectReader, TreeEntry, TreeEntryMode};
 use crate::row_store::RowMapSnapshot;
 use crate::{Repository, RepositoryError};
 use orna_value_v1::{
@@ -25,20 +26,49 @@ use super::DatabaseId;
 /// The final repository writer coordinate from the consolidated publication.
 pub const FINAL_REPOSITORY_FORMAT: u8 = 3;
 
+/// The `repository_layout_version` coordinate reported by `sys.rt.info()`: the
+/// 1.1.0 `repository_format` value, which equals [`FINAL_REPOSITORY_FORMAT`].
+pub const REPOSITORY_LAYOUT_VERSION: &str = "3";
+
+const _: () = assert!(
+    REPOSITORY_LAYOUT_VERSION.len() == 1
+        && REPOSITORY_LAYOUT_VERSION.as_bytes()[0] == b'0' + FINAL_REPOSITORY_FORMAT
+);
+
 /// The bounded size of the tracked `database.orna` record.
 pub const FORMAT_CONTEXT_MAX_METADATA_BYTES: usize = 64 * 1024;
 /// Per-module source bound compatible with project loading's aggregate budget.
 const MAX_SOURCE_MODULE_BYTES: usize = 4 * 1024 * 1024;
 
-const DATABASE_PATH: &str = ".orna/database.orna";
+/// The tracked metadata directory and the two record files format admission
+/// reads from it (ORNA-META-001, ORNA-META-002).
+const METADATA_DIRECTORY: &str = ".orna";
+const DATABASE_FILE: &str = "database.orna";
+const LEGACY_FORMAT_FILE: &str = "format.orna";
 pub(crate) const LEGACY_FORMAT_PATH: &str = ".orna/format.orna";
 const MAIN_SOURCE_PATH: &str = "main.orna";
-/// The fixed position of the format-3 native store root inside a snapshot.
+/// The bound on the fixed `main.orna` schema root a format-3 snapshot admits.
+const MAX_SCHEMA_ROOT_BYTES: usize = 64 * 1024;
+/// The fixed position of the format-3 native store root inside a snapshot,
+/// and its entry name in the metadata directory.
 pub(crate) const STORE_PATH: &str = ".orna/store";
-// Used only to classify a failed metadata-path lookup. The valid format-3
-// store path never recursively enumerates this tree.
-const MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC: usize = 65_536;
-const MAX_METADATA_READ_BYTES: usize = FORMAT_CONTEXT_MAX_METADATA_BYTES * 2;
+const STORE_ENTRY: &str = "store";
+/// Tracked `.orna/` entries a format-3 snapshot may still carry when it is
+/// read, although ORNA-META-001 admits only `database.orna` and `store`,
+/// because this build still writes them. The list is closed, and each entry
+/// names the work that removes it. The commit gate
+/// ([`Repository::validate_format3_index_tree`]) admits none of them, so no
+/// reviewed commit adds one.
+const TRANSITIONAL_FORMAT3_ENTRIES: [&str; 2] = [
+    // The object identity inventory from before it moved into the store.
+    // LSP rename (`orna-lsp` `server.rs`) still writes it, and `orna commit`
+    // migrates a staged copy into the store and drops it from the index.
+    // Removed by the store-backed LSP rename, ornadb-5il1.414.
+    crate::relation_admission::LEGACY_OBJECT_IDENTITY_SIDECAR_PATH,
+    // The record a prepared `orna migrate copy` candidate tracks. Removed when
+    // the migration coordinates move into commit trailers, ornadb-5il1.314.
+    crate::migration_copy::MIGRATION_RECORD,
+];
 
 /// Repository-format dispatch selected from tracked metadata.
 ///
@@ -74,7 +104,7 @@ impl RepositoryFormat {
 }
 
 /// Fail-closed outcomes for repository format admission and root seams.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FormatContextError {
     MetadataUnavailable,
     MetadataInvalid,
@@ -84,7 +114,16 @@ pub enum FormatContextError {
     /// write seams are refused, and the pinned numeric coordinate says which
     /// reader was asked.
     LegacyReadOnly(u8),
-    MixedFormats,
+    /// The snapshot mixes repository-format layouts, so no reader is
+    /// selected for it (ORNA-META-001, ORNA-META-002). `path` is the
+    /// repository-relative tracked path that does not belong to the format
+    /// the snapshot records: a legacy `.orna/format.orna` beside a format-3
+    /// `database.orna`, the format-3 `.orna/store` beside a legacy record,
+    /// another `.orna/` entry of a format-3 snapshot, or a loose row file that
+    /// a format-3 commit candidate writes.
+    MixedFormats {
+        path: String,
+    },
     SnapshotUnavailable,
     SnapshotInvalid,
     PinMismatch,
@@ -95,18 +134,21 @@ pub enum FormatContextError {
     RowMapMismatch,
     GraphContextUnavailable,
     GraphContextInvalid,
+    /// The native graph is present but malformed (store-format-3 section 2).
+    /// The typed graph error stays attached so callers can tell fault classes apart.
+    GraphMalformed(crate::native_graph::GraphError),
     TableBindingMismatch,
 }
 
 impl FormatContextError {
     /// Stable diagnostic code without paths, Git commands, or object IDs.
-    pub const fn code(self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
             Self::MetadataUnavailable => "ORNA-REPO-CONTEXT-001",
             Self::MetadataInvalid => "ORNA-REPO-CONTEXT-002",
             Self::UnknownFormat => "ORNA-REPO-CONTEXT-003",
             Self::LegacyReadOnly(_) => "ORNA-REPO-CONTEXT-015",
-            Self::MixedFormats => "ORNA-REPO-CONTEXT-004",
+            Self::MixedFormats { .. } => "ORNA-REPO-CONTEXT-004",
             Self::SnapshotUnavailable => "ORNA-REPO-CONTEXT-005",
             Self::SnapshotInvalid => "ORNA-REPO-CONTEXT-006",
             Self::PinMismatch => "ORNA-REPO-CONTEXT-007",
@@ -117,6 +159,7 @@ impl FormatContextError {
             Self::RowMapMismatch => "ORNA-REPO-CONTEXT-012",
             Self::GraphContextUnavailable => "ORNA-REPO-CONTEXT-013",
             Self::GraphContextInvalid => "ORNA-REPO-CONTEXT-014",
+            Self::GraphMalformed(_) => "ORNA-REPO-CONTEXT-017",
             Self::TableBindingMismatch => "ORNA-REPO-CONTEXT-016",
         }
     }
@@ -134,7 +177,12 @@ impl fmt::Display for FormatContextError {
                     "repository format {format} is a read-only compatibility snapshot; it has no row store to write"
                 );
             }
-            Self::MixedFormats => "repository metadata mixes format authorities",
+            Self::MixedFormats { path } => {
+                return write!(
+                    formatter,
+                    "repository snapshot mixes repository formats: {path} does not belong to its recorded format"
+                );
+            }
             Self::SnapshotUnavailable => "repository snapshot is unavailable",
             Self::SnapshotInvalid => "repository snapshot is invalid",
             Self::PinMismatch => "snapshot pin belongs to another repository",
@@ -145,12 +193,64 @@ impl fmt::Display for FormatContextError {
             Self::RowMapMismatch => "row map does not belong to the pinned format-3 context",
             Self::GraphContextUnavailable => "native graph repository data is unavailable",
             Self::GraphContextInvalid => "native graph repository data is invalid",
+            Self::GraphMalformed(error) => {
+                return write!(formatter, "native graph repository data is malformed: {error}");
+            }
             Self::TableBindingMismatch => "table declaration and committed schema binding disagree",
         })
     }
 }
 
 impl std::error::Error for FormatContextError {}
+
+/// A durable runtime write refused because the format recorded at `HEAD` is
+/// 1 or 2. Legacy snapshots keep their readers but have no row writer in this
+/// build (ORNA-UPGRADE-003, ORNA-ROW-013), and runtime admission follows the
+/// recorded format, not worktree metadata (ORNA-UPGRADE-001). The refusal
+/// carries its stable code, the recorded format and the remedy, so a front
+/// end can report it without interpreting it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LegacyWriteRefused {
+    format: u8,
+}
+
+impl LegacyWriteRefused {
+    /// What a user can do. No in-place format-3 upgrade ships yet, so the
+    /// remedy names the work item that delivers it rather than a command.
+    pub const REMEDY: &'static str = "this build has no writer or in-place upgrade for format-1/2 snapshots; the format-3 upgrade is tracked as ornadb-5il1.184";
+
+    /// The format recorded at `HEAD`: 1 or 2.
+    pub const fn format(self) -> u8 {
+        self.format
+    }
+
+    /// The stable diagnostic code, shared with the read-only legacy
+    /// format-context refusal.
+    pub const fn code(self) -> &'static str {
+        FormatContextError::LegacyReadOnly(self.format).code()
+    }
+
+    /// The condition, without the format number.
+    pub const fn title(self) -> &'static str {
+        "repository HEAD is a read-only legacy snapshot"
+    }
+
+    pub const fn remedy(self) -> &'static str {
+        Self::REMEDY
+    }
+}
+
+impl fmt::Display for LegacyWriteRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository format {} at HEAD is a read-only compatibility snapshot; durable runtime writes are refused",
+            self.format
+        )
+    }
+}
+
+impl std::error::Error for LegacyWriteRefused {}
 
 /// Owner-authenticated descriptor binding for one format-3 relation in an
 /// exact repository UUID and snapshot. A qualified source identity is retained
@@ -305,12 +405,12 @@ impl crate::GitCommitRef {
 }
 
 /// Opaque proof that the pinned `main.orna` source/schema root was present in
-/// the admitted snapshot. The native commit identity remains repository-owned.
+/// the admitted snapshot as a regular blob. The native commit identity remains
+/// repository-owned.
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
     oid: NativeOid,
-    digest: [u8; 32],
 }
 
 /// Opaque proof that the pinned `.orna/store` tree had a valid native-tree
@@ -448,20 +548,15 @@ impl RepositoryFormatContext {
         &self.snapshot
     }
 
-    /// A non-authoritative schema/root validation seam for later values and
-    /// row layers. It validates only the fixed source root in this slice.
+    /// Pins the committed `main.orna` source root by its native blob OID.
+    ///
+    /// The source bytes are not read here. Store format 3 bounds only
+    /// `database.orna` at 64 KiB (store-format-3 §1); a module source is
+    /// admitted under the source-module bound when a table is bound to it.
+    /// Reading and capping the source on every row-map load would make a
+    /// project with a larger `main.orna` unable to open any row.
     pub fn validate_schema_root(&self) -> Result<SchemaRootPin, FormatContextError> {
         self.require_format3()?;
-        let source = match self
-            .snapshot
-            .read_file(&self.repository, MAIN_SOURCE_PATH, 64 * 1024)
-        {
-            Ok(source) => source,
-            Err(RepositoryError::GitUnavailable) => {
-                return Err(FormatContextError::SchemaRootUnavailable);
-            }
-            Err(_) => return Err(FormatContextError::SchemaRootInvalid),
-        };
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let oid = committed_path_oid(
             &self.repository,
@@ -479,7 +574,6 @@ impl RepositoryFormatContext {
         Ok(SchemaRootPin {
             snapshot: self.snapshot.clone(),
             oid,
-            digest: Sha256::digest(&source).into(),
         })
     }
 
@@ -527,15 +621,35 @@ impl RepositoryFormatContext {
             snapshot_id,
             relation_id,
         )
-        .map_err(|_| FormatContextError::GraphContextInvalid)
+        .map_err(graph_context_error)
     }
 
     /// Issues native Git graph authority only for a sealed row-map snapshot
     /// whose repository, database, schema, store root, and exact snapshot
-    /// authority match this pinned format-3 context.
+    /// authority match this pinned format-3 context. The graph is owned by this
+    /// context's runtime owner, or by the repository-derived owner when none is set.
     pub fn open_native_graph(
         &self,
         rows: &RowMapSnapshot,
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.issue_native_graph(rows, self.runtime_owner_id)
+    }
+
+    /// Issues the same graph authority as [`Self::open_native_graph`], owned by
+    /// `owner_id`. Accepted pins captured under the repository-derived owner
+    /// stay admissible through that owner as a fallback.
+    pub fn open_native_graph_for_owner(
+        &self,
+        rows: &RowMapSnapshot,
+        owner_id: [u8; 16],
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.issue_native_graph(rows, Some(owner_id))
+    }
+
+    fn issue_native_graph(
+        &self,
+        rows: &RowMapSnapshot,
+        runtime_owner_id: Option<[u8; 16]>,
     ) -> Result<NativeGraphContext, FormatContextError> {
         self.require_format3()?;
         let database_id = self.require_database_id()?;
@@ -582,7 +696,7 @@ impl RepositoryFormatContext {
         let repository_id: [u8; 32] = repository_hash.finalize().into();
 
         let authority = rows.authority();
-        let owner_id = self.runtime_owner_id.unwrap_or_else(|| {
+        let derived_owner_id = {
             let mut owner_hash = Sha256::new();
             owner_hash.update(b"orna.repository.graph.owner.v1\0");
             owner_hash.update(authority);
@@ -590,7 +704,8 @@ impl RepositoryFormatContext {
             let mut owner_id = [0u8; 16];
             owner_id.copy_from_slice(&owner_digest[..16]);
             owner_id
-        });
+        };
+        let owner_id = runtime_owner_id.unwrap_or(derived_owner_id);
         let mut identity_hash = Sha256::new();
         identity_hash.update(b"orna.repository.graph.context.v1\0");
         identity_hash.update(repository_id);
@@ -614,12 +729,14 @@ impl RepositoryFormatContext {
             schema_digest,
             rows.clone(),
         )
+        .map(|graph| graph.with_accepted_pin_fallback_owner(derived_owner_id))
         .map_err(|_| FormatContextError::GraphContextInvalid)
     }
 
     /// Issues capture authority using this admitted snapshot and its graph
     /// owner identity. A runtime-scoped context therefore writes scratch refs
-    /// under the owner that will reclaim them after a crash.
+    /// under the owner that will reclaim them after a crash. Captured
+    /// candidates become lazy values pinned to this context's exact commit.
     pub fn capture_capability(
         &self,
         relation_id: [u8; 16],
@@ -634,7 +751,11 @@ impl RepositoryFormatContext {
         let scope = graph
             .open_read_scope()
             .map_err(CaptureCapabilityError::Graph)?;
-        RepositoryCaptureCapability::new(graph, scope).map_err(CaptureCapabilityError::Graph)
+        let pin = self.value_pin().map_err(CaptureCapabilityError::Format)?;
+        RepositoryCaptureCapability::new(graph, scope)
+            .map_err(CaptureCapabilityError::Graph)?
+            .with_capture_pin(pin)
+            .map_err(|_| CaptureCapabilityError::Format(FormatContextError::GraphContextInvalid))
     }
 
     /// Opens a snapshot-pinned format-3 value context for one relation.
@@ -646,7 +767,6 @@ impl RepositoryFormatContext {
         relation_id: [u8; 16],
     ) -> Result<Format3Context, FormatContextError> {
         self.require_format3()?;
-        let database_id = self.require_database_id()?;
         let rows = self.load_row_map(relation_id)?;
         let graph = std::sync::Arc::new(self.open_native_graph(&rows)?);
         let scope = graph
@@ -654,20 +774,25 @@ impl RepositoryFormatContext {
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
         let capability = RepositoryCaptureCapability::new(graph, scope)
             .map_err(|_| FormatContextError::GraphContextInvalid)?;
+        capability
+            .value_context(self.value_pin()?)
+            .map_err(|_| FormatContextError::GraphContextInvalid)
+    }
+
+    /// The value-layer pin for this context's exact commit.
+    fn value_pin(&self) -> Result<ValueSnapshot, FormatContextError> {
+        let database_id = self.require_database_id()?;
         let algorithm = repository_hash_algorithm(&self.repository)?;
         let commit = NativeOid::from_hex(algorithm, self.snapshot.commit.as_str())
             .map_err(|_| FormatContextError::SnapshotInvalid)?;
-        let pin = ValueSnapshot::Commit {
+        Ok(ValueSnapshot::Commit {
             database: *database_id.as_bytes(),
             algorithm: match algorithm {
                 GitHashAlgorithm::Sha1 => ValueGitHash::Sha1,
                 GitHashAlgorithm::Sha256 => ValueGitHash::Sha256,
             },
             oid: commit.as_bytes().to_vec(),
-        };
-        capability
-            .value_context(pin)
-            .map_err(|_| FormatContextError::GraphContextInvalid)
+        })
     }
 
     /// Resolves the committed descriptor selected by its authenticated table ID.
@@ -693,10 +818,10 @@ impl RepositoryFormatContext {
         let graph = self.open_native_graph(&rows)?;
         let scope = graph
             .open_read_scope()
-            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+            .map_err(graph_context_error)?;
         let descriptor = graph
             .read_schema_descriptor(&scope)
-            .map_err(|_| FormatContextError::GraphContextInvalid)?;
+            .map_err(graph_context_error)?;
         if schema_descriptor_table_id(&descriptor) != Some(relation_id) {
             return Err(FormatContextError::TableBindingMismatch);
         }
@@ -843,6 +968,46 @@ impl RepositoryFormatContext {
         }
     }
 }
+/// Classifies a native-graph fault on the admitted row-map path. Unavailable
+/// objects stay unavailable (ORNA-ROW-007). Shape faults in the native graph
+/// are malformed data (store-format-3 section 2, lines 50-55) and keep their
+/// typed diagnostic. Every other fault is an invalid graph context, not a
+/// malformed graph: a Git command failure, quota, cancel, durability or
+/// context-mismatch failure does not prove the stored graph is malformed.
+fn graph_context_error(error: crate::native_graph::GraphError) -> FormatContextError {
+    use crate::native_graph::GraphError;
+    match error {
+        GraphError::UnavailableObject
+        | GraphError::UnknownObjectAvailability
+        | GraphError::ObjectUnavailable
+        | GraphError::MissingObject { .. }
+        | GraphError::PromisedObjectNotMaterialized { .. } => {
+            FormatContextError::GraphContextUnavailable
+        }
+        GraphError::MalformedOid
+        | GraphError::UnknownNodeKind(_)
+        | GraphError::NonCanonicalData
+        | GraphError::NodeDataTooLarge(_)
+        | GraphError::FanoutExceeded(_)
+        | GraphError::HeightExceeded(_)
+        | GraphError::InvalidLength(_)
+        | GraphError::InvalidCount(_)
+        | GraphError::InvalidDomain
+        | GraphError::OverlappingChildRange
+        | GraphError::UncollapsedRoot
+        | GraphError::InvalidDigestLength
+        | GraphError::InvalidEmptyBlob
+        | GraphError::DuplicateRowKey
+        | GraphError::WrongNodeKind { .. }
+        | GraphError::InvalidTreeEnvelope
+        | GraphError::MissingNodeData
+        | GraphError::GitObjectMalformed
+        | GraphError::GitObjectHashMismatch
+        | GraphError::ContentIdentityMismatch
+        | GraphError::ChunkDigestMismatch => FormatContextError::GraphMalformed(error),
+        _ => FormatContextError::GraphContextInvalid,
+    }
+}
 
 impl SchemaRootPin {
     /// The snapshot pin from which this schema proof was admitted.
@@ -979,6 +1144,16 @@ impl HistoricalFormatContext {
         self.context.open_native_graph(rows)
     }
 
+    /// Issues the graph authority of [`Self::open_native_graph`], owned by
+    /// `owner_id`, for a mount that runs under that lease owner.
+    pub fn open_native_graph_for_owner(
+        &self,
+        rows: &RowMapSnapshot,
+        owner_id: [u8; 16],
+    ) -> Result<NativeGraphContext, FormatContextError> {
+        self.context.open_native_graph_for_owner(rows, owner_id)
+    }
+
     /// Reads one committed path's bytes from the pinned commit only.
     ///
     /// Available for every admitted format, so a legacy format-1/2 pin is
@@ -1012,6 +1187,99 @@ impl StoreRootPin {
 }
 
 impl Repository {
+    /// Refuses runtime admission when the format recorded at `HEAD` is not a
+    /// format this build knows (ORNA-REPO-CONTEXT-003). It runs before any
+    /// worktree metadata is read or any runtime state is opened, so a committed
+    /// `HEAD` is never bypassed by the worktree (ORNA-UPGRADE-001).
+    ///
+    /// Fails closed: when `HEAD` tracks a `.orna/database.orna` or
+    /// `.orna/format.orna` record that does not classify as a known format,
+    /// whatever the cause (unknown number, string or overflowing integer,
+    /// syntax-broken or open record, unreadable tree), the gate refuses with
+    /// [`FormatContextError::UnknownFormat`]. A `HEAD` whose metadata mixes
+    /// layouts (a legacy record beside `.orna/store`, ORNA-META-001) is refused
+    /// with [`FormatContextError::MixedFormats`] (ORNA-REPO-CONTEXT-004), never
+    /// reclassified as unknown. It falls through only when `HEAD` is unborn or
+    /// tracks no format record at all. Those cases are decided by
+    /// [`Self::require_writable_head_format`] and the metadata checks after it.
+    pub fn require_known_head_format(&self) -> Result<(), FormatContextError> {
+        match self.open_format_context() {
+            Ok(_) => Ok(()),
+            Err(error @ FormatContextError::MixedFormats { .. }) => Err(error),
+            Err(FormatContextError::UnknownFormat) => Err(FormatContextError::UnknownFormat),
+            Err(_) => self.refuse_unclassifiable_head_records(),
+        }
+    }
+
+    /// Decides a `HEAD` whose format context did not open. An unborn `HEAD`
+    /// (no pinnable snapshot) falls through. A `HEAD` that tracks any
+    /// `.orna/database.orna` or `.orna/format.orna` record, or whose metadata
+    /// cannot be read, is refused as an unknown format (fail closed).
+    fn refuse_unclassifiable_head_records(&self) -> Result<(), FormatContextError> {
+        let snapshot = match self.pin_snapshot("HEAD") {
+            Ok(snapshot) => snapshot,
+            Err(FormatContextError::SnapshotUnavailable) => return Ok(()),
+            Err(_) => return Err(FormatContextError::UnknownFormat),
+        };
+        match read_snapshot_metadata(self, &snapshot) {
+            Ok(metadata) if metadata.database.is_none() && metadata.legacy_format.is_none() => {
+                Ok(())
+            }
+            _ => Err(FormatContextError::UnknownFormat),
+        }
+    }
+
+    /// Admits durable runtime writes only when the format recorded at `HEAD`
+    /// has a writer. A format-1/2 `HEAD` is refused with
+    /// [`LegacyWriteRefused`] (ORNA-UPGRADE-001, ORNA-UPGRADE-003), whatever
+    /// metadata the worktree holds.
+    ///
+    /// An unborn `HEAD`, a format-3 `HEAD` and unreadable metadata are not
+    /// decided here; the metadata checks that follow report them. A prepared
+    /// migration copy is not admitted here: its `HEAD` is still the legacy
+    /// format, so ordinary durable writes stay refused (ORNA-UPGRADE-001,
+    /// ORNA-UPGRADE-003). Only [`Self::require_migration_carry_head_format`]
+    /// admits a prepared copy, for the migration's own checkpoint carry.
+    pub fn require_writable_head_format(&self) -> Result<(), LegacyWriteRefused> {
+        let Ok(context) = self.open_format_context() else {
+            return Ok(());
+        };
+        if !context.is_read_only() {
+            return Ok(());
+        }
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
+    }
+
+    /// Admits the migration's checkpoint carry only into a prepared copy
+    /// ([`Self::holds_prepared_migration`]) whose recorded `HEAD` format is
+    /// legacy (ORNA-UPGRADE-001). A writable `HEAD` is admitted as usual, and
+    /// an unreadable context is decided by [`Self::require_writable_head_format`].
+    pub fn require_migration_carry_head_format(&self) -> Result<(), LegacyWriteRefused> {
+        let Ok(context) = self.open_format_context() else {
+            return self.require_writable_head_format();
+        };
+        if !context.is_read_only() || self.holds_prepared_migration() {
+            return Ok(());
+        }
+        Err(LegacyWriteRefused {
+            format: context.repository_format_number(),
+        })
+    }
+
+    /// Whether this worktree holds a prepared format migration: a readable
+    /// publication journal that records migration continuity, as
+    /// `orna migrate copy` leaves in its destination. The journal lives in the
+    /// runtime directory, so without one nothing is read and nothing, not
+    /// even a coordination lock, is created.
+    pub fn holds_prepared_migration(&self) -> bool {
+        self.runtime_paths().root().exists()
+            && self.read_publication_journal().is_ok_and(|journal| {
+                journal.is_some_and(|journal| journal.migration_continuity().is_some())
+            })
+    }
+
     /// Pins a reachable Git selector without exposing its native object ID.
     pub(crate) fn pin_snapshot(
         &self,
@@ -1051,6 +1319,40 @@ impl Repository {
     ) -> Result<u8, FormatContextError> {
         self.open_private_candidate_format_context(candidate)
             .map(|context| context.repository_format_number())
+    }
+
+    /// Validates the exact staged index tree a reviewed commit will record,
+    /// before any commit object names it. The administration `commit` builds
+    /// its candidate, validates it, and only then creates the commit, so a
+    /// refused candidate leaves no object or ref behind (16-administration).
+    ///
+    /// The checks are the ones a pinned format-3 context applies: admitted
+    /// format-3 metadata, a bounded `main.orna` schema root, and an
+    /// `.orna/store` tree. Unlike reading a snapshot, the gate admits no
+    /// transitional `.orna/` entry: a reviewed commit tracks only
+    /// `database.orna` and `store` there (ORNA-META-001), so this writer never
+    /// produces a mixed snapshot.
+    pub(crate) fn validate_format3_index_tree(
+        &self,
+        tree: &crate::IndexTreeRef,
+    ) -> Result<(), FormatContextError> {
+        let metadata = read_tracked_metadata(self.objects(), tree.as_str())?;
+        let (format, _) = admit_metadata(&metadata, &[])?;
+        if !format.supports_writes() {
+            return Err(FormatContextError::LegacyReadOnly(format.number()));
+        }
+        self.read_tree_file(tree.as_str(), MAIN_SOURCE_PATH, MAX_SCHEMA_ROOT_BYTES)
+            .map_err(|error| match error {
+                RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
+                _ => FormatContextError::SchemaRootInvalid,
+            })?;
+        let store =
+            crate::ManagedPath::new(STORE_PATH).map_err(|_| FormatContextError::StoreRootInvalid)?;
+        match self.tree_entry(tree.as_str(), &store) {
+            Ok(Some((mode, _))) if mode == "040000" => Ok(()),
+            Err(RepositoryError::GitUnavailable) => Err(FormatContextError::StoreRootUnavailable),
+            _ => Err(FormatContextError::StoreRootInvalid),
+        }
     }
 
     /// Opens and validates format metadata at the current immutable HEAD.
@@ -1142,26 +1444,25 @@ impl Repository {
         if !snapshot.belongs_to(self) {
             return Err(FormatContextError::PinMismatch);
         }
-        let database = read_metadata_file(self, snapshot, DATABASE_PATH)?;
-        let legacy_format = read_metadata_file(self, snapshot, LEGACY_FORMAT_PATH)?;
-        parse_context(self.clone(), snapshot.clone(), database, legacy_format)
+        let metadata = read_snapshot_metadata(self, snapshot)?;
+        parse_context(self.clone(), snapshot.clone(), &metadata)
     }
 }
 
 fn repository_hash_algorithm(
     repository: &Repository,
 ) -> Result<GitHashAlgorithm, FormatContextError> {
-    let output = repository_git_output(repository, &["rev-parse", "--show-object-format=storage"])?;
-    match std::str::from_utf8(&output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim()
-    {
-        "sha1" => Ok(GitHashAlgorithm::Sha1),
-        "sha256" => Ok(GitHashAlgorithm::Sha256),
-        _ => Err(FormatContextError::GraphContextInvalid),
-    }
+    repository
+        .objects()
+        .algorithm()
+        .map_err(|error| match error {
+            RepositoryError::UnsupportedObjectFormat => FormatContextError::GraphContextInvalid,
+            _ => FormatContextError::GraphContextUnavailable,
+        })
 }
 
+/// Resolves one fixed snapshot path to its object through the repository's
+/// object reader, and checks the object type.
 fn committed_path_oid(
     repository: &Repository,
     commit: &crate::GitCommitRef,
@@ -1169,44 +1470,16 @@ fn committed_path_oid(
     path: &str,
     expected_kind: &str,
 ) -> Result<NativeOid, FormatContextError> {
-    let object_spec = format!("{}:{path}", commit.as_str());
-    let output = repository_git_output(repository, &["rev-parse", "--verify", &object_spec])?;
-    let hex = std::str::from_utf8(&output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim();
-    let oid =
-        NativeOid::from_hex(algorithm, hex).map_err(|_| FormatContextError::GraphContextInvalid)?;
-    let kind_output = repository_git_output(repository, &["cat-file", "-t", &oid.to_hex()])?;
-    if std::str::from_utf8(&kind_output)
-        .map_err(|_| FormatContextError::GraphContextInvalid)?
-        .trim()
-        != expected_kind
-    {
+    let object = repository
+        .objects()
+        .info(&format!("{}:{path}", commit.as_str()))
+        .map_err(|_| FormatContextError::GraphContextUnavailable)?
+        .ok_or(FormatContextError::GraphContextUnavailable)?;
+    if object.kind().name() != expected_kind {
         return Err(FormatContextError::GraphContextInvalid);
     }
-    Ok(oid)
-}
-
-fn repository_git_output(
-    repository: &Repository,
-    args: &[&str],
-) -> Result<Vec<u8>, FormatContextError> {
-    let output = Command::new("git")
-        .current_dir(repository.worktree())
-        .args(args)
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .env_remove("GIT_DIR")
-        .env_remove("GIT_WORK_TREE")
-        .env_remove("GIT_COMMON_DIR")
-        .env_remove("GIT_OBJECT_DIRECTORY")
-        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
-        .output()
-        .map_err(|_| FormatContextError::GraphContextUnavailable)?;
-    if !output.status.success() {
-        return Err(FormatContextError::GraphContextUnavailable);
-    }
-    Ok(output.stdout)
+    NativeOid::from_hex(algorithm, object.oid())
+        .map_err(|_| FormatContextError::GraphContextInvalid)
 }
 
 fn map_snapshot_error(error: RepositoryError) -> FormatContextError {
@@ -1218,92 +1491,174 @@ fn map_snapshot_error(error: RepositoryError) -> FormatContextError {
     }
 }
 
-fn read_metadata_file(
+/// One root tree's tracked `.orna` directory as format admission reads it:
+/// the two format records and every other entry, in Git tree order.
+struct TrackedMetadata {
+    database: Option<Vec<u8>>,
+    legacy_format: Option<Vec<u8>>,
+    others: Vec<TreeEntry>,
+}
+
+/// Reads the tracked metadata of one pinned snapshot: its commit's root tree,
+/// or a private candidate's exact tree.
+fn read_snapshot_metadata(
     repository: &Repository,
     snapshot: &RepositorySnapshotPin,
-    path: &str,
-) -> Result<Option<Vec<u8>>, FormatContextError> {
-    match snapshot.read_file(repository, path, MAX_METADATA_READ_BYTES) {
-        Ok(bytes) if bytes.len() <= FORMAT_CONTEXT_MAX_METADATA_BYTES => Ok(Some(bytes)),
-        Ok(_) => Err(FormatContextError::MetadataInvalid),
-        Err(RepositoryError::GitUnavailable) => Err(FormatContextError::MetadataUnavailable),
-        // File readers redact absence. Inspect the selected tree before
-        // treating a missing metadata path as a supported layout.
-        Err(_) => {
-            let path_is_present = if let Some(candidate) = &snapshot.private_candidate {
-                let managed_path = crate::ManagedPath::new(path)
-                    .map_err(|_| FormatContextError::MetadataInvalid)?;
-                repository
-                    .candidate_tree_entry(candidate, &managed_path)
-                    .map_err(|_| FormatContextError::MetadataInvalid)?
-                    .is_some()
-            } else {
-                repository
-                    .list_committed_tree(&snapshot.commit, MAX_TREE_ENTRIES_FOR_METADATA_DIAGNOSTIC)
-                    .map_err(|error| match error {
-                        RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
-                        _ => FormatContextError::MetadataInvalid,
-                    })?
-                    .into_iter()
-                    .any(|entry| {
-                        entry.path().as_path().to_str().is_some_and(|entry_path| {
-                            entry_path == path
-                                || entry_path
-                                    .strip_prefix(path)
-                                    .is_some_and(|suffix| suffix.starts_with('/'))
-                        })
-                    })
-            };
-            if path_is_present {
-                Err(FormatContextError::MetadataInvalid)
-            } else {
-                Ok(None)
-            }
+) -> Result<TrackedMetadata, FormatContextError> {
+    let objects = repository.objects();
+    let root = match &snapshot.private_candidate {
+        Some(candidate) => candidate.tree().as_str().to_owned(),
+        None => objects
+            .info(&format!("{}^{{tree}}", snapshot.commit.as_str()))
+            .map_err(map_metadata_read_error)?
+            .filter(|tree| tree.kind() == ObjectKind::Tree)
+            .ok_or(FormatContextError::MetadataInvalid)?
+            .oid()
+            .to_owned(),
+    };
+    read_tracked_metadata(objects, &root)
+}
+
+/// Reads the `.orna` directory of one root tree.
+///
+/// Admission needs the two format records, `.orna/database.orna` and the
+/// legacy `.orna/format.orna` (ORNA-META-002), and the names of the other
+/// entries, because the entries a snapshot may track depend on the format the
+/// records select (ORNA-META-001). It reads the root tree, the `.orna` tree
+/// and at most the two record blobs through the repository's object reader,
+/// and never lists the snapshot recursively: the format-3 store beside them
+/// grows with the rows it holds, and its size must not decide whether
+/// metadata can be read (ORNA-ROW-009).
+fn read_tracked_metadata(
+    objects: &ObjectReader,
+    root: &str,
+) -> Result<TrackedMetadata, FormatContextError> {
+    let mut metadata = TrackedMetadata {
+        database: None,
+        legacy_format: None,
+        others: Vec::new(),
+    };
+    let entries = match objects
+        .find_tree_entry(root, METADATA_DIRECTORY.as_bytes())
+        .map_err(map_metadata_read_error)?
+    {
+        Some(directory) if directory.mode() == TreeEntryMode::Tree => objects
+            .tree_entries(directory.oid())
+            .map_err(map_metadata_read_error)?,
+        // A snapshot without a `.orna` directory records no metadata.
+        _ => return Ok(metadata),
+    };
+    for entry in entries {
+        let record = if entry.name() == DATABASE_FILE.as_bytes() {
+            &mut metadata.database
+        } else if entry.name() == LEGACY_FORMAT_FILE.as_bytes() {
+            &mut metadata.legacy_format
+        } else {
+            metadata.others.push(entry);
+            continue;
+        };
+        // Git never writes two entries with one name; a tree that does holds
+        // malformed metadata rather than either record.
+        if record.is_some() {
+            return Err(FormatContextError::MetadataInvalid);
         }
+        *record = Some(read_metadata_blob(objects, &entry)?);
+    }
+    Ok(metadata)
+}
+
+/// Reads one metadata blob under the record bound. A metadata path that holds
+/// a directory, symlink or submodule is present but invalid.
+fn read_metadata_blob(
+    objects: &ObjectReader,
+    entry: &TreeEntry,
+) -> Result<Vec<u8>, FormatContextError> {
+    if !matches!(
+        entry.mode(),
+        TreeEntryMode::File | TreeEntryMode::Executable
+    ) {
+        return Err(FormatContextError::MetadataInvalid);
+    }
+    objects
+        .read_blob(entry.oid(), FORMAT_CONTEXT_MAX_METADATA_BYTES)
+        .map_err(map_metadata_read_error)
+}
+
+fn map_metadata_read_error(error: RepositoryError) -> FormatContextError {
+    match error {
+        RepositoryError::GitUnavailable => FormatContextError::MetadataUnavailable,
+        _ => FormatContextError::MetadataInvalid,
+    }
+}
+
+/// Selects the repository format and database identity the tracked metadata
+/// records, and refuses a snapshot whose `.orna` directory mixes layouts
+/// (ORNA-META-001, ORNA-META-002; Gate A, "unknown/mixed formats fail
+/// early"). A format-3 snapshot tracks only `database.orna`, `store` and the
+/// `tolerated` paths there. A legacy snapshot never tracks the format-3
+/// `store`, which no format-1/2 writer produced, so format-3 bytes relabelled
+/// with a legacy record do not open as a legacy snapshot (MIGRATION.md).
+fn admit_metadata(
+    metadata: &TrackedMetadata,
+    tolerated: &[&str],
+) -> Result<(RepositoryFormat, Option<DatabaseId>), FormatContextError> {
+    let legacy = metadata
+        .legacy_format
+        .as_deref()
+        .map(parse_legacy_format)
+        .transpose()?;
+    let (format, database_id) = match (metadata.database.as_deref(), legacy) {
+        (None, None) => return Err(FormatContextError::MetadataUnavailable),
+        (None, Some(format)) => (format, None),
+        (Some(database), None) => match parse_database_record(database)? {
+            DatabaseRecord::Format3(database_id) => (RepositoryFormat::Format3, Some(database_id)),
+            DatabaseRecord::LegacySidecar(_) => return Err(FormatContextError::MetadataInvalid),
+        },
+        (Some(database), Some(format)) => match parse_database_record(database)? {
+            DatabaseRecord::Format3(_) => {
+                return Err(mixed_metadata_entry(LEGACY_FORMAT_FILE.as_bytes()));
+            }
+            DatabaseRecord::LegacySidecar(database_id) => (format, Some(database_id)),
+        },
+    };
+    let foreign = metadata.others.iter().map(TreeEntry::name).find(|name| {
+        if format == RepositoryFormat::Format3 {
+            *name != STORE_ENTRY.as_bytes()
+                && !tolerated.iter().any(|path| {
+                    path.strip_prefix(METADATA_DIRECTORY)
+                        .and_then(|entry| entry.strip_prefix('/'))
+                        .is_some_and(|entry| entry.as_bytes() == *name)
+                })
+        } else {
+            *name == STORE_ENTRY.as_bytes()
+        }
+    });
+    match foreign {
+        Some(name) => Err(mixed_metadata_entry(name)),
+        None => Ok((format, database_id)),
+    }
+}
+
+/// Mixed formats at one `.orna` entry, named by its repository-relative path.
+fn mixed_metadata_entry(name: &[u8]) -> FormatContextError {
+    FormatContextError::MixedFormats {
+        path: format!("{METADATA_DIRECTORY}/{}", String::from_utf8_lossy(name)),
     }
 }
 
 fn parse_context(
     repository: Repository,
     snapshot: RepositorySnapshotPin,
-    database: Option<Vec<u8>>,
-    legacy_format: Option<Vec<u8>>,
+    metadata: &TrackedMetadata,
 ) -> Result<RepositoryFormatContext, FormatContextError> {
-    let legacy = legacy_format
-        .as_deref()
-        .map(parse_legacy_format)
-        .transpose()?;
-
-    match (database.as_deref(), legacy) {
-        (None, None) => Err(FormatContextError::MetadataUnavailable),
-        (None, Some(format)) => Ok(RepositoryFormatContext {
-            repository,
-            format,
-            database_id: None,
-            snapshot,
-            runtime_owner_id: None,
-        }),
-        (Some(database), None) => match parse_database_record(database)? {
-            DatabaseRecord::Format3(database_id) => Ok(RepositoryFormatContext {
-                repository,
-                format: RepositoryFormat::Format3,
-                database_id: Some(database_id),
-                snapshot,
-                runtime_owner_id: None,
-            }),
-            DatabaseRecord::LegacySidecar(_) => Err(FormatContextError::MetadataInvalid),
-        },
-        (Some(database), Some(format)) => match parse_database_record(database)? {
-            DatabaseRecord::Format3(_) => Err(FormatContextError::MixedFormats),
-            DatabaseRecord::LegacySidecar(database_id) => Ok(RepositoryFormatContext {
-                repository,
-                format,
-                database_id: Some(database_id),
-                snapshot,
-                runtime_owner_id: None,
-            }),
-        },
-    }
+    let (format, database_id) = admit_metadata(metadata, &TRANSITIONAL_FORMAT3_ENTRIES)?;
+    Ok(RepositoryFormatContext {
+        repository,
+        format,
+        database_id,
+        snapshot,
+        runtime_owner_id: None,
+    })
 }
 
 enum DatabaseRecord {
@@ -1311,6 +1666,11 @@ enum DatabaseRecord {
     LegacySidecar(DatabaseId),
 }
 
+/// Parses a `.orna/database.orna` record. Only the canonical format-3 record
+/// and the one-field legacy sidecar are admitted. A record that names format 1
+/// or 2 beside its `database_id` is refused as an unknown format, never read
+/// as a legacy layout: legacy layouts are read only from `.orna/format.orna`
+/// (ORNA-META-002; pinned by `refuses_legacy_format_numbers_inside_a_database_record`).
 fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextError> {
     let fields = parse_record(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
     if fields.len() == 1 && fields[0].name == "database_id" {
@@ -1354,24 +1714,74 @@ fn parse_database_record(bytes: &[u8]) -> Result<DatabaseRecord, FormatContextEr
     Ok(DatabaseRecord::Format3(database_id))
 }
 
-pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
-    let source = std::str::from_utf8(bytes).map_err(|_| FormatContextError::MetadataInvalid)?;
-    let line = source
-        .strip_suffix('\n')
-        .unwrap_or(source)
-        .strip_suffix('\r')
-        .unwrap_or_else(|| source.strip_suffix('\n').unwrap_or(source));
-    match line {
-        "format 1" => return Ok(RepositoryFormat::Legacy1),
-        "format 2" => return Ok(RepositoryFormat::Legacy2),
-        "format 3" => return Err(FormatContextError::UnknownFormat),
-        _ => {}
-    }
+/// One field value of a closed legacy `format.orna` record.
+#[derive(Clone, Copy)]
+enum LegacyRecordValue {
+    Integer(i64),
+    Text(&'static str),
+}
 
-    // The final publication names legacy reader coordinates as format 1/2,
-    // but does not enumerate any legacy `storage_profile` pair. Do not import
-    // historical draft/current-writer profile names into final admission.
-    Err(FormatContextError::MetadataInvalid)
+/// The `format.orna` records the format-1/2 writers produced. They stay
+/// readable inputs (ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002), and
+/// retained format-1/2 commits are decoded by their original storage profiles
+/// (`compatibility/README.md`). OrnaDB 1.0's `orna init` wrote the format-1
+/// record. The format-2 record is the closed capability record of the
+/// previous 1.1.0 draft (its ORNA-OGB-001). Each record is closed: it holds
+/// exactly these fields with these values, so an unlisted profile is never
+/// read as a known layout.
+const LEGACY_FORMAT_RECORDS: [(RepositoryFormat, &[(&str, LegacyRecordValue)]); 2] = [
+    (
+        RepositoryFormat::Legacy1,
+        &[
+            ("repository_format", LegacyRecordValue::Integer(1)),
+            (
+                "storage_profile",
+                LegacyRecordValue::Text("compact-storage-v1"),
+            ),
+        ],
+    ),
+    (
+        RepositoryFormat::Legacy2,
+        &[
+            ("repository_format", LegacyRecordValue::Integer(2)),
+            ("row_profile", LegacyRecordValue::Text("ORR-2")),
+            ("blob_profile", LegacyRecordValue::Text("OGB-1")),
+            ("semantic_profile", LegacyRecordValue::Text("SOV-2")),
+            (
+                "compact_profile",
+                LegacyRecordValue::Text("compact-storage-v2"),
+            ),
+        ],
+    ),
+];
+
+pub(super) fn parse_legacy_format(bytes: &[u8]) -> Result<RepositoryFormat, FormatContextError> {
+    let fields = parse_record(bytes).map_err(|()| FormatContextError::MetadataInvalid)?;
+    LEGACY_FORMAT_RECORDS
+        .iter()
+        .find(|(_, expected)| is_closed_record(&fields, expected))
+        .map(|(format, _)| *format)
+        .ok_or(FormatContextError::MetadataInvalid)
+}
+
+/// Whether `fields` holds each expected field exactly once, with its value,
+/// and nothing else.
+fn is_closed_record(fields: &[RecordField], expected: &[(&str, LegacyRecordValue)]) -> bool {
+    fields.len() == expected.len()
+        && expected.iter().all(|(name, value)| {
+            let mut named = fields.iter().filter(|field| field.name == *name);
+            let (Some(field), None) = (named.next(), named.next()) else {
+                return false;
+            };
+            match value {
+                LegacyRecordValue::Integer(expected) => {
+                    integer_literal(&field.value) == Some(*expected)
+                }
+                LegacyRecordValue::Text(expected) => {
+                    string_literal(&field.value) == Some(*expected)
+                }
+            }
+        })
 }
 
 fn parse_database_id(value: &Expr) -> Result<DatabaseId, FormatContextError> {
@@ -1451,6 +1861,17 @@ pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
     }
 }
 
+/// The database identity of either a canonical format-3 record or a preserved
+/// legacy sidecar. A pending migration candidate carries the sidecar identity
+/// forward, so the runtime identity must read it from there.
+pub(super) fn parse_any_database_id(bytes: &[u8]) -> Result<DatabaseId, ()> {
+    match parse_database_record(bytes).map_err(|_| ())? {
+        DatabaseRecord::Format3(database_id) | DatabaseRecord::LegacySidecar(database_id) => {
+            Ok(database_id)
+        }
+    }
+}
+
 #[cfg(test)]
 mod graph_bridge_tests {
     use std::{
@@ -1463,7 +1884,7 @@ mod graph_bridge_tests {
     use sha2::{Digest, Sha256};
     use tempfile::TempDir;
 
-    use super::RepositoryFormatContext;
+    use super::{FormatContextError, RepositoryFormatContext, TRANSITIONAL_FORMAT3_ENTRIES};
     use crate::{
         Repository,
         native_graph::{
@@ -1569,6 +1990,250 @@ mod graph_bridge_tests {
                 .require_database_id()
                 .expect("admitted format-3 identity")
         );
+    }
+
+    /// store-format-3 §1 bounds only `database.orna` at 64 KiB. A larger
+    /// `main.orna` still pins the schema root, loads the row map and opens
+    /// the graph (A07-storage-rows-09).
+    #[test]
+    fn a_main_source_over_64_kib_still_opens_the_row_map() {
+        let directory = repository();
+        let root = directory.path();
+        let mut source = MAIN_SOURCE.to_owned();
+        while source.len() <= 64 * 1024 {
+            source.push_str("// Padding that keeps this module source above 64 KiB.\n");
+        }
+        fs::write(root.join("main.orna"), &source).expect("write the oversized source");
+        commit(root);
+
+        let relation_id = [0x5a; 16];
+        let initial = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &initial, relation_id);
+        let algorithm = initial
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let rows = rows_leaf(
+            root,
+            algorithm,
+            &row_domain(relation_id, schema_digest),
+            &[(1, inline_value())],
+        );
+        install_rows_store(root, &initial, relation_id, &schema_oid, &rows, 1);
+
+        let pinned = context(root);
+        let schema_root = pinned
+            .validate_schema_root()
+            .expect("an oversized source still pins the schema root");
+        let head_source = git_output(root, &["rev-parse", "HEAD:main.orna"], None);
+        assert_eq!(
+            schema_root.oid.to_hex(),
+            std::str::from_utf8(&head_source)
+                .expect("rev-parse prints an OID")
+                .trim()
+        );
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the row map loads beside an oversized source");
+        let graph = pinned
+            .open_native_graph(&snapshot)
+            .expect("the graph opens beside an oversized source");
+        let scope = graph.open_read_scope().expect("owner read scope");
+        assert!(
+            graph
+                .lookup_row(&TypedKey::UInt(1), &scope)
+                .expect("bounded point lookup")
+                .is_some()
+        );
+    }
+
+    /// ORNA-META-001: format-3 tracked `.orna/` holds only `database.orna`
+    /// and `store`. Any other entry, such as the format-1 compact `storage`
+    /// layout, the draft format-2 `blobs` tree or a stray file, mixes formats:
+    /// the snapshot fails admission at `HEAD`, as a historical pin and at the
+    /// commit gate, with ORNA-REPO-CONTEXT-004 naming the entry (Gate A,
+    /// "unknown/mixed formats fail early").
+    #[test]
+    fn format3_snapshot_with_extra_metadata_child_is_rejected() {
+        for (entry, file) in [
+            ("storage", "storage/Music/manifest.orna"),
+            ("blobs", "blobs/ab/cdef"),
+            ("notes.txt", "notes.txt"),
+        ] {
+            let directory = repository();
+            let root = directory.path();
+            let path = root.join(".orna").join(file);
+            fs::create_dir_all(path.parent().expect("entry parent")).expect("create entry parent");
+            fs::write(&path, b"not format-3 metadata").expect("write the extra entry");
+            commit(root);
+            let repository = Repository::discover(root).expect("discover fixture");
+            let expected = FormatContextError::MixedFormats {
+                path: format!(".orna/{entry}"),
+            };
+
+            let refused = repository
+                .open_format_context()
+                .expect_err("HEAD mixes formats");
+            assert_eq!(refused, expected);
+            assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-004");
+            assert!(
+                refused.to_string().contains(&format!(".orna/{entry}")),
+                "the message names the entry: {refused}"
+            );
+            assert_eq!(
+                repository
+                    .open_format_context_at_selector("HEAD")
+                    .expect_err("the historical pin mixes formats"),
+                expected
+            );
+            let staged = repository
+                .index_generation()
+                .expect("read the index generation")
+                .tree()
+                .cloned()
+                .expect("the index names a tree");
+            assert_eq!(
+                repository.validate_format3_index_tree(&staged),
+                Err(expected)
+            );
+        }
+    }
+
+    /// `.orna/packages` (the package pin manifest, written by `orna-project-v1`
+    /// attachments) and `.orna/checkpoints` (the runtime checkpoint snapshot
+    /// directory) are tracked by pre-META-001 writers. ORNA-META-001 admits only
+    /// `database.orna` and `store` under format-3 `.orna/`, so a tracked snapshot
+    /// carrying either is refused with the offending entry named, not widened
+    /// into the transitional allow-list.
+    #[test]
+    fn format3_snapshot_with_packages_or_checkpoints_is_rejected() {
+        for (entry, file) in [
+            ("packages", "packages"),
+            ("checkpoints", "checkpoints/snapshot.orna"),
+        ] {
+            let directory = repository();
+            let root = directory.path();
+            let path = root.join(".orna").join(file);
+            fs::create_dir_all(path.parent().expect("entry parent")).expect("create entry parent");
+            fs::write(&path, b"not format-3 metadata").expect("write the extra entry");
+            commit(root);
+            let repository = Repository::discover(root).expect("discover fixture");
+            let refused = repository
+                .open_format_context()
+                .expect_err("HEAD mixes formats");
+            assert_eq!(
+                refused,
+                FormatContextError::MixedFormats {
+                    path: format!(".orna/{entry}"),
+                }
+            );
+            assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-004");
+            assert!(
+                refused.to_string().contains(&format!(".orna/{entry}")),
+                "the message names the entry: {refused}"
+            );
+        }
+    }
+
+    /// The transitional `.orna/` entries are exactly the two this build still
+    /// writes, each removed by the work named in `TRANSITIONAL_FORMAT3_ENTRIES`.
+    /// A snapshot carrying one stays readable, but the commit gate refuses it,
+    /// so no reviewed commit adds one. Retiring a writer must retire its entry
+    /// here.
+    #[test]
+    fn transitional_format3_entries_are_pinned_and_refused_by_the_commit_gate() {
+        assert_eq!(
+            TRANSITIONAL_FORMAT3_ENTRIES,
+            [".orna/object-identities.cbor", ".orna/migration.json"]
+        );
+        for entry in TRANSITIONAL_FORMAT3_ENTRIES {
+            let directory = repository();
+            let root = directory.path();
+            let repository = Repository::discover(root).expect("discover fixture");
+            let staged = || {
+                repository
+                    .index_generation()
+                    .expect("read the index generation")
+                    .tree()
+                    .cloned()
+                    .expect("the index names a tree")
+            };
+            assert_eq!(
+                repository.validate_format3_index_tree(&staged()),
+                Ok(()),
+                "the gate admits a plain format-3 tree"
+            );
+
+            fs::write(root.join(entry), b"transitional metadata")
+                .expect("write the transitional entry");
+            commit(root);
+            assert_eq!(
+                repository
+                    .open_format_context()
+                    .expect("a transitional entry stays readable")
+                    .repository_format_number(),
+                3
+            );
+            assert_eq!(
+                repository.validate_format3_index_tree(&staged()),
+                Err(FormatContextError::MixedFormats {
+                    path: entry.to_owned()
+                })
+            );
+        }
+    }
+
+    /// A legacy marker beside `.orna/store` is a mixed snapshot on every
+    /// admission path, with the same error code: the commit gate refuses the
+    /// staged tree before any commit object exists, a committed snapshot is
+    /// refused by the snapshot reader, and runtime admission refuses `HEAD`
+    /// (ORNA-META-001, ORNA-META-002; ORNA-REPO-CONTEXT-004).
+    #[test]
+    fn legacy_marker_beside_store_is_refused_on_every_admission_path() {
+        const FORMAT_ONE: &str =
+            include_str!("../tests/fixtures/format-context/format-1-ornadb-1.0.orna");
+        const FORMAT_TWO: &str =
+            include_str!("../tests/fixtures/format-context/format-2-draft-1.1.0.orna");
+        for record in [FORMAT_ONE, FORMAT_TWO] {
+            let directory = repository();
+            let root = directory.path();
+            fs::write(root.join(".orna/format.orna"), record).expect("write legacy marker");
+            git(root, &["add", "."]);
+            let repository = Repository::discover(root).expect("discover fixture");
+            let staged = repository
+                .index_generation()
+                .expect("read the index generation")
+                .tree()
+                .cloned()
+                .expect("the index names a tree");
+            let staged_error = repository
+                .validate_format3_index_tree(&staged)
+                .expect_err("the commit gate refuses the staged mixed tree");
+            assert!(
+                matches!(staged_error, FormatContextError::MixedFormats { .. }),
+                "{staged_error:?}"
+            );
+            assert_eq!(staged_error.code(), "ORNA-REPO-CONTEXT-004");
+
+            git(
+                root,
+                &["commit", "--quiet", "-m", "legacy marker beside store"],
+            );
+            let refused = repository
+                .open_format_context()
+                .expect_err("the snapshot reader refuses HEAD");
+            assert!(
+                matches!(refused, FormatContextError::MixedFormats { .. }),
+                "{refused:?}"
+            );
+            assert_eq!(refused.code(), "ORNA-REPO-CONTEXT-004");
+            assert_eq!(
+                repository.require_known_head_format(),
+                Err(refused),
+                "runtime admission refuses HEAD as ORNA-REPO-CONTEXT-004"
+            );
+        }
     }
 
     #[test]
@@ -1830,7 +2495,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
@@ -2195,8 +2860,7 @@ mod graph_bridge_tests {
             .maintain_row_index(
                 &[RowIndexMutation::Insert {
                     key: TypedKey::UInt(0),
-                    value: RowValue::inline(inline_value(), Vec::new())
-                        .expect("canonical prepended row"),
+                    fields: inline_value(),
                 }],
                 &scope,
             )
@@ -2306,7 +2970,7 @@ mod graph_bridge_tests {
             },
             RowIndexMutation::Insert {
                 key: TypedKey::UInt(0),
-                value: RowValue::inline(inline_value(), Vec::new()).expect("canonical row value"),
+                fields: inline_value(),
             },
         ];
         let churn = graph
@@ -2368,6 +3032,91 @@ mod graph_bridge_tests {
                 "key {key} after the maintenance pass"
             );
         }
+    }
+
+    /// store-format-3 section 2: the child ranges of a branch are
+    /// nonoverlapping and exhaustive in fence order. A row map whose second
+    /// page starts inside the first page's range still opens, because the
+    /// loader checks only the root, but a range read across the pages and a
+    /// maintenance pass that rewrites the second page both refuse it, so
+    /// neither a query nor a publication returns or writes rows from
+    /// overlapping pages (ornadb-5il1.129 bead comment, A07-storage-rows-04).
+    #[test]
+    fn range_reads_and_maintenance_reject_overlapping_child_ranges() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x6e; 16];
+        let initial = context(root);
+        if initial.load_row_map(relation_id).is_err() {
+            install_overflow_row_store(root, &initial, relation_id, None);
+        }
+        let seeding = context(root);
+        let (schema_oid, schema_digest) = schema_node_for_relation(root, &seeding, relation_id);
+        let algorithm = seeding
+            .validate_store_root()
+            .expect("pinned store root")
+            .oid
+            .algorithm();
+        let domain = row_domain(relation_id, schema_digest);
+        let page = |keys: std::ops::RangeInclusive<u64>| {
+            rows_leaf(
+                root,
+                algorithm,
+                &domain,
+                &keys.map(|key| (key, inline_value())).collect::<Vec<_>>(),
+            )
+        };
+        let fence = |key: u64| TypedKey::UInt(key).canonical_bytes().expect("fence key");
+        // The right page starts at key 15, inside the left page's 1..=20.
+        let (left, right) = (page(1..=20), page(15..=34));
+        let branch = write_native_node(
+            root,
+            algorithm,
+            &NodeData::OrderedBranch {
+                domain: domain.clone(),
+                height: 1,
+                entries: vec![
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(20),
+                        child: left,
+                        row_count: 20,
+                    },
+                    OrderedBranchEntry {
+                        inclusive_max_key: fence(34),
+                        child: right,
+                        row_count: 20,
+                    },
+                ],
+            },
+        );
+        install_rows_store(root, &seeding, relation_id, &schema_oid, &branch, 40);
+
+        let pinned = context(root);
+        let snapshot = pinned
+            .load_row_map(relation_id)
+            .expect("the loader checks the root");
+        let graph = pinned.open_native_graph(&snapshot).expect("admit graph");
+        let scope = graph.open_read_scope().expect("owner scope");
+        assert!(
+            graph
+                .range_rows(
+                    &crate::row_store::KeyRange::new(None, None, 100).expect("whole range"),
+                    &scope,
+                )
+                .is_err(),
+            "a range read refuses overlapping pages"
+        );
+        assert!(
+            graph
+                .maintain_row_index(
+                    &[RowIndexMutation::Delete {
+                        key: TypedKey::UInt(30),
+                    }],
+                    &scope,
+                )
+                .is_err(),
+            "maintenance refuses to rewrite an overlapping page"
+        );
     }
 
     #[test]
@@ -2732,6 +3481,9 @@ mod graph_bridge_tests {
         git(directory, &["update-ref", "refs/heads/main", commit]);
     }
 
+    /// Writes `schema_bytes` as a kind-6 node over a one-chunk byte index.
+    /// The chunk entry carries the chunk's own SHA-256; the node records
+    /// `schema_digest`, which a valid node sets to the bytes' schema identity.
     fn schema_descriptor_node(
         directory: &Path,
         algorithm: GitHashAlgorithm,
@@ -2749,7 +3501,7 @@ mod graph_bridge_tests {
                 entries: vec![ByteIndexEntry {
                     span_length: schema_bytes.len() as u64,
                     target: chunk_oid,
-                    chunk_sha256: Some(schema_digest),
+                    chunk_sha256: Some(Sha256::digest(schema_bytes).into()),
                 }],
             },
         );
@@ -2794,7 +3546,7 @@ mod graph_bridge_tests {
             .algorithm();
         let descriptor = descriptor_for_table(relation_id, "Int");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest: [u8; 32] = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             directory,
             algorithm,
@@ -3742,7 +4494,7 @@ mod graph_bridge_tests {
             .oid
             .algorithm();
         let valid_bytes = MAIN_SOURCE.as_bytes();
-        let valid_digest: [u8; 32] = Sha256::digest(valid_bytes).into();
+        let valid_digest = crate::native_graph::schema_identity_v3(valid_bytes);
 
         let mut tampered_bytes = valid_bytes.to_vec();
         tampered_bytes[0] ^= 1;
@@ -3912,7 +4664,7 @@ mod graph_bridge_tests {
         ]))
         .expect("valid three-field table manifest");
         let schema_bytes = descriptor.encode().expect("encode schema descriptor");
-        let schema_digest = Sha256::digest(&schema_bytes).into();
+        let schema_digest = crate::native_graph::schema_identity_v3(&schema_bytes);
         let schema_oid = schema_descriptor_node(
             root,
             algorithm,
@@ -5308,6 +6060,26 @@ mod graph_bridge_tests {
             .expect("read the copied Blob payload");
         assert_eq!(read.bytes(), payload);
         assert_eq!(payload_scope.payload_bytes_read(), payload.len() as u64);
+    }
+
+    #[test]
+    fn operational_graph_errors_are_not_classified_as_malformed() {
+        use crate::native_graph::GraphError;
+        for error in [
+            GraphError::ReadQuotaExceeded,
+            GraphError::MetadataQuotaExceeded,
+            GraphError::InventoryQuotaExceeded,
+            GraphError::ReadCancelled,
+            GraphError::DurabilityFailed,
+            GraphError::ObjectDurabilityUnavailable,
+            GraphError::GitCommandFailed,
+        ] {
+            let mapped = super::graph_context_error(error.clone());
+            assert!(
+                !matches!(mapped, FormatContextError::GraphMalformed(_)),
+                "operational graph error must not be GraphMalformed: {error:?} -> {mapped:?}"
+            );
+        }
     }
 }
 
