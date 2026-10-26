@@ -7,6 +7,9 @@ use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{Expr, parse_expression};
 use orna_value_v1::Raw;
 
+/// Steps the instant handler charges for reading the clock.
+const CLOCK_STEPS: u64 = 5;
+
 fn integer(value: i64) -> Raw {
     Raw::Int(BigInt::from(value))
 }
@@ -22,10 +25,27 @@ fn instant() -> CanonicalValue {
     .expect("instant is canonical")
 }
 
+/// How the host answers `now` for the activation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Clock {
+    /// No handler resolves `now`.
+    Absent,
+    /// A real instant, charging `CLOCK_STEPS` against the clock's budget.
+    Instant,
+    /// The clock read exhausts its budget and fails.
+    Exhausted,
+    /// The clock answers with a value that is not an instant.
+    NotAnInstant,
+}
+
+fn is_now(callee: &Expr) -> bool {
+    matches!(callee, Expr::Name { text, .. } if text == "now")
+}
+
 #[derive(Clone)]
 struct StorageEffects {
     rows: Vec<i64>,
-    clock: bool,
+    clock: Clock,
 }
 
 impl EffectHandler for StorageEffects {
@@ -34,11 +54,33 @@ impl EffectHandler for StorageEffects {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if self.clock && matches!(callee, Expr::Name { text, .. } if text == "now") {
-            assert!(arguments.is_empty());
-            return Ok(Some(instant()));
+        if !is_now(callee) {
+            return Ok(None);
         }
-        Ok(None)
+        assert!(arguments.is_empty());
+        match self.clock {
+            Clock::Absent | Clock::Exhausted => Ok(None),
+            Clock::Instant => Ok(Some(instant())),
+            Clock::NotAnInstant => Ok(Some(
+                CanonicalValue::new(integer(7)).expect("row is canonical"),
+            )),
+        }
+    }
+
+    fn handle_with_budget(
+        &mut self,
+        callee: &Expr,
+        arguments: &[CanonicalValue],
+        budget: &mut StepBudget,
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        if is_now(callee) {
+            match self.clock {
+                Clock::Instant => budget.debit(CLOCK_STEPS)?,
+                Clock::Exhausted => budget.debit(u64::MAX)?,
+                Clock::Absent | Clock::NotAnInstant => {}
+            }
+        }
+        self.handle(callee, arguments)
     }
 
     fn scan_relation_page(
@@ -72,10 +114,19 @@ impl EffectHandler for StorageEffects {
 }
 
 fn run(source: &str, rows: Vec<i64>) -> CanonicalValue {
-    run_with(source, rows, true)
+    run_with(source, rows, Clock::Instant)
 }
 
-fn run_with(source: &str, rows: Vec<i64>, clock: bool) -> CanonicalValue {
+fn run_with(source: &str, rows: Vec<i64>, clock: Clock) -> CanonicalValue {
+    run_limited(source, rows, clock, Limits::default()).expect("query should evaluate")
+}
+
+fn run_limited(
+    source: &str,
+    rows: Vec<i64>,
+    clock: Clock,
+    limits: Limits,
+) -> Result<CanonicalValue, EvaluationError> {
     let parsed = parse_expression(source);
     assert!(
         parsed.is_ok(),
@@ -95,10 +146,9 @@ fn run_with(source: &str, rows: Vec<i64>, clock: bool) -> CanonicalValue {
         "query",
         &functions,
         &Environment::new(),
-        Limits::default(),
+        limits,
         &mut effects,
     )
-    .expect("query should evaluate")
 }
 
 #[test]
@@ -197,13 +247,79 @@ fn materialization_created_is_the_activation_instant() {
 }
 
 #[test]
-fn materialization_does_not_require_a_clock_handler() {
+fn materialization_without_a_clock_is_not_recorded() {
+    // ORNA-QUERY-006 / ORNA-CALL-004: a decision without an activation instant
+    // is not inspectable, so it is not recorded. The query result is unchanged.
     let result = run_with(
         "[sys.Storage | filter(value => value >= 0) | sum(),
           sys.Materialization | count()]",
         vec![2, 1],
-        false,
+        Clock::Absent,
     );
 
-    assert_eq!(result.raw(), &Raw::Array(vec![integer(3), integer(1)]));
+    assert_eq!(result.raw(), &Raw::Array(vec![integer(3), integer(0)]));
+}
+
+#[test]
+fn materialization_with_a_non_instant_clock_is_not_recorded() {
+    let result = run_with(
+        "[sys.Storage | filter(value => value >= 0) | sum(),
+          sys.Materialization | count()]",
+        vec![2, 1],
+        Clock::NotAnInstant,
+    );
+
+    assert_eq!(result.raw(), &Raw::Array(vec![integer(3), integer(0)]));
+}
+
+#[test]
+fn failing_clock_read_is_not_recorded_and_leaves_the_query_result_unchanged() {
+    let result = run_with(
+        "[sys.Storage | filter(value => value >= 0) | sum(),
+          sys.Materialization | count()]",
+        vec![2, 1],
+        Clock::Exhausted,
+    );
+
+    assert_eq!(result.raw(), &Raw::Array(vec![integer(3), integer(0)]));
+}
+
+#[test]
+fn recording_a_decision_does_not_consume_the_query_step_budget() {
+    // ORNA-PLAN-001: recording must not move a pure result to a step limit.
+    // The clock charges CLOCK_STEPS, so a clock debited from the query budget
+    // would fail the query at its own minimum. The recording must not do so.
+    let source = "sys.Storage | filter(value => value >= 0) | sum()";
+    let minimum = (0..=1_000)
+        .find(|&max_steps| {
+            run_limited(
+                source,
+                vec![2, 1],
+                Clock::Absent,
+                Limits {
+                    max_steps,
+                    ..Limits::default()
+                },
+            )
+            .is_ok()
+        })
+        .expect("query fits within 1000 steps");
+    assert!(
+        minimum >= CLOCK_STEPS,
+        "the clock read must fit the activation budget for a decision to be recorded"
+    );
+
+    let limits = Limits {
+        max_steps: minimum,
+        ..Limits::default()
+    };
+    let result = run_limited(
+        source,
+        vec![2, 1],
+        Clock::Instant,
+        limits,
+    )
+    .expect("recording must not add a step-limit failure to a pure query");
+
+    assert_eq!(result.raw(), &integer(3));
 }

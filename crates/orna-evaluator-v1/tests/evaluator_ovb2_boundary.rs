@@ -149,13 +149,22 @@ fn native_sys_blob_length_read_verify_and_to_bytes_dispatch_through_call() {
     .expect("dispatch sys.blob.read within bounds");
     assert_eq!(sliced.format(), ValueFormat::Ovb2);
 
-    let out_of_range = evaluate_expression_ovb2(
-        "sys.blob.read(sys.blob.from_bytes([0, 1]), offset: 2, length: 1)",
+    let past_end = evaluate_expression_ovb2(
+        "sys.blob.read(sys.blob.from_bytes([0, 1]), offset: 3, length: 1)",
         &BTreeMap::new(),
         Limits::default(),
     )
     .expect_err("a read starting past EOF is a bounds failure");
-    assert_eq!(out_of_range.code(), "sys.blob.bounds");
+    assert_eq!(past_end.code(), "sys.blob.bounds");
+
+    // A read starting exactly at EOF is in bounds and yields an empty slice.
+    let at_end = evaluate_expression_ovb2(
+        "sys.blob.length(sys.blob.read(sys.blob.from_bytes([0, 1]), offset: 2, length: 1))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("a read starting at EOF is in bounds");
+    assert_eq!(at_end.format(), ValueFormat::Ovb2);
 
     evaluate_expression_ovb2(
         "sys.blob.verify(sys.blob.from_bytes([1, 2, 3]))",

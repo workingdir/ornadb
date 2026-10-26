@@ -4480,9 +4480,9 @@ struct MaterializationRecord {
     /// Pinned `sys.MaterializationRef`, captured with the decision. `None` when
     /// no OVB-2 value context pins the activation.
     reference: Option<CanonicalValue>,
-    /// Activation instant captured when the decision was made. `None` when no
-    /// effect handler resolved `now` at that point.
-    created: Option<Value>,
+    /// Activation instant (ORNA-TXN-005) shared by every decision in one
+    /// activation. A decision is recorded only when a clock resolved.
+    created: Value,
 }
 
 /// Materialization decisions produced by one callback, drained by its parent
@@ -7994,6 +7994,11 @@ impl Context<'_, '_> {
     /// is `object` (stage identity) plus `snapshot` (output digest). A repeated
     /// key is already in the log and is not recorded again. Only the canonical
     /// digest, count, and byte size are retained; rows are not copied.
+    /// Only buffered or folded scans reach this function: collect, sort,
+    /// sum/min/max and list paths. Pipelines that never buffer (count, first,
+    /// exists) record no decision; ORNA-CALL-004 permits that, and the
+    /// omission is deliberate. A decision with no resolvable clock is also not
+    /// recorded (see `materialization_clock`).
     fn record_materialization(
         &mut self,
         plan: &RelationPlan,
@@ -8009,7 +8014,9 @@ impl Context<'_, '_> {
         if self.has_materialization(&object, &snapshot) {
             return Ok(());
         }
-        let created = self.activation_now(&materialization_clock_callee())?;
+        let Some(created) = self.materialization_clock()? else {
+            return Ok(());
+        };
         let reference = self.materialization_reference(&object, &snapshot)?;
         self.admit_materialization(MaterializationRecord {
             object,
@@ -8119,25 +8126,38 @@ impl Context<'_, '_> {
         Ok((rows, next))
     }
 
-    /// Reads the activation clock through the effect boundary. `None` means no
-    /// handler resolved `now`; the evaluator never supplies a clock itself.
+    /// Reads the activation clock through the effect boundary, debiting the
+    /// activation's step budget. `None` means no handler resolved `now`; the
+    /// evaluator never supplies a clock itself.
     fn activation_now(&mut self, callee: &Expr) -> Result<Option<Value>, EvaluationError> {
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let result = self.resolve_now(callee, &mut budget);
+        let debited = remaining - budget.remaining();
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        result
+    }
+
+    /// Dispatches a `now` call to the OVB-2 handler when present, otherwise to
+    /// the plain effect handler, and converts the answer to a value. The caller
+    /// owns the step budget.
+    fn resolve_now(
+        &mut self,
+        callee: &Expr,
+        budget: &mut StepBudget,
+    ) -> Result<Option<Value>, EvaluationError> {
         if self.effects.is_none() {
             return Ok(None);
         }
-        let remaining = self.limits.max_steps.saturating_sub(self.steps);
-        let mut budget = StepBudget::new(remaining);
         if self.has_ovb2_effects() {
             let result = self
                 .ovb2_effects()
                 .expect("checked OVB-2 effect handler")
-                .handle_with_budget(callee, &[], &mut budget);
-            let debited = remaining - budget.remaining();
-            self.steps = self
-                .steps
-                .checked_add(debited)
-                .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-            return match result? {
+                .handle_with_budget(callee, &[], budget)?;
+            return match result {
                 Some(value) => self.ovb2_effect_value(&value).map(Some),
                 None => Ok(None),
             };
@@ -8146,15 +8166,30 @@ impl Context<'_, '_> {
             .effects
             .as_deref_mut()
             .expect("checked effect handler")
-            .handle_with_budget(callee, &[], &mut budget);
-        let debited = remaining - budget.remaining();
-        self.steps = self
-            .steps
-            .checked_add(debited)
-            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-        match result? {
+            .handle_with_budget(callee, &[], budget)?;
+        match result {
             Some(value) => self.effect_value(&value).map(Some),
             None => Ok(None),
+        }
+    }
+
+    /// The activation instant for a new decision. Every decision in one
+    /// activation shares the instant its first decision captured (ORNA-TXN-005),
+    /// so later decisions reuse it. The read runs on a budget of its own and is
+    /// not debited from the query, so recording cannot move a pure result to a
+    /// step limit (ORNA-PLAN-001). A missing, failing or non-Instant clock yields
+    /// `None`: the decision is not recorded rather than failing the query or
+    /// recording a fabricated `created`. Cancellation still propagates.
+    fn materialization_clock(&mut self) -> Result<Option<Value>, EvaluationError> {
+        if let Some(first) = self.materializations.first() {
+            return Ok(Some(first.created.clone()));
+        }
+        let mut budget = StepBudget::new(self.limits.max_steps);
+        match self.resolve_now(&materialization_clock_callee(), &mut budget) {
+            Ok(Some(instant @ Value::Instant { .. })) => Ok(Some(instant)),
+            Ok(_) => Ok(None),
+            Err(failure) if failure.code() == "ORNA-EVAL-CANCELLED" => Err(failure),
+            Err(_) => Ok(None),
         }
     }
 
@@ -15934,9 +15969,7 @@ fn materialization_row(record: &MaterializationRecord) -> Value {
     if let Some(reference) = &record.reference {
         fields.insert("reference".to_owned(), Value::Reference(reference.clone()));
     }
-    if let Some(created) = &record.created {
-        fields.insert("created".to_owned(), created.clone());
-    }
+    fields.insert("created".to_owned(), record.created.clone());
     Value::Record(fields)
 }
 
