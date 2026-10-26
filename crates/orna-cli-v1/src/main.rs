@@ -2595,13 +2595,10 @@ fn refuse_legacy_bare_module_rows(
             "retry the invocation after checking local runtime state",
         )
     };
-    let commit = repository.head().ok().flatten().ok_or_else(|| {
-        Diagnostic::target(
-            "E2200",
-            "table reads need a committed project",
-            "commit the project, then run the command again",
-        )
-    })?;
+    // No commit means no committed table relation can hold legacy rows.
+    let Some(commit) = repository.head().ok().flatten() else {
+        return Ok(());
+    };
     // A commit without an identity inventory never allocated its tables'
     // identities. Evaluating its table statements would touch no committed
     // relation, so refuse with the remedy that allocates the identities.
