@@ -102,44 +102,6 @@ bead = "ornadb-5il1.138"
 reason = "Fails on main at cf1c6aa82; part of the 43 semantic failures CI never ran."
 
 [[failure]]
-package = "orna-conformance-v1"
-target = "test:diagnostic_codes_conformance"
-test = "defined_semantic_diagnostic_codes_are_reachable_from_real_fixtures"
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-conformance-v1"
-target = "test:expected_diagnostics_payload_audit"
-test = "every_invalid_sidecar_matches_the_emitted_diagnostic_payload"
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-conformance-v1"
-target = "test:reference_tool_models"
-test = "frozen_source_probe_cases_match_parser_acceptance"
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-conformance-v1"
-target = "test:semantic_runtime_adapter"
-tests = [
-    "semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read",
-    "semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read",
-]
-bead = "ornadb-5il1.266"
-reason = "Fails on main; conformance and traceability crates still need the 1.1.0 profile, coordinates and required IDs."
-
-[[failure]]
-package = "orna-core"
-target = "lib"
-test = "inspect::tests::trace_event_accessors_expose_the_closed_facts"
-bead = "ornadb-5il1.166"
-reason = "Fails on origin/main d35b7c0c3: orna-core --lib reports 588 passed and this test fails. Old-stack island slated for removal (ornadb-5il1.166)."
-
-[[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
 tests = [
@@ -151,40 +113,6 @@ bead = "ornadb-5il1.273"
 reason = "Fails on main as well; owned by the orna-semantic-v1 main-failure triage."
 
 [[failure]]
-package = "orna-lsp"
-target = "lib"
-tests = [
-    "server::persisted_object_rename_tests::ambiguous_field_rename_warns_when_a_committed_identity_exists",
-    "server::persisted_object_rename_tests::declined_followup_rename_saves_latest_applied_identity",
-    "server::persisted_object_rename_tests::declined_or_lost_rename_response_does_not_persist_identity",
-    "server::persisted_object_rename_tests::declined_rename_saves_without_warning",
-    "server::persisted_object_rename_tests::failed_identity_persist_is_reported_to_client",
-    "server::persisted_object_rename_tests::fully_applied_rename_chain_with_reused_intermediate_name_keeps_id_at_final_target",
-    "server::persisted_object_rename_tests::function_rename_never_warns",
-    "server::persisted_object_rename_tests::identity_that_cannot_be_carried_warns_with_the_remedy",
-    "server::persisted_object_rename_tests::local_rename_never_warns",
-    "server::persisted_object_rename_tests::rename_during_a_merge_returns_the_plain_edit_and_keeps_identity",
-    "server::persisted_object_rename_tests::rename_of_an_uncommitted_table_is_plain_and_silent",
-    "server::persisted_object_rename_tests::rename_preserves_object_identity",
-    "server::persisted_object_rename_tests::rename_request_returns_the_plain_edit_when_staged_identities_are_unreadable",
-    "server::persisted_object_rename_tests::rename_without_a_staged_identity_inventory_warns_and_keeps_the_text",
-    "server::persisted_object_rename_tests::save_after_the_document_closed_warns_with_the_remedy",
-    "server::persisted_object_rename_tests::saved_text_that_differs_from_the_buffer_warns_with_the_remedy",
-    "server::persisted_object_rename_tests::sequential_rename_chain_not_saved_does_not_persist_identity",
-    "server::persisted_object_rename_tests::sequential_unsaved_renames_preserve_original_object_identity",
-    "server::persisted_object_rename_tests::unrelated_declaration_matching_declined_target_does_not_steal_identity",
-]
-bead = "ornadb-36nj"
-reason = "Fails on main (nightly gates run 40241388796, workspace-rest); PR 9186 changes no crates/ code, so the failure is inherited."
-
-[[failure]]
-package = "orna-storage-v1"
-target = "test:req_embedded"
-test = "replacement_runtime_fences_stale_writer_before_accepting_mutations"
-bead = "ornadb-olxr"
-reason = "Fails on main: returns LeaseHeld where OwnerLost is expected (req_embedded.rs:220); nightly gates run 40241388796 crate-tests and workspace-rest."
-
-[[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
 tests = [
@@ -193,10 +121,3 @@ tests = [
 ]
 bead = "ornadb-8nx6"
 reason = "Fails on main; observed in nightly gates run 40241388796 workspace-rest. PR 9186 changes no crates/ code."
-
-[[failure]]
-package = "orna-cli-v1"
-target = "test:object_identity_mv"
-test = "mv_restores_the_source_when_staging_the_inventory_fails"
-bead = "ornadb-srco"
-reason = "Fails on main; observed in nightly gates run 40241388796 workspace-cli. PR 9186 changes no crates/ code."

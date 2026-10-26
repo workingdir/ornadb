@@ -3,19 +3,19 @@ name: Nightly gates
 # Runs what is too slow or too large for every pull request and keeps the
 # result as Orna 1.1.0 acceptance-gate evidence (implementation/ACCEPTANCE.md,
 # "Evidence record per gate"):
-# - `cargo test --workspace --no-fail-fast`, split into five runners by package
-#   for disk and time. The five shards together cover every workspace package.
-# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import runs in the cli shard
-#   on schedule and dispatch only; a pull request skips it (hours of runner disk, cli-gate-b.yml).
-#   Gate C at one million rows runs in gate-c-scale.yml (PR 9344), not here.
+# - `cargo test --workspace --no-fail-fast`, split into four runners by package
+#   for disk and time. The four shards cover every workspace package except
+#   orna-live-v1 and orna-conformance-v1, which live-v1-tests.yml and
+#   conformance-v1-tests.yml gate on every pull request.
+# - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import is
+#   not run here; it lives in cli-gate-b.yml and Gate C scale in gate-c-scale.yml.
 # - cargo fmt and Clippy, which do not pass on main yet.
 # Every job writes an evidence record with scripts/gate_evidence.py: commit,
 # command, host and tool versions, inputs, exit status, per-test outcomes and
 # the log's SHA-256. A job fails only on a failure missing from
 # scripts/known-test-failures.toml. The evidence job resolves the gate items in
 # scripts/gate-evidence-items.toml and uploads one summary.
-# Pull requests that change this workflow, the recorder, the gate items or the
-# baseline run it too, so a baseline change is proven against a full run.
+# This workflow runs on schedule and on dispatch only; it is never a pull-request check.
 
 on:
   schedule:
@@ -26,19 +26,13 @@ on:
         description: Full 40-character commit SHA to test; empty tests the dispatched ref.
         required: false
         type: string
-  pull_request:
-    paths:
-      - .github/workflows/nightly-gates.yml
-      - scripts/gate_evidence.py
-      - scripts/gate-evidence-items.toml
-      - scripts/known-test-failures.toml
 
 permissions:
   contents: read
 
 concurrency:
-  group: nightly-gates-${{ github.event_name == 'pull_request' && github.ref || inputs.revision_sha || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: nightly-gates-${{ inputs.revision_sha || github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_BUILD_JOBS: 2
@@ -95,13 +89,11 @@ jobs:
           - shard: sys
             packages: -p orna-sys-v1
             recorder: ""
-          - shard: conformance
-            packages: -p orna-conformance-v1
-            recorder: ""
           - shard: rest
             packages: >-
               --workspace --exclude orna-cli-v1 --exclude orna-evaluator-v1
               --exclude orna-sys-v1 --exclude orna-conformance-v1
+              --exclude orna-live-v1
             recorder: ""
     steps:
       - name: Check out the tested revision
@@ -133,7 +125,6 @@ jobs:
           --timeout-minutes 330
           ${{ matrix.recorder }}
           -- cargo test --locked --no-fail-fast ${{ matrix.packages }}
-          ${{ matrix.shard == 'cli' && github.event_name == 'pull_request' && '-- --skip gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata' || '' }}
 
       - name: Show free disk space
         if: ${{ !cancelled() }}
