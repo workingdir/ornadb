@@ -1872,6 +1872,51 @@ mod tests {
     }
 
     #[test]
+    fn unresolved_name_matching_a_loaded_module_suggests_its_use_import() {
+        let (_directory, project) = loaded_project(
+            &[
+                (
+                    "main.orna",
+                    include_str!(
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                    ),
+                ),
+                (
+                    "library.orna",
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                    ),
+                ),
+            ],
+            None,
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            &project,
+            Vec::<(String, String)>::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        let error = session.submit("library.twice(\"x\")\n").unwrap_err();
+
+        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        assert_eq!(detail.message, "name `library` cannot be resolved");
+        assert_eq!(detail.span, Some(0..7));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "add `use library;` to bring module `library` into scope"),
+            "{:?}",
+            detail.help
+        );
+        assert!(
+            detail.help.iter().all(|help| !help.contains("let library")),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
     fn loaded_module_path_resolves_after_use_and_reports_the_missing_member() {
         let (_directory, project) = loaded_project(
             &[
