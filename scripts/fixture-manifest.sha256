@@ -235,6 +235,8 @@ efaba490271b197f215c700a8a5e7aeaad0d4d222512e8d81511d734961a2a1e  crates/orna-cl
 5990194150d9bd904b382828990c0513ddb766e3f6d0a1c250edd04399e95bbe  crates/orna-cli-v1/tests/fixtures/reference-project/sensors.orna
 18ff0bf2b41001095dd9767c25bb855dc7f45a88462ca490e35910f39d59fcf5  crates/orna-cli-v1/tests/fixtures/reference-project/values.orna
 01d195023139825c30ff104417d08ea1ea2b2dc2138c4d39e880b4dfa9e3a463  crates/orna-cli-v1/tests/fixtures/reference-project/warehouse.orna
+985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d  crates/orna-cli-v1/tests/fixtures/reference/tests/final-vectors.json
+93b8edb858bc0a674cd0256c6350bd7286062eb3e2a01accc964e135fdc24ff1  crates/orna-cli-v1/tests/fixtures/reference/tests/scenarios.json
 cb898749d76e51fdaf6c6636920ccdb4f415fc1cffd1e2497636b38cc2469807  crates/orna-cli-v1/tests/fixtures/repl-arithmetic.orna
 5ddc9aa5bb8dcd3843f859e49d6d827dbe8e2919caad3ca349a9a61f90c64de2  crates/orna-cli-v1/tests/fixtures/repl-at-head.orna
 4a8e1a46ef6e3c72890aff6c6cc340f0f27d056c9df4db38db0e0d43fd3e9f31  crates/orna-cli-v1/tests/fixtures/repl-cli-numeric-context.orna
