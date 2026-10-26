@@ -54,6 +54,7 @@ use orna_application_v1::{
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
+    project_declares_assertions, transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
@@ -61,7 +62,8 @@ use orna_runtime_v1::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
     RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
     RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation,
-    TableObjectId, TerminalOutcome, WriterLease,
+    TableActivationError, TableObjectId, TerminalOutcome, ValidatedTableRequestActivationCommit,
+    WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2437,6 +2439,8 @@ struct ReplTransactions {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     tables: Vec<RuntimeTableIdentity>,
+    identities: orna_project_v1::ObjectIdentityManifest,
+    table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     table_schemas: BTreeMap<String, orna_semantic_v1::TableSchema>,
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
@@ -2991,6 +2995,14 @@ fn repl_transactions(
         return None;
     }
     let tables = committed_table_identities(repository, &commit, table_names).ok()?;
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
+        .ok()?;
+    let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
+        tables
+            .iter()
+            .map(|table| (table.table().to_owned(), table.object_id()))
+            .collect(),
+    );
     let capture_relation_id = tables.first()?.object_id().bytes();
     let (identity, initial_digest) = runtime_identity(repository).ok()?;
     if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
@@ -3016,6 +3028,8 @@ fn repl_transactions(
         identity,
         initial_digest,
         tables,
+        identities,
+        table_object_ids,
         table_schemas,
         capture_relation_id,
         session_id,
@@ -3123,10 +3137,11 @@ fn repl_session_error(error: &ReplError) -> Diagnostic {
             "fix the first reported source contract error before starting a project REPL session",
         )
     } else {
-        Diagnostic::target(
+        Diagnostic::target_with_detail(
             "E2200",
             "project REPL session is not available",
             "use a project supported by the configured REPL runtime",
+            error.code().to_owned(),
         )
     }
 }
@@ -3447,7 +3462,7 @@ fn run_repl_input(
         if cancelled {
             original
         } else {
-            REPL_EFFECT_UNCERTAIN.to_owned().into()
+            repl_effect_uncertain(settlement_cause(&original))
         }
     };
     let admission = match transactions
@@ -3476,7 +3491,7 @@ fn run_repl_input(
     let evaluation = transactions
         .authority
         .evaluate_staged_repl_transaction(session, staged, &scope, bindings);
-    let (value, successor, activation) = match evaluation {
+    let (value, successor, activation, external_dispatched) = match evaluation {
         Ok(result) => result,
         Err(failure) => {
             if failure.external_effects_possible {
@@ -3508,6 +3523,14 @@ fn run_repl_input(
             REPL_EFFECT_UNCERTAIN.to_owned().into()
         } else {
             abandon("ORNA-REPL-EFFECT".to_owned().into())
+        }
+    };
+    let unsettled_after_evaluation_because = |cause: String| -> repl::ReplFailure {
+        if external_possible {
+            let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
+            repl_effect_uncertain(cause)
+        } else {
+            abandon(repl_effect_cancelled(cause))
         }
     };
     if activation.mutations().is_empty() {
@@ -3547,18 +3570,90 @@ fn run_repl_input(
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
         return Err(unsettled_after_evaluation());
     };
-    let committed = transactions
-        .runtime
-        .block_on(state.commit_staged_table_request_activation(
-            writer,
-            request,
-            fingerprint,
-            &request_staged,
-            outcome,
-        ));
-    if committed.is_err() {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+    // ORNA-ASSERT-042: a project that declares assertions checks the
+    // post-mutation candidate against them before any row, checkpoint or
+    // terminal is published. A project without assertions has nothing to
+    // check, so its commit keeps the unvalidated activation path.
+    if project_declares_assertions(&transactions.project) {
+        let cwd_generation = u64::try_from(request_staged.context().capture().generation())
+            .ok()
+            .and_then(|runtime| {
+                repository
+                    .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                    .ok()
+            });
+        let Some(cwd_generation) = cwd_generation else {
+            return Err(unsettled_after_evaluation());
+        };
+        let mut validator = match transactional_loaded_project_candidate_validator(
+            &transactions.project,
+            &transactions.identities,
+            cwd_generation,
+            Arc::clone(&transactions.table_object_ids),
+            Limits::default(),
+        ) {
+            Ok(validator) => validator,
+            Err(outcome) => {
+                return Err(unsettled_after_evaluation_because(stage_outcome_cause(
+                    &outcome,
+                )));
+            }
+        };
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_validated_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity: request,
+                    fingerprint,
+                    context: request_staged.context(),
+                    mutations: request_staged.mutations(),
+                    next_digest: request_staged.next_digest(),
+                    outcome,
+                    validator: &mut *validator,
+                    faults: request_staged.faults(),
+                    effects: request_staged.effects(),
+                },
+            ));
+        match committed {
+            Ok(_) => {}
+            // Validation runs before any publication, so a failed validation
+            // leaves the input uncommitted. It is cancelled unless an external
+            // binding was actually dispatched during evaluation. Only a false
+            // assertion is ORNA-A091-009; other validator failures keep their
+            // diagnostic in the detail.
+            Err(TableActivationError::ValidationFailed(diagnostic)) if !external_dispatched => {
+                let failure = if orna_conformance_v1::is_table_assertion_false(diagnostic) {
+                    repl::ReplFailure::from("ORNA-A091-009".to_owned())
+                } else {
+                    repl_effect_cancelled(format!(
+                        "table assertion validation did not complete: {diagnostic:?}"
+                    ))
+                };
+                return Err(abandon(failure));
+            }
+            Err(error) => {
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+                return Err(repl_effect_uncertain(format!(
+                    "table commit failed with {}",
+                    table_activation_cause(&error)
+                )));
+            }
+        }
+    } else {
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_staged_table_request_activation(
+                writer,
+                request,
+                fingerprint,
+                &request_staged,
+                outcome,
+            ));
+        if committed.is_err() {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        }
     }
     record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
     *session = successor;
@@ -3593,13 +3688,20 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
     if !failure.external_effects_possible {
         return repl::ReplFailure::from(cause);
     }
+    repl_effect_uncertain(format!(
+        "external effects may already have happened after evaluation failed with {cause}"
+    ))
+}
+
+/// Submission failure for an input whose external effects may already have
+/// happened. The code stays `ORNA-REPL-EFFECT-UNCERTAIN`; `message` names the
+/// cause that stopped settlement, so the outcome is diagnosable without replay.
+fn repl_effect_uncertain(message: String) -> repl::ReplFailure {
     repl::ReplFailure {
         code: REPL_EFFECT_UNCERTAIN.to_owned(),
         detail: Some(orna_evaluator_v1::ReplDetail {
             code: REPL_EFFECT_UNCERTAIN.to_owned(),
-            message: format!(
-                "external effects may already have happened after evaluation failed with {cause}"
-            ),
+            message,
             span: None,
             notes: Vec::new(),
             help: vec![
@@ -3607,6 +3709,48 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
                     .to_owned(),
             ],
         }),
+    }
+}
+
+/// Submission failure for an input that was not published and is cancelled.
+/// `message` names the cause so the failure stays diagnosable.
+fn repl_effect_cancelled(message: String) -> repl::ReplFailure {
+    repl::ReplFailure {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            message,
+            span: None,
+            notes: Vec::new(),
+            help: Vec::new(),
+        }),
+    }
+}
+
+/// The failure that stopped settlement, named for the uncertain detail.
+fn settlement_cause(failure: &repl::ReplFailure) -> String {
+    match &failure.detail {
+        Some(detail) => format!("{}: {}", failure.code, detail.message),
+        None => failure.code.clone(),
+    }
+}
+
+/// The commit error's inner cause, for the uncertain detail.
+fn table_activation_cause(error: &TableActivationError) -> String {
+    match error {
+        TableActivationError::Runtime(runtime) => runtime.to_string(),
+        TableActivationError::ValidationFailed(diagnostic) => format!("{diagnostic:?}"),
+    }
+}
+
+/// The validator-build outcome's cause, for the unsettled detail.
+fn stage_outcome_cause(outcome: &StageOutcome<orna_foundation_v1::Diagnostic>) -> String {
+    match outcome {
+        StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => {
+            format!("{}: {}", diagnostic.code(), diagnostic.message())
+        }
+        StageOutcome::Skipped { reason } => reason.clone(),
+        StageOutcome::Passed => "validator build produced no validator".to_owned(),
     }
 }
 
