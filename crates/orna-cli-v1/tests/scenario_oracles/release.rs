@@ -113,7 +113,12 @@ pub fn entries() -> Vec<Entry> {
             "the REPL admits a row that violates a table assertion `orna run` enforces",
             repl_skips_table_assertions,
         ),
-        Entry::pass("FINAL-ROW-012", external_store_edits_are_not_used),
+        Entry::gap(
+            "FINAL-ROW-012",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            row_012_blocker,
+        ),
         Entry::gap("FINAL-ROW-013", "ornadb-5il1.184", NO_UPGRADE, no_upgrade),
         Entry::gap(
             "FINAL-ROW-014",
@@ -121,10 +126,25 @@ pub fn entries() -> Vec<Entry> {
             STORAGE_METADATA,
             storage_unobservable,
         ),
-        Entry::pass("FINAL-ROW-015", tampered_graph_edges_are_refused),
+        Entry::gap(
+            "FINAL-ROW-015",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            row_015_blocker,
+        ),
         // FINAL-GRAPH
-        Entry::pass("FINAL-GRAPH-001", nodes_are_data_and_refs_trees),
-        Entry::pass("FINAL-GRAPH-002", tampered_graph_edges_are_refused),
+        Entry::gap(
+            "FINAL-GRAPH-001",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            graph_001_blocker,
+        ),
+        Entry::gap(
+            "FINAL-GRAPH-002",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            graph_002_blocker,
+        ),
         Entry::pass("FINAL-GRAPH-003", terminal_chunks_are_raw_blobs),
         Entry::gap(
             "FINAL-GRAPH-004",
@@ -132,9 +152,11 @@ pub fn entries() -> Vec<Entry> {
             OVERFLOW,
             large_row_is_not_published,
         ),
-        Entry::pass(
+        Entry::gap(
             "FINAL-GRAPH-005",
-            shared_children_keep_per_parent_annotations,
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            graph_005_blocker,
         ),
         Entry::pass("FINAL-GRAPH-006", sha256_repositories_keep_native_widths),
         Entry::pass("FINAL-GRAPH-007", store_roots_hold_only_the_snapshot),
@@ -216,8 +238,18 @@ pub fn entries() -> Vec<Entry> {
         }),
         // FINAL-OGB
         Entry::pass("FINAL-OGB-001", descriptors_match_the_release_graph),
-        Entry::pass("FINAL-OGB-002", corrupted_chunks_fail_verification),
-        Entry::pass("FINAL-OGB-003", empty_content_has_one_descriptor),
+        Entry::gap(
+            "FINAL-OGB-002",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            ogb_002_blocker,
+        ),
+        Entry::gap(
+            "FINAL-OGB-003",
+            "ornadb-z7v3",
+            EXPORT_COPIES_TAMPERED_STORE,
+            ogb_003_blocker,
+        ),
         Entry::gap("FINAL-OGB-004", "ornadb-5il1.120", BLOB_OPERATIONS, |db| {
             blob_operation_unsupported(db, "sys.blob.verify(sys.blob.from_bytes([1]))")
         }),
@@ -1608,6 +1640,46 @@ fn replace_node_data(db: &mut Db, node: &str, bytes: &[u8]) -> Check {
     Ok(())
 }
 
+/// The blocker reproduces when the scenario's executor fails only because
+/// `orna export` copies a store that the product readers refuse.
+fn export_copies_refused_store(check: Check) -> Probe {
+    match check {
+        Ok(()) => Err(Failure(
+            "orna export now refuses the tampered store".to_owned(),
+        )),
+        Err(Failure(reason))
+            if reason.contains("copied a corrupted store")
+                || reason.contains("copied a content graph") =>
+        {
+            Ok(reason.lines().next().unwrap_or_default().to_owned())
+        }
+        Err(failure) => Err(failure),
+    }
+}
+
+macro_rules! export_blocker {
+    ($($probe:ident => $executor:ident),+ $(,)?) => {
+        $(
+            fn $probe(db: &mut Db) -> Probe {
+                export_copies_refused_store($executor(db))
+            }
+        )+
+    };
+}
+
+export_blocker! {
+    row_012_blocker => external_store_edits_are_not_used,
+    row_015_blocker => tampered_graph_edges_are_refused,
+    graph_001_blocker => nodes_are_data_and_refs_trees,
+    graph_002_blocker => tampered_graph_edges_are_refused,
+    graph_005_blocker => shared_children_keep_per_parent_annotations,
+    ogb_002_blocker => corrupted_chunks_fail_verification,
+    ogb_003_blocker => empty_content_has_one_descriptor,
+}
+
+const EXPORT_COPIES_TAMPERED_STORE: &str =
+    "orna export copies a tampered store that every other product reader refuses";
+
 /// Every product reader refuses the committed store.
 fn refused_reading(db: &mut Db, relation: &str) -> Check {
     let query = db.orna(&["query", relation])?;
@@ -1722,7 +1794,7 @@ fn corrupted_chunks_fail_verification(db: &mut Db) -> Check {
         .trim()
         .to_owned();
     let parent = chunk.parent().to_owned();
-    db.git(&["rm", "--cached", "-q", &path])?.ok()?;
+    db.git(&["rm", "--cached", "--sparse", "-q", &path])?.ok()?;
     db.git(&[
         "update-index",
         "--add",
