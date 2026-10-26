@@ -2534,21 +2534,28 @@ fn legacy_bare_module_table(
 /// since removed, is that table's data, never a legacy module row.
 fn legacy_bare_module_candidates(
     repository: &orna_repository_v1::Repository,
-    commit: &orna_repository_v1::GitCommitRef,
+    commit: Option<&orna_repository_v1::GitCommitRef>,
     declared: &[&str],
 ) -> Result<Vec<(String, String)>, orna_project_v1::ObjectIdentityError> {
     let mut tables = declared
         .iter()
         .map(|name| ((*name).to_owned(), false))
         .collect::<Vec<_>>();
-    let manifest = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)?;
-    tables.extend(
-        manifest
-            .records()
-            .iter()
-            .filter(|record| record.kind() == orna_project_v1::ObjectKind::Table)
-            .map(|record| (record.qualified_name().to_owned(), record.is_retired())),
-    );
+    let manifest = match commit {
+        Some(commit) => Some(orna_project_v1::ObjectIdentityManifest::read_committed(
+            repository, commit,
+        )?),
+        None => None,
+    };
+    if let Some(manifest) = manifest {
+        tables.extend(
+            manifest
+                .records()
+                .iter()
+                .filter(|record| record.kind() == orna_project_v1::ObjectKind::Table)
+                .map(|record| (record.qualified_name().to_owned(), record.is_retired())),
+        );
+    }
     let owned = tables
         .iter()
         .map(|(name, _)| name.as_str())
@@ -2599,11 +2606,11 @@ fn refuse_legacy_bare_module_rows(
             "retry the invocation after checking local runtime state",
         )
     };
-    // An unborn HEAD means no committed table relation can hold legacy rows.
-    // An unreadable HEAD is not evidence of absence: refuse it.
+    // An unborn HEAD has no committed table relation, so only the declared
+    // names can name legacy rows. An unreadable HEAD is not evidence of
+    // absence: refuse it.
     let commit = match repository.head() {
-        Ok(Some(commit)) => commit,
-        Ok(None) => return Ok(()),
+        Ok(commit) => commit,
         Err(_) => {
             return Err(Diagnostic::target(
                 "E2200",
@@ -2612,19 +2619,21 @@ fn refuse_legacy_bare_module_rows(
             ));
         }
     };
-    // A commit without an identity inventory never allocated its tables'
-    // identities. Evaluating its table statements would touch no committed
-    // relation, so refuse with the remedy that allocates the identities.
-    if orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, &commit)
-        .map_err(|_| unreadable())?
-        .is_none()
-    {
-        return Err(unavailable_table_identity(
-            "the commit carries no object identity inventory".to_owned(),
-        ));
+    if let Some(commit) = &commit {
+        // A commit without an identity inventory never allocated its tables'
+        // identities. Evaluating its table statements would touch no committed
+        // relation, so refuse with the remedy that allocates the identities.
+        if orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .map_err(|_| unreadable())?
+            .is_none()
+        {
+            return Err(unavailable_table_identity(
+                "the commit carries no object identity inventory".to_owned(),
+            ));
+        }
     }
     let declared = declared.iter().map(String::as_str).collect::<Vec<_>>();
-    let candidates = legacy_bare_module_candidates(repository, &commit, &declared)
+    let candidates = legacy_bare_module_candidates(repository, commit.as_ref(), &declared)
         .map_err(|_| unreadable())?;
     if candidates.is_empty() {
         return Ok(());
@@ -2924,7 +2933,7 @@ fn run_committed_table_invocation(
         .keys()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    let candidates = legacy_bare_module_candidates(&repository, &commit, &table_names)
+    let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
         .map_err(|_| {
             Diagnostic::target(
                 "E2200",
@@ -3331,7 +3340,7 @@ fn run_repl_input(
             .map(RuntimeTableIdentity::table)
             .collect::<Vec<_>>();
         let candidates =
-            legacy_bare_module_candidates(repository, &transactions.commit, &tables)
+            legacy_bare_module_candidates(repository, Some(&transactions.commit), &tables)
                 .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
         if let Some(table) = legacy_bare_module_table(&state, &transactions.runtime, &candidates)
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?
