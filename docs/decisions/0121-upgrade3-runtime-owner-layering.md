@@ -1,4 +1,4 @@
-# Work ADR 0119: UPGRADE-3 Runtime Owner, Layering and Annotation Coordinate
+# Work ADR 0121: UPGRADE-3 Runtime Owner, Layering and Annotation Coordinate
 
 **Status:** Accepted
 
@@ -16,7 +16,7 @@ The process that runs `orna upgrade --to-format 3` is the publisher for the
 migration. It:
 
 * takes the coordination lock and writer lease that `orna publish` takes, with
-  lease owner `invocation_owner_id(identity)`
+  lease owner `invocation_owner_id()`
   (`crates/orna-cli-v1/src/main.rs`);
 * calls `publish_legacy_format_migration` with the prepared publication journal,
   which carries the migration continuity record and the
