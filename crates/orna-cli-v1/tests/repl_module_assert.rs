@@ -298,3 +298,81 @@ fn several_false_module_assertions_reject_the_write_and_keep_the_store() {
     assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
     assert_eq!(git(&root, &["status", "--porcelain"]), status);
 }
+
+/// ORNA-ASSERT-039: a declaration assertion whose value reads a table through
+/// a helper call carries a TableRead effect, so the checker refuses the
+/// declaration. No such dependency reaches the store in an admitted program.
+const HELPER_CALL_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+pub fn has_book(id: Int): Bool {\n    exists(Book, book => book.id == id)\n}\n\n\
+assert every(Loan, loan => has_book(loan.book_id));\n";
+
+#[test]
+fn helper_call_table_read_is_refused_with_its_spec_code() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, HELPER_CALL_LIBRARY);
+    let output = refused_commit(&root);
+    assert!(output.contains("ORNA-A091-007"), "{output}");
+}
+
+/// A helper used as a function value (ORNA-LAMBDA) is subject to the same effect rule.
+const HELPER_VALUE_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+pub fn has_book(id: Int): Bool {\n    exists(Book, book => book.id == id)\n}\n\n\
+pub fn holds_for(id: Int): Bool {\n    let check = has_book;\n    check(id)\n}\n\n\
+assert every(Loan, loan => holds_for(loan.book_id));\n";
+
+#[test]
+fn helper_value_table_read_is_refused_with_its_spec_code() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, HELPER_VALUE_LIBRARY);
+    let output = refused_commit(&root);
+    assert!(output.contains("ORNA-A091-007"), "{output}");
+}
+
+/// A table read inside a range bound (`count()`) is a TableRead effect, so
+/// ORNA-ASSERT-039 refuses the declaration.
+const RANGE_BOUND_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+assert every(Loan, loan => loan.book_id in (0..(Book | count())));\n";
+
+#[test]
+fn range_bound_table_read_is_refused_with_its_spec_code() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, RANGE_BOUND_LIBRARY);
+    let output = refused_commit(&root);
+    assert!(output.contains("ORNA-A091-007"), "{output}");
+}
+
+/// Commits `main.orna` importing the sibling module `a`, whose table the
+/// assertion reads by its qualified identity.
+fn two_module_library(main: &str, sibling: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, main);
+    std::fs::write(root.join("a.orna"), sibling).expect("write a.orna");
+    git(&root, &["add", "a.orna"]);
+    commit_source(&root, "module table dependency fixture");
+    (directory, root)
+}
+
+const SIBLING_MODULE_MAIN: &str = "use a;\n\n\
+pub table Loan(id: Int) {\n    item_id: Int,\n}\n\n\
+assert every(Loan, loan => exists(a.Item, item => item.id == loan.item_id));\n\n\
+pub fn seed() {\n    a.Item.insert({ id: 1, label: \"Dune\" });\n    Loan.insert({ id: 1, item_id: 1 });\n}\n\n\
+pub fn drop_item() {\n    a.Item.delete(1);\n}\n";
+
+const SIBLING_MODULE_ITEM: &str = "pub table Item(id: Int) {\n    label: Str,\n}\n";
+
+/// A write to the non-root module table `a.Item` (qualified identity) must
+/// evaluate the module assertion that depends on it. The REPL does not name
+/// non-root module tables, so the writes go through admitted `orna run` entry points.
+#[test]
+fn write_to_a_non_root_module_table_evaluates_the_assertion() {
+    let (_directory, root) = two_module_library(SIBLING_MODULE_MAIN, SIBLING_MODULE_ITEM);
+    assert_success(&orna(&root, &["run", "main.seed"]), "seed run");
+
+    let output = orna(&root, &["--debug", "run", "main.drop_item"]);
+    let text = transcript(&output);
+    assert!(text.contains("ORNA-EVAL-MODULE-ASSERT"), "{text}");
+    assert!(!output.status.success(), "{text}");
+}
