@@ -54,6 +54,7 @@ use orna_application_v1::{
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
+    transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
@@ -61,7 +62,8 @@ use orna_runtime_v1::{
     FaultInjector, NoFault, PinnedCommittedRows, QueryObservationRegistration, RequestIdentity,
     RuntimeError, RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState,
     RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation,
-    TableObjectId, TerminalOutcome, WriterLease,
+    TableActivationError, TableObjectId, TerminalOutcome, ValidatedTableRequestActivationCommit,
+    WriterLease,
 };
 use orna_sys_v1::{
     EnvironmentProvider, FilesystemProvider, RuntimeMode, StdSnapshotPin, SysHostContext,
@@ -2437,6 +2439,8 @@ struct ReplTransactions {
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     tables: Vec<RuntimeTableIdentity>,
+    identities: orna_project_v1::ObjectIdentityManifest,
+    table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     table_schemas: BTreeMap<String, orna_semantic_v1::TableSchema>,
     capture_relation_id: [u8; 16],
     session_id: [u8; 16],
@@ -2991,6 +2995,14 @@ fn repl_transactions(
         return None;
     }
     let tables = committed_table_identities(repository, &commit, table_names).ok()?;
+    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
+        .ok()?;
+    let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
+        tables
+            .iter()
+            .map(|table| (table.table().to_owned(), table.object_id()))
+            .collect(),
+    );
     let capture_relation_id = tables.first()?.object_id().bytes();
     let (identity, initial_digest) = runtime_identity(repository).ok()?;
     if format_context.require_database_id().ok()?.as_bytes() != &identity.database_id {
@@ -3016,6 +3028,8 @@ fn repl_transactions(
         identity,
         initial_digest,
         tables,
+        identities,
+        table_object_ids,
         table_schemas,
         capture_relation_id,
         session_id,
@@ -3123,10 +3137,11 @@ fn repl_session_error(error: &ReplError) -> Diagnostic {
             "fix the first reported source contract error before starting a project REPL session",
         )
     } else {
-        Diagnostic::target(
+        Diagnostic::target_with_detail(
             "E2200",
             "project REPL session is not available",
             "use a project supported by the configured REPL runtime",
+            error.code().to_owned(),
         )
     }
 }
@@ -3547,18 +3562,55 @@ fn run_repl_input(
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
         return Err(unsettled_after_evaluation());
     };
+    let cwd_generation = u64::try_from(request_staged.context().capture().generation())
+        .ok()
+        .and_then(|runtime| {
+            repository
+                .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                .ok()
+        });
+    let Some(cwd_generation) = cwd_generation else {
+        return Err(unsettled_after_evaluation());
+    };
+    // ORNA-ASSERT-042: the post-mutation candidate is checked against the
+    // committed project's assertions before any row, checkpoint or terminal is
+    // published.
+    let Ok(mut validator) = transactional_loaded_project_candidate_validator(
+        &transactions.project,
+        &transactions.identities,
+        cwd_generation,
+        Arc::clone(&transactions.table_object_ids),
+        Limits::default(),
+    ) else {
+        return Err(unsettled_after_evaluation());
+    };
     let committed = transactions
         .runtime
-        .block_on(state.commit_staged_table_request_activation(
-            writer,
-            request,
-            fingerprint,
-            &request_staged,
-            outcome,
+        .block_on(state.commit_validated_table_request_activation(
+            ValidatedTableRequestActivationCommit {
+                writer,
+                identity: request,
+                fingerprint,
+                context: request_staged.context(),
+                mutations: request_staged.mutations(),
+                next_digest: request_staged.next_digest(),
+                outcome,
+                validator: &mut *validator,
+                faults: request_staged.faults(),
+                effects: request_staged.effects(),
+            },
         ));
-    if committed.is_err() {
-        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-        return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+    match committed {
+        Ok(_) => {}
+        // Validation runs before any publication, so a failed assertion leaves
+        // the input uncommitted and the request is cancelled (ORNA-A091-009).
+        Err(TableActivationError::ValidationFailed(_)) if !external_possible => {
+            return Err(abandon("ORNA-A091-009".to_owned().into()));
+        }
+        Err(_) => {
+            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+        }
     }
     record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);
     *session = successor;
