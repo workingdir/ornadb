@@ -2,14 +2,13 @@
 //! scenarios.
 
 use std::{
+    io::{Read, Write},
     net::TcpStream,
     path::Path,
     process::Child,
     thread,
     time::{Duration, Instant},
 };
-
-use tungstenite::{Message, client::IntoClientRequest, http::HeaderValue};
 
 use crate::harness::{
     Check, Db, Entry, Failure, Probe, check_refuses, ensure, repl_refuses, unknown_command,
@@ -472,30 +471,19 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         .and_then(|value| value.split(';').next().map(str::to_owned))
         .ok_or_else(|| Failure("the session response sets no cookie".to_owned()))?;
 
-    let header = |value: &str| {
-        HeaderValue::from_str(value).map_err(|error| Failure(format!("header {value}: {error}")))
-    };
-    let mut request = format!("ws://127.0.0.1:{}{path}", server.port())
-        .into_client_request()
-        .map_err(|error| Failure(format!("websocket request: {error}")))?;
-    request.headers_mut().insert("Origin", header(&origin)?);
-    request.headers_mut().insert("Cookie", header(&cookie)?);
-    request
-        .headers_mut()
-        .insert("Sec-WebSocket-Protocol", header("orna.present.v1")?);
-    let stream = TcpStream::connect(("127.0.0.1", server.port()))
-        .map_err(|error| Failure(format!("connect: {error}")))?;
-    stream
-        .set_read_timeout(Some(Duration::from_secs(60)))
-        .map_err(|error| Failure(format!("socket timeout: {error}")))?;
-    let (mut socket, _) = tungstenite::client(request, stream)
-        .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;
-    socket
-        .send(Message::Binary(
-            watch_envelope(&database, "main.notes()")?.into(),
-        ))
-        .map_err(|error| Failure(format!("send watch: {error}")))?;
-    let first = read_envelope(&mut socket)?;
+    let mut socket = WatchSocket::connect(
+        server.port(),
+        path,
+        &[
+            ("Origin", origin.as_str()),
+            ("Cookie", cookie.as_str()),
+            ("Sec-WebSocket-Protocol", "orna.present.v1"),
+        ],
+    )?;
+    socket.send_binary(&watch_envelope(&database, "main.notes()")?)?;
+    let first = socket
+        .read_message(Duration::from_secs(60))?
+        .ok_or_else(|| Failure("no first live message within 60 s".to_owned()))?;
     match message_type(&first) {
         Some(SNAPSHOT) => {}
         Some(DIAGNOSTIC) => {
@@ -518,25 +506,15 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
 
     // A second process changes the watched relation's CWD.
     db.repl_effect(r#"main.Note.insert({ id: "later", text: "changes the watched count" })"#)?;
-    socket
-        .get_mut()
-        .set_read_timeout(Some(Duration::from_secs(10)))
-        .map_err(|error| Failure(format!("socket timeout: {error}")))?;
-    match socket.read() {
-        Ok(Message::Binary(bytes)) => Err(Failure(format!(
+    match socket.read_message(Duration::from_secs(10))? {
+        Some(bytes) => Err(Failure(format!(
             "the host now pushes message type {:?} after the change",
             message_type(&bytes)
         ))),
-        Ok(other) => Err(Failure(format!("unexpected live message {other:?}"))),
-        Err(tungstenite::Error::Io(error))
-            if matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            ) =>
-        {
-            Ok("watch on `main.notes()`: snapshot 0 received; no snapshot or delta within 10 s of a CWD insert".to_owned())
-        }
-        Err(error) => Err(Failure(format!("live socket failed: {error}"))),
+        None => Ok(
+            "watch on `main.notes()`: snapshot 0 received; no snapshot or delta within 10 s of a CWD insert"
+                .to_owned(),
+        ),
     }
 }
 
@@ -593,17 +571,145 @@ fn uuid_bytes(text: &str) -> Result<[u8; 16], Failure> {
     Ok(bytes)
 }
 
-fn read_envelope(socket: &mut tungstenite::WebSocket<TcpStream>) -> Result<Vec<u8>, Failure> {
-    loop {
-        match socket
-            .read()
-            .map_err(|error| Failure(format!("read live message: {error}")))?
-        {
-            Message::Binary(bytes) => return Ok(bytes.to_vec()),
-            Message::Ping(_) | Message::Pong(_) => {}
-            other => return Err(Failure(format!("unexpected live message {other:?}"))),
+/// The `Sec-WebSocket-Key` the probe sends. Any 16-byte base64 value is valid;
+/// the server's accept key is not checked because the probe only reads frames.
+const WATCH_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+/// A minimal RFC 6455 client for the live watch probe: one HTTP upgrade, masked
+/// client frames and unmasked server frames. It adds no dependency, so the
+/// workspace lockfile is unchanged.
+struct WatchSocket {
+    stream: TcpStream,
+}
+
+impl WatchSocket {
+    fn connect(port: u16, path: &str, headers: &[(&str, &str)]) -> Result<Self, Failure> {
+        let mut stream = TcpStream::connect(("127.0.0.1", port))
+            .map_err(|error| Failure(format!("connect: {error}")))?;
+        stream
+            .set_read_timeout(Some(Duration::from_secs(60)))
+            .map_err(|error| Failure(format!("socket timeout: {error}")))?;
+        let extra: String = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}\r\n"))
+            .collect();
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {WATCH_KEY}\r\n{extra}\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;
+        let head = read_head(&mut stream)?;
+        ensure!(
+            head.starts_with("HTTP/1.1 101"),
+            "websocket upgrade refused: {}",
+            head.lines().next().unwrap_or_default()
+        );
+        Ok(Self { stream })
+    }
+
+    /// Sends one binary frame, masked as RFC 6455 requires of clients.
+    fn send_binary(&mut self, payload: &[u8]) -> Result<(), Failure> {
+        self.send_frame(0x2, payload)
+    }
+
+    fn send_frame(&mut self, opcode: u8, payload: &[u8]) -> Result<(), Failure> {
+        const MASK: [u8; 4] = [0x37, 0xfa, 0x21, 0x3d];
+        let mut frame = vec![0x80 | opcode];
+        match payload.len() {
+            length @ 0..=125 => frame.push(0x80 | length as u8),
+            length @ 126..=0xffff => {
+                frame.push(0x80 | 126);
+                frame.extend_from_slice(&(length as u16).to_be_bytes());
+            }
+            length => {
+                frame.push(0x80 | 127);
+                frame.extend_from_slice(&(length as u64).to_be_bytes());
+            }
+        }
+        frame.extend_from_slice(&MASK);
+        frame.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ MASK[index % 4]),
+        );
+        self.stream
+            .write_all(&frame)
+            .map_err(|error| Failure(format!("send live frame: {error}")))
+    }
+
+    /// Waits up to `timeout` for the next binary message. `Ok(None)` means
+    /// nothing arrived in time; pings are answered and other frames fail.
+    fn read_message(&mut self, timeout: Duration) -> Result<Option<Vec<u8>>, Failure> {
+        self.stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|error| Failure(format!("socket timeout: {error}")))?;
+        loop {
+            let mut header = [0u8; 2];
+            match self.stream.read_exact(&mut header) {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    return Ok(None);
+                }
+                Err(error) => return Err(Failure(format!("live socket failed: {error}"))),
+            }
+            ensure!(header[1] & 0x80 == 0, "the host sent a masked frame");
+            let length = match header[1] & 0x7f {
+                126 => {
+                    let mut bytes = [0u8; 2];
+                    self.read_frame_bytes(&mut bytes)?;
+                    usize::from(u16::from_be_bytes(bytes))
+                }
+                127 => {
+                    let mut bytes = [0u8; 8];
+                    self.read_frame_bytes(&mut bytes)?;
+                    usize::try_from(u64::from_be_bytes(bytes))
+                        .map_err(|_| Failure("live frame length overflows".to_owned()))?
+                }
+                short => usize::from(short),
+            };
+            let mut payload = vec![0u8; length];
+            self.read_frame_bytes(&mut payload)?;
+            match header[0] & 0x0f {
+                0x2 => return Ok(Some(payload)),
+                0x9 => self.send_frame(0xa, &payload)?,
+                0xa => {}
+                0x8 => return Err(Failure("the host closed the live socket".to_owned())),
+                other => {
+                    return Err(Failure(format!(
+                        "unexpected live frame opcode {other:#x}"
+                    )));
+                }
+            }
         }
     }
+
+    fn read_frame_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Failure> {
+        self.stream
+            .read_exact(bytes)
+            .map_err(|error| Failure(format!("read live frame: {error}")))
+    }
+}
+
+/// Reads an HTTP response head byte by byte, so no frame that follows the
+/// upgrade is consumed with it.
+fn read_head(stream: &mut TcpStream) -> Result<String, Failure> {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        ensure!(head.len() < 16 * 1024, "the websocket upgrade response has no end");
+        stream
+            .read_exact(&mut byte)
+            .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;
+        head.push(byte[0]);
+    }
+    Ok(String::from_utf8_lossy(&head).into_owned())
 }
 
 /// The registry type of a canonical envelope: a five-entry map whose first
