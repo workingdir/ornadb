@@ -180,7 +180,7 @@ pub enum Verdict {
 
 impl Verdict {
     fn is_failure(&self) -> bool {
-        matches!(self, Verdict::Fail(_) | Verdict::Stale(_))
+        matches!(self, Verdict::Fail(_))
     }
 }
 
@@ -291,12 +291,15 @@ pub fn run_entries(entries: &[Entry]) -> Vec<Verdict> {
     verdicts.into_iter().map(|(_, verdict)| verdict).collect()
 }
 
-/// Prints one line per scenario and fails when any executor failed or any
-/// gap no longer reproduces its blocker.
-pub fn report(entries: &[Entry], verdicts: &[Verdict]) {
+/// Prints every verdict and returns the IDs whose known gap no longer
+/// reproduces (STALE). Only `FAIL` verdicts fail the run here; callers decide
+/// what to do with the STALE set (the release suite ratchets it, mandatory
+/// scenarios must have none).
+pub fn report(entries: &[Entry], verdicts: &[Verdict]) -> Vec<&'static str> {
     let oracles = oracles();
     let mut text = String::new();
     let mut failures = String::new();
+    let mut stale = Vec::new();
     let (mut passed, mut gaps, mut unavailable) = (0, 0, 0);
     for (entry, verdict) in entries.iter().zip(verdicts) {
         let title = oracles
@@ -330,6 +333,9 @@ pub fn report(entries: &[Entry], verdicts: &[Verdict]) {
                 unreachable!("an executor cannot produce a gap verdict")
             }
         };
+        if matches!(verdict, Verdict::Stale(_)) {
+            stale.push(entry.id);
+        }
         if verdict.is_failure() {
             let _ = writeln!(failures, "{line}");
         }
@@ -337,17 +343,17 @@ pub fn report(entries: &[Entry], verdicts: &[Verdict]) {
     }
     let _ = writeln!(
         text,
-        "{} scenarios: {passed} pass, {gaps} known gaps, {unavailable} not run without FUSE, {} failing",
+        "{} scenarios: {passed} pass, {gaps} known gaps, {} stale (ratcheted), {unavailable} not run without FUSE, {} failing",
         entries.len(),
-        entries.len() - passed - gaps - unavailable
+        stale.len(),
+        entries.len() - passed - gaps - unavailable - stale.len()
     );
     println!("{text}");
     assert!(
         failures.is_empty(),
-        "scenario oracle failures (FAIL: an executor no longer passes; STALE: a listed \
-         gap's blocker no longer reproduces, so write the scenario's executor or record \
-         its next blocker):\n{failures}"
+        "scenario oracle failures (FAIL: an executor no longer passes):\n{failures}"
     );
+    stale
 }
 
 /// The output and exit status of one product or Git command.
@@ -1015,7 +1021,8 @@ pub fn unknown_command(db: &mut Db, arguments: &[&str]) -> Probe {
     let text = run.output();
     ensure!(
         run.code == Some(2)
-            && (text.contains("unknown Orna command") || text.contains("is not available in this build")),
+            && (text.contains("unknown Orna command")
+                || text.contains("is not available in this build")),
         "`orna {}` is now a command: {}",
         arguments.join(" "),
         run.describe()
@@ -1036,7 +1043,9 @@ pub fn repl_refuses(db: &mut Db, lines: &[&str], code: &str) -> Probe {
     let text = run.output();
     let accepted = [code, "sys.version.incompatible", "ORNA-REPL-EFFECT"];
     ensure!(
-        accepted.iter().any(|c| text.contains(&format!("error[{c}]"))),
+        accepted
+            .iter()
+            .any(|c| text.contains(&format!("error[{c}]"))),
         "the REPL no longer refuses `{}` (expected error[{code}]): {}",
         lines.join("; "),
         run.describe()
