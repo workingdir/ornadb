@@ -4764,6 +4764,15 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let all: BTreeSet<String> = self.tables.iter().cloned().collect();
+        self.validate_changed(rows, &all)
+    }
+
+    fn validate_changed(
+        &mut self,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for (table, assertions) in &self.table_assertions {
             for assertion in assertions {
@@ -4827,7 +4836,14 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 }
             }
         }
-        if !self.module_assertions.is_empty() {
+        // ORNA-ASSERT-026: a module assertion is evaluated only when a validating
+        // boundary changed a table in its transitive dependency set.
+        let applicable = self
+            .module_assertions
+            .iter()
+            .filter(|assertion| assertion.dependencies.iter().any(|table| changed_tables.contains(table)))
+            .collect::<Vec<_>>();
+        if !applicable.is_empty() {
             // Module assertions read whole rows by field name, so candidate rows
             // are named from their key and stable field order, exactly as the
             // table assertions above name them.
@@ -4836,7 +4852,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 &self.candidate_table_fields,
                 &self.candidate_key_fields,
             )?;
-            for assertion in &self.module_assertions {
+            for assertion in applicable {
                 let value = evaluate_module_assertion_rows(
                     &named,
                     &assertion.expression,
@@ -4890,6 +4906,15 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let all: BTreeSet<String> = self.tables.iter().cloned().collect();
+        self.validate_changed(rows, &all)
+    }
+
+    fn validate_changed(
+        &mut self,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
             if table_assertion_function(&assertion.expression, &self.functions).is_some() {
@@ -4946,7 +4971,11 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 }
             }
         }
-        for assertion in &self.module_assertions {
+        for assertion in self
+            .module_assertions
+            .iter()
+            .filter(|assertion| assertion.dependencies.iter().any(|table| changed_tables.contains(table)))
+        {
             let value = evaluate_module_assertion_rows(
                 rows,
                 &assertion.expression,
