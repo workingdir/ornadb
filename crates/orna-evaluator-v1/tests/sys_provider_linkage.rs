@@ -229,12 +229,27 @@ fn linked_explain_query_is_dispatched_natively_through_the_host_catalogue() {
 
 #[test]
 fn evaluator_relation_sources_are_exactly_the_relation_links() {
+    let native = system_provider_linkage()
+        .links()
+        .filter(|link| link.host == SystemProviderHost::Evaluator)
+        .filter_map(|link| match link.member {
+            SystemSurfaceMember::Relation(path) => Some(path.to_owned()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     let mut recognised = BTreeSet::new();
     for path in published_paths().relations {
         let mut host = RecordingHost::default();
         let outcome = evaluate(&format!("{path} | count()"), &mut host);
         if host.relation_sources.is_empty() {
-            assert!(outcome.is_err(), "{path} counted rows without a relation source");
+            if native.contains(&path) {
+                outcome.unwrap_or_else(|error| {
+                    panic!("{path} is evaluator-native but did not count: {}", error.code())
+                });
+                recognised.insert(path);
+            } else {
+                assert!(outcome.is_err(), "{path} counted rows without a relation source");
+            }
             continue;
         }
         assert_eq!(host.relation_sources, BTreeSet::from([path.clone()]));
