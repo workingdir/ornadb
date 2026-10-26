@@ -120,3 +120,25 @@ fn ids_allocated_by_a_failed_activation_are_never_reused() {
     publish(&root, "Notes after a failed activation");
     assert_eq!(query_rows(&root, &["query", &note, "--format", "json"]), 3);
 }
+
+#[test]
+fn renaming_an_automatic_key_table_commits_its_allocator_summary() {
+    // ORNA-AUTOID-004 and ORNA-EVOL-001: the allocator summary is a system
+    // relation, not a table, so a rename that restages the store inventory
+    // must keep it. `orna mv` of a key-less table with allocated IDs must
+    // still commit, and the table keeps its ObjectId and watermark.
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, NOTES);
+    let note = admitted_relations(&commit_source(&root, "Declare Note"))["Note"].clone();
+    assert_eq!(insert_notes(&root, &["a", "b"]), vec![1, 2]);
+    publish(&root, "Two notes");
+
+    let renamed = orna(&root, &["mv", "Note", "Memo"]);
+    assert_success(&renamed, "orna mv");
+    commit_source(&root, "Rename Note to Memo");
+
+    assert_eq!(
+        committed_watermarks(&root, &head(&root)).expect("the commit records an allocator summary")[&note],
+        "2"
+    );
+}
