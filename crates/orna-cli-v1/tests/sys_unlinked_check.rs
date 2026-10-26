@@ -9,7 +9,7 @@ use tempfile::TempDir;
 fn project(source: &str) -> TempDir {
     let directory = tempfile::tempdir().expect("sys admission fixture project");
     std::fs::write(directory.path().join("main.orna"), source).expect("write fixture source");
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -23,7 +23,7 @@ fn project(source: &str) -> TempDir {
 }
 
 fn check(project: &TempDir) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",

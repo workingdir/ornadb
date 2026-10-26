@@ -1,0 +1,2 @@
+use std.list;
+pub fn seed(): [Int] = std.list.take([1, 2, 3], -1);

@@ -38,7 +38,7 @@ pub fn isolate_git(command: &mut Command) {
 }
 
 pub fn orna(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command);
     command
         .args(arguments)
@@ -49,7 +49,7 @@ pub fn orna(directory: &Path, arguments: &[&str]) -> Output {
 
 /// One REPL session that evaluates each line of `input` in order.
 pub fn orna_repl(root: &Path, input: &str) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command);
     let mut child = command
         .args(["--db", root.to_str().expect("UTF-8 test path"), "repl"])

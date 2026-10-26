@@ -98,7 +98,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
 
     assert!(module.symbols["pure"].effects.effects.is_empty());
     assert!(!module.symbols["pure"].effects.may_fail);
-    assert!(module.symbols["database"].effects.effects.contains("database read"));
+    assert!(module.symbols["database"].effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
     assert!(module.symbols["database"].effects.may_fail);
     assert!(module.symbols["direct_one"].effects.may_fail);
     assert!(module.symbols["predicate_one"].effects.may_fail);
@@ -113,7 +113,7 @@ fn relational_callbacks_preserve_effects_and_failure_before_planning() {
     for name in ["direct_one", "predicate_one"] {
         assert!(matches!(
             &module.symbols[name].ty,
-            Type::Function { result, .. } if result.as_ref() == &Type::Named("Note".into())
+            Type::Function { result, .. } if result.as_ref() == &Type::Named("relation-callback-effects.Note".into())
         ));
     }
 }

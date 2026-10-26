@@ -52,6 +52,7 @@ use editor_mount::{
 const EIO: i32 = 5;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
+const EPERM: i32 = 1;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -75,6 +76,17 @@ fn assert_errno<T: std::fmt::Debug>(result: std::io::Result<T>, expected: i32, c
     assert_eq!(error.raw_os_error(), Some(expected), "{context}: {error}");
 }
 
+/// `renameat2(2)` with explicit flags, through rustix: `std::fs::rename` cannot
+/// pass any. The crate forbids `unsafe`, so no libc call is made here.
+fn rename_with_flags(
+    from: &Path,
+    to: &Path,
+    flags: rustix::fs::RenameFlags,
+) -> std::io::Result<()> {
+    rustix::fs::renameat_with(rustix::fs::CWD, from, rustix::fs::CWD, to, flags)
+        .map_err(std::io::Error::from)
+}
+
 fn assert_success(output: &Output, context: &str) {
     assert!(
         output.status.success(),
@@ -85,7 +97,7 @@ fn assert_success(output: &Output, context: &str) {
 }
 
 fn orna(repository: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
         .arg(repository)
         .args(args)
@@ -209,6 +221,7 @@ async fn commit_unvalidated_runtime_row(
             [0x7f; 32],
             TerminalOutcome::new(vec![0x80]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -271,7 +284,7 @@ impl Session {
     }
 
     fn unmount(&self) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .arg("--db")
             .arg(self.repository_directory.path())
             .arg("unmount")
@@ -290,7 +303,7 @@ impl Session {
         )
         .unwrap();
         fs::set_permissions(&editor, fs::Permissions::from_mode(0o755)).unwrap();
-        let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        let output = Command::new(env!("CARGO_BIN_EXE_orna"))
             .arg("--db")
             .arg(self.repository_directory.path())
             .args(["edit", &format!("Music/{key}/data.orna")])
@@ -724,18 +737,11 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
         let capture = format!(
             "sys.blob.annotate(sys.blob.capture_file({root}, \"{key}.mp3\", 65536), \"audio/mpeg\")"
         );
-        documents.push((
-            format!("Music/{key}.orna"),
-            format!("{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"),
-        ));
+        documents.push(format!("{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"));
         captures.push(capture);
     }
-    let sources = documents
-        .iter()
-        .map(|(path, document)| (path.as_str(), document.as_str()))
-        .collect::<Vec<_>>();
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(MEDIA_SOURCE, "Music", &sources);
+        format3::format3_repository_with_context(MEDIA_SOURCE, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -757,11 +763,12 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
     let capture_rows = rows
         .iter()
         .zip(&blob_fields)
+        .zip(&documents)
         .zip(0xa0_u8..)
-        .map(|((&(key, _, _), fields), ordinal)| media_commit::SourceCaptureRow {
+        .map(|(((&(key, _, _), fields), document), ordinal)| media_commit::SourceCaptureRow {
             key,
             blob_fields: fields,
-            source_row: None,
+            source_row: document,
             ordinal,
             insert_only: true,
         })
@@ -876,5 +883,178 @@ async fn blob_descriptor_edits_are_refused_instead_of_dropped() {
         b"london-mp3-bytes",
         "metadata saves keep the captured content"
     );
+    session.finish();
+}
+
+/// A Blob projection has no private candidate, so a write-intent open, including
+/// `O_TRUNC`, is refused with EPERM (profiles/vfs-1.md:104-106, :139;
+/// 41-vfs.md:103-105). The stored Blob is not truncated by the refused open.
+#[tokio::test]
+async fn blob_write_open_is_refused_with_eperm_and_not_truncated() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) =
+        media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
+    let blob = session.row("london").join("content.mp3");
+    assert_errno(
+        OpenOptions::new().write(true).open(&blob),
+        EPERM,
+        "a Blob write-open is refused",
+    );
+    assert_errno(
+        OpenOptions::new().write(true).truncate(true).open(&blob),
+        EPERM,
+        "a Blob O_TRUNC open is refused",
+    );
+    assert_eq!(
+        fs::read(&blob).unwrap(),
+        b"london-mp3-bytes",
+        "a refused Blob open leaves the stored content unchanged",
+    );
+    session.finish();
+}
+
+/// A Blob projection has no candidate, so unlink and a same-row rename of it are
+/// refused with EPERM (profiles/vfs-1.md:110, :139; 41-vfs.md:103-105). The stored
+/// Blob is unchanged afterwards.
+#[tokio::test]
+async fn blob_unlink_and_rename_are_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) =
+        media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
+    let blob = session.row("london").join("content.mp3");
+    assert_errno(fs::remove_file(&blob), EPERM, "a Blob unlink is refused");
+    assert_errno(
+        fs::rename(&blob, session.row("london").join("moved.mp3")),
+        EPERM,
+        "a same-row Blob rename is refused",
+    );
+    assert_eq!(
+        fs::read(&blob).unwrap(),
+        b"london-mp3-bytes",
+        "a refused Blob unlink or rename leaves the stored content unchanged",
+    );
+    session.finish();
+}
+
+/// Structural mutations refused on the live writable mount are EPERM, not EROFS:
+/// EROFS is reserved for historical and read-only views (profiles/vfs-1.md:139;
+/// 41-vfs.md:103-105). A cross-row rename is also EPERM, not EXDEV: EXDEV would
+/// let `mv` and `cp` fall back to copy-then-unlink, which the refused unlink of
+/// the source would leave half-applied. Every refusal leaves the stored rows
+/// unchanged.
+#[tokio::test]
+async fn live_mount_structural_refusals_are_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (mut session, _media_root) = media_session(&[
+        ("london", "London", b"london-mp3-bytes".as_slice()),
+        ("paris", "Paris", b"paris-mp3-bytes".as_slice()),
+    ])
+    .await;
+    let london_before = session.read("london");
+    assert_errno(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(session.mountpoint().join("Music").join("notes.txt")),
+        EPERM,
+        "a create directly in the table directory is refused",
+    );
+    assert_errno(
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(session.row("london").join("notes.txt")),
+        EPERM,
+        "a create of a non-blob name inside a row is refused",
+    );
+    assert_errno(
+        fs::remove_file(session.document("london")),
+        EPERM,
+        "unlinking a row's data.orna is refused",
+    );
+    assert_errno(
+        fs::rename(
+            session.row("london").join("content.mp3"),
+            session.row("paris").join("moved.mp3"),
+        ),
+        EPERM,
+        "a Blob rename across rows is refused with EPERM, not EXDEV",
+    );
+    assert_errno(
+        fs::rename(
+            session.document("london"),
+            session.row("london").join("other.orna"),
+        ),
+        EPERM,
+        "renaming a row's data.orna to another name is refused",
+    );
+    assert_errno(
+        rename_with_flags(
+            &session.row("london").join("content.mp3"),
+            &session.row("london").join("renamed.mp3"),
+            rustix::fs::RenameFlags::NOREPLACE,
+        ),
+        EPERM,
+        "a same-row rename with flags is refused",
+    );
+    let truncate = std::process::Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], 0)"])
+        .arg(session.row("london").join("content.mp3"))
+        .env("LC_ALL", "C")
+        .output()
+        .expect("run python3 os.truncate on a Blob");
+    assert!(
+        !truncate.status.success(),
+        "a path-based truncate of a Blob is refused",
+    );
+    assert!(
+        String::from_utf8_lossy(&truncate.stderr).contains("Operation not permitted"),
+        "a path-based truncate of a Blob fails with EPERM, got: {}",
+        String::from_utf8_lossy(&truncate.stderr),
+    );
+    assert_eq!(
+        session.read("london"),
+        london_before,
+        "refused structural mutations leave the row document unchanged",
+    );
+    assert_eq!(
+        fs::read(session.row("london").join("content.mp3")).unwrap(),
+        b"london-mp3-bytes",
+        "a refused cross-row rename leaves the Blob in its row",
+    );
+    session.finish();
+}
+
+/// A temp-file save renamed to any name other than the row's `data.orna` is
+/// refused with EPERM (41-vfs.md:103-105); the same temp file still completes
+/// the save to `data.orna` afterwards.
+#[tokio::test]
+async fn temporary_rename_to_another_name_is_eperm_and_still_saves() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    let before = session.read("london");
+    let scratch = session.row("london").join(".data.orna.save");
+    fs::write(&scratch, music_row("London renamed")).expect("write a temp file in a row");
+    assert_errno(
+        fs::rename(&scratch, session.row("london").join("other.txt")),
+        EPERM,
+        "a temp-file rename to a name other than data.orna is refused",
+    );
+    assert_eq!(
+        session.read("london"),
+        before,
+        "the refused rename leaves the row document unchanged",
+    );
+    fs::rename(&scratch, session.document("london"))
+        .expect("the refused temp file still saves to data.orna");
+    assert!(session.read("london").contains("London renamed"));
     session.finish();
 }

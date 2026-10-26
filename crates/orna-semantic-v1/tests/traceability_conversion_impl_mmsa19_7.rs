@@ -3,8 +3,8 @@
 //! inline Orna sources; they do not claim runtime conversion execution.
 
 use orna_semantic_v1::{
-    Analysis, Catalogue, DIAG_LEGACY_TRYFROM, DIAG_TYPE, ModuleInput, Symbol, Type, analyze,
-    analyze_with_catalogue,
+    Analysis, Catalogue, DIAG_CONVERSION_CHAIN, DIAG_LEGACY_TRYFROM, DIAG_TYPE, ModuleInput,
+    Symbol, Type, analyze, analyze_with_catalogue,
 };
 
 const CHAIN_DIAGNOSTIC: &str =
@@ -132,7 +132,7 @@ pub type Account { id: Str, impl From<Email> { fn from(email) = Account { id: "a
     )]);
     assert!(
         implicit.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == DIAG_TYPE && diagnostic.message() == CHAIN_DIAGNOSTIC
+            diagnostic.code() == DIAG_CONVERSION_CHAIN && diagnostic.message() == CHAIN_DIAGNOSTIC
         }),
         "{:#?}",
         implicit.diagnostics
