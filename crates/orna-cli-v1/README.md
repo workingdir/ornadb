@@ -2,7 +2,7 @@
 
 A developing CLI for Orna 1.1.0 (publication `final-2026-10-05`, repository
 writer format 3). The installed command is `orna`; Cargo builds it as the
-`orna-cli-v1` binary.
+`orna` binary.
 
 ## Command surface
 
@@ -111,6 +111,12 @@ mount; the edit is validated before the durable row changes.
 one resolved commit. `orna mount status`
 reports attached views in human or `--json` form. Host FUSE mounts are supported
 on Linux only.
+
+`orna mount status --json` emits one object per attached view with the keys
+`mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
+`unresolved_drafts` (an array of `{"path","detail"}` for each unresolved draft of a
+writable mount), and `draft_error` (a string when drafts could not be listed, else
+`null`). `read_only` is always the negation of `writable`.
 
 ## Boundary
 

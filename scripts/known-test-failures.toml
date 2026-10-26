@@ -1,0 +1,69 @@
+# Tests and checks that fail on main today.
+#
+# The nightly gates workflow (`scripts/gate_evidence.py run`) fails a job only
+# when a failure is not listed here. A listed failure still makes its evidence
+# record `failed`; this file only stops it from failing the job.
+#
+# Each entry names the bead that owns the fix. Delete the entry in the change
+# that makes the test pass. The nightly summary fails when a listed test passes
+# (unless the entry is intermittent) or is no longer a test of its target.
+# Never add an entry to hide a regression.
+#
+# Staleness is detected only by the nightly summary. The PR path (crate-tests and
+# cli-tests, through the registry-aware runner) skips listed tests and does not
+# re-run them alone, so a listed test that starts passing stays hidden on PRs
+# until the nightly run. Do not rely on the PR path to retire an entry.
+#
+#   package       Cargo package, or "workspace" for a whole-workspace check
+#   target        lib, doc, bin:NAME, test:NAME or check:NAME
+#   test          exact libtest name, or "*" when the test binary aborts
+#   bead          bead that owns the fix
+#   reason        why it fails, and where the failure was observed
+#   record        optional record ID or glob the entry is limited to (default: every record)
+#   intermittent  optional; true when the test fails only on some runs, so a pass is expected
+
+[[failure]]
+package = "workspace"
+target = "check:fmt"
+test = "fmt"
+bead = "ornadb-5il1.224"
+reason = "cargo fmt --all -- --check reports diffs in at least 253 files on origin/main d35b7c0c3; the count was cut short when rustfmt hit the 4G lane memory cap."
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:req_vfs"
+test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"
+bead = "ornadb-9aj6"
+reason = "Fails intermittently in a full req_vfs run on main. Passed in the d35b7c0c3 baseline (orna-cli-v1 req_vfs: 36 of 36)."
+intermittent = true
+
+[[failure]]
+package = "orna-repository-v1"
+target = "lib"
+test = "tests::runtime_owner_chain_survives_repeated_startup_crashes"
+bead = "ornadb-mmsa.37"
+reason = "Failed on main CI run 39347800291; intermittent in the parallel library suite. Passed in the d35b7c0c3 baseline run (orna-repository-v1 lib: 304 of 304)."
+intermittent = true
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:publication_crash_matrix"
+test = "cli_publication_reopens_after_process_kill_at_each_reachable_boundary"
+bead = "ornadb-aflz"
+reason = "Fails intermittently on main (NotFound at publication_crash_matrix.rs:284). Passed in one d35b7c0c3 baseline run (publication_crash_matrix: 12 of 12)."
+intermittent = true
+
+[[failure]]
+package = "orna-cli-v1"
+target = "test:publication_crash_matrix"
+test = "recovery_consumes_only_frozen_range_and_preserves_unrelated_work"
+bead = "ornadb-aflz"
+reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520. Passed in one d35b7c0c3 baseline run (publication_crash_matrix: 12 of 12)."
+intermittent = true
+
+[[failure]]
+package = "workspace"
+target = "check:clippy"
+test = "clippy"
+bead = "ornadb-5il1.256"
+reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."

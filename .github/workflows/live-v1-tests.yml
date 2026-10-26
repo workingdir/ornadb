@@ -1,0 +1,42 @@
+name: Live v1 tests
+
+# Every orna-live-v1 test target runs on each pull request and each push to main. The
+# crate had no workflow, so its host tests (including the owner-lock and writer-lease
+# admission tests) were never gated on a pull request.
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_JOBS: 2
+  RUST_TEST_THREADS: 2
+
+# Push: one group per commit, never cancelled. Pull request: one group per ref, so a new
+# commit cancels the older run.
+concurrency:
+  group: live-v1-tests-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  live-v1-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      # --no-fail-fast runs every test target so one failing binary cannot hide another.
+      - name: Test the orna-live-v1 crate
+        run: cargo test --locked -p orna-live-v1 --no-fail-fast -- --nocapture

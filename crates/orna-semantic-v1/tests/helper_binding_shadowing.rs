@@ -50,7 +50,7 @@ fn imported_helper_shadowed_by_callback_local_does_not_expand_imported_tables() 
         ),
     ]);
 
-    assert_shadowed_plan(&analysis, BTreeSet::from(["User".to_owned()]));
+    assert_shadowed_plan(&analysis, BTreeSet::from(["consumer.User".to_owned()]));
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn same_module_helper_call_keeps_exact_transitive_table_dependencies() {
     );
     assert_eq!(
         plan(&analysis, "consumer").dependencies,
-        BTreeSet::from(["Account".to_owned(), "User".to_owned()])
+        BTreeSet::from(["consumer.Account".to_owned(), "consumer.User".to_owned()])
     );
 }
 
@@ -124,7 +124,7 @@ fn imported_helper_call_keeps_exact_transitive_table_dependencies() {
     );
     assert_eq!(
         plan(&analysis, "consumer").dependencies,
-        BTreeSet::from(["User".to_owned(), "Account".to_owned()])
+        BTreeSet::from(["checks.User".to_owned(), "checks.Account".to_owned()])
     );
     assert_eq!(
         module(&analysis, "checks")
@@ -133,7 +133,8 @@ fn imported_helper_call_keeps_exact_transitive_table_dependencies() {
             .expect("imported helper export")
             .effects,
         EffectSummary {
-            effects: BTreeSet::from(["database read".to_owned()]),
+            effects: BTreeSet::from([orna_semantic_v1::EffectKind::TableRead]),
+            opaque: false,
             may_fail: true,
         }
     );

@@ -10,6 +10,7 @@
 //! the size of the tree around them (ORNA-ROW-009).
 
 use std::{
+    collections::HashMap,
     fmt,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -22,6 +23,30 @@ use crate::{
     Repository, RepositoryError, init::format_context::STORE_PATH, native_graph::GitHashAlgorithm,
     scrub_git_routing_environment,
 };
+
+/// Most entries a committed tree walk may visit, counting every occurrence of
+/// a shared subtree and every interior tree. The fixed walk limits are not
+/// `ProjectLimits` fields; orna-project-v1 documents them and reports a breach
+/// as `ProjectLoadError::SourceTreeLimit`.
+const MAX_SOURCE_TREE_WALK_ENTRIES: u64 = 1 << 20;
+/// Most path bytes a committed tree walk may list, counting every occurrence
+/// of a shared subtree. The entry cap alone does not bound this: a chain of
+/// 255-byte names expands to gigabytes of paths within the entry cap.
+const MAX_SOURCE_TREE_PATH_BYTES: u64 = 1 << 27;
+/// Deepest tree nesting a committed tree walk may expand.
+const MAX_SOURCE_TREE_DEPTH: usize = 256;
+
+/// Entry count, path bytes and nesting height of a measured tree.
+#[derive(Clone, Copy)]
+struct SourceTreeSummary {
+    /// Entries the walk visits, counting every occurrence of shared subtrees.
+    entries: u64,
+    /// Bytes of every visited entry's full path, relative to the measured
+    /// tree. A subtree's paths gain its parent's prefix once per occurrence.
+    path_bytes: u64,
+    /// Levels of tree nesting below the measured tree.
+    height: usize,
+}
 
 /// Bounds one response header: an echoed object name or a full SHA-256 ID,
 /// followed by the object type and size.
@@ -79,6 +104,11 @@ impl ObjectHeader {
 
     pub(crate) const fn kind(&self) -> ObjectKind {
         self.kind
+    }
+
+    /// The object's size in bytes, as `info` reported it.
+    pub(crate) const fn size(&self) -> u64 {
+        self.size
     }
 }
 
@@ -140,6 +170,9 @@ pub(crate) struct ObjectReader {
     worktree: PathBuf,
     algorithm: OnceLock<GitHashAlgorithm>,
     session: Mutex<Option<Session>>,
+    /// Processes this reader has started, for tests that count spawns.
+    #[cfg(test)]
+    starts: std::sync::atomic::AtomicUsize,
 }
 
 impl fmt::Debug for ObjectReader {
@@ -156,6 +189,8 @@ impl ObjectReader {
             worktree,
             algorithm: OnceLock::new(),
             session: Mutex::new(None),
+            #[cfg(test)]
+            starts: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -168,6 +203,7 @@ impl ObjectReader {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command.args(["rev-parse", "--show-object-format"]);
         let output = command
             .output()
@@ -221,6 +257,30 @@ impl ObjectReader {
         })
     }
 
+    /// Reads the complete bytes of an object whose header `info` has just
+    /// reported. The caller admits the header's kind and size first; the
+    /// bytes are read through the same shared process, one exchange.
+    pub(crate) fn read_exact(
+        &self,
+        oid: &str,
+        header: &ObjectHeader,
+        algorithm: GitHashAlgorithm,
+    ) -> Result<Vec<u8>, RepositoryError> {
+        let size = usize::try_from(header.size).map_err(|_| RepositoryError::GitOperationFailed)?;
+        self.with_session(|session| {
+            if session.request("contents", oid, algorithm)? != Some(header.clone()) {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            let mut bytes = vec![0; size];
+            session
+                .output()?
+                .read_exact(&mut bytes)
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            session.finish_contents()?;
+            Ok(bytes)
+        })
+    }
+
     /// Lists every entry of one tree object, in Git's tree order.
     pub(crate) fn tree_entries(&self, oid: &str) -> Result<Vec<TreeEntry>, RepositoryError> {
         let mut entries = Vec::new();
@@ -232,6 +292,119 @@ impl ObjectReader {
             });
         })?;
         Ok(entries)
+    }
+
+    /// Refuses a recursive listing of `treeish` under `path` before Git expands
+    /// it. The treeish must resolve to a tree, so a missing one fails closed. A
+    /// path that names no tree lists nothing, so it is accepted. Every
+    /// occurrence of a shared subtree is measured, so the check is bounded even
+    /// when the expansion it guards is not.
+    pub(crate) fn check_expansion(&self, treeish: &str, path: &str) -> Result<(), RepositoryError> {
+        let root = self
+            .info(&format!("{treeish}^{{tree}}"))?
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        if path.is_empty() {
+            return self.check_tree_budget(root.oid(), None, 0);
+        }
+        match self.info(&format!("{treeish}^{{tree}}:{path}"))? {
+            Some(target) if target.kind == ObjectKind::Tree => {
+                let prefix = u64::try_from(path.len()).unwrap_or(u64::MAX).saturating_add(1);
+                self.check_tree_budget(target.oid(), None, prefix)
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Checks that the tree at `oid`, listed under a prefix of `prefix` bytes
+    /// that includes its separator, stays within the walk limits. `site` is as
+    /// in [`Self::measure_tree`].
+    fn check_tree_budget(
+        &self,
+        oid: &str,
+        site: Option<usize>,
+        prefix: u64,
+    ) -> Result<(), RepositoryError> {
+        let summary = self.measure_tree(oid, site, 0, &mut HashMap::new())?;
+        let listed = summary
+            .entries
+            .saturating_mul(prefix)
+            .saturating_add(summary.path_bytes);
+        if listed > MAX_SOURCE_TREE_PATH_BYTES {
+            return Err(RepositoryError::SourceTreeLimit);
+        }
+        Ok(())
+    }
+
+    /// Measures the tree at `oid` without listing it. `site` is the number of
+    /// leading `STORE_PATH` components the tree names, or `None` once it leaves
+    /// that prefix. Results are memoised per tree and site, so each shared
+    /// subtree is read once while its expanded entries still count per
+    /// occurrence.
+    fn measure_tree(
+        &self,
+        oid: &str,
+        site: Option<usize>,
+        depth: usize,
+        memo: &mut HashMap<(String, Option<usize>), SourceTreeSummary>,
+    ) -> Result<SourceTreeSummary, RepositoryError> {
+        let key = (oid.to_owned(), site);
+        if let Some(summary) = memo.get(&key) {
+            return Ok(*summary);
+        }
+        if depth > MAX_SOURCE_TREE_DEPTH {
+            return Err(RepositoryError::SourceTreeLimit);
+        }
+        let store_depth = STORE_PATH.split('/').count();
+        let mut summary = SourceTreeSummary {
+            entries: 0,
+            path_bytes: 0,
+            height: 0,
+        };
+        for entry in self.tree_entries(oid)? {
+            let name_bytes = u64::try_from(entry.name().len()).unwrap_or(u64::MAX);
+            summary.entries += 1;
+            summary.path_bytes = summary.path_bytes.saturating_add(name_bytes);
+            Self::admit(&summary)?;
+            if !matches!(entry.mode(), TreeEntryMode::Tree) {
+                continue;
+            }
+            let child_site = Self::store_child_site(site, entry.name());
+            if child_site == Some(store_depth) {
+                continue;
+            }
+            let child = self.measure_tree(entry.oid(), child_site, depth + 1, memo)?;
+            if depth + 1 + child.height > MAX_SOURCE_TREE_DEPTH {
+                return Err(RepositoryError::SourceTreeLimit);
+            }
+            // Each of the child's entries gains this name and a separator.
+            summary.entries += child.entries;
+            summary.path_bytes = summary
+                .path_bytes
+                .saturating_add(name_bytes.saturating_add(1).saturating_mul(child.entries))
+                .saturating_add(child.path_bytes);
+            Self::admit(&summary)?;
+            summary.height = summary.height.max(child.height + 1);
+        }
+        memo.insert(key, summary);
+        Ok(summary)
+    }
+
+    /// Refuses a summary whose entries or path bytes exceed the walk limits.
+    fn admit(summary: &SourceTreeSummary) -> Result<(), RepositoryError> {
+        if summary.entries > MAX_SOURCE_TREE_WALK_ENTRIES
+            || summary.path_bytes > MAX_SOURCE_TREE_PATH_BYTES
+        {
+            return Err(RepositoryError::SourceTreeLimit);
+        }
+        Ok(())
+    }
+
+    /// The store site of the child `name` of a tree at `site`, or `None` once
+    /// the child leaves the `STORE_PATH` prefix.
+    fn store_child_site(site: Option<usize>, name: &[u8]) -> Option<usize> {
+        let index = site?;
+        let component = STORE_PATH.split('/').nth(index)?;
+        (component.as_bytes() == name).then_some(index + 1)
     }
 
     /// Finds the entry called `name` in one tree object without keeping its
@@ -312,6 +485,9 @@ impl ObjectReader {
         let mut slot = self.lock_session();
         if slot.is_none() {
             *slot = Some(Session::start(&self.worktree)?);
+            #[cfg(test)]
+            self.starts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         }
         let Some(session) = slot.as_mut() else {
             return Err(RepositoryError::GitOperationFailed);
@@ -345,6 +521,12 @@ impl ObjectReader {
             .as_ref()
             .map(|session| session.child.id())
     }
+
+    /// How many cat-file processes this reader has started.
+    #[cfg(test)]
+    pub(crate) fn process_starts(&self) -> usize {
+        self.starts.load(std::sync::atomic::Ordering::SeqCst)
+    }
 }
 
 /// One running `git cat-file --batch-command` process.
@@ -359,6 +541,7 @@ impl Session {
         let mut command = Command::new("git");
         command.current_dir(worktree);
         scrub_git_routing_environment(&mut command);
+        crate::bind_git_discovery_to_worktree(&mut command, worktree);
         // Set after scrubbing, which removes inherited replace-object settings.
         command
             .env("GIT_NO_LAZY_FETCH", "1")
@@ -533,8 +716,11 @@ impl Repository {
     }
 
     /// Walks a tree depth first in Git's tree order, as `git ls-tree -r`
-    /// lists it, and skips the subtree at the fixed store position.
+    /// lists it, and skips the subtree at the fixed store position. The walk
+    /// is preceded by a measurement, because shared subtrees multiply their
+    /// entries without any bound on the stored bytes.
     fn source_tree_entries(&self, root: &str) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
+        self.objects.check_tree_budget(root, Some(0), 0)?;
         let mut listed = Vec::new();
         let mut pending = vec![(String::new(), self.objects.tree_entries(root)?.into_iter())];
         loop {
@@ -584,7 +770,7 @@ mod tests {
     };
 
     use super::{ObjectKind, TreeEntryMode};
-    use crate::{CommittedTreeEntryKind, Repository};
+    use crate::{CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError};
 
     fn git(directory: &Path, arguments: &[&str]) -> String {
         git_with_input(directory, arguments, "")
@@ -741,6 +927,170 @@ mod tests {
     }
 
     #[test]
+    fn a_multi_object_walk_starts_exactly_one_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let tree = git(root, &["rev-parse", "HEAD^{tree}"]);
+        assert_eq!(objects.process_starts(), 0, "no read has started a process");
+        for _ in 0..8 {
+            objects
+                .info(&tree)
+                .expect("read the tree")
+                .expect("the tree exists");
+            objects
+                .tree_entries(&tree)
+                .expect("list the tree");
+        }
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "a multi-object walk reuses one cat-file process"
+        );
+    }
+
+    /// Blob reads, which the walk uses for every chunk, must also share the one
+    /// process; a walk that only lists trees would not prove that.
+    #[test]
+    fn a_multi_object_walk_reads_blobs_through_the_same_process() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        for _ in 0..8 {
+            assert_eq!(
+                objects.read_blob(&blob, 1024).expect("read the blob"),
+                b"pub fn main() {}\n"
+            );
+            let header = objects
+                .info(&blob)
+                .expect("info the blob")
+                .expect("the blob exists");
+            assert_eq!(
+                objects
+                    .read_exact(&blob, &header, algorithm)
+                    .expect("read the blob exactly"),
+                b"pub fn main() {}\n"
+            );
+        }
+        assert_eq!(objects.process_starts(), 1, "blob reads reuse one process");
+    }
+
+    /// A reader process that died is discarded rather than left in use: the
+    /// read reports an error instead of hanging on a closed pipe, and the next
+    /// read starts a fresh process.
+    #[test]
+    fn a_dead_reader_process_is_discarded_and_the_next_read_restarts_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("first read"),
+            b"pub fn main() {}\n"
+        );
+        let pid = objects.process_id().expect("a live reader process");
+        let killed = Command::new("sh")
+            .args(["-c", &format!("kill -9 {pid}")])
+            .status()
+            .expect("send SIGKILL");
+        assert!(killed.success());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_blob(&blob, 1024).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a read on a dead reader returns instead of hanging");
+            assert!(failed, "a dead reader cannot serve a read");
+        });
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
+    /// A caller header that disagrees with git's header is refused before any
+    /// bytes are read, and the reader is restarted so it stays in step.
+    #[test]
+    fn a_header_that_disagrees_with_git_is_refused_and_the_reader_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = objects
+            .info(&blob)
+            .expect("info the blob")
+            .expect("the blob exists");
+        let mut wrong: super::ObjectHeader = header.clone();
+        wrong.size += 1;
+        assert!(objects.read_exact(&blob, &wrong, algorithm).is_err());
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(objects.process_starts(), 2, "the reader was restarted once");
+    }
+
+    /// A git process that dies after writing part of an object leaves the
+    /// reader short of the declared size. The read reports the failure without
+    /// hanging on the closed pipe, the broken process is discarded, and the
+    /// next read starts a fresh one.
+    #[test]
+    fn a_truncated_object_stream_discards_the_session_and_the_next_read_restarts() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let objects = repository.objects();
+        let blob = git(root, &["rev-parse", "HEAD:main.orna"]);
+        let algorithm = objects.algorithm().expect("the repository algorithm");
+        let header = super::ObjectHeader {
+            oid: blob.clone(),
+            kind: ObjectKind::Blob,
+            size: 20,
+        };
+        // The stub answers the `contents` request with a 20-byte header, writes
+        // 5 bytes, and exits: the stream ends mid-object.
+        let script = format!(r#"read line; printf '{blob} blob 20\n'; printf short; exit 0"#);
+        let mut child = Command::new("sh")
+            .args(["-c", &script])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn the stub reader");
+        let input = child.stdin.take().expect("stub stdin");
+        let output = std::io::BufReader::new(child.stdout.take().expect("stub stdout"));
+        *objects.lock_session() = Some(super::Session {
+            child,
+            input: Some(input),
+            output: Some(output),
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| sender.send(objects.read_exact(&blob, &header, algorithm).is_err()));
+            let failed = receiver
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a truncated read returns instead of hanging");
+            assert!(failed, "a truncated object cannot be read exactly");
+        });
+        assert!(
+            objects.process_id().is_none(),
+            "the truncated process was discarded"
+        );
+        assert_eq!(
+            objects.read_blob(&blob, 1024).expect("restarted read"),
+            b"pub fn main() {}\n"
+        );
+        assert_eq!(
+            objects.process_starts(),
+            1,
+            "the next read started a fresh process"
+        );
+    }
+
+    #[test]
     fn a_failed_read_restarts_the_reader_without_desynchronising_it() {
         let (directory, repository) = repository();
         let objects = repository.objects();
@@ -863,5 +1213,241 @@ mod tests {
                 .expect("the source listing never enters the store"),
             complete
         );
+    }
+
+    /// Each level holds two entries naming the same next tree, so the listing
+    /// of the root expands to `2^levels` leaves from `levels + 1` objects. The
+    /// walk must refuse it before it materialises any of that expansion.
+    #[test]
+    fn source_listing_rejects_a_shared_subtree_bomb_before_expanding_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let mut tree = git_with_input(root, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+        for _ in 0..30 {
+            tree = git_with_input(
+                root,
+                &["mktree"],
+                &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+            );
+        }
+        let commit = git(root, &["commit-tree", &tree, "-m", "tree bomb"]);
+        git(root, &["update-ref", "HEAD", &commit]);
+        let commit = repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the bomb commit");
+        assert!(matches!(
+            repository.list_committed_source_tree(&commit),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// A chain nested beyond the depth limit is refused as well, even though
+    /// it holds only one entry per level.
+    #[test]
+    fn source_listing_rejects_trees_nested_beyond_the_depth_limit() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let mut tree = git_with_input(root, &["mktree"], "");
+        for _ in 0..300 {
+            tree = git_with_input(root, &["mktree"], &format!("040000 tree {tree}\td\n"));
+        }
+        let commit = git(root, &["commit-tree", &tree, "-m", "deep chain"]);
+        git(root, &["update-ref", "HEAD", &commit]);
+        let commit = repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the deep commit");
+        assert!(matches!(
+            repository.list_committed_source_tree(&commit),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// Commits `tree` as the new HEAD of the fixture repository and resolves
+    /// it, so a test can list it by commit.
+    fn commit_tree_as_head(
+        directory: &Path,
+        repository: &Repository,
+        tree: &str,
+        message: &str,
+    ) -> GitCommitRef {
+        let commit = git(directory, &["commit-tree", tree, "-m", message]);
+        git(directory, &["update-ref", "HEAD", &commit]);
+        repository
+            .resolve_snapshot(&commit)
+            .expect("resolve the fixture commit")
+    }
+
+    /// Two entries per level name the same next tree and the leaf is an empty
+    /// tree, so `ls-tree -r` emits no leaf while still visiting every interior
+    /// tree: 2^depth occurrences. A cap on listed leaves never trips on it, so
+    /// the bound must count interior trees before git expands them.
+    #[test]
+    fn committed_tree_listing_refuses_an_empty_leaf_bomb_before_git_expands_it() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let mut tree = git_with_input(root, &["mktree"], "");
+        for _ in 0..30 {
+            tree = git_with_input(
+                root,
+                &["mktree"],
+                &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+            );
+        }
+        let commit = commit_tree_as_head(root, &repository, &tree, "empty leaf bomb");
+        assert!(matches!(
+            repository.list_committed_tree(&commit, 64),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// A shared DAG whose expansion stays under the limit lists every
+    /// occurrence: ten levels of two entries name 2^10 leaves.
+    #[test]
+    fn committed_tree_listing_lists_a_shared_dag_under_the_limit_in_full() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let mut tree = git_with_input(root, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+        for _ in 0..10 {
+            tree = git_with_input(
+                root,
+                &["mktree"],
+                &format!("040000 tree {tree}\ta\n040000 tree {tree}\tb\n"),
+            );
+        }
+        let commit = commit_tree_as_head(root, &repository, &tree, "shared dag");
+        let listed = repository
+            .list_committed_tree(&commit, 4096)
+            .expect("list the shared DAG under the limit");
+        assert_eq!(listed.len(), 1024);
+    }
+
+    /// Eighteen levels of two 255-byte names hold about 3 * 2^18 entries,
+    /// under the entry cap, yet list gigabytes of paths. The path-byte budget
+    /// must refuse them.
+    #[test]
+    fn committed_tree_listing_refuses_long_names_past_the_path_byte_budget() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let mut tree = git_with_input(root, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+        let (long_a, long_b) = ("a".repeat(255), "b".repeat(255));
+        for _ in 0..18 {
+            tree = git_with_input(
+                root,
+                &["mktree"],
+                &format!("040000 tree {tree}\t{long_a}\n040000 tree {tree}\t{long_b}\n"),
+            );
+        }
+        let commit = commit_tree_as_head(root, &repository, &tree, "long names");
+        assert!(matches!(
+            repository.list_committed_tree(&commit, 1 << 20),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// A flat tree of 10,000 entries is far below every walk limit and lists
+    /// in full.
+    #[test]
+    fn committed_tree_listing_accepts_a_flat_tree_of_ten_thousand_entries() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let listing = (0..10_000)
+            .map(|index| format!("100644 blob {leaf}\tf{index:05}\n"))
+            .collect::<String>();
+        let tree = git_with_input(root, &["mktree"], &listing);
+        let commit = commit_tree_as_head(root, &repository, &tree, "flat");
+        let listed = repository
+            .list_committed_tree(&commit, 10_000)
+            .expect("list the flat tree");
+        assert_eq!(listed.len(), 10_000);
+    }
+
+    /// A narrow chain nested 60 levels deep is well under the depth limit and
+    /// lists its single file.
+    #[test]
+    fn committed_tree_listing_accepts_a_narrow_tree_sixty_levels_deep() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let mut tree = git_with_input(root, &["mktree"], &format!("100644 blob {leaf}\tf\n"));
+        for _ in 0..60 {
+            tree = git_with_input(root, &["mktree"], &format!("040000 tree {tree}\td\n"));
+        }
+        let commit = commit_tree_as_head(root, &repository, &tree, "deep narrow");
+        let listed = repository
+            .list_committed_tree(&commit, 64)
+            .expect("list the narrow deep tree");
+        assert_eq!(listed.len(), 1);
+    }
+
+    /// The materialised store is walked only by its own reader, which lists
+    /// its ten thousand entries, so the store is accepted at that size and the
+    /// source listing never enters it.
+    #[test]
+    fn large_orna_store_is_accepted_by_the_store_and_skipped_by_the_source_listing() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let leaf = git_with_input(root, &["hash-object", "-w", "--stdin"], "leaf\n");
+        let listing = (0..10_000)
+            .map(|index| format!("100644 blob {leaf}\tn{index:05}\n"))
+            .collect::<String>();
+        let store = git_with_input(root, &["mktree"], &listing);
+        let metadata = git_with_input(root, &["mktree"], &format!("040000 tree {store}\tstore\n"));
+        let mut listing = git(root, &["ls-tree", "HEAD"]);
+        listing.push_str(&format!("\n040000 tree {metadata}\t.orna\n"));
+        let tree = git_with_input(root, &["mktree"], &listing);
+        let commit = commit_tree_as_head(root, &repository, &tree, "large store");
+        repository
+            .objects()
+            .check_expansion(commit.as_str(), ".orna/store")
+            .expect("a 10k-entry store is under every limit");
+        repository
+            .list_committed_source_tree(&commit)
+            .expect("the source listing skips the store");
+    }
+
+    /// An absent path lists nothing and is accepted; a treeish that names no
+    /// object fails closed.
+    #[test]
+    fn expansion_check_accepts_an_absent_path_and_fails_closed_on_a_missing_treeish() {
+        let (directory, repository) = repository();
+        let root = directory.path();
+        let head = git(root, &["rev-parse", "HEAD"]);
+        let objects = repository.objects();
+        objects
+            .check_expansion(&head, "no/such/path")
+            .expect("an absent path lists nothing");
+        assert!(matches!(
+            objects.check_expansion("0123456789abcdef0123456789abcdef01234567", ""),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+}
+
+#[cfg(all(test, unix))]
+mod corrupt_root_tests {
+    use super::*;
+
+    #[test]
+    fn object_reader_algorithm_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        assert!(ObjectReader::new(child).algorithm().is_err());
+    }
+
+    #[test]
+    fn object_reader_session_fails_closed_for_corrupt_root_under_healthy_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = crate::tests::corrupt_child_under_healthy_parent(root.path());
+        let fails_closed = match Session::start(&child) {
+            Err(_) => true,
+            Ok(mut session) => session
+                .request("info", "HEAD", GitHashAlgorithm::Sha1)
+                .is_err(),
+        };
+        assert!(fails_closed);
     }
 }

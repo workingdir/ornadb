@@ -6,6 +6,8 @@
 //! All public failures are stable redacted codes and inbound protocol bytes
 //! are decoded canonically.
 
+pub mod live_presentation;
+
 use futures::{
     channel::oneshot,
     executor::block_on,
@@ -37,8 +39,8 @@ use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    StagedTableActivation, TableMutation, TerminalOutcome, WriterLease, admin_invocation_id,
-    with_terminal_admin_effect,
+    ActivationEffectReport, StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
+    admin_invocation_id, with_terminal_admin_effect,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -105,6 +107,8 @@ pub enum Error {
     ApplicationDeferred,
     RuntimeUnavailable,
     SnapshotExpired,
+    /// The retained session credential or lifetime has expired.
+    SessionExpired,
 }
 
 impl Error {
@@ -127,6 +131,7 @@ impl Error {
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
+            Self::SessionExpired => "wire.session_expired",
         }
     }
 }
@@ -729,6 +734,7 @@ impl Default for LiveApplicationWorkSupervisor {
 pub struct LiveEvalTransaction {
     pub mutations: Vec<TableMutation>,
     pub next_digest: [u8; 32],
+    pub effects: ActivationEffectReport,
     pub faults: Arc<dyn FaultInjector>,
     request_identity: Option<RequestIdentity>,
     after_commit: Option<Box<dyn FnOnce() + Send>>,
@@ -739,11 +745,13 @@ impl LiveEvalTransaction {
     pub fn new(
         mutations: Vec<TableMutation>,
         next_digest: [u8; 32],
+        effects: ActivationEffectReport,
         faults: Arc<dyn FaultInjector>,
     ) -> Self {
         Self {
             mutations,
             next_digest,
+            effects,
             faults,
             request_identity: None,
             after_commit: None,
@@ -1663,7 +1671,7 @@ impl HttpResponse {
         Self {
             status: match error {
                 Error::Denied => 403,
-                Error::Closed => 410,
+                Error::Closed | Error::SessionExpired => 410,
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
                 Error::DeletionFailed
@@ -1744,6 +1752,17 @@ enum DurableAdmission {
     Execute,
     Active,
     Replay(Box<DispatchOutcome>),
+}
+
+/// Test-only access to the runtime handle that holds the worktree writer lease.
+#[cfg(feature = "test-support")]
+impl LiveHost {
+    /// Returns the owner-bound runtime handle, or `None` when the host is not
+    /// durable. Only the lock holder may reserve requests (ORNA-TURSO-005).
+    #[must_use]
+    pub fn owner_runtime_for_test(&self) -> Option<Arc<RuntimeState>> {
+        self.runtime.clone()
+    }
 }
 
 // The state boundary is synchronous today, but the async methods keep the
@@ -2688,7 +2707,23 @@ impl LiveHost {
         } else {
             0
         };
-        let mut work = self.application_work.admit(session, request)?;
+        let mut work = match self.application_work.admit(session, request) {
+            Ok(work) => work,
+            Err(Error::Limit) => {
+                // Admission was refused before any request state existed, so
+                // the correlated limit diagnostic is not retained for replay.
+                return match self.operational_error_outcome(
+                    Some(session),
+                    &envelope,
+                    Error::Limit,
+                    false,
+                )? {
+                    Some(outcome) => Ok(ApplicationPreparation::Completed(outcome)),
+                    None => Err(Error::Limit),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
             work.complete();
             self.retain_failure(session, request, fingerprint).await?;
@@ -3087,6 +3122,8 @@ impl LiveHost {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
             Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
+            Error::Limit => ("wire.limit", event_watch),
+            Error::SessionExpired => ("wire.session_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3436,7 +3473,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -3454,7 +3491,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -4353,6 +4390,7 @@ impl LiveHost {
         let LiveEvalTransaction {
             mutations,
             next_digest,
+            effects,
             faults,
             request_identity: _,
             after_commit,
@@ -4363,9 +4401,14 @@ impl LiveHost {
             outcome: FrameOutcome::Accepted,
             response: Some(response),
         })?;
-        let staged =
-            StagedTableActivation::from_source(context.clone(), mutations, next_digest, faults)
-                .map_err(|error| map_runtime(&error))?;
+        let staged = StagedTableActivation::from_source(
+            context.clone(),
+            mutations,
+            next_digest,
+            faults,
+            effects,
+        )
+        .map_err(|error| map_runtime(&error))?;
         let committed = runtime
             .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
             .await
@@ -4695,10 +4738,10 @@ impl LiveHost {
         Ok(())
     }
 
-    /// A resync is a complete-root replacement fallback. Keep the server
-    /// watch identity stable, reject revision regressions, and permit same-
-    /// revision replay only when the complete visible tree and pinned snapshot
-    /// are unchanged.
+    /// A resync is answered with the watch's latest full snapshot. Keep the
+    /// server watch identity stable, reject revision regressions, and permit
+    /// same-revision replay only when the complete visible tree and pinned
+    /// snapshot are unchanged.
     fn prepare_watch_snapshot_replacement(
         &self,
         session: [u8; 16],
@@ -4709,37 +4752,8 @@ impl LiveHost {
             .watch_snapshots
             .get(&(session, watch))
             .ok_or(Error::ApplicationRejected)?;
-        let candidate = match &response.message {
-            Message::Snapshot { .. } | Message::Diagnostic { .. } => {
-                let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
-                    return Ok(None);
-                };
-                candidate
-            }
-            Message::Delta {
-                base_revision,
-                new_revision,
-                patches,
-                snapshot,
-            } => {
-                if response.request.is_some()
-                    || response.watch != Some(watch)
-                    || *base_revision != current.revision
-                    || *new_revision <= *base_revision
-                {
-                    return Err(Error::ApplicationRejected);
-                }
-                let present = current
-                    .present
-                    .apply_patches(patches, self.limits.protocol)
-                    .map_err(|_| Error::ApplicationRejected)?;
-                AcceptedWatchSnapshot {
-                    revision: *new_revision,
-                    present,
-                    snapshot: snapshot.clone(),
-                }
-            }
-            _ => return Err(Error::ApplicationRejected),
+        let Some(candidate) = AcceptedWatchSnapshot::from_response(response)? else {
+            return Ok(None);
         };
         if candidate.revision < current.revision
             || candidate.revision == current.revision && candidate != *current
@@ -5104,6 +5118,32 @@ fn validate_result_response(
     })
 }
 
+/// Validates a sync Eval/Event response after the application has run.
+///
+/// The application publishes its effects before the host validates the
+/// envelope. Every validation failure after that point (encoding, request or
+/// watch correlation, non-Result shape, and fingerprint mismatch) is retained
+/// as `RetainedWithoutValue`. Nothing that has already been executed may look
+/// like "not executed": the terminal must not be a generic failure or a
+/// correlated `wire.request_mismatch` diagnostic that a client could mistake
+/// for a pre-dispatch rejection and resend under a fresh request ID
+/// (ORNA-PROTO-004; 30-protocol.md L121). The specific mismatch reason is not
+/// stored in the durable terminal. Pre-dispatch mismatches keep their
+/// correlated `wire.request_mismatch` diagnostic on the operational path.
+fn validate_applied_result_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    match validate_result_response(request, fingerprint, response, limits) {
+        Err(Error::ApplicationRejected | Error::RequestMismatch) => {
+            Ok(retained_without_value_outcome(request, fingerprint))
+        }
+        result => result,
+    }
+}
+
 /// Host-generated diagnostics are terminal outcomes for a small set of
 /// operational rejections even though normal Eval/Event completions are
 /// Results. Retain only a request-matched diagnostic, and only let an Event
@@ -5159,10 +5199,13 @@ fn validate_snapshot_response(
     })
 }
 
-/// Watch requests may be rejected with a structured host diagnostic. An
-/// initial watch has no server-issued identity yet, while resync must retain
-/// its existing watch identity so a client can correlate the failure without
-/// treating it as a new watch admission.
+/// Watch requests are answered with a full snapshot carrying their request
+/// ID, or rejected with a structured host diagnostic. An initial watch has no
+/// server-issued identity yet, while resync must retain its existing watch
+/// identity so a client can correlate the answer without treating it as a
+/// new watch admission. A delta never answers a resync: the client resyncs
+/// because it lost its base revision, so it receives the latest full snapshot
+/// under its own request ID (30-protocol message registry, type 2).
 fn validate_watch_response(
     request: [u8; 16],
     watch: Option<[u8; 16]>,
@@ -5177,8 +5220,6 @@ fn validate_watch_response(
             if response.request == Some(request)
                 && response.watch.is_some()
                 && watch.is_none_or(|expected| response.watch == Some(expected)) => {}
-        Message::Delta { .. }
-            if watch.is_some() && response.request.is_none() && response.watch == watch => {}
         Message::Diagnostic { .. }
             if response.request == Some(request) && response.watch == watch => {}
         _ => return Err(Error::ApplicationRejected),
@@ -5309,7 +5350,8 @@ fn attachment_id(value: [u8; 16]) -> AttachmentId {
 }
 fn map_boundary(error: BoundaryError) -> Error {
     match error {
-        BoundaryError::Closed | BoundaryError::Expired => Error::Closed,
+        BoundaryError::Closed => Error::Closed,
+        BoundaryError::Expired => Error::SessionExpired,
         BoundaryError::DeletionFailed => Error::DeletionFailed,
         BoundaryError::Denied => Error::Denied,
     }
@@ -8268,6 +8310,7 @@ fn host_error(error: Error) -> WireResponse {
     let (status, code) = match error {
         Error::Limit => (413, "live.limit"),
         Error::Closed => (410, "live.expired"),
+        Error::SessionExpired => (410, "wire.session_expired"),
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
@@ -8701,6 +8744,98 @@ mod tests {
         }
     }
 
+    /// Counts eval invocations so retry tests can prove the application ran
+    /// exactly once for a request ID.
+    #[derive(Default)]
+    struct WrongRequestApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongRequestApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([99; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    /// Counts event invocations so the event path can prove an applied
+    /// mismatch is retained rather than rerun on retry.
+    #[derive(Default)]
+    struct WrongRequestEventApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongRequestEventApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn event(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([98; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+    }
+
+    /// Applied effects followed by a result that correlates to the request but
+    /// carries the wrong fingerprint.
+    #[derive(Default)]
+    struct WrongFingerprintApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongFingerprintApplication {
+        fn eval(&mut self, _: [u8; 16], request: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            Ok(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0xee; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
     struct FailBeforeTableWrite;
 
     impl FaultInjector for FailBeforeTableWrite {
@@ -9056,11 +9191,17 @@ mod tests {
         subscribed_host_with_credential(runtime).0
     }
 
+    /// 30-protocol message registry, type 2 (A13-live-serving-08): a resync is
+    /// answered with the latest full snapshot under its own request ID. A
+    /// request-less delta assumes the base revision the resyncing client has
+    /// lost, so the host refuses it; the correlated snapshot advances the
+    /// accepted watch tree.
     #[test]
-    fn resync_delta_advances_the_accepted_watch_tree() {
+    fn resync_is_answered_by_a_correlated_full_snapshot_not_a_delta() {
         let mut host = subscribed_host(None);
         let session = [91; 16];
         let watch = [92; 16];
+        let request = [93; 16];
         let snapshot = CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap();
         let previous = orna_protocol_v1::PresentNode::from_value(
             CanonicalValue::new(OvbRaw::Int(1.into())).unwrap(),
@@ -9078,24 +9219,47 @@ mod tests {
                 snapshot: snapshot.clone(),
             },
         );
-        let patches = orna_protocol_v1::PatchList::replace_root(&next).unwrap();
-        let response = Envelope {
+        let delta = Envelope {
             request: None,
             watch: Some(watch),
             message: Message::Delta {
                 base_revision: 0,
                 new_revision: 1,
-                patches,
+                patches: orna_protocol_v1::PatchList::replace_root(&next).unwrap(),
+                snapshot: snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        };
+        assert!(matches!(
+            validate_watch_response(
+                request,
+                Some(watch),
+                delta.clone(),
+                ProtocolLimits::default()
+            ),
+            Err(Error::ApplicationRejected)
+        ));
+        assert!(matches!(
+            host.prepare_watch_snapshot_replacement(session, watch, &delta),
+            Err(Error::ApplicationRejected)
+        ));
+
+        let refreshed = Envelope {
+            request: Some(request),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision: 1,
+                present: next.clone(),
                 snapshot: snapshot.clone(),
             },
             extensions: BTreeMap::new(),
         };
         let accepted =
-            validate_watch_response([93; 16], Some(watch), response, ProtocolLimits::default())
-                .expect("a correlated watch delta is accepted by its watch identity");
+            validate_watch_response(request, Some(watch), refreshed, ProtocolLimits::default())
+                .expect("the correlated full snapshot answers the resync");
         let candidate = host
             .prepare_watch_snapshot_replacement(session, watch, accepted.response.as_ref().unwrap())
-            .expect("the accepted delta advances its base revision")
+            .expect("the snapshot advances the accepted revision")
             .unwrap();
         assert_eq!(candidate.revision, 1);
         assert_eq!(candidate.present, next);
@@ -9458,6 +9622,144 @@ mod tests {
         );
         assert!(!socket.closed);
         assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+    }
+
+    #[test]
+    fn applied_eval_with_unvalidatable_response_is_retained_without_value() {
+        let request = [5; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The application published its effects before returning a response
+        // the host could not validate. The terminal record must be the
+        // retained-without-value contract, not a generic failure.
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied eval must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        // An exact retry replays that terminal result instead of rerunning the
+        // application under the same request ID.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+    }
+
+    #[test]
+    fn applied_eval_with_fingerprint_mismatch_is_retained_without_value() {
+        let request = [6; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongFingerprintApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // Effects were applied before the fingerprint mismatch was seen. The
+        // terminal must be retained-without-value, not a correlated
+        // wire.request_mismatch that a client could read as "not executed"
+        // (ORNA-PROTO-004; 30-protocol.md L121).
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("a post-effect mismatch must complete with a retained Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+    }
+
+    #[test]
+    fn applied_event_with_unvalidatable_response_is_retained_without_value() {
+        let request = [15; 16];
+        let watch = [16; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestEventApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The event published its effects before returning a response the
+        // host could not validate. The terminal must be retained-without-value,
+        // not a correlated wire.request_mismatch that reads as "not applied".
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied event must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        // An exact retry replays the terminal result without rerunning the event.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the event");
     }
 
     #[test]
@@ -10713,6 +11015,7 @@ mod tests {
             let transaction = LiveEvalTransaction::new(
                 vec![mutation],
                 [24; 32],
+                ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
                 if fail {
                     Arc::new(FailBeforeTableWrite)
                 } else {
@@ -10810,8 +11113,12 @@ mod tests {
                 extensions: BTreeMap::new(),
             };
             let committed_on_success = Arc::clone(&committed);
-            let mut transaction =
-                LiveEvalTransaction::new(vec![mutation], [24; 32], Arc::new(NoFault));
+            let mut transaction = LiveEvalTransaction::new(
+                vec![mutation],
+                [24; 32],
+                ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+                Arc::new(NoFault),
+            );
             if let Some(supplied_identity) = supplied_identity {
                 transaction = transaction.for_request(supplied_identity);
             }
@@ -11209,6 +11516,63 @@ mod tests {
     }
 
     #[test]
+    fn url_safe_sec_websocket_key_is_rejected_by_the_real_handshake() {
+        let (host, origin, _) = subscribed_host_with_credential(None);
+        let mut transport = LiveTransport::new(host, TransportLimits::default()).unwrap();
+        transport.sessions.insert(
+            [1; 16],
+            SessionRecord {
+                metadata: SessionMetadata {
+                    session: [1; 16],
+                    database: [2; 16],
+                    runtime: [3; 16],
+                    expires_at: 10,
+                    subscribe: Vec::new(),
+                },
+                credential: SessionCredential {
+                    security: OpaqueCredential::from_bytes([7; 32]),
+                    serving: ServingCredential::new([7; 32]),
+                },
+                origin,
+            },
+        );
+        let request = |key: &str| WireRequest {
+            method: "GET".into(),
+            path: format!("/orna/live/{}", uuid([1; 16])),
+            headers: vec![
+                ("Host".into(), "app.example".into()),
+                ("Origin".into(), "https://app.example".into()),
+                ("Connection".into(), "Upgrade".into()),
+                ("Upgrade".into(), "websocket".into()),
+                ("Sec-WebSocket-Version".into(), "13".into()),
+                ("Sec-WebSocket-Key".into(), key.into()),
+                ("Sec-WebSocket-Protocol".into(), SUBPROTOCOL.into()),
+                (
+                    "Cookie".into(),
+                    format!("orna_session={}", encode_token([7; 32])),
+                ),
+            ],
+            body: Vec::new(),
+        };
+        // The standard-alphabet key is the control: the same request is
+        // admitted, so the rejections below are caused by the key alone.
+        assert!(
+            transport
+                .begin_websocket_upgrade(&request("dGhlIHNhbXBsZSBub25jZQ=="), [5; 16], 0)
+                .is_ok()
+        );
+        for key in ["AAAAAAAAAAAAAAAAAAAA_w==", "AAAAAAAAAAAAAAAAAAAA-w=="] {
+            assert_eq!(
+                transport
+                    .begin_websocket_upgrade(&request(key), [6; 16], 0)
+                    .err(),
+                Some(wire_error(400, "live.malformed_request")),
+                "key {key:?}"
+            );
+        }
+    }
+
+    #[test]
     fn delivery_barrier_rejects_expired_delivery_and_late_commit() {
         let mut transport = LiveTransport::new(subscribed_host(None), TransportLimits::default())
             .expect("transport is configured");
@@ -11387,7 +11751,7 @@ mod websocket_key_alphabet {
     }
 
     #[test]
-    fn url_safe_key_is_rejected_at_the_handshake() {
+    fn url_safe_key_alphabet_is_rejected_by_the_decoder() {
         // 24 characters, URL alphabet '_' in the final group.
         assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA_w==").is_none());
         assert!(decode_base64("AAAAAAAAAAAAAAAAAAAA-w==").is_none());
