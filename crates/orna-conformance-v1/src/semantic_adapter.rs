@@ -4548,6 +4548,7 @@ struct TransactionalTableCandidateValidator {
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
     candidate_table_fields: TableFields,
+    candidate_key_fields: TableFields,
     functions: Functions,
     limits: EvaluatorLimits,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
@@ -4720,6 +4721,10 @@ impl TransactionalTableCandidateValidator {
             table_assertions: table_assertions.clone(),
             module_assertions: module_assertions.clone(),
             candidate_table_fields: table_fields.clone(),
+            candidate_key_fields: key_fields
+                .iter()
+                .map(|(table, key)| (table.clone(), key.fields.clone()))
+                .collect(),
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
             limits,
             tables: tables.into_iter().collect(),
@@ -4763,7 +4768,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     .map_err(|_| table_assertion_diagnostic())?;
                 let mut projections = BTreeSet::new();
                 let mut candidate_rows = 0usize;
-                for (_, encoded) in rows.get(table).ok_or_else(table_assertion_diagnostic)? {
+                for (key, encoded) in rows.get(table).ok_or_else(table_assertion_diagnostic)? {
                     debit_host_step(&mut budget).map_err(|_| table_assertion_diagnostic())?;
                     candidate_rows = candidate_rows
                         .checked_add(1)
@@ -4771,7 +4776,13 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     self.limits
                         .check_items(candidate_rows)
                         .map_err(|_| table_assertion_diagnostic())?;
-                    let row = candidate_assertion_row(table, encoded, &self.candidate_table_fields)?;
+                    let row = candidate_assertion_row(
+                        table,
+                        key,
+                        encoded,
+                        &self.candidate_table_fields,
+                        &self.candidate_key_fields,
+                    )?;
                     let environment = Environment::from([(binding.to_owned(), row)]);
                     let value = evaluate_with_functions_and_budget(
                         predicate,
@@ -4795,19 +4806,29 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 }
             }
         }
-        for assertion in &self.module_assertions {
-            let value = evaluate_module_assertion_rows(
+        if !self.module_assertions.is_empty() {
+            // Module assertions read whole rows by field name, so candidate rows
+            // are named from their key and stable field order, exactly as the
+            // table assertions above name them.
+            let named = named_candidate_rows(
                 rows,
-                &assertion.expression,
-                &Environment::new(),
-                &self.functions,
-                self.limits,
-                &mut budget,
-                0,
-            )
-            .map_err(|_| table_assertion_diagnostic())?;
-            if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                return Err(table_assertion_diagnostic());
+                &self.candidate_table_fields,
+                &self.candidate_key_fields,
+            )?;
+            for assertion in &self.module_assertions {
+                let value = evaluate_module_assertion_rows(
+                    &named,
+                    &assertion.expression,
+                    &Environment::new(),
+                    &self.functions,
+                    self.limits,
+                    &mut budget,
+                    0,
+                )
+                .map_err(|_| table_assertion_diagnostic())?;
+                if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                    return Err(table_assertion_diagnostic());
+                }
             }
         }
         Ok(())
@@ -10009,8 +10030,10 @@ enum TableAssertionKind {
 
 fn candidate_assertion_row(
     table: &str,
+    key: &[u8],
     encoded: &[u8],
     table_fields: &TableFields,
+    key_fields: &TableFields,
 ) -> Result<Value, SafeDiagnostic> {
     let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
     let OvbRaw::Array(values) = row.raw() else {
@@ -10019,20 +10042,65 @@ fn candidate_assertion_row(
     let names = table_fields
         .get(table)
         .ok_or_else(table_assertion_diagnostic)?;
-    let mut fields = names
+    let key_names = key_fields
+        .get(table)
+        .ok_or_else(table_assertion_diagnostic)?;
+    let key_values = candidate_key_components(key, key_names)?;
+    let mut fields = key_names
         .iter()
-        .zip(values)
+        .cloned()
+        .zip(key_values)
+        .chain(names.iter().cloned().zip(values.iter().cloned()))
         .map(|(name, value)| {
-            let key = OvbRaw::Text(name.clone());
-            let encoded_key = Value::new(key.clone())
+            let name = OvbRaw::Text(name);
+            let encoded_name = Value::new(name.clone())
                 .and_then(|value| value.encode())
                 .map_err(|_| table_assertion_diagnostic())?;
-            Ok((encoded_key, (key, value.clone())))
+            Ok((encoded_name, (name, value)))
         })
         .collect::<Result<Vec<_>, SafeDiagnostic>>()?;
     fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
     let fields = fields.into_iter().map(|(_, field)| field).collect();
     Value::new(OvbRaw::Map(fields)).map_err(|_| table_assertion_diagnostic())
+}
+
+/// Key components are stored in the entry key, not the row value: a single
+/// key encodes its value directly, a composite key encodes an array in
+/// declared order (see `encoded_table_key`).
+fn candidate_key_components(key: &[u8], key_names: &[String]) -> Result<Vec<OvbRaw>, SafeDiagnostic> {
+    let decoded = Value::decode(key).map_err(|_| table_assertion_diagnostic())?;
+    let components = match (key_names, decoded.raw()) {
+        ([_], raw) => vec![raw.clone()],
+        (_, OvbRaw::Array(values)) => values.clone(),
+        _ => return Err(table_assertion_diagnostic()),
+    };
+    if components.len() != key_names.len() {
+        return Err(table_assertion_diagnostic());
+    }
+    Ok(components)
+}
+
+/// Rebuilds every candidate row as a named map, key components included, so
+/// module assertions bind fields by name exactly as table assertions do.
+fn named_candidate_rows(
+    rows: &orna_runtime_v1::RuntimeTableRows,
+    table_fields: &TableFields,
+    key_fields: &TableFields,
+) -> Result<orna_runtime_v1::RuntimeTableRows, SafeDiagnostic> {
+    rows.iter()
+        .map(|(table, entries)| {
+            let named = entries
+                .iter()
+                .map(|(key, encoded)| {
+                    let row =
+                        candidate_assertion_row(table, key, encoded, table_fields, key_fields)?;
+                    let encoded = row.encode().map_err(|_| table_assertion_diagnostic())?;
+                    Ok((key.clone(), encoded))
+                })
+                .collect::<Result<Vec<_>, SafeDiagnostic>>()?;
+            Ok((table.clone(), named))
+        })
+        .collect()
 }
 
 fn order_field_names_by_stable_id(
@@ -10600,6 +10668,11 @@ mod transaction_admission_tests {
         assert_eq!(ordered_fields, ["second_declared", "first_declared"]);
 
         let table_fields = BTreeMap::from([("main.Note".to_owned(), ordered_fields)]);
+        let key_fields = BTreeMap::from([("main.Note".to_owned(), vec!["id".to_owned()])]);
+        let key = Value::new(OvbRaw::Text("note-7".into()))
+            .unwrap()
+            .encode()
+            .unwrap();
         let encoded = Value::new(OvbRaw::Array(vec![
             OvbRaw::Text("value-for-second".into()),
             OvbRaw::Text("value-for-first".into()),
@@ -10607,7 +10680,14 @@ mod transaction_admission_tests {
         .unwrap()
         .encode()
         .unwrap();
-        let row = super::candidate_assertion_row("main.Note", &encoded, &table_fields).unwrap();
+        let row = super::candidate_assertion_row(
+            "main.Note",
+            &key,
+            &encoded,
+            &table_fields,
+            &key_fields,
+        )
+        .unwrap();
         let OvbRaw::Map(fields) = row.raw() else {
             panic!("candidate assertion row is a record map");
         };
@@ -10618,6 +10698,7 @@ mod transaction_admission_tests {
         };
         assert_eq!(value_for("first_declared"), Some(&OvbRaw::Text("value-for-first".into())));
         assert_eq!(value_for("second_declared"), Some(&OvbRaw::Text("value-for-second".into())));
+        assert_eq!(value_for("id"), Some(&OvbRaw::Text("note-7".into())));
     }
 
     fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {

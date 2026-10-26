@@ -72,20 +72,19 @@ fn characterizes_current_behaviour_fn_main_typed_in_repl_is_accepted_without_ent
     assert!(output.stderr.is_empty(), "{text}");
 }
 
-/// Current behaviour: a root top-level `assert` declaration is ADMITTED into the
-/// REPL session (ORNA-ASSERT-021..030). It has no session value; its predicate
-/// is evaluated against the candidate database at each REPL write commit. Here
-/// the predicate holds, so an unrelated root function still runs.
+/// Current behaviour: a root top-level `assert` declaration is outside the
+/// admitted REPL set (`_ => ORNA-REPL-UNSUPPORTED`), so the whole project
+/// session is refused with the fixed E2200 sentence, even for an unrelated
+/// root function. R1 names the `assert` declaration.
 #[test]
-fn characterizes_current_behaviour_root_top_level_assert_is_admitted_and_holds() {
+fn characterizes_current_behaviour_root_top_level_assert_refuses_the_whole_session() {
     let project = initialized_project(&[(
         "main.orna",
         "pub fn answer() = 1;\nassert answer() == 1;\n",
     )]);
 
-    let output = run_lines(project.path(), &["main.answer()"]);
+    let output = run_one_shot(project.path(), "main.answer()");
     let text = combined(&output);
-    assert!(output.status.success(), "{text}");
-    assert!(output.stdout.contains("1 : Int"), "{text}");
-    assert!(!text.contains("E2200"), "{text}");
+    assert!(!output.status.success(), "{text}");
+    assert!(text.contains("E2200"), "{text}");
 }
