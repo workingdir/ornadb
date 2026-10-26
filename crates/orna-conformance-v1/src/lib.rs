@@ -920,7 +920,7 @@ async fn execute_reference_project_runtime_adapter(
                     step,
                     before
                         .as_ref()
-                        .and_then(|snapshot| snapshot.tables.get("Reading"))
+                        .and_then(|snapshot| snapshot.tables.get("sensors.Reading"))
                         .map(Vec::len),
                 )
                 .await?;
@@ -1141,13 +1141,17 @@ fn reference_entry_name(project: &ProjectUnit, invoke: &str) -> Result<String, S
         .iter()
         .find(|unit| unit.source_id.ends_with("/main.orna"))
         .ok_or_else(|| "reference entry module is missing".to_owned())?;
-    let namespace = module
-        .source_id
+    let namespace = reference_module_namespace(module)?;
+    Ok(format!("{namespace}.{invoke}"))
+}
+
+/// A reference module's namespace is its file stem: `library.orna` declares `library`.
+fn reference_module_namespace(unit: &SourceUnit) -> Result<&str, String> {
+    unit.source_id
         .rsplit('/')
         .next()
         .and_then(|name| name.strip_suffix(".orna"))
-        .ok_or_else(|| "reference entry module identity is invalid".to_owned())?;
-    Ok(format!("{namespace}.{invoke}"))
+        .ok_or_else(|| "reference module identity is invalid".to_owned())
 }
 
 async fn verify_reference_step(
@@ -1201,9 +1205,9 @@ async fn verify_reference_step(
                     "reference additional-row expectation lacks a baseline".to_owned()
                 })?;
                 let observed = state
-                    .committed_table_rows("Reading")
+                    .committed_table_rows("sensors.Reading")
                     .await
-                    .map_err(|_| "reference Reading rows could not be read".to_owned())?
+                    .map_err(|_| "reference sensors.Reading rows could not be read".to_owned())?
                     .len()
                     .saturating_sub(before);
                 if observed as u64 != expected {
@@ -1211,10 +1215,7 @@ async fn verify_reference_step(
                 }
                 checks.push("additional row count matched immutable expectation".into());
             }
-            table_name => {
-                let table = table_name
-                    .rsplit_once('.')
-                    .map_or(table_name, |(_, table)| table);
+            table => {
                 let schema = schemas
                     .get(table)
                     .ok_or_else(|| format!("reference expectation names unknown table: {table}"))?;
@@ -1281,6 +1282,7 @@ fn reference_table_schemas(
 ) -> Result<BTreeMap<String, ReferenceTableSchema>, String> {
     let mut schemas = BTreeMap::new();
     for module in &project.modules {
+        let namespace = reference_module_namespace(module)?;
         let parsed = parse_module(&module.source);
         if !parsed.is_ok() {
             return Err("reference project module could not be parsed".into());
@@ -1316,7 +1318,7 @@ fn reference_table_schemas(
             }
             if schemas
                 .insert(
-                    name,
+                    format!("{namespace}.{name}"),
                     ReferenceTableSchema {
                         fields,
                         key_count: keys.len(),
