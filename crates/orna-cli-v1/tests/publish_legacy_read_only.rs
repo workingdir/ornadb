@@ -46,7 +46,7 @@ const LEGACY_FORMAT_RECORDS: [(&str, u8); 2] = [
 ];
 
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -329,6 +329,50 @@ fn publish_in_a_prepared_migration_copy_names_the_unactivated_candidate() {
             repository.read_publication_journal().unwrap(),
             Some(journal)
         );
+        assert_eq!(runtime_state_files(&repository), runtime_before);
+    }
+}
+
+/// A prepared migration copy keeps a legacy `HEAD`. Ordinary runtime
+/// derivation refuses it (ORNA-UPGRADE-001, ORNA-UPGRADE-003); only the
+/// migration's own checkpoint carry admits it, and the refusal leaves the
+/// journal and runtime state files as they were.
+#[test]
+fn prepared_copy_runtime_identity_admits_only_the_carry_and_leaves_state_unchanged() {
+    for (format_record, _) in LEGACY_FORMAT_RECORDS {
+        let parent = TempDir::new().expect("temporary parent");
+        let source = parent.path().join("source");
+        fs::create_dir(&source).unwrap();
+        commit_legacy_snapshot(&source, format_record);
+        let destination = parent.path().join("migrated");
+        let copy = run(
+            &source,
+            &[
+                "migrate",
+                "copy",
+                destination.to_str().unwrap(),
+                "--annotation-defaults",
+                "0",
+                "--no-persistent-consumers",
+            ],
+        );
+        assert!(
+            copy.status.success(),
+            "{}",
+            String::from_utf8_lossy(&copy.stderr)
+        );
+
+        let repository = Repository::discover(&destination).unwrap();
+        assert!(repository.holds_prepared_migration());
+        let journal = repository.read_publication_journal().unwrap();
+        let runtime_before = runtime_state_files(&repository);
+
+        assert!(matches!(
+            orna_runtime_v1::repository_runtime_identity(&repository),
+            Err(orna_runtime_v1::RuntimeError::LegacyHeadReadOnly(_))
+        ));
+        assert!(orna_runtime_v1::migration_copy_runtime_identity(&repository).is_ok());
+        assert_eq!(repository.read_publication_journal().unwrap(), journal);
         assert_eq!(runtime_state_files(&repository), runtime_before);
     }
 }

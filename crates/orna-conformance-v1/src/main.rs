@@ -37,10 +37,18 @@ const CHECKPOINT_ATOMICITY_RUNTIME_CLAIM: &str = "CP-001 observes durable finite
 /// scenario witness: the semantic adapter exposes analysis, not a compiled
 /// executable artifact, and the bounded evaluator reinterprets source.
 /// Such scenarios therefore remain explicit corpus skips.
-#[derive(Default)]
 struct CompositeEvaluator {
     bounded: BoundedEvaluator,
     transactional: TransactionalEvaluator,
+}
+
+impl Default for CompositeEvaluator {
+    fn default() -> Self {
+        Self {
+            bounded: BoundedEvaluator::default(),
+            transactional: TransactionalEvaluator::default().with_fixture_catalogue(),
+        }
+    }
 }
 
 impl RuntimeEvaluator for CompositeEvaluator {

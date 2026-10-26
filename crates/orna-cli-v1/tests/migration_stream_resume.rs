@@ -9,7 +9,7 @@ use orna_runtime_v1::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
     StreamMutationBatch, WriterLease, import_stream_carry, read_stream_carry,
-    repository_runtime_identity, runtime_identity_for_database_id,
+    migration_copy_runtime_identity, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -176,7 +176,7 @@ fn checkpoint_after_reopen(root: &Path) -> StreamCheckpoint {
 }
 
 fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -196,7 +196,7 @@ fn run_copy(source: &Path, destination: &Path) -> std::process::Output {
 fn deliver_from_destination(root: &Path) -> Vec<Vec<u8>> {
     runtime().block_on(async {
         let repository = Repository::discover(root).unwrap();
-        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
         let state = RuntimeState::open(&repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -298,7 +298,7 @@ fn stream_carry_import_without_recorded_continuity_writes_nothing() {
         let refused = import_stream_carry(&destination_repository, &carry, None).await;
         assert_eq!(refused, Err(RuntimeError::StreamIdentityMismatch));
 
-        let (identity, digest) = repository_runtime_identity(&destination_repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&destination_repository).unwrap();
         let state = RuntimeState::open(&destination_repository, identity, digest)
             .await
             .expect("open destination runtime");
@@ -353,7 +353,7 @@ fn migration_carry_without_bridge_origin_refuses_open() {
     );
     runtime().block_on(async {
         let repository = Repository::discover(&destination).unwrap();
-        let (identity, digest) = repository_runtime_identity(&repository).unwrap();
+        let (identity, digest) = migration_copy_runtime_identity(&repository).unwrap();
         RuntimeState::open(&repository, identity, digest)
             .await
             .expect("intact destination opens before forging");
@@ -385,4 +385,68 @@ fn migration_carry_without_bridge_origin_refuses_open() {
             Err(error) => assert_eq!(error, RuntimeError::RecoveryInvalid),
         }
     });
+}
+
+#[test]
+fn stream_carry_import_is_idempotent_and_refuses_rows_that_differ() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+    let output = run_copy(&source, &destination);
+    assert!(
+        output.status.success(),
+        "first carry must succeed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let recorded = runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        let recorded = carry.continuity_record().expect("carry continuity is recorded");
+        let destination_repository = Repository::discover(&destination).unwrap();
+        import_stream_carry(&destination_repository, &carry, Some(&recorded))
+            .await
+            .expect("re-importing an identical carry is a no-op");
+        recorded
+    });
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
+
+    runtime().block_on(async {
+        let source_repository = Repository::discover(&source).unwrap();
+        let carry = read_stream_carry(&source_repository)
+            .await
+            .expect("source stream state is carriable");
+        let destination_repository = Repository::discover(&destination).unwrap();
+        let differs = import_stream_carry(&destination_repository, &carry, Some(&recorded)).await;
+        assert_eq!(differs, Err(RuntimeError::MigrationCarryTargetDiffers));
+    });
+}
+
+#[test]
+fn migration_copy_retry_after_carry_recovers() {
+    let parent = TempDir::new().unwrap();
+    let source = parent.path().join("source");
+    fs::create_dir(&source).unwrap();
+    dirty_legacy_source(&source);
+    give_source_a_persistent_consumer(&source, false);
+    let destination = parent.path().join("migrated");
+    let first = run_copy(&source, &destination);
+    assert!(
+        first.status.success(),
+        "first copy must carry: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+
+    let retry = run_copy(&source, &destination);
+    assert!(
+        retry.status.success(),
+        "rerunning a completed carry must recover: {}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    assert_eq!(deliver_from_destination(&destination), vec![b"3".to_vec()]);
 }

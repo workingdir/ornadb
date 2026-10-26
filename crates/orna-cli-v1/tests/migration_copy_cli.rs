@@ -54,7 +54,7 @@ fn run_copy(
     count: &str,
     git_trace: &Path,
 ) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TRACE", git_trace)
         .args([
@@ -73,7 +73,7 @@ fn run_copy(
 }
 
 fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",
@@ -548,7 +548,12 @@ fn cli_migration_copy_prepares_a_candidate_from_recorded_legacy_metadata() {
                 .repository_format_number(),
             format
         );
-        assert_eq!(migrated.require_writable_head_format(), Ok(()));
+        let refusal = migrated
+            .require_writable_head_format()
+            .expect_err("a prepared copy is not writable through ordinary runtime writes");
+        assert_eq!(refusal.format(), format);
+        assert_eq!(refusal.code(), "ORNA-REPO-CONTEXT-015");
+        assert_eq!(migrated.require_migration_carry_head_format(), Ok(()));
 
         let retry = run_copy(&source, &destination, "0", &git_trace);
         assert!(
