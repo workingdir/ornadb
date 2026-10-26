@@ -1933,6 +1933,13 @@ fn run_project_function(
             .get(&orna_semantic_v1::Namespace(Vec::new()))
             .and_then(|module| module.symbols.get("main"))
             .is_some_and(|symbol| symbol.kind == orna_semantic_v1::SymbolKind::Function);
+    if allow_private_root_main && !private_default_main_present {
+        return Err(Diagnostic::target(
+            "E2103",
+            "no root main(): main.orna declares no `main()` function",
+            "declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`",
+        ));
+    }
     if !private_default_main_present && !public_project_function(&analysis, target) {
         return Err(Diagnostic::unavailable(
             "durable project invocation is not available",
