@@ -11,7 +11,8 @@ use std::{
 };
 
 use crate::harness::{
-    Check, Db, Entry, Failure, Probe, check_refuses, ensure, one_line, repl_refuses, unknown_command,
+    Check, Db, Entry, Failure, Probe, check_refuses, ensure, one_line, repl_refuses,
+    unknown_command,
 };
 
 pub const LIVE_BLOCKER: &str = "the live watch socket is closed with code 1002 before the first snapshot for the spec-shaped `main.notes()` watch request, so ORNA-WIRE-001's initial snapshot is not delivered; root cause unverified (host rejection or probe envelope)";
@@ -133,7 +134,9 @@ fn cwd_overlays_head(db: &mut Db) -> Probe {
         head.output().trim()
     );
     if cwd.output().contains("> 2 : Int") && head.output().contains("> 1 : Int") {
-        return Err(Failure(format!("the CWD relation now counts the local row and HEAD counts only the published row: {evidence}")));
+        return Err(Failure(format!(
+            "the CWD relation now counts the local row and HEAD counts only the published row: {evidence}"
+        )));
     }
     Ok(evidence)
 }
@@ -511,7 +514,9 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         Ok(Some(bytes)) => bytes,
         Ok(None) => return Err(Failure("no first live message within 60 s".to_owned())),
         Err(Failure(reason)) if reason.starts_with("the host closed the live socket") => {
-            return Ok(format!("watch on `main.notes()`: {reason} before the first snapshot"));
+            return Ok(format!(
+                "watch on `main.notes()`: {reason} before the first snapshot"
+            ));
         }
         Err(error) => return Err(error),
     };
@@ -724,9 +729,7 @@ impl WatchSocket {
                     )));
                 }
                 other => {
-                    return Err(Failure(format!(
-                        "unexpected live frame opcode {other:#x}"
-                    )));
+                    return Err(Failure(format!("unexpected live frame opcode {other:#x}")));
                 }
             }
         }
@@ -745,7 +748,10 @@ fn read_head(stream: &mut TcpStream) -> Result<String, Failure> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-        ensure!(head.len() < 16 * 1024, "the websocket upgrade response has no end");
+        ensure!(
+            head.len() < 16 * 1024,
+            "the websocket upgrade response has no end"
+        );
         stream
             .read_exact(&mut byte)
             .map_err(|error| Failure(format!("websocket upgrade: {error}")))?;

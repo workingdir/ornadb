@@ -15,8 +15,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     harness::{
-        Check, Db, Entry, Failure, Probe, check_refuses, ensure, hex, repl_refuses, unknown_command,
-        vendored_fixture,
+        Check, Db, Entry, Failure, Probe, check_refuses, ensure, hex, repl_refuses,
+        unknown_command, vendored_fixture,
     },
     mandatory::{LIVE_BLOCKER as LIVE_WATCH, watches_receive_no_update},
 };
@@ -50,7 +50,7 @@ const STAGING: &str =
     "`orna add --row` cannot stage a published row: it reports that the logical row was not found";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
 const RUN_CAPTURE: &str = "`orna run` cannot capture a file into a row: the invocation is rejected";
-const READ_ONLY_WORKSPACE: &str = "the workspace mount (`orna mount DIR --cwd`) is read-only, so no edit, link, sync or unmount behaviour of a writable view can run";
+const READ_ONLY_WORKSPACE: &str = "the recorded blocker that the workspace mount (`orna mount DIR --cwd`) is read-only is spec-false: profiles/vfs-1.md:20 makes --cwd writable unless --read-only; re-scope in ornadb-kfbk";
 const CWD_MOUNT: &str = "the workspace mount does not project the CWD: a row inserted but not published is missing from it";
 const DESCRIPTOR_EDITS: &str = "`orna edit` accepts Blob descriptor edits it must refuse or apply: a traversal path or a null required Blob is admitted";
 const MEDIA_TYPE_EDITS: &str =
@@ -1692,7 +1692,8 @@ const EXPORT_COPIES_TAMPERED_STORE: &str =
     "orna export copies a tampered store that every other product reader refuses";
 
 const REPL_EFFECT_UNADMITTED: &str = "the REPL preview refuses the effectful row insert, and scenarios have no admitted runtime entry point to perform it";
-const SIZE_LIMIT_CHUNK_CAPTURE: &str = "a 3 MiB REPL capture fails with sys.blob.limit before the row is inserted";
+const SIZE_LIMIT_CHUNK_CAPTURE: &str =
+    "a 3 MiB REPL capture fails with sys.blob.limit before the row is inserted";
 
 /// The blocker reproduces when the scenario's executor stops at `needle`,
 /// the product refusal that blocks the scenario, before its own assertions.
