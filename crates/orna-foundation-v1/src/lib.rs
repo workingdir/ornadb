@@ -63,6 +63,11 @@ impl RowRef {
             .map_err(FoundationError::Value)
     }
 
+    /// Canonical OVB-1 value of this reference, for embedding in a row.
+    pub fn to_canonical(&self) -> Result<CanonicalValue, FoundationError> {
+        Value::new(self.raw()?).map_err(FoundationError::Value)
+    }
+
     /// Decodes a canonical, snapshot-pinned row reference from OVB-1 bytes.
     /// Strict snapshot decoding preserves the exact captured CWD generation;
     /// it never substitutes a later current-CWD pin.
@@ -151,6 +156,8 @@ pub enum StreamKind {}
 pub enum CheckpointKind {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FailureKind {}
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MaterializationKind {}
 /// Compile-time marker for `sys.AssertionRef`.
 ///
 /// This marker is non-authoritative: attaching it to a generic row reference
@@ -203,6 +210,9 @@ pub type CheckpointRef = TypedRowRef<CheckpointKind>;
 /// Typed `sys.RowRef<sys.Failure>` marker. This is not proof that a failure
 /// exists or grants retry, skip, replay, or resolution authority.
 pub type FailureRef = TypedRowRef<FailureKind>;
+/// Typed `sys.RowRef<sys.Materialization>` marker. This is not proof that a
+/// materialization exists or grants reuse, invalidation, or storage authority.
+pub type MaterializationRef = TypedRowRef<MaterializationKind>;
 
 pub mod object_reference;
 pub use object_reference::{
@@ -356,6 +366,9 @@ pub const SYS_CHECKPOINT_TABLE_ID: [u8; 16] = [
 pub const SYS_FAILURE_TABLE_ID: [u8; 16] = [
     0xb4, 0x62, 0xcd, 0x70, 0x35, 0x2f, 0x4a, 0xb9, 0x8f, 0x3a, 0x97, 0x56, 0xe1, 0x4c, 0x28, 0x04,
 ];
+pub const SYS_MATERIALIZATION_TABLE_ID: [u8; 16] = [
+    0xf2, 0x8a, 0x19, 0x15, 0xd8, 0xc7, 0x42, 0xf4, 0x92, 0x5e, 0x0c, 0x5b, 0xe5, 0x70, 0xdc, 0x8a,
+];
 
 /// Constructs a checked `sys.CheckpointRef` from the canonical durable
 /// checkpoint natural key (`consumer_identity + source_identity + partition`).
@@ -408,6 +421,27 @@ pub fn failure_reference(
             key.push(OvbRaw::Text(position));
             OvbRaw::Array(key)
         },
+        snapshot,
+    }))
+}
+
+/// Constructs a checked `sys.MaterializationRef` from its canonical natural
+/// key (`object + snapshot`). Both key parts are 32-byte digests recorded by
+/// the evaluator's activation log; the reference is pinned to `snapshot`.
+pub fn materialization_reference(
+    database_id: [u8; 16],
+    snapshot: CanonicalSnapshot,
+    object: [u8; 32],
+    output: [u8; 32],
+) -> Result<MaterializationRef, SystemReferenceError> {
+    ensure_snapshot_database(database_id, &snapshot)?;
+    Ok(TypedRowRef::from_row_ref(RowRef {
+        database_id,
+        table_id: SYS_MATERIALIZATION_TABLE_ID,
+        key: OvbRaw::Array(vec![
+            OvbRaw::Bytes(object.to_vec()),
+            OvbRaw::Bytes(output.to_vec()),
+        ]),
         snapshot,
     }))
 }

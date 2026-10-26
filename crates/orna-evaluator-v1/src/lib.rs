@@ -1908,6 +1908,8 @@ pub fn planner_metadata(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2043,6 +2045,8 @@ fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
         effects,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation,
@@ -2155,6 +2159,8 @@ pub fn evaluate_expression_with_functions_and_effects_and_cancellation(
         effects: Some(effects),
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation,
@@ -2295,6 +2301,8 @@ fn evaluate_with_functions_and_nominals_and_budget(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2339,6 +2347,8 @@ pub fn evaluate_function(
         effects: None,
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host: None,
         cancellation: None,
@@ -2430,6 +2440,8 @@ fn invoke_named_with_host(
         effects: None,
         namespace: function_namespace(name),
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::default(),
         sys_host,
         cancellation: None,
@@ -2545,6 +2557,8 @@ fn invoke_named_with_effects_and_reuse(
         effects: Some(effects),
         namespace: function_namespace(name),
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         cancellation: None,
         reuse: CallReuse::default(),
         sys_host: None,
@@ -2632,6 +2646,8 @@ pub fn invoke_named_with_context_effects(
             effects: Some(&mut profiled_effects),
             namespace: function_namespace(name),
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -3663,6 +3679,18 @@ impl Value {
         }
         CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
     }
+    /// Encoded canonical bytes of this value, equal to
+    /// `self.clone().canonical()?.encode()`, but borrowing `self` so the digest
+    /// fold does not clone every row.
+    fn canonical_bytes(&self) -> Result<Vec<u8>, EvaluationError> {
+        if let Self::Error(failure) = self {
+            return Err(failure.clone());
+        }
+        CanonicalValue::new(self.raw()?)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+            .encode()
+            .map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
     /// REPL result boundary; see [`Value::canonical`]. A format-3 Blob is
     /// presented as its payload-free summary, so the result stays canonical
     /// without copying the reference's bytes or descriptor across the boundary.
@@ -3670,7 +3698,10 @@ impl Value {
         CanonicalValue::new(summarise_rov3_blobs(self.raw()?)?)
             .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
-    fn raw(self) -> Result<Raw, EvaluationError> {
+    /// Canonical raw form of this value. It borrows the value, so the digest
+    /// fold can encode each relation row without first deep-copying it; only
+    /// the leaves and containers that the owned raw form needs are allocated.
+    fn raw(&self) -> Result<Raw, EvaluationError> {
         Ok(match self {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -3682,16 +3713,16 @@ impl Value {
             // They must not cross the successful canonical-value boundary,
             // but a containing value must preserve the original failure while
             // propagating to that boundary.
-            Self::Error(failure) => return Err(failure),
+            Self::Error(failure) => return Err(failure.clone()),
             Self::Null => Raw::Null,
             Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
-            Self::Bool(value) => Raw::Bool(value),
-            Self::Int(value) => Raw::Int(value),
+            Self::Bool(value) => Raw::Bool(*value),
+            Self::Int(value) => Raw::Int(value.clone()),
             Self::Decimal(value) => Raw::Tag(
                 60000,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(value.coefficient),
-                    Raw::Int(value.exponent10),
+                    Raw::Int(value.coefficient.clone()),
+                    Raw::Int(value.exponent10.clone()),
                 ])),
             ),
             Self::Money { amount, currency } => Raw::Tag(
@@ -3700,20 +3731,20 @@ impl Value {
                     Raw::Tag(
                         60000,
                         Box::new(Raw::Array(vec![
-                            Raw::Int(amount.coefficient),
-                            Raw::Int(amount.exponent10),
+                            Raw::Int(amount.coefficient.clone()),
+                            Raw::Int(amount.exponent10.clone()),
                         ])),
                     ),
-                    object_id_raw(currency),
+                    object_id_raw(*currency),
                 ])),
             ),
-            Self::Float(bits) => Raw::Float(bits),
-            Self::String(value) => Raw::Text(value),
-            Self::Blob(value) => Raw::Bytes(value),
-            Self::AnnotatedBlob(value) => value,
+            Self::Float(bits) => Raw::Float(*bits),
+            Self::String(value) => Raw::Text(value.clone()),
+            Self::Blob(value) => Raw::Bytes(value.clone()),
+            Self::AnnotatedBlob(value) => value.clone(),
             Self::ContextualBlob(value) => value.raw().clone(),
-            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
-            Self::Uuid(value) => object_id_raw(value),
+            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value.clone()))),
+            Self::Uuid(value) => object_id_raw(*value),
             Self::Digest(value) => Raw::Tag(
                 60025,
                 Box::new(Raw::Array(vec![
@@ -3729,8 +3760,8 @@ impl Value {
             } => Raw::Tag(
                 60002,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(unix_seconds.into()),
-                    Raw::Int(nanosecond.into()),
+                    Raw::Int((*unix_seconds).into()),
+                    Raw::Int((*nanosecond).into()),
                 ])),
             ),
             Self::Duration {
@@ -3739,8 +3770,8 @@ impl Value {
             } => Raw::Tag(
                 60005,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(seconds),
-                    Raw::Int(nanosecond.into()),
+                    Raw::Int(seconds.clone()),
+                    Raw::Int((*nanosecond).into()),
                 ])),
             ),
             Self::Range {
@@ -3750,14 +3781,14 @@ impl Value {
             } => Raw::Tag(
                 60019,
                 Box::new(Raw::Array(vec![
-                    raw_option_value(lower)?,
-                    raw_option_value(upper)?,
-                    Raw::Bool(upper_inclusive),
+                    raw_option_value(lower.as_deref())?,
+                    raw_option_value(upper.as_deref())?,
+                    Raw::Bool(*upper_inclusive),
                 ])),
             ),
             Self::List(values) => Raw::Array(
                 values
-                    .into_iter()
+                    .iter()
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
             ),
@@ -3767,10 +3798,7 @@ impl Value {
             Self::Tuple(values) => Raw::Tag(
                 60015,
                 Box::new(Raw::Array(
-                    values
-                        .into_iter()
-                        .map(Value::raw)
-                        .collect::<Result<_, _>>()?,
+                    values.iter().map(Value::raw).collect::<Result<_, _>>()?,
                 )),
             ),
             // The finite stream's source identity and digest remain in the
@@ -3787,8 +3815,8 @@ impl Value {
                 }
                 Raw::Array(
                     values
-                        .into_iter()
-                        .skip(position)
+                        .iter()
+                        .skip(*position)
                         .map(Value::raw)
                         .collect::<Result<_, _>>()?,
                 )
@@ -3798,7 +3826,7 @@ impl Value {
                 // Keep the comparator tied to that rule, including CBOR head
                 // length transitions and multi-byte Unicode field names.
                 let mut fields = values
-                    .into_iter()
+                    .iter()
                     .map(|(key, value)| {
                         if !key.nfc().eq(key.chars()) {
                             return Err(error("ORNA-EVAL-VALUE"));
@@ -3814,7 +3842,9 @@ impl Value {
                 Raw::Map(
                     fields
                         .into_iter()
-                        .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key), value)))
+                        .map(|(_, key, value)| {
+                            value.raw().map(|value| (Raw::Text(key.clone()), value))
+                        })
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -3822,7 +3852,7 @@ impl Value {
                 // The runtime value preserves declaration order. OVB requires
                 // canonical field-key order only at the serialization edge.
                 let mut encoded = fields
-                    .into_iter()
+                    .iter()
                     .map(|(key, value)| {
                         let encoded_key = CanonicalValue::new(key.clone())
                             .map_err(|_| error("ORNA-EVAL-VALUE"))?
@@ -3835,12 +3865,14 @@ impl Value {
                 Raw::Tag(
                     60009,
                     Box::new(Raw::Array(vec![
-                        type_id,
+                        type_id.clone(),
                         Raw::Array(
                             encoded
                                 .into_iter()
                                 .map(|(_, key, value)| {
-                                    value.raw().map(|value| Raw::Array(vec![key, value]))
+                                    value
+                                        .raw()
+                                        .map(|value| Raw::Array(vec![key.clone(), value]))
                                 })
                                 .collect::<Result<_, _>>()?,
                         ),
@@ -3854,17 +3886,18 @@ impl Value {
             } => Raw::Tag(
                 60008,
                 Box::new(Raw::Array(vec![
-                    type_id,
-                    variant_id,
+                    type_id.clone(),
+                    variant_id.clone(),
                     payload
-                        .map(|value| value.raw())
+                        .as_deref()
+                        .map(Value::raw)
                         .transpose()?
                         .unwrap_or(Raw::Null),
                 ])),
             ),
             Self::Option(value) => Raw::Tag(
                 60013,
-                Box::new(match value {
+                Box::new(match value.as_deref() {
                     Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
                     None => Raw::Array(vec![Raw::Int(0.into())]),
                 }),
@@ -4459,6 +4492,37 @@ impl Scope {
     }
 }
 
+/// One materialization decision, keyed by `sys.Materialization`'s natural key
+/// (`object` + `snapshot`). Decisions with the same key upsert one row.
+struct MaterializationRecord {
+    /// Deterministic identity of the relation stages that produced the value.
+    object: [u8; 32],
+    /// Deterministic identity of the produced output (its canonical digest).
+    snapshot: [u8; 32],
+    digest: [u8; 32],
+    rows: usize,
+    bytes: Option<usize>,
+    valid: bool,
+    /// Pinned `sys.MaterializationRef`, captured with the decision. `None` when
+    /// no OVB-2 value context pins the activation.
+    reference: Option<CanonicalValue>,
+    /// Activation instant (ORNA-TXN-005) shared by every decision in one
+    /// activation. A decision is recorded only when a clock resolved.
+    created: Value,
+}
+
+/// Materialization decisions produced by one callback, drained by its parent
+/// in callback index order so the parent log stays deterministic.
+type MaterializationSink = Arc<std::sync::Mutex<Vec<MaterializationRecord>>>;
+
+fn take_materializations(sink: &MaterializationSink) -> Vec<MaterializationRecord> {
+    std::mem::take(
+        &mut *sink
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
 /// Counts activation-local call reuse decisions. The counters are observational
 /// only: reuse never changes a logical result (ORNA-PLAN-001).
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4540,6 +4604,8 @@ struct Context<'functions, 'effects> {
     effects: Option<&'effects mut dyn EffectHandler>,
     namespace: Option<String>,
     transfer: Option<Transfer>,
+    materializations: Vec<MaterializationRecord>,
+    materialization_clock_unavailable: bool,
     cancellation: Option<&'functions CancellationToken>,
     reuse: CallReuse,
     sys_host: ActivationSysHost<'functions>,
@@ -4708,6 +4774,7 @@ fn invoke_task_callback(
     sys_host: ActivationSysHost<'_>,
     active_calls: usize,
     mut effects: Option<Box<dyn EffectHandler + Send>>,
+    materializations: &MaterializationSink,
 ) -> Result<Value, EvaluationError> {
     let mut context = Context {
         limits,
@@ -4724,11 +4791,18 @@ fn invoke_task_callback(
             .map(|handler| handler as &mut dyn EffectHandler),
         namespace: None,
         transfer: None,
+        materializations: Vec::new(),
+        materialization_clock_unavailable: false,
         reuse: CallReuse::disabled(),
         sys_host,
         cancellation: Some(&cancellation),
     };
-    context.invoke_callable(&callback, Vec::new(), 0)
+    let result = context.invoke_callable(&callback, Vec::new(), 0);
+    materializations
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(std::mem::take(&mut context.materializations));
+    result
 }
 
 /// Run finite callback lists with a bounded number of owned worker threads.
@@ -4750,7 +4824,11 @@ fn run_task_callbacks(
     sys_host: ActivationSysHost<'_>,
     cancel_after_failure: bool,
     cancel_after_success: bool,
-) -> (Vec<Option<Result<Value, EvaluationError>>>, Option<Value>) {
+) -> (
+    Vec<Option<Result<Value, EvaluationError>>>,
+    Option<Value>,
+    Vec<Vec<MaterializationRecord>>,
+) {
     const MAX_TASK_WORKERS: usize = 32;
     let available = std::thread::available_parallelism().map_or(1, usize::from);
     let worker_count = callbacks.len().min(available).min(MAX_TASK_WORKERS).max(1);
@@ -4758,13 +4836,19 @@ fn run_task_callbacks(
     let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
 
-    std::thread::scope(|scope| {
+    let sinks: Arc<Vec<MaterializationSink>> = Arc::new(
+        (0..callbacks.len())
+            .map(|_| Arc::new(std::sync::Mutex::new(Vec::new())))
+            .collect(),
+    );
+    let (results, winner) = std::thread::scope(|scope| {
         let (sender, receiver) = std::sync::mpsc::channel();
         for _ in 0..worker_count {
             let sender = sender.clone();
             let next = Arc::clone(&next);
             let shared_cancel = Arc::clone(&shared_cancel);
             let child_effects = Arc::clone(&child_effects);
+            let sinks = Arc::clone(&sinks);
             let parent = parent.clone();
             scope.spawn(move || {
                 loop {
@@ -4798,6 +4882,7 @@ fn run_task_callbacks(
                             sys_host,
                             active_calls,
                             effects,
+                            &sinks[index],
                         )
                     }))
                     .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
@@ -4827,7 +4912,9 @@ fn run_task_callbacks(
             results[index] = Some(result);
         }
         (results, winner)
-    })
+    });
+    let records = sinks.iter().map(take_materializations).collect();
+    (results, winner, records)
 }
 
 impl Context<'_, '_> {
@@ -7196,7 +7283,9 @@ impl Context<'_, '_> {
                 // list sum and nothing beyond one chunk is retained.
                 let limit = self.limits.max_collection_items;
                 let mut chunk = Vec::new();
+                let mut digest = OutputDigest::new();
                 self.for_each_relation_value(plan, depth, |context, value| {
+                    digest.push(&value);
                     if chunk.len() >= limit {
                         let values = std::mem::take(&mut chunk);
                         let running =
@@ -7209,6 +7298,7 @@ impl Context<'_, '_> {
                     chunk.push(value);
                     Ok(true)
                 })?;
+                self.record_materialization(plan, digest)?;
                 self.observe_list_relation(operation, chunk, arguments, depth)
             }
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -7321,11 +7411,14 @@ impl Context<'_, '_> {
         depth: usize,
     ) -> Result<Vec<Value>, EvaluationError> {
         let mut values = Vec::new();
+        let mut digest = OutputDigest::new();
         self.for_each_relation_value(plan, depth, |context, value| {
+            digest.push(&value);
             values.push(value);
             context.items(values.len())?;
             Ok(true)
         })?;
+        self.record_materialization(plan, digest)?;
         Ok(values)
     }
 
@@ -7688,11 +7781,14 @@ impl Context<'_, '_> {
             unreachable!("sort stage index")
         };
         let mut values = Vec::new();
+        let mut digest = OutputDigest::new();
         self.for_each_relation_value(&prefix, depth, |context, value| {
+            digest.push(&value);
             values.push(value);
             context.items(values.len())?;
             Ok(true)
         })?;
+        self.record_materialization(&prefix, digest)?;
         let sorted = self.collection("sort_by", vec![Value::list(values), key.clone()], depth)?;
         let Value::List(sorted) = sorted else {
             unreachable!("sort_by returns a list")
@@ -7831,6 +7927,9 @@ impl Context<'_, '_> {
         after: Option<&[u8]>,
         page_limit: usize,
     ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
+        if source == SYS_MATERIALIZATION_SOURCE {
+            return self.materialization_page(after, page_limit);
+        }
         enum SourcePage {
             Canonical(RelationPage),
             Contextual(ContextValueRelationPage),
@@ -7919,6 +8018,218 @@ impl Context<'_, '_> {
         Ok((rows, next))
     }
 
+    /// Records a materialization decision for `sys.Materialization`. The key
+    /// is `object` (stage identity) plus `snapshot` (output digest). A repeated
+    /// key is already in the log and is not recorded again. Only the canonical
+    /// digest, count, and byte size are retained; rows are not copied.
+    /// Only buffered or folded scans reach this function: collect, sort,
+    /// sum/min/max and list paths. Pipelines that never buffer (count, first,
+    /// exists) record no decision; ORNA-CALL-004 permits that, and the
+    /// omission is deliberate. A decision with no resolvable clock is also not
+    /// recorded (see `materialization_clock`).
+    fn record_materialization(
+        &mut self,
+        plan: &RelationPlan,
+        digest: OutputDigest,
+    ) -> Result<(), EvaluationError> {
+        if plan.source == SYS_MATERIALIZATION_SOURCE {
+            return Ok(());
+        }
+        let object = relation_stage_digest(plan);
+        let rows = digest.rows;
+        let (digest, bytes, valid) = digest.finish();
+        let snapshot = sha256_parts("orna.materialization.snapshot.v1", &[&digest]);
+        if self.has_materialization(&object, &snapshot) {
+            return Ok(());
+        }
+        let Some(created) = self.materialization_clock()? else {
+            return Ok(());
+        };
+        let reference = self.materialization_reference(&object, &snapshot)?;
+        self.admit_materialization(MaterializationRecord {
+            object,
+            snapshot,
+            digest,
+            rows,
+            bytes,
+            valid,
+            reference,
+            created,
+        })
+    }
+
+    fn has_materialization(&self, object: &[u8; 32], snapshot: &[u8; 32]) -> bool {
+        self.materializations
+            .iter()
+            .any(|record| record.object == *object && record.snapshot == *snapshot)
+    }
+
+    /// Pins the decision's `sys.MaterializationRef` to this activation's OVB-2
+    /// value context. Without that context there is no database or snapshot
+    /// pin, so no reference is fabricated and the row omits `reference`.
+    fn materialization_reference(
+        &mut self,
+        object: &[u8; 32],
+        snapshot: &[u8; 32],
+    ) -> Result<Option<CanonicalValue>, EvaluationError> {
+        let Some(handler) = self.ovb2_effects() else {
+            return Ok(None);
+        };
+        let Some(context) = handler.value_context() else {
+            return Ok(None);
+        };
+        let reference = orna_foundation_v1::materialization_reference(
+            context.database_uuid(),
+            context.pin().clone(),
+            *object,
+            *snapshot,
+        )
+        .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+        reference
+            .into_row_ref()
+            .to_canonical()
+            .map(Some)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
+
+    /// Appends a decision unless its key is already logged. The log holds one
+    /// row per distinct key and is bounded by `max_collection_items`.
+    fn admit_materialization(
+        &mut self,
+        record: MaterializationRecord,
+    ) -> Result<(), EvaluationError> {
+        if self.has_materialization(&record.object, &record.snapshot) {
+            return Ok(());
+        }
+        if self.materializations.len() >= self.limits.max_collection_items {
+            return Err(error("ORNA-EVAL-LIMIT"));
+        }
+        self.materializations.push(record);
+        Ok(())
+    }
+
+    /// Admits materialization decisions made by task callbacks. Batches are
+    /// given in callback index order, so the parent log is deterministic.
+    fn absorb_materializations(
+        &mut self,
+        batches: Vec<Vec<MaterializationRecord>>,
+    ) -> Result<(), EvaluationError> {
+        for record in batches.into_iter().flatten() {
+            self.admit_materialization(record)?;
+        }
+        Ok(())
+    }
+
+    /// Serves one page of the activation's materialization log. The cursor is
+    /// the 8-byte big-endian index of the next entry.
+    fn materialization_page(
+        &mut self,
+        after: Option<&[u8]>,
+        page_limit: usize,
+    ) -> Result<(Vec<Value>, Option<Vec<u8>>), EvaluationError> {
+        let start = match after {
+            None => 0,
+            Some(cursor) => {
+                let bytes: [u8; 8] = cursor.try_into().map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                usize::try_from(u64::from_be_bytes(bytes)).map_err(|_| error("ORNA-EVAL-VALUE"))?
+            }
+        };
+        let total = self.materializations.len();
+        if start > total {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let end = start.saturating_add(page_limit).min(total);
+        if end == start {
+            return Ok((Vec::new(), None));
+        }
+        if end - start > self.limits.max_collection_items {
+            return Err(error("ORNA-EVAL-VALUE"));
+        }
+        let mut rows = Vec::with_capacity(end - start);
+        for index in start..end {
+            self.step()?;
+            rows.push(materialization_row(&self.materializations[index]));
+        }
+        let next = (end < total).then(|| (end as u64).to_be_bytes().to_vec());
+        Ok((rows, next))
+    }
+
+    /// Reads the activation clock through the effect boundary, debiting the
+    /// activation's step budget. `None` means no handler resolved `now`; the
+    /// evaluator never supplies a clock itself.
+    fn activation_now(&mut self, callee: &Expr) -> Result<Option<Value>, EvaluationError> {
+        let remaining = self.limits.max_steps.saturating_sub(self.steps);
+        let mut budget = StepBudget::new(remaining);
+        let result = self.resolve_now(callee, &mut budget);
+        let debited = remaining - budget.remaining();
+        self.steps = self
+            .steps
+            .checked_add(debited)
+            .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
+        result
+    }
+
+    /// Dispatches a `now` call to the OVB-2 handler when present, otherwise to
+    /// the plain effect handler, and converts the answer to a value. The caller
+    /// owns the step budget.
+    fn resolve_now(
+        &mut self,
+        callee: &Expr,
+        budget: &mut StepBudget,
+    ) -> Result<Option<Value>, EvaluationError> {
+        if self.effects.is_none() {
+            return Ok(None);
+        }
+        if self.has_ovb2_effects() {
+            let result = self
+                .ovb2_effects()
+                .expect("checked OVB-2 effect handler")
+                .handle_with_budget(callee, &[], budget)?;
+            return match result {
+                Some(value) => self.ovb2_effect_value(&value).map(Some),
+                None => Ok(None),
+            };
+        }
+        let result = self
+            .effects
+            .as_deref_mut()
+            .expect("checked effect handler")
+            .handle_with_budget(callee, &[], budget)?;
+        match result {
+            Some(value) => self.effect_value(&value).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The activation instant for a new decision. Every decision in one
+    /// activation shares the instant its first decision captured (ORNA-TXN-005),
+    /// so later decisions reuse it. The read runs on a budget of its own and is
+    /// not debited from the query, so recording cannot move a pure result to a
+    /// step limit (ORNA-PLAN-001). The clock is a host-visible `now` effect call,
+    /// made at most once per activation: when it is missing, failing or not an
+    /// Instant the decision is not recorded rather than failing the query or
+    /// recording a fabricated `created`, and that absence is cached so later
+    /// decisions in the same activation do not call the host again. Cancellation
+    /// still propagates.
+    fn materialization_clock(&mut self) -> Result<Option<Value>, EvaluationError> {
+        if let Some(first) = self.materializations.first() {
+            return Ok(Some(first.created.clone()));
+        }
+        if self.materialization_clock_unavailable {
+            return Ok(None);
+        }
+        let mut budget = StepBudget::new(self.limits.max_steps);
+        let clock = match self.resolve_now(&materialization_clock_callee(), &mut budget) {
+            Ok(Some(instant @ Value::Instant { .. })) => Some(instant),
+            Err(failure) if failure.code() == "ORNA-EVAL-CANCELLED" => return Err(failure),
+            _ => None,
+        };
+        if clock.is_none() {
+            self.materialization_clock_unavailable = true;
+        }
+        Ok(clock)
+    }
+
     fn validate_relation_plan_sources(
         &mut self,
         plan: &RelationPlan,
@@ -7927,6 +8238,8 @@ impl Context<'_, '_> {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
         } else if plan.source_values.is_some() {
+            Ok(())
+        } else if plan.source == SYS_MATERIALIZATION_SOURCE {
             Ok(())
         } else {
             self.effects
@@ -8405,35 +8718,8 @@ impl Context<'_, '_> {
                 return Err(error("ORNA-EVAL-ARGUMENT"));
             }
             self.invalidate_call_reuse();
-            let remaining = self.limits.max_steps.saturating_sub(self.steps);
-            let mut budget = StepBudget::new(remaining);
-            if self.has_ovb2_effects() {
-                let result = self
-                    .ovb2_effects()
-                    .expect("checked OVB-2 effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.ovb2_effect_value(&value);
-                }
-            } else {
-                let result = self
-                    .effects
-                    .as_deref_mut()
-                    .expect("checked effect handler")
-                    .handle_with_budget(callee, &[], &mut budget);
-                let debited = remaining - budget.remaining();
-                self.steps = self
-                    .steps
-                    .checked_add(debited)
-                    .ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
-                if let Some(value) = result? {
-                    return self.effect_value(&value);
-                }
+            if let Some(value) = self.activation_now(callee)? {
+                return Ok(value);
             }
         }
         // `uuid7()` is an activation-scoped intrinsic. Like `now()`, it is
@@ -10548,7 +10834,7 @@ impl Context<'_, '_> {
                 } else {
                     child_effects.resize_with(callbacks.len(), || None);
                 }
-                let (results, _) = run_task_callbacks(
+                let (results, _, records) = run_task_callbacks(
                     callbacks,
                     child_effects,
                     self.calls,
@@ -10564,6 +10850,7 @@ impl Context<'_, '_> {
                     true,
                     false,
                 );
+                self.absorb_materializations(records)?;
                 if parent.as_ref().is_some_and(CancellationToken::is_requested) {
                     return Err(error("ORNA-EVAL-CANCELLED"));
                 }
@@ -10602,7 +10889,7 @@ impl Context<'_, '_> {
                 } else {
                     child_effects.resize_with(callbacks.len(), || None);
                 }
-                let (results, winner) = run_task_callbacks(
+                let (results, winner, records) = run_task_callbacks(
                     callbacks,
                     child_effects,
                     self.calls,
@@ -10618,6 +10905,7 @@ impl Context<'_, '_> {
                     false,
                     true,
                 );
+                self.absorb_materializations(records)?;
                 if parent.as_ref().is_some_and(CancellationToken::is_requested) {
                     return Err(error("ORNA-EVAL-CANCELLED"));
                 }
@@ -10669,11 +10957,14 @@ impl Context<'_, '_> {
                     .effects
                     .as_deref_mut()
                     .and_then(|effects| effects.fork_task_child(0));
+                let materializations: MaterializationSink =
+                    Arc::new(std::sync::Mutex::new(Vec::new()));
                 let result = std::thread::scope(|scope| {
                     let (sender, receiver) = std::sync::mpsc::channel();
                     let shared_for_task = Arc::clone(&shared_cancel);
                     let callback = callback.clone();
                     let task_parent = parent.clone();
+                    let sink_for_task = Arc::clone(&materializations);
                     scope.spawn(move || {
                         let cancellation =
                             CancellationToken::child(Arc::clone(&shared_for_task), task_parent);
@@ -10691,6 +10982,7 @@ impl Context<'_, '_> {
                                 sys_host,
                                 active_calls,
                                 child_effects,
+                                &sink_for_task,
                             )
                         }))
                         .unwrap_or_else(|_| Err(error("ORNA-EVAL-ERROR")));
@@ -10727,8 +11019,9 @@ impl Context<'_, '_> {
                             }
                         }
                     }
-                })?;
-                Ok(result)
+                });
+                self.absorb_materializations(vec![take_materializations(&materializations)])?;
+                result
             }
             ("parallel" | "race", [_]) | ("timeout", [_, _]) => Err(error("ORNA-EVAL-TYPE")),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
@@ -11274,7 +11567,7 @@ impl Context<'_, '_> {
         let mut encoded_values = Vec::with_capacity(values.len());
         for value in values {
             self.step()?;
-            encoded_values.push(value.clone().raw()?);
+            encoded_values.push(value.raw()?);
             self.items(encoded_values.len())?;
         }
         let identity = Raw::Array(vec![
@@ -15681,8 +15974,131 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
     match function_name(expression)?.as_str() {
         "sys.Storage" => Some("sys.Storage"),
         "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
+        "sys.Materialization" => Some("sys.Materialization"),
         _ => None,
     }
+}
+
+const SYS_MATERIALIZATION_SOURCE: &str = "sys.Materialization";
+
+fn sha256_parts(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(domain.as_bytes());
+    hash.update([0]);
+    for part in parts {
+        hash.update(part);
+    }
+    hash.finalize().into()
+}
+
+fn materialization_row(record: &MaterializationRecord) -> Value {
+    let count = |value: Option<usize>| {
+        Value::Option(value.map(|count| Box::new(Value::Int(BigInt::from(count)))))
+    };
+    let mut fields = BTreeMap::from([
+        ("object".to_owned(), Value::Blob(record.object.to_vec())),
+        ("snapshot".to_owned(), Value::Blob(record.snapshot.to_vec())),
+        ("digest".to_owned(), Value::Blob(record.digest.to_vec())),
+        ("rows".to_owned(), count(Some(record.rows))),
+        ("bytes".to_owned(), count(record.bytes)),
+        ("valid".to_owned(), Value::Bool(record.valid)),
+    ]);
+    if let Some(reference) = &record.reference {
+        fields.insert("reference".to_owned(), Value::Reference(reference.clone()));
+    }
+    fields.insert("created".to_owned(), record.created.clone());
+    Value::Record(fields)
+}
+
+/// Callee used to read the activation clock for `created`. It is never a user
+/// annotation; the host effect handler decides whether a clock exists.
+fn materialization_clock_callee() -> Expr {
+    Expr::Name {
+        text: "now".to_owned(),
+        span: orna_syntax_v1::SyntaxSpan::new(0, 0),
+    }
+}
+
+/// Incremental canonical digest of one materialized output. Rows fold in as
+/// they stream, so a decision never retains its full output. Encoding stops at
+/// the first row with no canonical form; later rows are still counted.
+struct OutputDigest {
+    digest: Sha256,
+    rows: usize,
+    bytes: usize,
+    valid: bool,
+}
+
+impl OutputDigest {
+    fn new() -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"orna.materialization.digest.v1\0");
+        Self {
+            digest,
+            rows: 0,
+            bytes: 0,
+            valid: true,
+        }
+    }
+
+    fn push(&mut self, value: &Value) {
+        self.rows = self.rows.saturating_add(1);
+        if !self.valid {
+            return;
+        }
+        let encoded = value.canonical_bytes();
+        match encoded {
+            Ok(encoded) => {
+                self.digest.update((encoded.len() as u64).to_be_bytes());
+                self.digest.update(&encoded);
+                self.bytes = self.bytes.saturating_add(encoded.len());
+            }
+            Err(_) => self.valid = false,
+        }
+    }
+
+    /// Returns the digest, the encoded byte count when every row is canonical,
+    /// and that validity flag.
+    fn finish(self) -> ([u8; 32], Option<usize>, bool) {
+        (
+            self.digest.finalize().into(),
+            self.valid.then_some(self.bytes),
+            self.valid,
+        )
+    }
+}
+
+/// Stage identity of a relation plan: its source name, union children, inline
+/// source rows, and every stage in order. Read-scope identities are not part
+/// of it, so the same logical stages over the same source share one key.
+fn relation_stage_digest(plan: &RelationPlan) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(b"orna.materialization.object.v1\0");
+    update_relation_identity(&mut hash, plan);
+    hash.finalize().into()
+}
+
+fn update_relation_identity(hash: &mut Sha256, plan: &RelationPlan) {
+    hash_identity_part(hash, b"source", plan.source.as_bytes());
+    if let Some((left, right)) = &plan.source_union {
+        hash_identity_part(hash, b"union", &[]);
+        update_relation_identity(hash, left);
+        update_relation_identity(hash, right);
+    }
+    if let Some(values) = &plan.source_values {
+        hash_identity_part(hash, b"values", format!("{values:?}").as_bytes());
+    }
+    for stage in &plan.stages {
+        hash_identity_part(hash, b"stage", stage.fingerprint().as_bytes());
+    }
+    hash_identity_part(hash, b"end", &[]);
+}
+
+fn hash_identity_part(hash: &mut Sha256, tag: &[u8], payload: &[u8]) {
+    hash.update((tag.len() as u64).to_be_bytes());
+    hash.update(tag);
+    hash.update((payload.len() as u64).to_be_bytes());
+    hash.update(payload);
 }
 
 fn function_namespace(name: &str) -> Option<String> {
@@ -15724,7 +16140,7 @@ fn one_like(value: &Value) -> Result<Value, EvaluationError> {
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
-fn raw_option_value(value: Option<Box<Value>>) -> Result<Raw, EvaluationError> {
+fn raw_option_value(value: Option<&Value>) -> Result<Raw, EvaluationError> {
     let parts = match value {
         Some(value) => vec![Raw::Int(1.into()), value.raw()?],
         None => vec![Raw::Int(0.into())],
@@ -16448,6 +16864,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -17938,6 +18356,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18014,6 +18434,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18166,6 +18588,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation,
@@ -18313,6 +18737,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18350,6 +18776,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -18818,6 +19246,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -18853,6 +19283,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: Some(&mut effects),
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -18887,6 +19319,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: Some(&cancellation),
@@ -19051,6 +19485,8 @@ mod table_reference_value_tests {
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -19391,7 +19827,7 @@ mod blob_equality_tests {
         .unwrap()
     }
 
-    fn rov3_blob_value(payload: &[u8]) -> Value {
+    pub(super) fn rov3_blob_value(payload: &[u8]) -> Value {
         let context = rov3_context(payload);
         let reference = context
             .reference(
@@ -19530,6 +19966,8 @@ mod blob_equality_tests {
             effects: None,
             namespace: None,
             transfer: None,
+            materializations: Vec::new(),
+            materialization_clock_unavailable: false,
             reuse: CallReuse::default(),
             sys_host: None,
             cancellation: None,
@@ -19584,5 +20022,234 @@ mod standard_layer_merge_tests {
         };
         assert_eq!(target.extend(other), Ok(()));
         assert!(target.local_aliases.contains_key("extra"));
+    }
+}
+
+/// Proof that folding a row into the materialization digest allocates a
+/// bounded amount per row. A thread-local counter only tallies allocations made
+/// by the test thread while `COUNTING` is set, so parallel tests do not skew it.
+#[cfg(test)]
+mod output_digest_allocation_proof {
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+    }
+    static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if COUNTING.with(Cell::get) {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    fn sample_row() -> Value {
+        Value::Record(BTreeMap::from([
+            ("object".to_owned(), Value::Blob(vec![7; 32])),
+            (
+                "name".to_owned(),
+                Value::String("materialized output row".repeat(4)),
+            ),
+            (
+                "items".to_owned(),
+                Value::List(List::from(
+                    (0..16)
+                        .map(|number| Value::Int(BigInt::from(number)))
+                        .collect::<Vec<_>>(),
+                )),
+            ),
+            ("valid".to_owned(), Value::Bool(true)),
+        ]))
+    }
+
+    /// Runs `work` with allocation counting enabled on this thread and returns
+    /// the number of heap allocations it performed.
+    fn count_allocations(work: impl FnOnce()) -> usize {
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        COUNTING.with(|counting| counting.set(true));
+        work();
+        COUNTING.with(|counting| counting.set(false));
+        ALLOCATIONS.load(Ordering::Relaxed) - before
+    }
+
+    #[test]
+    fn output_digest_row_allocations_are_counted() {
+        const ROWS: usize = 256;
+        let row = sample_row();
+        let expected_len = row
+            .canonical_bytes()
+            .expect("sample row is canonical")
+            .len();
+
+        // Before: the per-row fold cloned the value before canonicalising it.
+        let legacy = count_allocations(|| {
+            for _ in 0..ROWS {
+                let encoded = row
+                    .clone()
+                    .canonical()
+                    .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")))
+                    .expect("legacy row encodes");
+                std::hint::black_box(encoded);
+            }
+        });
+
+        // After: the digest fold borrows the row.
+        let mut digest = OutputDigest::new();
+        let borrowing = count_allocations(|| {
+            for _ in 0..ROWS {
+                digest.push(&row);
+            }
+        });
+        eprintln!(
+            "OUTPUT_DIGEST_ALLOCATIONS rows={ROWS} legacy_total={legacy} legacy_per_row={} borrowing_total={borrowing} borrowing_per_row={}",
+            legacy / ROWS,
+            borrowing / ROWS
+        );
+        assert!(digest.valid);
+        assert_eq!(digest.bytes, expected_len * ROWS);
+        assert!(borrowing < legacy);
+    }
+}
+
+#[cfg(test)]
+mod output_digest_equivalence {
+    use super::blob_equality_tests::rov3_blob_value;
+    use super::*;
+
+    /// One value per `Value` variant (31 arms), so the borrowed digest encoding
+    /// is checked against the legacy clone path on every arm.
+    fn every_variant() -> Vec<Value> {
+        let closure = Closure {
+            parameters: Vec::new(),
+            body: Expr::Name {
+                text: "x".to_owned(),
+                span: orna_syntax_v1::SyntaxSpan::new(0, 0),
+            },
+            captured: Scope(
+                BTreeMap::new(),
+                BTreeSet::new(),
+                BTreeSet::new(),
+                NominalDefinitions::new(),
+                BTreeSet::new(),
+            ),
+            namespace: None,
+        };
+        let relation = RelationPlan {
+            source: "rows".to_owned(),
+            source_identity: RelationReadScope(0),
+            shared_filter_group: None,
+            source_union: None,
+            source_values: None,
+            stages: Vec::new(),
+        };
+        vec![
+            Value::Null,
+            Value::Unit,
+            Value::Bool(true),
+            Value::Int(BigInt::from(-7)),
+            Value::Decimal(DecimalValue::new(BigInt::from(125), BigInt::from(-2)).unwrap()),
+            Value::Money {
+                amount: DecimalValue::new(BigInt::from(1), BigInt::from(0)).unwrap(),
+                currency: [0x55; 16],
+            },
+            Value::Float(1.5_f64.to_bits()),
+            Value::String("text".to_owned()),
+            Value::Blob(vec![1, 2, 3]),
+            Value::AnnotatedBlob(Raw::Text("annotated".to_owned())),
+            rov3_blob_value(b"payload"),
+            Value::Date("2026-10-26".to_owned()),
+            Value::Uuid([3; 16]),
+            Value::Digest([4; 32]),
+            Value::Reference(CanonicalValue::new(Raw::Int(3.into())).expect("canonical")),
+            Value::TableReference(CanonicalValue::new(Raw::Int(4.into())).expect("canonical")),
+            Value::Instant {
+                unix_seconds: 1,
+                nanosecond: 0,
+            },
+            Value::Duration {
+                seconds: BigInt::from(1),
+                nanosecond: 5,
+            },
+            Value::Period {
+                days: BigInt::from(2),
+            },
+            Value::Error(error("ORNA-TEST-ERROR")),
+            Value::Range {
+                lower: Some(Box::new(Value::Int(BigInt::from(1)))),
+                upper: None,
+                upper_inclusive: false,
+            },
+            Value::List(List::from(vec![Value::Bool(false)])),
+            Value::Stream {
+                values: vec![Value::Bool(false)],
+                source_label: "source".to_owned(),
+                source_digest: [0; 32],
+                position: 0,
+                provider: None,
+            },
+            Value::Relation(relation),
+            Value::Tuple(vec![Value::Null]),
+            Value::Record(BTreeMap::from([("field".to_owned(), Value::Bool(true))])),
+            Value::NominalRecord {
+                type_id: Raw::Int(1.into()),
+                fields: vec![(Raw::Text("field".to_owned()), Value::Null)],
+            },
+            Value::Enum {
+                type_id: Raw::Int(1.into()),
+                variant_id: Raw::Int(2.into()),
+                payload: Some(Box::new(Value::Null)),
+            },
+            Value::Option(Some(Box::new(Value::Int(BigInt::from(5))))),
+            Value::Function {
+                name: "f".to_owned(),
+                nominal_definitions: NominalDefinitions::new(),
+            },
+            Value::Closure(Arc::new(closure)),
+        ]
+    }
+
+    fn outcome(result: Result<Vec<u8>, EvaluationError>) -> Result<Vec<u8>, String> {
+        result.map_err(|failure| failure.code().to_owned())
+    }
+
+    /// Spec: Orna-1.1.0.md:7400-7417. The digest fold must encode each row to
+    /// exactly the bytes, or exactly the rejection code, of the legacy path.
+    #[test]
+    fn borrowed_canonical_bytes_match_legacy_clone_path_for_every_variant() {
+        let values = every_variant();
+        assert_eq!(values.len(), 31);
+        let mut accepted = 0;
+        let mut rejected = 0;
+        for value in values {
+            let borrowed = outcome(value.canonical_bytes());
+            let legacy = outcome(
+                value
+                    .clone()
+                    .canonical()
+                    .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE"))),
+            );
+            assert_eq!(borrowed, legacy, "{value:?}");
+            if borrowed.is_ok() {
+                accepted += 1;
+            } else {
+                rejected += 1;
+            }
+        }
+        assert!(accepted > 0 && rejected > 0);
     }
 }

@@ -98,7 +98,7 @@ jobs:
 
       - name: Test the orna-evaluator-v1 library and evaluator suite
         if: ${{ !cancelled() }}
-        run: python3 scripts/gate_evidence.py test -p orna-evaluator-v1 --target lib --target test:evaluator --timeout-minutes 30
+        run: python3 scripts/gate_evidence.py test -p orna-evaluator-v1 --target lib --target test:evaluator --target test:materialization_introspection --target test:evaluator_ovb2_boundary --timeout-minutes 30
 
   # Gate D: SIGKILL at each publication boundary. Needs the crash-barriers test feature.
   publication-crash-matrix:
