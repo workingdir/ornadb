@@ -35,4 +35,3 @@ google.mail(account: credential)
 **ORNA-SECRET-003** A `SecretRef` may be displayed and serialized by stable name; the resolved secret value may not.
 
 **ORNA-SECRET-004** `sys.Secret` MUST expose metadata such as name, provider and availability but MUST NOT expose secret contents.
-

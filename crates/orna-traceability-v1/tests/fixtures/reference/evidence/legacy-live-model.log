@@ -1,0 +1,38 @@
+{
+  "scope": "Selected protocol structural and state models, not independent clients/servers, complete tagged-value validation, authentication or malformed-WebSocket fuzzing.",
+  "passed": 5,
+  "total": 5,
+  "results": [
+    {
+      "name": "wire.all-message-structures",
+      "pass": true,
+      "detail": {
+        "message_kinds": 13,
+        "scope": "envelope, known fields, selected nested values and canonical byte roundtrip"
+      }
+    },
+    {
+      "name": "wire.invalid-structure-rejections",
+      "pass": true,
+      "detail": {
+        "invalid_messages_rejected": 13,
+        "unknown_optional_extension_accepted": true
+      }
+    },
+    {
+      "name": "session.http-schema",
+      "pass": true,
+      "detail": "Closed create/resume/response schemas; unknown fields and unsupported protocol reject. Authentication/cookies are implementation obligations."
+    },
+    {
+      "name": "request.reservation-and-terminal-claim",
+      "pass": true,
+      "detail": "Fingerprint mismatch rejects; a reservation is not success or a replay licence; terminal claim and model writes become visible together."
+    },
+    {
+      "name": "watch.atomic-delta-resync",
+      "pass": true,
+      "detail": "Selected property-patch model publishes atomically and preserves the visible tree on invalid path or revision mismatch."
+    }
+  ]
+}

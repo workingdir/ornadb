@@ -133,7 +133,7 @@
   },
   {
     "id": "storage",
-    "title": "Physical storage and representation",
+    "title": "One indexed row store",
     "part": "Persistence",
     "file": "source/23-storage.md"
   },
@@ -178,6 +178,48 @@
     "title": "Live protocol and session recovery",
     "part": "Interchange",
     "file": "source/30-protocol.md"
+  },
+  {
+    "id": "blob-values",
+    "title": "Annotated immutable Blob values",
+    "part": "Orna 1.1 integration",
+    "file": "source/36-blob-values.md"
+  },
+  {
+    "id": "blob-storage",
+    "title": "Unified native-Git graph and Blob chunks",
+    "part": "Orna 1.1 integration",
+    "file": "source/37-git-native-blobs.md"
+  },
+  {
+    "id": "ingestion",
+    "title": "Ingestion, inspection and derived knowledge",
+    "part": "Orna 1.1 integration",
+    "file": "source/38-ingestion-inspection.md"
+  },
+  {
+    "id": "source-apps",
+    "title": "Source-hosted applications and minimal devtools",
+    "part": "Orna 1.1 integration",
+    "file": "source/39-source-hosted-apps.md"
+  },
+  {
+    "id": "vfs",
+    "title": "Editable row-directory filesystem",
+    "part": "Orna 1.1 integration",
+    "file": "source/41-vfs.md"
+  },
+  {
+    "id": "media-policy",
+    "title": "MIME declarations and deterministic suffixes",
+    "part": "Orna 1.1 integration",
+    "file": "source/42-media.md"
+  },
+  {
+    "id": "upgrade",
+    "title": "Compatibility, migration and verification",
+    "part": "Orna 1.1 integration",
+    "file": "source/40-upgrade-contract.md"
   },
   {
     "id": "examples",

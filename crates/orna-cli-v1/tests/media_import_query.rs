@@ -597,7 +597,7 @@ fn run_query(directory: &Path, arguments: &[&str]) -> std::process::Output {
 /// test can choose the global `--db` endpoint and the process directory
 /// independently.
 fn run_orna_from(cwd: &Path, words: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    std::process::Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(cwd)
         .args(words)
         .output()
@@ -737,6 +737,7 @@ async fn import_media(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &orna_runtime_v1::NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -1241,6 +1242,7 @@ async fn delete_media(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &orna_runtime_v1::NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();
@@ -2258,6 +2260,7 @@ async fn commit_captured_binding(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
         )
         .await
         .unwrap();

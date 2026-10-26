@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-view.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1002",
+  "message_contains": "`view` is replaced by an ordinary function",
+  "status": "expected-not-executed"
+}

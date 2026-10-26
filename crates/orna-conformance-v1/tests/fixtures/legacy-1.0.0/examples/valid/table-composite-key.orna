@@ -1,0 +1,4 @@
+pub table Reading(vehicle: Uuid, time: Instant) {
+    speed: Float<mph>,
+    rpm: Int,
+}

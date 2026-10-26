@@ -1,0 +1,7 @@
+use std.text.{slug, disambiguate};
+
+pub table Contact(
+    id: Str = disambiguate(slug(name), Contact.keys())
+) {
+    name: Str,
+}

@@ -1,0 +1,6 @@
+pub table Tariff(effective_from: Date) {
+    rate: Money<GBP> / kWh,
+}
+
+pub fn cost(energy: Decimal<kWh>, tariff: Tariff) =
+    energy * tariff.rate;

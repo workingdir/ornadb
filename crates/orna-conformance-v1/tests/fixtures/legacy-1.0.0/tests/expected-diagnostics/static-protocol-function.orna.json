@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/static-protocol-function.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "ORNA091-E-STATIC-FN",
+  "message_contains": "protocols use instance functions and static properties, not static functions",
+  "status": "expected-not-executed"
+}

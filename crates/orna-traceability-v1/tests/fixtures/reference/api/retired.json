@@ -1,0 +1,34 @@
+{
+  "scope": "Removed from new-format 1.1.0 admission; historical contexts retain their original API",
+  "functions": [
+    {
+      "name": "sys.admin.set_storage_preference",
+      "effect": "admin",
+      "signature": "fn sys.admin.set_storage_preference(table: sys.TableRef, preference: sys.StoragePreference): sys.Storage",
+      "purpose": "Set future automatic placement preference without rewriting existing rows.",
+      "contract": "administrative-state-transitions"
+    },
+    {
+      "name": "sys.admin.rewrite_storage",
+      "effect": "admin",
+      "signature": "fn sys.admin.rewrite_storage(table: sys.TableRef, to: sys.StorageRewriteTarget): sys.StorageRewriteResult",
+      "purpose": "Atomically rewrite physical placement while preserving logical rows.",
+      "contract": "administrative-state-transitions"
+    }
+  ],
+  "value_types": [
+    "sys.StorageRewriteResult"
+  ],
+  "enums": {
+    "sys.StoragePreference": [
+      "automatic",
+      "editable",
+      "compact"
+    ],
+    "sys.StorageRewriteTarget": [
+      "editable",
+      "compact"
+    ]
+  },
+  "reason": "one canonical row representation; no user placement mode"
+}

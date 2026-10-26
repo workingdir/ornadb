@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/transaction-block.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1007",
+  "message_contains": "database writes are transactional by activation; `transaction` is not syntax",
+  "status": "expected-not-executed"
+}

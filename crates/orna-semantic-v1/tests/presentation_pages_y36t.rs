@@ -16,7 +16,7 @@
 //! suites; this file does not promote their current evidence to complete.
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_DISPLAY_READ_ONLY, ModuleInput, Type, analyze, analyze_with_catalogue,
 };
 
 fn effect_fixture(protocol: &str, member: &str) -> String {
@@ -65,7 +65,7 @@ fn display_implementation_write_is_rejected() {
     );
     let result = analyze(&[ModuleInput::new("display-write.orna", &source)]);
     assert!(
-        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         "Display write must fail as a type/effect diagnostic: {:#?}",
         result.diagnostics
     );
@@ -79,7 +79,7 @@ fn present_implementation_write_is_rejected() {
     );
     let result = analyze(&[ModuleInput::new("present-write.orna", &source)]);
     assert!(
-        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_TYPE),
+        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         "Present write must fail as a type/effect diagnostic: {:#?}",
         result.diagnostics
     );
