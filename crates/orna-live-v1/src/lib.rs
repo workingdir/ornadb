@@ -107,6 +107,8 @@ pub enum Error {
     ApplicationDeferred,
     RuntimeUnavailable,
     SnapshotExpired,
+    /// The retained session credential or lifetime has expired.
+    SessionExpired,
 }
 
 impl Error {
@@ -129,6 +131,7 @@ impl Error {
             Self::ApplicationDeferred => "live.application_deferred",
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
+            Self::SessionExpired => "wire.session_expired",
         }
     }
 }
@@ -1668,7 +1671,7 @@ impl HttpResponse {
         Self {
             status: match error {
                 Error::Denied => 403,
-                Error::Closed => 410,
+                Error::Closed | Error::SessionExpired => 410,
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
                 Error::DeletionFailed
@@ -2704,7 +2707,23 @@ impl LiveHost {
         } else {
             0
         };
-        let mut work = self.application_work.admit(session, request)?;
+        let mut work = match self.application_work.admit(session, request) {
+            Ok(work) => work,
+            Err(Error::Limit) => {
+                // Admission was refused before any request state existed, so
+                // the correlated limit diagnostic is not retained for replay.
+                return match self.operational_error_outcome(
+                    Some(session),
+                    &envelope,
+                    Error::Limit,
+                    false,
+                )? {
+                    Some(outcome) => Ok(ApplicationPreparation::Completed(outcome)),
+                    None => Err(Error::Limit),
+                };
+            }
+            Err(error) => return Err(error),
+        };
         if let Err(error) = self.reserve_and_start(session, request, fingerprint) {
             work.complete();
             self.retain_failure(session, request, fingerprint).await?;
@@ -3103,6 +3122,8 @@ impl LiveHost {
             Error::RequestMismatch => (Error::RequestMismatch.code(), event_watch),
             Error::UnsupportedOperation => ("wire.unsupported", event_watch),
             Error::SnapshotExpired => ("wire.snapshot_expired", event_watch),
+            Error::Limit => ("wire.limit", event_watch),
+            Error::SessionExpired => ("wire.session_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
@@ -3452,7 +3473,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -3470,7 +3491,7 @@ impl LiveHost {
                                     fingerprint,
                                 )
                                 .await?;
-                            let outcome = validate_result_response(
+                            let outcome = validate_applied_result_response(
                                 request,
                                 fingerprint,
                                 response,
@@ -5097,6 +5118,32 @@ fn validate_result_response(
     })
 }
 
+/// Validates a sync Eval/Event response after the application has run.
+///
+/// The application publishes its effects before the host validates the
+/// envelope. Every validation failure after that point (encoding, request or
+/// watch correlation, non-Result shape, and fingerprint mismatch) is retained
+/// as `RetainedWithoutValue`. Nothing that has already been executed may look
+/// like "not executed": the terminal must not be a generic failure or a
+/// correlated `wire.request_mismatch` diagnostic that a client could mistake
+/// for a pre-dispatch rejection and resend under a fresh request ID
+/// (ORNA-PROTO-004; 30-protocol.md L121). The specific mismatch reason is not
+/// stored in the durable terminal. Pre-dispatch mismatches keep their
+/// correlated `wire.request_mismatch` diagnostic on the operational path.
+fn validate_applied_result_response(
+    request: [u8; 16],
+    fingerprint: [u8; 32],
+    response: Envelope,
+    limits: ProtocolLimits,
+) -> Result<DispatchOutcome> {
+    match validate_result_response(request, fingerprint, response, limits) {
+        Err(Error::ApplicationRejected | Error::RequestMismatch) => {
+            Ok(retained_without_value_outcome(request, fingerprint))
+        }
+        result => result,
+    }
+}
+
 /// Host-generated diagnostics are terminal outcomes for a small set of
 /// operational rejections even though normal Eval/Event completions are
 /// Results. Retain only a request-matched diagnostic, and only let an Event
@@ -5303,7 +5350,8 @@ fn attachment_id(value: [u8; 16]) -> AttachmentId {
 }
 fn map_boundary(error: BoundaryError) -> Error {
     match error {
-        BoundaryError::Closed | BoundaryError::Expired => Error::Closed,
+        BoundaryError::Closed => Error::Closed,
+        BoundaryError::Expired => Error::SessionExpired,
         BoundaryError::DeletionFailed => Error::DeletionFailed,
         BoundaryError::Denied => Error::Denied,
     }
@@ -8262,6 +8310,7 @@ fn host_error(error: Error) -> WireResponse {
     let (status, code) = match error {
         Error::Limit => (413, "live.limit"),
         Error::Closed => (410, "live.expired"),
+        Error::SessionExpired => (410, "wire.session_expired"),
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
@@ -8688,6 +8737,98 @@ mod tests {
     impl LiveApplication for RejectingApplication {
         fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
             Err(Error::ApplicationRejected)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    /// Counts eval invocations so retry tests can prove the application ran
+    /// exactly once for a request ID.
+    #[derive(Default)]
+    struct WrongRequestApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongRequestApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([99; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+    }
+
+    /// Counts event invocations so the event path can prove an applied
+    /// mismatch is retained rather than rerun on retry.
+    #[derive(Default)]
+    struct WrongRequestEventApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongRequestEventApplication {
+        fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            Err(Error::UnsupportedOperation)
+        }
+
+        fn event(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            // Effects are already applied when the application answers for a
+            // different request; the host cannot validate that response.
+            Ok(Envelope {
+                request: Some([98; 16]),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
+        }
+    }
+
+    /// Applied effects followed by a result that correlates to the request but
+    /// carries the wrong fingerprint.
+    #[derive(Default)]
+    struct WrongFingerprintApplication {
+        calls: usize,
+    }
+
+    impl LiveApplication for WrongFingerprintApplication {
+        fn eval(&mut self, _: [u8; 16], request: [u8; 16], _: &Message) -> Result<Envelope> {
+            self.calls += 1;
+            Ok(Envelope {
+                request: Some(request),
+                watch: None,
+                message: Message::Result {
+                    status: ResultStatus::Success,
+                    value: Some(CanonicalValue::unit()),
+                    fingerprint: [0xee; 32],
+                    diagnostic: None,
+                },
+                extensions: BTreeMap::new(),
+            })
         }
 
         fn watch(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope> {
@@ -9481,6 +9622,144 @@ mod tests {
         );
         assert!(!socket.closed);
         assert!(transport.host.watches.contains(&([1; 16], unrelated_watch)));
+    }
+
+    #[test]
+    fn applied_eval_with_unvalidatable_response_is_retained_without_value() {
+        let request = [5; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The application published its effects before returning a response
+        // the host could not validate. The terminal record must be the
+        // retained-without-value contract, not a generic failure.
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied eval must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        // An exact retry replays that terminal result instead of rerunning the
+        // application under the same request ID.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+    }
+
+    #[test]
+    fn applied_eval_with_fingerprint_mismatch_is_retained_without_value() {
+        let request = [6; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongFingerprintApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // Effects were applied before the fingerprint mismatch was seen. The
+        // terminal must be retained-without-value, not a correlated
+        // wire.request_mismatch that a client could read as "not executed"
+        // (ORNA-PROTO-004; 30-protocol.md L121).
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("a post-effect mismatch must complete with a retained Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&eval_frame(request)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+    }
+
+    #[test]
+    fn applied_event_with_unvalidatable_response_is_retained_without_value() {
+        let request = [15; 16];
+        let watch = [16; 16];
+        let mut transport =
+            LiveTransport::new(subscribed_host(None), TransportLimits::default()).unwrap();
+        transport.host.watches.insert(([1; 16], watch));
+        let mut socket = WebSocketState::new([4; 16]);
+        let mut application = WrongRequestEventApplication::default();
+        let response = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        // The event published its effects before returning a response the
+        // host could not validate. The terminal must be retained-without-value,
+        // not a correlated wire.request_mismatch that reads as "not applied".
+        let Message::Result { fingerprint, .. } = &response.message else {
+            panic!("an applied event must complete with a Result");
+        };
+        let fingerprint = *fingerprint;
+        assert_eq!(
+            response,
+            retained_without_value_outcome(request, fingerprint)
+                .response
+                .unwrap()
+        );
+        assert_eq!(application.calls, 1);
+
+        // An exact retry replays the terminal result without rerunning the event.
+        let replay = diagnostic_output(
+            futures::executor::block_on(transport.receive_with_application(
+                &mut socket,
+                2,
+                &masked_binary_frame(&event_frame(request, watch)),
+                &mut application,
+            ))
+            .unwrap(),
+        );
+        assert_eq!(replay, response);
+        assert_eq!(application.calls, 1, "a retry must never rerun the event");
     }
 
     #[test]

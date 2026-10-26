@@ -1189,7 +1189,7 @@ impl Repository {
         tree: &IndexTreeRef,
         head: Option<&GitCommitRef>,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
-        let mut command = self.command();
+        let mut command = self.private_commit_command();
         command.args(["commit-tree", tree.as_str()]);
         if let Some(head) = head {
             command.args(["-p", head.as_str()]);
@@ -2228,6 +2228,21 @@ mod tests {
             .map(|id| StagedRelation::new(*id, table_descriptor(*id, "Str")))
             .collect::<Vec<_>>();
         repository.stage_store_admission(&staged, &tables, &identities_for(relations))
+    }
+
+    #[test]
+    fn private_carrier_capture_needs_no_configured_identity() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        // An empty local identity makes an ambient-identity commit fail on
+        // any host, even one with a global identity, because local config
+        // overrides global config. The carrier must not read it.
+        git(root, &["config", "user.name", ""]);
+        git(root, &["config", "user.email", ""]);
+        let staged = repository
+            .capture_staged_candidate()
+            .expect("a private carrier commit must not require a configured identity");
+        assert!(staged.store_root().is_none());
     }
 
     #[test]

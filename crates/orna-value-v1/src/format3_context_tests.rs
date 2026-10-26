@@ -980,6 +980,37 @@ fn identical_reference_bindings_short_circuit_only_within_one_context() {
     assert_eq!(resolver.reads.load(Ordering::SeqCst), 2);
 }
 
+#[test]
+fn verify_streams_a_large_reference_in_bounded_chunks() {
+    // Larger than the 8 MiB call ceiling: verification must not need a buffer
+    // of the full length, so every resolver request stays within the quota.
+    let bytes = vec![0x5a_u8; 9 * 1024 * 1024];
+    let identity = ContentIdentity::from_bytes(&bytes);
+    let resolver = counting_resolver(&bytes);
+    let quota = Format3Quota::new(1024 * 1024, 1_u64 << 62).unwrap();
+    let context = test_context_with_quota(resolver.clone(), quota);
+    let blob = Blob::from_reference(
+        context
+            .reference(identity, NativeOid::from_bytes(&[9; 20]).unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    blob.verify().unwrap();
+    assert_eq!(resolver.reads.load(Ordering::SeqCst), 9);
+    assert_eq!(resolver.max_request.load(Ordering::SeqCst), 1024 * 1024);
+
+    let wrong = Blob::from_reference(
+        context
+            .reference(
+                ContentIdentity::from_bytes(b"other"),
+                NativeOid::from_bytes(&[9; 20]).unwrap(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(wrong.verify(), Err(Error::ContentDigestMismatch));
+}
+
 struct CountingResolver {
     bytes: Vec<u8>,
     reads: AtomicUsize,
