@@ -73,14 +73,23 @@ impl From<ApplicationError> for ReplEvaluationFailure {
 impl ApplicationAuthority {
     /// Evaluates one effectful REPL submission into an unpublished candidate.
     /// The caller must commit the returned activation before publishing the
-    /// returned session successor.
+    /// returned session successor. The returned flag reports whether an external
+    /// sys binding was actually dispatched during evaluation (not merely declared).
     pub fn evaluate_staged_repl_transaction(
         &self,
         session: &AdmittedReplSession,
         staged: StagedReplActivation,
         scope: &ReplTransactionScope<'_>,
         bindings: &mut SysHostBindingRegistry,
-    ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ReplEvaluationFailure> {
+    ) -> Result<
+        (
+            Option<CanonicalValue>,
+            AdmittedReplSession,
+            StagedActivation,
+            bool,
+        ),
+        ReplEvaluationFailure,
+    > {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
         // The REPL host serves no publication relation, so its explain
         // catalogue pins the activation's project tables only.
@@ -147,7 +156,7 @@ impl ApplicationAuthority {
             activation,
         )
             .map_err(|error| failure(error.into()))?;
-        Ok((value, successor, activation))
+        Ok((value, successor, activation, external_effects_possible))
     }
 }
 
