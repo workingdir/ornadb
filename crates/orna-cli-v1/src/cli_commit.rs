@@ -155,10 +155,15 @@ fn stage_store(
     let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_catalogue(project.modules(), &catalogue);
     if !analysis.is_ok() {
-        return Err(Diagnostic::target(
+        let first = analysis
+            .diagnostics
+            .first()
+            .expect("non-empty diagnostics when semantic analysis fails");
+        return Err(Diagnostic::target_with_detail(
             "E2101",
             "staged source semantic analysis failed",
             "fix the first reported source contract error, stage it, then commit again",
+            format!("{}: {}", first.code(), first.message()),
         ));
     }
     let previous = orna_project_v1::ObjectIdentityManifest::read_staged(repository, &staged)
