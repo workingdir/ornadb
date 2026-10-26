@@ -2497,50 +2497,90 @@ fn unavailable_table_identity(detail: String) -> Diagnostic {
     )
 }
 
-/// Returns the first admitted module table whose rows still sit under its bare
-/// name. A module table `library.Book` is stored as `library.Book`; earlier
-/// builds stored it as `Book`, which the qualified table cannot see: reads miss
-/// those rows and writes fork the relation. A bare name that an admitted root
-/// table also owns is that root table's data, so only module tables are checked.
+/// Returns the first module table whose rows still sit under its bare name. A
+/// module table `library.Book` is stored as `library.Book`; earlier builds
+/// stored it as `Book`, which the qualified table cannot see: reads miss those
+/// rows and writes fork the relation. `candidates` comes from
+/// [`legacy_bare_module_candidates`].
 fn legacy_bare_module_table(
     state: &RuntimeState,
     runtime: &tokio::runtime::Runtime,
-    tables: &[&str],
+    candidates: &[(String, String)],
 ) -> Result<Option<String>, orna_runtime_v1::RuntimeError> {
-    for table in tables {
-        let Some((_, bare)) = table.rsplit_once('.') else {
-            continue;
-        };
-        if tables.contains(&bare) {
-            continue;
-        }
+    for (qualified, bare) in candidates {
         if runtime.block_on(state.has_table_rows(bare))? {
-            return Ok(Some((*table).to_owned()));
+            return Ok(Some(qualified.clone()));
         }
     }
     Ok(None)
 }
 
+/// The module tables whose rows may sit under a bare name, as `(qualified,
+/// bare)` pairs. `declared` are the qualified names the caller admits; when
+/// `commit` is given, every table recorded in its committed identity manifest
+/// is added, retired ones included. A live `ns.B` is a candidate unless a table
+/// named `B`, live or retired, exists: a bare name a root table owns, even one
+/// since removed, is that table's data, never a legacy module row.
+fn legacy_bare_module_candidates(
+    repository: &orna_repository_v1::Repository,
+    commit: Option<&orna_repository_v1::GitCommitRef>,
+    declared: &[&str],
+) -> Result<Vec<(String, String)>, orna_project_v1::ObjectIdentityError> {
+    let mut tables = declared
+        .iter()
+        .map(|name| ((*name).to_owned(), false))
+        .collect::<Vec<_>>();
+    if let Some(commit) = commit {
+        let manifest = orna_project_v1::ObjectIdentityManifest::read_committed(repository, commit)?;
+        tables.extend(
+            manifest
+                .records()
+                .iter()
+                .filter(|record| record.kind() == orna_project_v1::ObjectKind::Table)
+                .map(|record| (record.qualified_name().to_owned(), record.is_retired())),
+        );
+    }
+    let owned = tables
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .collect::<BTreeSet<_>>();
+    let mut candidates = BTreeSet::new();
+    for (qualified, retired) in &tables {
+        if *retired {
+            continue;
+        }
+        let Some((_, bare)) = qualified.rsplit_once('.') else {
+            continue;
+        };
+        if !owned.contains(bare) {
+            candidates.insert((qualified.clone(), bare.to_owned()));
+        }
+    }
+    Ok(candidates.into_iter().collect())
+}
+
 /// Refuses a multi-module durable invocation whose store holds rows of a
 /// declared module table under its bare name. The storage names are derived
 /// from each module's namespace and table declarations, as admission names them.
+/// The candidates come from the committed identity manifest at `HEAD` when a
+/// commit exists, so a removed root table keeps its bare name.
 fn refuse_legacy_bare_module_rows(
     repository: &orna_repository_v1::Repository,
     identity: RuntimeIdentity,
     initial_digest: [u8; 32],
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(), Diagnostic> {
-    let mut tables = Vec::new();
+    let mut declared = Vec::new();
     for (module, module_identity) in project.modules().iter().zip(project.identities()) {
         for item in orna_syntax_v1::parse_module(&module.source).value.items {
             if let orna_syntax_v1::Declaration::Table { name, .. } = item.declaration {
                 let mut qualified = module_identity.namespace().to_vec();
                 qualified.push(name);
-                tables.push(qualified.join("."));
+                declared.push(qualified.join("."));
             }
         }
     }
-    if tables.is_empty() {
+    if declared.is_empty() {
         return Ok(());
     }
     let unreadable = || {
@@ -2550,6 +2590,13 @@ fn refuse_legacy_bare_module_rows(
             "retry the invocation after checking local runtime state",
         )
     };
+    let commit = repository.head().ok().flatten();
+    let declared = declared.iter().map(String::as_str).collect::<Vec<_>>();
+    let candidates = legacy_bare_module_candidates(repository, commit.as_ref(), &declared)
+        .map_err(|_| unreadable())?;
+    if candidates.is_empty() {
+        return Ok(());
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -2557,8 +2604,7 @@ fn refuse_legacy_bare_module_rows(
     let state = runtime
         .block_on(RuntimeState::open(repository, identity, initial_digest))
         .map_err(|_| unreadable())?;
-    let table_names = tables.iter().map(String::as_str).collect::<Vec<_>>();
-    match legacy_bare_module_table(&state, &runtime, &table_names).map_err(|_| unreadable())? {
+    match legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| unreadable())? {
         Some(table) => Err(legacy_module_table_diagnostic(&table)),
         None => Ok(()),
     }
@@ -2839,7 +2885,15 @@ fn run_committed_table_invocation(
         .keys()
         .map(String::as_str)
         .collect::<Vec<_>>();
-    if let Some(table) = legacy_bare_module_table(&state, &runtime, &table_names).map_err(|_| {
+    let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "committed table rows could not be read",
+                "retry the invocation after checking local runtime state",
+            )
+        })?;
+    if let Some(table) = legacy_bare_module_table(&state, &runtime, &candidates).map_err(|_| {
         Diagnostic::target(
             "E2200",
             "committed table rows could not be read",
@@ -3224,7 +3278,10 @@ fn run_repl_input(
             .iter()
             .map(RuntimeTableIdentity::table)
             .collect::<Vec<_>>();
-        if let Some(table) = legacy_bare_module_table(&state, &transactions.runtime, &tables)
+        let candidates =
+            legacy_bare_module_candidates(repository, Some(&transactions.commit), &tables)
+                .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+        if let Some(table) = legacy_bare_module_table(&state, &transactions.runtime, &candidates)
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?
         {
             return Err(repl_effect_failure(

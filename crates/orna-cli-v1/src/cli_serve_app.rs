@@ -159,7 +159,9 @@ impl ServeApp {
                 .map_err(|_| "serve.evaluation_failed");
         }
         let table_names = names.iter().map(String::as_str).collect::<Vec<_>>();
-        if legacy_bare_module_table(&state, &runtime, &table_names)
+        let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        if legacy_bare_module_table(&state, &runtime, &candidates)
             .map_err(|_| "serve.table_rows_unavailable")?
             .is_some()
         {
