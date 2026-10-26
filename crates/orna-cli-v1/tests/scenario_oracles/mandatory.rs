@@ -20,12 +20,7 @@ const SKIP_BLOCKER: &str = "an operator cannot skip a failed delivery: `sys.Fail
 
 pub fn entries() -> Vec<Entry> {
     vec![
-        Entry::gap(
-            "STATE-001",
-            "ornadb-5afo",
-            "the CWD relation does not count uncommitted REPL inserts: `main.Contact | count()` ignores the local row (ORNA-STATE-002)",
-            cwd_overlays_head,
-        ),
+        Entry::pass("STATE-001", cwd_counts_uncommitted_insert),
         Entry::pass("KEY-001", automatic_ids_do_not_reuse_deletion),
         Entry::pass("KEY-002", automatic_ids_survive_reset),
         Entry::pass("TXN-001", nested_writes_roll_back_with_the_activation),
@@ -111,28 +106,21 @@ pub fn entries() -> Vec<Entry> {
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) { name: Str, }\n";
 const INSERT_ALICE: &str = r#"main.Contact.insert({ id: "alice", name: "Alice" })"#;
 
-fn cwd_overlays_head(db: &mut Db) -> Probe {
-    db.declare(CONTACT_SOURCE)?;
+fn cwd_counts_uncommitted_insert(db: &mut Db) -> Check {
+    let tables = db.declare(CONTACT_SOURCE)?;
+    let relation = Db::relation(&tables, "Contact")?;
     db.repl_effect(INSERT_ALICE)?;
     db.publish()?.ok()?;
     db.repl_effect(r#"main.Contact.insert({ id: "bob", name: "Bob" })"#)?;
     let cwd = db.repl(&["main.Contact | count()"])?;
-    let head = db.repl(&["main.Contact.as_of(HEAD) | count()"])?;
-    let evidence = format!(
-        "`main.Contact | count()` after an uncommitted insert: {}; `main.Contact.as_of(HEAD) | count()`: {}",
+    let head = db.query_json(&relation, &["--at", "HEAD"])?;
+    ensure!(
+        cwd.output().contains("> 2 : Int") && head["rows"].as_u64() == Some(1),
+        "the CWD relation must count the uncommitted local row (2) while HEAD counts only the published row (1): `main.Contact | count()`: {}; `orna query --at HEAD` rows: {}",
         cwd.output().trim(),
-        head.output().trim()
+        head["rows"]
     );
-    if cwd.output().contains("> 2 : Int") && head.output().contains("> 1 : Int") {
-        return Err(Failure::Unmet(format!(
-            "the CWD relation now counts the local row and HEAD counts only the published row: {evidence}"
-        )));
-    }
-    harness_ensure!(
-        cwd.output().contains("> 1 : Int"),
-        "the CWD count is not in the expected form, so the blocker was not observed: {evidence}"
-    );
-    Ok(evidence)
+    Ok(())
 }
 
 fn clone_filter_is_ignored(db: &mut Db) -> Probe {
