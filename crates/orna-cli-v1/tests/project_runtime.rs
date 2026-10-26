@@ -1137,8 +1137,108 @@ fn binary_run_without_a_target_reports_a_missing_root_main() {
     assert!(output.stdout.is_empty());
     assert_eq!(
         output.stderr,
-        b"error[E2000]: durable project invocation is not available\nhelp: use a supported table transaction; stream roots require the explicit stream runtime\n"
+        b"error[E2103]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
     );
+}
+
+#[test]
+/// ORNA-RUN-002: bare `orna run` without a root `main()` diagnoses the missing entry in a committed project.
+fn binary_run_without_a_target_reports_a_missing_root_main_in_a_committed_project() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        include_str!("fixtures/run/no-main.orna"),
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+    commit_orna(directory.path(), "snapshot without main");
+
+    let output = run_bare(directory.path());
+
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert_eq!(
+        output.stderr,
+        b"error[E2103]: no root main(): main.orna declares no `main()` function\nhelp: declare `main()` in main.orna, or run a qualified function such as `orna run MODULE.FUNCTION`\n"
+    );
+}
+
+#[test]
+/// ORNA-RUN-002: bare `orna run` invokes the root `main()` of a committed project with tables.
+fn binary_run_without_a_target_invokes_the_root_main_of_a_committed_project_with_tables() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "pub table Sample(id: Str) {\n    label: Str,\n}\npub fn main(): Int = 42;\n",
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+    commit_orna(directory.path(), "snapshot with table and main");
+
+    let output = run_bare(directory.path());
+
+    assert!(output.status.success(), "stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+/// ORNA-RUN-003: a qualified function in `ingest/main.orna` runs exactly like the same function in another file.
+fn binary_run_qualified_function_in_an_ingest_module_matches_another_module() {
+    let directory = tempfile::tempdir().expect("project directory");
+    std::fs::create_dir(directory.path().join("ingest")).expect("ingest directory");
+    std::fs::write(
+        directory.path().join("ingest/main.orna"),
+        "pub fn answer(): Int = 42;\n",
+    )
+    .expect("ingest source");
+    std::fs::write(
+        directory.path().join("other.orna"),
+        "pub fn answer(): Int = 42;\n",
+    )
+    .expect("other source");
+    std::fs::write(
+        directory.path().join("main.orna"),
+        "use ingest;\nuse other;\npub fn main(): Int = other.answer();\n",
+    )
+    .expect("root source");
+    initialize_project(directory.path());
+    commit_orna(directory.path(), "snapshot with two modules");
+
+    let ingest = invoke(directory.path(), "run", "ingest.answer");
+    let other = invoke(directory.path(), "run", "other.answer");
+
+    assert!(ingest.status.success(), "stderr: {:?}", ingest.stderr);
+    assert!(other.status.success(), "stderr: {:?}", other.stderr);
+    assert_eq!(ingest.stdout, other.stdout);
+    assert_eq!(ingest.stderr, other.stderr);
+}
+
+fn run_bare(directory: &std::path::Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args(["--db", directory.to_str().expect("UTF-8 path"), "run"])
+        .output()
+        .expect("CLI process")
+}
+
+fn commit_orna(directory: &std::path::Path, message: &str) {
+    git_output_at(directory, &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(directory, &["config", "user.name", "kierandrewett"]);
+    git_output_at(directory, &["config", "commit.gpgsign", "false"]);
+    git_output_at(directory, &["add", "-A"]);
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.to_str().expect("UTF-8 path"),
+            "commit",
+            "-m",
+            message,
+        ])
+        .output()
+        .expect("CLI commit");
+    assert!(output.status.success(), "commit stderr: {:?}", output.stderr);
 }
 
 #[test]
