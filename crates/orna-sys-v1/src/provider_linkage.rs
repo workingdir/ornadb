@@ -58,7 +58,18 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 16] = [
+const DECLARED_LINKS: [SystemProviderLink; 17] = [
+    // `orna-evaluator-v1`: `Evaluator::call` serves the `sys.Materialization`
+    // rows natively from the decisions the activation recorded (ORNA-QUERY-006,
+    // ORNA-CALL-004); the relation reaches no host relation source.
+    // The catalogue's local-durable availability is the target, not the current
+    // behaviour: these rows exist only for the activation that recorded them
+    // (tracked by ornadb-l7sk). system_api_inventory.json mirrors the spec table
+    // and is deliberately left unchanged.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Relation("sys.Materialization"),
+        host: SystemProviderHost::Evaluator,
+    },
     // `orna-evaluator-v1`: `Evaluator::call` answers the Blob read family
     // natively from the Blob value (length, digest, verify, bounded read,
     // to_bytes under its 8 MiB call limit) and builds Blobs from integer
