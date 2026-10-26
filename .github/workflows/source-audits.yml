@@ -78,6 +78,9 @@ jobs:
       - name: Prove standard library pin checker behavior
         run: python3 -m unittest scripts.test_standard_library_pin
 
+      - name: Prove gate evidence recorder behavior
+        run: python3 -m unittest scripts.test_gate_evidence
+
       - name: Prove independent extractor behavior
         run: python3 -m unittest scripts.test_orna_extract
 
@@ -203,8 +206,9 @@ jobs:
       # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
       # missing.
       - name: Install editor hosts for the highlighter test
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
           sudo apt-get install -y emacs-nox vim
           npm install --prefix "$RUNNER_TEMP/editor-tools" --no-audit --no-fund \
             tree-sitter-cli@0.26.5 vscode-textmate@9.3.2 vscode-oniguruma@2.0.1
@@ -299,3 +303,40 @@ jobs:
               print("::error::cargo test completed without selecting any tests", file=sys.stderr)
               raise SystemExit(1)
           PY
+
+  rollback-proof:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.revision_sha == '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      # Gate D: recovery of an uncertain external effect never fabricates a proven rollback.
+      # A rollback receipt needs the controlled marker the activation records before its table
+      # transaction; absent or reported external evidence recovers as uncertain. The lib tests
+      # are selected by exact path and their count is asserted, so a rename cannot drop one.
+      - name: Test rollback-proof effect evidence
+        run: |
+          cargo test --locked -p orna-runtime-v1 --test uncertain_effect_recovery -- --nocapture
+          cargo test --locked -p orna-runtime-v1 --lib -- --nocapture --exact \
+            tests::external_effect_marker_keeps_fault_recovery_uncertain \
+            tests::recovery_retains_uncertainty_and_clears_old_owner_evidence \
+            tests::rollback_proof_requires_controlled_marker \
+            tests::activation_records_controlled_marker_before_its_table_transaction \
+            tests::external_effect_downgrades_a_marker_left_by_an_earlier_commit_attempt \
+            tests::controlled_fault_receipt_recovers_as_proven_after_owner_takeover_and_reopen \
+            tests::runtime_owned_activation_failure_rolls_back_and_recovers_as_proven_after_reopen \
+            tests::migrated_ledger_retains_controlled_rollback_recovery_after_reopen \
+            2>&1 | tee rollback-proof-lib.log
+          grep -q 'test result: ok. 8 passed; 0 failed' rollback-proof-lib.log
