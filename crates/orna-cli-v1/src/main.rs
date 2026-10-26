@@ -3693,9 +3693,11 @@ fn run_repl_input(
                 &request_staged,
                 outcome,
             ));
-        if committed.is_err() {
+        if let Err(error) = committed {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+            return Err(repl_effect_uncertain(format!(
+                "table commit failed with {error}"
+            )));
         }
     }
     record_committed(orna_runtime_v1::InvocationObservationStatus::Succeeded);

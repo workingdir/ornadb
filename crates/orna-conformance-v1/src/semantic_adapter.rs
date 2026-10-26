@@ -42,7 +42,8 @@ use orna_runtime_v1::{
 };
 use orna_semantic_v1::{
     AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
-    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders, analyze_with_providers,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders,
+    UNRESOLVED_TABLE_DEPENDENCY, analyze_with_providers, assertion_dependencies_apply,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
@@ -4728,11 +4729,11 @@ impl TransactionalTableCandidateValidator {
         let mut tables = key_fields.keys().cloned().collect::<BTreeSet<_>>();
         for assertions in table_assertions.values() {
             for assertion in assertions {
-                tables.extend(assertion.dependencies.iter().cloned());
+                tables.extend(concrete_dependency_tables(&assertion.dependencies));
             }
         }
         for assertion in module_assertions {
-            tables.extend(assertion.dependencies.iter().cloned());
+            tables.extend(concrete_dependency_tables(&assertion.dependencies));
         }
         Self {
             cwd_generation,
@@ -4764,6 +4765,15 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let all: BTreeSet<String> = self.tables.iter().cloned().collect();
+        self.validate_changed(rows, &all)
+    }
+
+    fn validate_changed(
+        &mut self,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for (table, assertions) in &self.table_assertions {
             for assertion in assertions {
@@ -4827,7 +4837,16 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 }
             }
         }
-        if !self.module_assertions.is_empty() {
+        // ORNA-ASSERT-026: a module assertion is evaluated only when a validating
+        // boundary changed a table in its transitive dependency set.
+        let applicable = self
+            .module_assertions
+            .iter()
+            .filter(|assertion| {
+                assertion_dependencies_apply(&assertion.dependencies, changed_tables)
+            })
+            .collect::<Vec<_>>();
+        if !applicable.is_empty() {
             // Module assertions read whole rows by field name, so candidate rows
             // are named from their key and stable field order, exactly as the
             // table assertions above name them.
@@ -4836,7 +4855,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 &self.candidate_table_fields,
                 &self.candidate_key_fields,
             )?;
-            for assertion in &self.module_assertions {
+            for assertion in applicable {
                 let value = evaluate_module_assertion_rows(
                     &named,
                     &assertion.expression,
@@ -4871,7 +4890,7 @@ impl ListTableCandidateValidator {
             applicable_module_assertions(&bridge.table, &bridge.module_assertions)?;
         let mut tables = BTreeSet::from([bridge.table.clone()]);
         for assertion in &module_assertions {
-            tables.extend(assertion.dependencies.iter().cloned());
+            tables.extend(concrete_dependency_tables(&assertion.dependencies));
         }
         Ok(Self {
             table: bridge.table.clone(),
@@ -4890,6 +4909,15 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        let all: BTreeSet<String> = self.tables.iter().cloned().collect();
+        self.validate_changed(rows, &all)
+    }
+
+    fn validate_changed(
+        &mut self,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        changed_tables: &BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
             if table_assertion_function(&assertion.expression, &self.functions).is_some() {
@@ -4946,7 +4974,13 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 }
             }
         }
-        for assertion in &self.module_assertions {
+        for assertion in self
+            .module_assertions
+            .iter()
+            .filter(|assertion| {
+                assertion_dependencies_apply(&assertion.dependencies, changed_tables)
+            })
+        {
             let value = evaluate_module_assertion_rows(
                 rows,
                 &assertion.expression,
@@ -7673,13 +7707,24 @@ fn attach_assertion_dependencies(
     Ok(())
 }
 
+/// Table names named by a dependency set; the incomplete marker names no table.
+fn concrete_dependency_tables(
+    dependencies: &BTreeSet<String>,
+) -> impl Iterator<Item = String> + '_ {
+    dependencies
+        .iter()
+        .filter(|table| table.as_str() != UNRESOLVED_TABLE_DEPENDENCY)
+        .cloned()
+}
+
 fn applicable_module_assertions(
     table: &str,
     assertions: &[AdmittedAssertion],
 ) -> Result<Vec<AdmittedAssertion>, String> {
+    let changed = BTreeSet::from([table.to_owned()]);
     let applicable = assertions
         .iter()
-        .filter(|assertion| assertion.dependencies.contains(table))
+        .filter(|assertion| assertion_dependencies_apply(&assertion.dependencies, &changed))
         .cloned()
         .collect::<Vec<_>>();
     if applicable.len() > 1 {
