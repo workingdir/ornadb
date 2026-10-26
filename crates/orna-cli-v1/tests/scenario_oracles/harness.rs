@@ -37,6 +37,8 @@ const SCENARIOS_SHA256: &str = "93b8edb858bc0a674cd0256c6350bd7286062eb3e2a01acc
 const COMMAND_LIMIT: Duration = Duration::from_secs(240);
 /// Concurrent scenarios: each one starts several product processes.
 const MAX_WORKERS: usize = 4;
+/// Ports tried before `orna serve` is reported as unable to bind.
+const SERVE_ATTEMPTS: usize = 5;
 
 /// One oracle as published: its identity and title. The given/when/then text
 /// stays in the vendored file.
@@ -668,9 +670,25 @@ impl Db {
         Ok(self.git(arguments)?.ok()?.stdout)
     }
 
-    /// Starts `orna serve` on a free loopback port and waits for it to
-    /// announce the address.
+    /// Starts `orna serve` on a free loopback port and waits until that child
+    /// is listening on it. The port is picked by binding then releasing it, so
+    /// another process can take it before the child binds: the child then exits
+    /// and the attempt is repeated on a fresh port.
     pub fn serve(&mut self) -> Result<Server, Failure> {
+        let mut last = String::new();
+        for _ in 0..SERVE_ATTEMPTS {
+            match self.start_serve()? {
+                Start::Listening(server) => return Ok(server),
+                Start::Exited(output) => last = output,
+            }
+        }
+        Err(Failure::Harness(format!(
+            "orna serve exited on each of {SERVE_ATTEMPTS} ports: {}",
+            excerpt(&last)
+        )))
+    }
+
+    fn start_serve(&mut self) -> Result<Start, Failure> {
         let port = TcpListener::bind("127.0.0.1:0")
             .and_then(|listener| listener.local_addr())
             .map_err(|error| Failure::Harness(format!("free port: {error}")))?
@@ -688,19 +706,19 @@ impl Db {
         let mut server = Server { child, port };
         let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
-            if let Ok(Some(status)) = server.child.try_wait() {
-                let mut output = String::new();
-                if let Some(mut stderr) = server.child.stderr.take() {
-                    let _ = stderr.read_to_string(&mut output);
-                }
-                return Err(Failure::Harness(format!(
-                    "orna serve exited ({status}): {}",
-                    excerpt(&output)
-                )));
+            if let Some(exited) = server.exited()? {
+                return Ok(Start::Exited(exited));
             }
             if TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                // The child may have failed to bind after another listener
+                // answered this connect. Only a child still alive after the
+                // settle time owns the port.
+                thread::sleep(Duration::from_millis(200));
+                if let Some(exited) = server.exited()? {
+                    return Ok(Start::Exited(exited));
+                }
                 let _ = writeln!(self.transcript, "$ orna serve --port {port}");
-                return Ok(server);
+                return Ok(Start::Listening(server));
             }
             thread::sleep(Duration::from_millis(50));
         }
@@ -973,6 +991,12 @@ fn mounted(point: &Path) -> bool {
     })
 }
 
+/// The outcome of one `orna serve` start: listening, or exited before it bound.
+enum Start {
+    Listening(Server),
+    Exited(String),
+}
+
 /// A running `orna serve`, stopped when dropped.
 pub struct Server {
     child: Child,
@@ -993,6 +1017,22 @@ impl Response {
 }
 
 impl Server {
+    /// The exit status and stderr once the child has exited, `None` while it runs.
+    fn exited(&mut self) -> Result<Option<String>, Failure> {
+        let status = self
+            .child
+            .try_wait()
+            .map_err(|error| Failure::Harness(format!("orna serve status: {error}")))?;
+        let Some(status) = status else {
+            return Ok(None);
+        };
+        let mut output = String::new();
+        if let Some(mut stderr) = self.child.stderr.take() {
+            let _ = stderr.read_to_string(&mut output);
+        }
+        Ok(Some(format!("{status}: {output}")))
+    }
+
     /// Sends one request with `Connection: close` and reads the response.
     pub fn request(
         &self,
