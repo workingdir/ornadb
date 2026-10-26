@@ -58,10 +58,52 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 7] = [
+const DECLARED_LINKS: [SystemProviderLink; 16] = [
+    // `orna-evaluator-v1`: `Evaluator::call` answers the Blob read family
+    // natively from the Blob value (length, digest, verify, bounded read,
+    // to_bytes under its 8 MiB call limit) and builds Blobs from integer
+    // bytes with `from_bytes`. None of them reaches the host boundary.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.length"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.digest"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.verify"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.read"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.to_bytes"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.from_bytes"),
+        host: SystemProviderHost::Evaluator,
+    },
     // `orna-evaluator-v1`: `Evaluator::call` dispatches the annotation natively.
     SystemProviderLink {
         member: SystemSurfaceMember::Callable("sys.blob.annotate"),
+        host: SystemProviderHost::Evaluator,
+    },
+    // `orna-evaluator-v1`: `Evaluator::call` answers the metadata-only
+    // reflection and exact content equality of Blob values natively.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.media_type"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.suffix"),
+        host: SystemProviderHost::Evaluator,
+    },
+    SystemProviderLink {
+        member: SystemSurfaceMember::Callable("sys.blob.same_content"),
         host: SystemProviderHost::Evaluator,
     },
     // `orna-evaluator-v1`: `Evaluator::call` lowers the query natively through
@@ -260,6 +302,9 @@ mod tests {
         }
         for member in [
             SystemSurfaceMember::Callable("sys.blob.annotate"),
+            SystemSurfaceMember::Callable("sys.blob.media_type"),
+            SystemSurfaceMember::Callable("sys.blob.suffix"),
+            SystemSurfaceMember::Callable("sys.blob.same_content"),
             SystemSurfaceMember::Callable("sys.explain(Query)"),
             SystemSurfaceMember::Callable("sys.rt.info"),
             SystemSurfaceMember::Callable("sys.blob.capture_file"),

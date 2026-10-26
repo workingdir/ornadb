@@ -40,7 +40,7 @@ fn diff_streams_native_output_and_preserves_exit_code_for_paths_with_spaces() {
         repository.path(),
         &["diff", "--no-color", "--", "changed path.orna"],
     );
-    let cli = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let cli = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["diff", "--no-color", "--", "changed path.orna"])
         .current_dir(repository.path())
         .output()
@@ -58,7 +58,7 @@ fn diff_streams_native_output_and_preserves_exit_code_for_paths_with_spaces() {
         repository.path(),
         &["diff", "--exit-code", "--", "changed path.orna"],
     );
-    let cli_exit_code = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let cli_exit_code = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args(["diff", "--exit-code", "--", "changed path.orna"])
         .current_dir(repository.path())
         .output()
