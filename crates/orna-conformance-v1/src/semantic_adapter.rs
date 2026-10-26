@@ -12835,14 +12835,14 @@ mod durable_tests {
             .expect("reopened runtime");
         assert!(
             state
-                .committed_table_row("Note", &Value::int(7.into()).encode().unwrap())
+                .committed_table_row("inventory.Note", &Value::int(7.into()).encode().unwrap())
                 .await
                 .unwrap()
                 .is_some()
         );
         assert!(
             state
-                .committed_table_row("Note", &Value::int(8.into()).encode().unwrap())
+                .committed_table_row("inventory.Note", &Value::int(8.into()).encode().unwrap())
                 .await
                 .unwrap()
                 .is_none()
@@ -12890,7 +12890,7 @@ mod durable_tests {
         .unwrap();
         assert!(
             state
-                .committed_table_row("Stock", &north)
+                .committed_table_row("warehouse.Stock", &north)
                 .await
                 .unwrap()
                 .is_some()
@@ -13710,7 +13710,7 @@ mod list_stream_tests {
             .await
             .expect("reopened runtime");
         assert_eq!(
-            state.committed_table_rows("Reading").await.unwrap().len(),
+            state.committed_table_rows("sensors.Reading").await.unwrap().len(),
             3
         );
         let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
@@ -13785,7 +13785,7 @@ mod list_stream_tests {
             .await
             .expect("reopened runtime");
         assert_eq!(
-            state.committed_table_rows("Reading").await.unwrap().len(),
+            state.committed_table_rows("sensors.Reading").await.unwrap().len(),
             6,
             "changed literal contents must not resume the predecessor checkpoint"
         );
