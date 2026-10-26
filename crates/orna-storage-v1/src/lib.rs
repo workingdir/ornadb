@@ -1101,6 +1101,20 @@ fn build_frozen_publication_store_root(
     let Some((_, base_graph, _)) = relation_candidates.first() else {
         return Err(Error::IncompleteStaging);
     };
+    // A publication that changes rows also records the allocator watermark
+    // known when it is made (ORNA-AUTOID-005); a no-op prefix stays a no-op.
+    let rows_changed = relation_candidates.iter().any(|(rows, _, maintenance)| {
+        maintenance
+            .as_ref()
+            .is_some_and(|maintenance| maintenance.primary_root() != rows.version().primary_root())
+    });
+    let allocator_summary = if rows_changed {
+        repository
+            .allocator_summary_maintenance(expected_head)
+            .map_err(|_| Error::RepositoryUnavailable)?
+    } else {
+        None
+    };
     let scope = base_graph
         .open_read_scope()
         .map_err(|_| Error::RepositoryUnavailable)?;
@@ -1111,6 +1125,11 @@ fn build_frozen_publication_store_root(
                 .as_ref()
                 .map(|maintenance| (rows.version(), maintenance))
         })
+        .chain(
+            allocator_summary
+                .iter()
+                .map(|(rows, maintenance)| (rows.version(), maintenance)),
+        )
         .collect::<Vec<_>>();
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)

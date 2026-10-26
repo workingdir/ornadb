@@ -216,6 +216,30 @@ fn mv_renames_a_table_in_a_nested_module() {
     assert_eq!(git(&root, &["status", "--porcelain"]), "");
 }
 
+/// `mv` never moves a table between module namespaces: a qualified target in
+/// another module is refused with E1002 before any file or index changes.
+#[test]
+fn mv_refuses_a_target_in_another_namespace_without_changing_anything() {
+    const MAIN: &str = "use warehouse;\n";
+    const WAREHOUSE: &str = "pub table Media(id: Str) { size: Int, }\n";
+    let (_directory, root, _initial) =
+        committed_project_with(&[("main.orna", MAIN), ("warehouse.orna", WAREHOUSE)]);
+    let head_before = git(&root, &["rev-parse", "HEAD"]);
+
+    let output = run_cli(&root, &["mv", "warehouse.Media", "main.Archive"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("E1002"), "{stderr}");
+    assert_eq!(
+        fs::read_to_string(root.join("warehouse.orna")).unwrap(),
+        WAREHOUSE
+    );
+    assert_eq!(fs::read_to_string(root.join("main.orna")).unwrap(), MAIN);
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head_before);
+    assert_eq!(git(&root, &["status", "--porcelain"]), "");
+}
+
 /// A run interrupted after the source write resumes: the worktree already
 /// names the new table, so `mv` leaves that file in place, stages the same
 /// rename of the staged module and moves the table and field identities.
