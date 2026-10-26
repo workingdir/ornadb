@@ -22,8 +22,14 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-/// Byte-identical copy of the Orna 1.1.0 release `tests/scenarios.json`.
-const SCENARIOS_JSON: &str = include_str!("../fixtures/reference/tests/scenarios.json");
+/// Reads a crate-local release fixture at run time, so the bytes stay in the
+/// consuming crate. Each caller checks them against its pinned SHA-256.
+pub fn vendored_fixture(relative: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+    fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
+}
+
 /// The release `SHA256SUMS` entry for `tests/scenarios.json`.
 const SCENARIOS_SHA256: &str = "93b8edb858bc0a674cd0256c6350bd7286062eb3e2a01accc964e135fdc24ff1";
 /// Upper bound for one product command; a debug-build REPL insert takes a
@@ -41,13 +47,14 @@ pub struct Oracle {
 /// Every scenario in the vendored release file, keyed by scenario ID, after
 /// checking that the copy is still the release file.
 static ORACLES: LazyLock<BTreeMap<String, Oracle>> = LazyLock::new(|| {
+    let text = vendored_fixture("tests/fixtures/reference/tests/scenarios.json");
     assert_eq!(
-        hex(&Sha256::digest(SCENARIOS_JSON.as_bytes())),
+        hex(&Sha256::digest(text.as_bytes())),
         SCENARIOS_SHA256,
         "the vendored scenario oracles no longer match the release file"
     );
     let document: serde_json::Value =
-        serde_json::from_str(SCENARIOS_JSON).expect("the release oracle file is JSON");
+        serde_json::from_str(&text).expect("the release oracle file is JSON");
     let scenarios = document["scenarios"]
         .as_array()
         .expect("the release oracle file lists scenarios");
@@ -757,7 +764,7 @@ impl Db {
 
     fn command(&self, program: &str) -> Command {
         let mut command = Command::new(match program {
-            "orna" => env!("CARGO_BIN_EXE_orna-cli-v1"),
+            "orna" => env!("CARGO_BIN_EXE_orna"),
             other => other,
         });
         command
