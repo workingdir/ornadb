@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::cli_args::LegendFormat;
+use orna_repository_v1::relation_admission::RelationAdmissionError;
 use std::{
     fs::{self, OpenOptions},
     io::{self, Write as _},
@@ -15,7 +16,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             Ok(())
         }
         Command::Version => {
-            println!("orna-cli-v1 0.1.0");
+            println!("orna 0.1.0");
             Ok(())
         }
         Command::Init(ref target) => {
@@ -229,9 +230,17 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     }
 }
 
+/// Renames one table in source and moves its identity in the staged store
+/// inventory (ORNA-OBJECT-003). Like `git mv`, the rename is staged for
+/// review and nothing is committed: the worktree module and its staged copy
+/// get the same declaration-name edit, and the inventory is restaged in the
+/// same index update, so the next `orna commit` keeps the table and field
+/// ObjectIds and with them the table's relation. Other unstaged edits stay
+/// unstaged. A run interrupted after the source write resumes from the
+/// renamed source.
 #[allow(
     clippy::too_many_lines,
-    reason = "the source and manifest update must remain one auditable coordination-lock sequence"
+    reason = "the source edit and the staged inventory update must remain one auditable sequence"
 )]
 fn run_mv(
     endpoint: &Endpoint,
@@ -284,75 +293,12 @@ fn run_mv(
                 "use the table's qualified name from the current source project",
             )
         })?;
-    let source = &modules[module_index].source;
-    let parsed = orna_syntax_v1::parse_module(source);
-    if !parsed.is_ok() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "table source could not be parsed",
-            "fix the source module, then retry mv",
-        ));
-    }
-    let mut matching_old = parsed.value.items.iter().filter(|item| {
-        matches!(
-            &item.declaration,
-            orna_syntax_v1::Declaration::Table { name, .. } if name == old_leaf
-        )
-    });
-    let old_item = matching_old.next();
-    if matching_old.next().is_some() {
-        return Err(Diagnostic::target(
-            "E2101",
-            "source table name is ambiguous",
-            "use a project with one table declaration for the selected qualified name",
-        ));
-    }
-    let source_already_renamed = old_item.is_none();
-    let item = if let Some(item) = old_item {
-        item
-    } else {
-        let mut matching_new = parsed.value.items.iter().filter(|item| {
-            matches!(
-                &item.declaration,
-                orna_syntax_v1::Declaration::Table { name, .. } if name == new_leaf
-            )
-        });
-        let Some(item) = matching_new.next() else {
-            return Err(Diagnostic::target(
-                "E2101",
-                "source table was not found",
-                "use an active table declaration recorded in the object identity manifest",
-            ));
-        };
-        if matching_new.next().is_some() {
-            return Err(Diagnostic::target(
-                "E2101",
-                "source table name is ambiguous",
-                "use a project with one table declaration for the selected qualified name",
-            ));
-        }
-        item
-    };
-    let original_source = if source_already_renamed {
-        None
-    } else {
-        let name_span = table_declaration_name_span(source, &item.span, old_leaf).ok_or_else(|| {
-            Diagnostic::target(
-                "E2101",
-                "table declaration name could not be located",
-                "fix the source module, then retry mv",
-            )
-        })?;
-        let original_source = std::mem::take(&mut modules[module_index].source);
-        let mut updated_source = String::with_capacity(
-            original_source.len() - (name_span.end - name_span.start) + new_leaf.len(),
-        );
-        updated_source.push_str(&original_source[..name_span.start]);
-        updated_source.push_str(new_leaf);
-        updated_source.push_str(&original_source[name_span.end..]);
-        modules[module_index].source = updated_source;
-        Some(original_source)
-    };
+    let original_source = renamed_table_source(&modules[module_index].source, old_leaf, new_leaf)
+        .map_err(|title| {
+            Diagnostic::target("E2101", title, "fix the source module, then retry mv")
+        })?
+        .map(|updated| std::mem::replace(&mut modules[module_index].source, updated));
+    let source_already_renamed = original_source.is_none();
 
     let catalogue = semantic_catalogue(&project)?;
     let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
@@ -371,152 +317,110 @@ fn run_mv(
         new_qualified,
     );
 
-    repository.with_coordination_lock(|| {
-        let previous = orna_project_v1::ObjectIdentityManifest::read_worktree(&repository)
-            .map_err(|_| mv_manifest_io_error())?
-            .ok_or_else(|| {
-                Diagnostic::target(
-                    "E2101",
-                    "object identity manifest is missing",
-                    "reconcile and commit object identities before using mv",
-                )
-            })?;
-        if previous
-            .id(
-                orna_project_v1::ObjectKind::Table,
-                rename.old_qualified_name(),
-            )
-            .is_none()
-            || (source_already_renamed
-                && previous
-                    .id(
-                        orna_project_v1::ObjectKind::Table,
-                        rename.new_qualified_name(),
-                    )
-                    .is_some())
-        {
-            return Err(Diagnostic::target(
-                "E2101",
-                "table identity was not found in the expected rename state",
-                "use an active table declaration recorded in the object identity manifest",
-            ));
-        }
-        let next = orna_project_v1::ObjectIdentityManifest::reconcile_with_renames(
-            &modules,
-            Some(&previous),
-            std::slice::from_ref(&rename),
+    repository
+        .refuse_unretained_committed_store()
+        .map_err(mv_staging_error)?;
+    let staged = repository
+        .capture_staged_candidate()
+        .map_err(mv_staging_error)?;
+    let logical_path = modules[module_index].logical_path.clone();
+    let staged_source = repository
+        .read_private_candidate_file(
+            staged.candidate(),
+            &logical_path,
+            orna_project_v1::ProjectLimits::default().max_source_bytes,
         )
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .ok_or_else(|| mv_staged_source_error("the table's source module is not staged"))?;
+    // The staged module gets the same declaration-name edit as the
+    // worktree, so the index stays a consistent candidate, as after `git mv`.
+    // Other unstaged edits to the module stay unstaged.
+    let staged_rename =
+        renamed_table_source(&staged_source, old_leaf, new_leaf).map_err(mv_staged_source_error)?;
+    let previous = orna_project_v1::ObjectIdentityManifest::read_staged(&repository, &staged)
+        .map_err(|error| {
+            Diagnostic::target_with_detail(
+                "E2100",
+                "staged object identities could not be read",
+                "restore the staged `.orna/store`, then retry `mv`",
+                format!("{error:?}"),
+            )
+        })?
+        .ok_or_else(mv_identity_missing_error)?;
+    if previous
+        .id(
+            orna_project_v1::ObjectKind::Table,
+            rename.old_qualified_name(),
+        )
+        .is_none()
+        || (source_already_renamed
+            && previous
+                .id(
+                    orna_project_v1::ObjectKind::Table,
+                    rename.new_qualified_name(),
+                )
+                .is_some())
+    {
+        return Err(Diagnostic::target(
+            "E2101",
+            "table identity was not found in the expected rename state",
+            "use an active table declaration recorded in the staged object identities",
+        ));
+    }
+    let next = previous
+        .with_renames(&modules, std::slice::from_ref(&rename))
         .map_err(|_| {
             Diagnostic::target(
                 "E2101",
-                "table rename conflicts with the object identity manifest",
+                "table rename conflicts with the staged object identities",
                 "choose an unused table name and retry mv",
             )
         })?;
 
-        let (old_table_directory, old_directory_exists) = checked_project_table_directory(
-            repository.worktree(),
-            rename.old_qualified_name(),
-        )?;
-        let (new_table_directory, new_directory_exists) = checked_project_table_directory(
-            repository.worktree(),
-            rename.new_qualified_name(),
-        )?;
-        let old_table_path = rename.old_qualified_name().replace('.', "/");
-        if new_directory_exists && !(source_already_renamed && !old_directory_exists) {
-            return Err(mv_loose_row_destination_error());
-        }
-
-        let row_directory_moved = old_directory_exists
-            && if source_already_renamed {
-                let mut table_paths = project
-                    .loose_rows()
-                    .iter()
-                    .map(|row| row.table_path().to_owned())
-                    .collect::<std::collections::BTreeSet<_>>();
-                table_paths.insert(old_table_path.clone());
-                table_directory_has_owned_loose_row(
-                    repository.worktree(),
-                    &old_table_directory,
-                    &old_table_path,
-                    &table_paths,
-                )?
-            } else {
-                project
-                    .loose_rows()
-                    .iter()
-                    .any(|row| row.table_path() == old_table_path)
-            };
-
-        if let Some(original_source) = original_source.as_deref() {
-            if write_source_atomically(
+    if let Some(original_source) = original_source.as_deref() {
+        if write_source_atomically(
+            &source_path,
+            original_source.as_bytes(),
+            modules[module_index].source.as_bytes(),
+        )
+        .is_err()
+        {
+            if !restore_source_after_failed_write(
                 &source_path,
                 original_source.as_bytes(),
                 modules[module_index].source.as_bytes(),
-            )
-            .is_err()
-            {
-                if !restore_source_after_failed_write(
-                    &source_path,
-                    original_source.as_bytes(),
-                    modules[module_index].source.as_bytes(),
-                ) {
-                    return Err(mv_partial_update_error());
-                }
-                return Err(Diagnostic::target(
-                    "E2100",
-                    "table source could not be updated",
-                    "check source-file permissions and retry mv",
-                ));
+            ) {
+                return Err(mv_partial_update_error());
             }
+            return Err(Diagnostic::target(
+                "E2100",
+                "table source could not be updated",
+                "check source-file permissions and retry mv",
+            ));
         }
+    }
 
-        if row_directory_moved {
-            if fs::rename(&old_table_directory, &new_table_directory).is_err() {
-                let source_restored = original_source.as_deref().map_or(true, |original| {
-                    restore_source_after_failed_write(
-                        &source_path,
-                        original.as_bytes(),
-                        modules[module_index].source.as_bytes(),
-                    )
-                });
-                if !source_restored {
-                    return Err(mv_partial_update_error());
-                }
-                return Err(mv_loose_row_path_error());
-            }
-            if sync_parent_directory(&old_table_directory).is_err() {
-                rollback_failed_mv_update(
-                    &repository,
-                    &previous,
-                    &next,
-                    &old_table_directory,
-                    &new_table_directory,
-                    row_directory_moved,
-                    &source_path,
-                    original_source.as_deref().map(str::as_bytes),
-                    modules[module_index].source.as_bytes(),
-                )?;
-                return Err(mv_loose_row_path_error());
-            }
-        }
-
-        if next.write_worktree(&repository).is_err() {
-            rollback_failed_mv_update(
-                &repository,
-                &previous,
-                &next,
-                &old_table_directory,
-                &new_table_directory,
-                row_directory_moved,
+    let staged_sources = staged_rename
+        .as_deref()
+        .map(|updated| (logical_path.as_str(), updated.as_bytes()))
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Err(error) =
+        repository.stage_object_identities(&staged, &next.to_stored(), &staged_sources)
+    {
+        let source_restored = original_source.as_deref().is_none_or(|original| {
+            restore_source_after_failed_write(
                 &source_path,
-                original_source.as_deref().map(str::as_bytes),
+                original.as_bytes(),
                 modules[module_index].source.as_bytes(),
-            )?;
-            return Err(mv_manifest_io_error());
+            )
+        });
+        if !source_restored {
+            return Err(mv_partial_update_error());
         }
-        Ok(())
-    })?;
+        return Err(mv_staging_error(error));
+    }
 
     write_success_line(
         &format!(
@@ -533,6 +437,63 @@ fn mv_usage() -> Diagnostic {
         "E1002",
         "invalid table rename names",
         "use `mv TABLE NEW_NAME` within the table's existing module namespace",
+    )
+}
+
+/// The module source with table `old_leaf` renamed to `new_leaf`, or `None`
+/// when it already declares `new_leaf` and no `old_leaf`, as after an
+/// interrupted `mv`. The error is the diagnostic title.
+fn renamed_table_source(
+    source: &str,
+    old_leaf: &str,
+    new_leaf: &str,
+) -> Result<Option<String>, &'static str> {
+    let parsed = orna_syntax_v1::parse_module(source);
+    if !parsed.is_ok() {
+        return Err("table source could not be parsed");
+    }
+    let tables = |leaf: &str| {
+        parsed
+            .value
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    &item.declaration,
+                    orna_syntax_v1::Declaration::Table { name, .. } if name == leaf
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    match tables(old_leaf).as_slice() {
+        [item] => {
+            let name_span = table_declaration_name_span(source, &item.span, old_leaf)
+                .ok_or("table declaration name could not be located")?;
+            let mut updated = String::with_capacity(
+                source.len() - (name_span.end - name_span.start) + new_leaf.len(),
+            );
+            updated.push_str(&source[..name_span.start]);
+            updated.push_str(new_leaf);
+            updated.push_str(&source[name_span.end..]);
+            Ok(Some(updated))
+        }
+        [] => match tables(new_leaf).len() {
+            1 => Ok(None),
+            0 => Err("source table was not found"),
+            _ => Err("source table name is ambiguous"),
+        },
+        _ => Err("source table name is ambiguous"),
+    }
+}
+
+/// The staged copy of the table's module cannot take the rename: it is not
+/// staged, or it does not declare the table under either name.
+fn mv_staged_source_error(title: &'static str) -> Diagnostic {
+    Diagnostic::target_with_detail(
+        "E2101",
+        "the staged source module cannot take the rename",
+        "stage the table's source module with `git add`, then retry mv",
+        title.to_owned(),
     )
 }
 
@@ -643,162 +604,6 @@ fn checked_project_source_path(root: &Path, logical_path: &str) -> Result<PathBu
     }
     Ok(path)
 }
-fn checked_project_table_directory(
-    root: &Path,
-    qualified_name: &str,
-) -> Result<(PathBuf, bool), Diagnostic> {
-    let root_metadata = fs::symlink_metadata(root).map_err(|_| mv_loose_row_path_error())?;
-    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-        return Err(mv_loose_row_path_error());
-    }
-    let mut path = root.to_path_buf();
-    let mut missing = false;
-    for component in qualified_name.split('.') {
-        if component.is_empty() || component.contains('/') || component.contains('\\') {
-            return Err(mv_loose_row_path_error());
-        }
-        path.push(component);
-        if missing {
-            continue;
-        }
-        match fs::symlink_metadata(&path) {
-            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                return Err(mv_loose_row_path_error());
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => missing = true,
-            Err(_) => return Err(mv_loose_row_path_error()),
-        }
-    }
-    if path == root {
-        return Err(mv_loose_row_path_error());
-    }
-    Ok((path, !missing))
-}
-
-// The current project omits rows under the old name during source-first recovery.
-// Mirror the loader's longest table-path ownership rule for those pending rows.
-fn table_directory_has_owned_loose_row(
-    root: &Path,
-    table_directory: &Path,
-    table_path: &str,
-    table_paths: &std::collections::BTreeSet<String>,
-) -> Result<bool, Diagnostic> {
-    let mut pending = vec![table_directory.to_path_buf()];
-    while let Some(directory) = pending.pop() {
-        let entries = fs::read_dir(&directory).map_err(|_| mv_loose_row_path_error())?;
-        for entry in entries {
-            let path = entry
-                .map_err(|_| mv_loose_row_path_error())?
-                .path();
-            let metadata = fs::symlink_metadata(&path).map_err(|_| mv_loose_row_path_error())?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
-                pending.push(path);
-                continue;
-            }
-            if !metadata.is_file()
-                || path.extension().and_then(|extension| extension.to_str()) != Some("orna")
-            {
-                continue;
-            }
-            let Some(logical_path) = worktree_logical_path(root, &path) else {
-                return Err(mv_loose_row_path_error());
-            };
-            if loose_row_table_owner(&logical_path, table_paths) == Some(table_path) {
-                return Ok(true);
-            }
-        }
-    }
-    Ok(false)
-}
-
-fn worktree_logical_path(root: &Path, path: &Path) -> Option<String> {
-    path.strip_prefix(root)
-        .ok()?
-        .components()
-        .map(|component| match component {
-            Component::Normal(name) => name.to_str().map(str::to_owned),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()
-        .map(|components| components.join("/"))
-}
-
-fn loose_row_table_owner<'a>(
-    logical_path: &str,
-    table_paths: &'a std::collections::BTreeSet<String>,
-) -> Option<&'a str> {
-    let mut selected = None;
-    for table_path in table_paths {
-        let Some(suffix) = logical_path
-            .strip_prefix(table_path)
-            .and_then(|suffix| suffix.strip_prefix('/'))
-        else {
-            continue;
-        };
-        if suffix.is_empty()
-            || !suffix.ends_with(".orna")
-            || suffix.split('/').any(|component| component.is_empty())
-        {
-            continue;
-        }
-        if selected.is_none_or(|previous: &str| table_path.len() > previous.len()) {
-            selected = Some(table_path.as_str());
-        }
-    }
-    selected
-}
-fn sync_parent_directory(path: &Path) -> io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| io::Error::other("table directory has no parent"))?;
-    fs::File::open(parent)?.sync_all()
-}
-
-fn restore_table_directory(old_path: &Path, new_path: &Path) -> bool {
-    match (
-        fs::symlink_metadata(old_path),
-        fs::symlink_metadata(new_path),
-    ) {
-        (Ok(old), Err(error))
-            if !old.file_type().is_symlink()
-                && old.is_dir()
-                && error.kind() == io::ErrorKind::NotFound =>
-        {
-            true
-        }
-        (Err(error), Ok(new))
-            if error.kind() == io::ErrorKind::NotFound
-                && !new.file_type().is_symlink()
-                && new.is_dir() =>
-        {
-            fs::rename(new_path, old_path)
-                .and_then(|()| sync_parent_directory(old_path))
-                .is_ok()
-        }
-        _ => false,
-    }
-}
-
-fn mv_loose_row_path_error() -> Diagnostic {
-    Diagnostic::target(
-        "E2100",
-        "loose-row directory is unavailable or unsafe",
-        "restore the table row directory as a regular worktree directory, then retry mv",
-    )
-}
-
-fn mv_loose_row_destination_error() -> Diagnostic {
-    Diagnostic::target(
-        "E2101",
-        "loose-row destination already exists",
-        "move or rename the destination directory before retrying mv",
-    )
-}
-
 
 fn write_source_atomically(path: &Path, expected: &[u8], replacement: &[u8]) -> io::Result<()> {
     write_source_atomically_before_replace(path, expected, replacement, || Ok(()))
@@ -828,7 +633,16 @@ fn write_source_atomically_before_replace(
             .create_new(true)
             .open(&temp)?;
         temp_created = true;
-        file.set_permissions(metadata.permissions())?;
+        // Copy only the permission bits: never carry setuid/setgid/sticky onto
+        // the replacement source (W62-08).
+        #[cfg(unix)]
+        let permissions = {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::Permissions::from_mode(metadata.permissions().mode() & 0o777)
+        };
+        #[cfg(not(unix))]
+        let permissions = metadata.permissions();
+        file.set_permissions(permissions)?;
         file.write_all(replacement)?;
         file.sync_all()?;
         drop(file);
@@ -863,43 +677,6 @@ fn restore_source_after_failed_write(path: &Path, original: &[u8], updated: &[u8
     }
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the complete rollback state is explicit at the transaction boundary"
-)]
-fn rollback_failed_mv_update(
-    repository: &orna_repository_v1::Repository,
-    previous: &orna_project_v1::ObjectIdentityManifest,
-    next: &orna_project_v1::ObjectIdentityManifest,
-    old_table_directory: &Path,
-    new_table_directory: &Path,
-    row_directory_moved: bool,
-    source_path: &Path,
-    original_source: Option<&[u8]>,
-    updated_source: &[u8],
-) -> Result<(), Diagnostic> {
-    let manifest_restored =
-        match orna_project_v1::ObjectIdentityManifest::read_worktree(repository) {
-            Ok(Some(current)) if current == *next => previous.write_worktree(repository).is_ok(),
-            Ok(Some(current)) if current == *previous => true,
-            _ => false,
-        };
-    let rows_restored = !row_directory_moved
-        || restore_table_directory(old_table_directory, new_table_directory);
-    let source_restored = if rows_restored {
-        original_source.map_or(true, |original| {
-            restore_source_after_failed_write(source_path, original, updated_source)
-        })
-    } else {
-        false
-    };
-    if manifest_restored && rows_restored && source_restored {
-        Ok(())
-    } else {
-        Err(mv_partial_update_error())
-    }
-}
-
 fn mv_source_path_error() -> Diagnostic {
     Diagnostic::target(
         "E2100",
@@ -908,19 +685,52 @@ fn mv_source_path_error() -> Diagnostic {
     )
 }
 
-fn mv_manifest_io_error() -> Diagnostic {
+/// The index stages no object identities yet: a database before its first
+/// `orna commit` has no inventory, and a rename without identity metadata
+/// would be a delete plus create (ORNA-OBJECT-004).
+fn mv_identity_missing_error() -> Diagnostic {
     Diagnostic::target(
-        "E2100",
-        "object identity manifest could not be updated",
-        "check repository permissions and retry `mv`",
+        "E2101",
+        "no staged object identities record the table",
+        "commit the table with `orna commit -m MESSAGE` before using mv",
     )
+}
+
+/// The staged inventory could not be captured or restaged; the source is
+/// unchanged.
+fn mv_staging_error(error: RelationAdmissionError) -> Diagnostic {
+    use orna_repository_v1::RepositoryError;
+    match error {
+        RelationAdmissionError::EmptyIndex => mv_identity_missing_error(),
+        RelationAdmissionError::SourceNotStaged { .. } => {
+            mv_staged_source_error("the table's source module is not staged")
+        }
+        RelationAdmissionError::StaleIndex => Diagnostic::target(
+            "E2100",
+            "the index changed while mv was staging object identities",
+            "review the staged changes, then retry `mv`",
+        ),
+        RelationAdmissionError::Repository(RepositoryError::PublicationPending) => {
+            Diagnostic::target(
+                "E2100",
+                "an interrupted publication has not been recovered",
+                "run `orna publish` to finish recovery first, then retry `mv`",
+            )
+        }
+        other => Diagnostic::target_with_detail(
+            "E2100",
+            "staged object identities could not be updated",
+            "restore the staged `.orna/store`, then retry `mv`",
+            other.to_string(),
+        ),
+    }
 }
 
 fn mv_partial_update_error() -> Diagnostic {
     Diagnostic::target(
         "E2100",
         "table rename could not be fully rolled back",
-        "inspect the source module, table row directory, and object identity manifest before retrying `mv`",
+        "inspect the source module and the staged `.orna/store` before retrying `mv`",
     )
 }
 
@@ -1113,7 +923,7 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             Diagnostic::target_with_detail(
                 "E2100",
                 "migration stream checkpoints could not be carried",
-                "verify the destination continuity record and that the destination holds no carried checkpoints; the copy was prepared but no checkpoint was imported",
+                "verify the destination continuity record; a destination already holding different carried checkpoints is refused and no checkpoint was imported",
                 format!("{error:?}"),
             )
         })?;
@@ -1307,6 +1117,26 @@ mod mv_tests {
         assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
     }
 
+    /// W62-08: the replacement source must not inherit setuid/setgid/sticky.
+    #[cfg(unix)]
+    #[test]
+    fn source_writer_drops_setuid_setgid_and_sticky_from_the_replaced_file() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().unwrap();
+        let source = directory.path().join("main.orna");
+        fs::write(&source, b"before").unwrap();
+        fs::set_permissions(&source, fs::Permissions::from_mode(0o7755)).unwrap();
+
+        write_source_atomically(&source, b"before", b"after").unwrap();
+
+        assert_eq!(fs::read(&source).unwrap(), b"after");
+        assert_eq!(
+            fs::metadata(&source).unwrap().permissions().mode() & 0o7777,
+            0o755
+        );
+    }
+
     #[test]
     fn source_writer_cleans_its_temp_file_when_the_expected_source_changes() {
         let directory = tempdir().unwrap();
@@ -1345,254 +1175,5 @@ mod mv_tests {
         fs::write(&source, b"concurrent").unwrap();
         assert!(!restore_source_after_failed_write(&source, b"original", b"updated"));
         assert_eq!(fs::read(&source).unwrap(), b"concurrent");
-    }
-
-    #[test]
-    fn checked_table_directory_reports_existing_and_missing_paths() {
-        let directory = tempdir().unwrap();
-        let existing = directory.path().join("warehouse/Media");
-        fs::create_dir_all(&existing).unwrap();
-
-        assert_eq!(
-            checked_project_table_directory(directory.path(), "warehouse.Media").unwrap(),
-            (existing, true)
-        );
-        let (missing_leaf, exists) =
-            checked_project_table_directory(directory.path(), "warehouse.Missing").unwrap();
-        assert_eq!(missing_leaf, directory.path().join("warehouse/Missing"));
-        assert!(!exists);
-        let (missing_ancestor, exists) =
-            checked_project_table_directory(directory.path(), "missing.Namespace.Media").unwrap();
-        assert_eq!(
-            missing_ancestor,
-            directory.path().join("missing/Namespace/Media")
-        );
-        assert!(!exists);
-    }
-
-    #[test]
-    fn checked_table_directory_rejects_regular_file_leaf() {
-        let directory = tempdir().unwrap();
-        fs::write(directory.path().join("Media"), b"not a directory").unwrap();
-
-        let error = checked_project_table_directory(directory.path(), "Media").unwrap_err();
-
-        assert_eq!(error.title, "loose-row directory is unavailable or unsafe");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn checked_table_directory_rejects_symlink_leaf_and_ancestor() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempdir().unwrap();
-        let target = tempdir().unwrap();
-        fs::create_dir(target.path().join("Media")).unwrap();
-        symlink(target.path(), directory.path().join("Media")).unwrap();
-        symlink(target.path(), directory.path().join("linked")).unwrap();
-
-        assert_eq!(
-            checked_project_table_directory(directory.path(), "Media")
-                .unwrap_err()
-                .title,
-            "loose-row directory is unavailable or unsafe"
-        );
-        assert_eq!(
-            checked_project_table_directory(directory.path(), "linked.Media")
-                .unwrap_err()
-                .title,
-            "loose-row directory is unavailable or unsafe"
-        );
-    }
-
-    #[test]
-    fn row_directory_rollback_moves_only_the_expected_directory() {
-        let directory = tempdir().unwrap();
-        let old_path = directory.path().join("Media");
-        let new_path = directory.path().join("Archive");
-        fs::create_dir(&new_path).unwrap();
-        fs::write(new_path.join("row.orna"), b"row").unwrap();
-
-        assert!(restore_table_directory(&old_path, &new_path));
-        assert_eq!(fs::read(old_path.join("row.orna")).unwrap(), b"row");
-        assert!(!new_path.exists());
-        assert!(restore_table_directory(&old_path, &new_path));
-        fs::create_dir(&new_path).unwrap();
-        assert!(!restore_table_directory(&old_path, &new_path));
-    }
-
-    #[test]
-    fn failed_mv_rollback_keeps_source_when_row_directory_restore_fails() {
-        const ORIGINAL: &[u8] = b"pub table Media(id: Str) { payload: Blob, }";
-        const UPDATED: &[u8] = b"pub table Archive(id: Str) { payload: Blob, }";
-        let (directory, repository, previous, next) = manifest_rollback_state();
-        next.write_worktree(&repository).unwrap();
-        let (source, old_directory, new_directory) = moved_mv_rollback_files(&directory);
-        fs::create_dir(&old_directory).unwrap();
-        fs::write(old_directory.join("conflict.orna"), b"existing old directory").unwrap();
-
-        let error = rollback_failed_mv_update(
-            &repository,
-            &previous,
-            &next,
-            &old_directory,
-            &new_directory,
-            true,
-            &source,
-            Some(ORIGINAL),
-            UPDATED,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.title, "table rename could not be fully rolled back");
-        assert_eq!(fs::read(&source).unwrap(), UPDATED);
-        assert_eq!(
-            fs::read(old_directory.join("conflict.orna")).unwrap(),
-            b"existing old directory"
-        );
-        assert_eq!(fs::read(new_directory.join("row.orna")).unwrap(), b"row");
-    }
-
-    fn manifest_rollback_state() -> (
-        tempfile::TempDir,
-        orna_repository_v1::Repository,
-        orna_project_v1::ObjectIdentityManifest,
-        orna_project_v1::ObjectIdentityManifest,
-    ) {
-        const ORIGINAL: &str = "pub table Media(id: Str) { payload: Blob, }";
-        const RENAMED: &str = "pub table Archive(id: Str) { payload: Blob, }";
-        let directory = tempdir().unwrap();
-        fs::write(directory.path().join("main.orna"), ORIGINAL).unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "--quiet"])
-            .current_dir(directory.path())
-            .status()
-            .unwrap();
-        assert!(status.success());
-        let repository = orna_repository_v1::Repository::discover(directory.path()).unwrap();
-        let original_module = orna_semantic_v1::ModuleInput::new("main.orna", ORIGINAL);
-        let previous = orna_project_v1::ObjectIdentityManifest::reconcile_and_write_worktree(
-            &repository,
-            std::slice::from_ref(&original_module),
-        )
-        .unwrap();
-        let renamed_module = orna_semantic_v1::ModuleInput::new("main.orna", RENAMED);
-        let rename = orna_project_v1::ObjectIdentityRename::new(
-            orna_project_v1::ObjectKind::Table,
-            "Media",
-            "Archive",
-        );
-        let next = orna_project_v1::ObjectIdentityManifest::reconcile_with_renames(
-            std::slice::from_ref(&renamed_module),
-            Some(&previous),
-            std::slice::from_ref(&rename),
-        )
-        .unwrap();
-        (directory, repository, previous, next)
-    }
-
-    fn moved_mv_rollback_files(
-        directory: &tempfile::TempDir,
-    ) -> (PathBuf, PathBuf, PathBuf) {
-        const UPDATED: &str = "pub table Archive(id: Str) { payload: Blob, }";
-        let source = directory.path().join("main.orna");
-        fs::write(&source, UPDATED).unwrap();
-        let old_directory = directory.path().join("Media");
-        let new_directory = directory.path().join("Archive");
-        fs::create_dir(&old_directory).unwrap();
-        fs::write(old_directory.join("row.orna"), b"row").unwrap();
-        fs::rename(&old_directory, &new_directory).unwrap();
-        (source, old_directory, new_directory)
-    }
-
-    #[test]
-    fn failed_mv_rollback_restores_manifest_when_write_already_replaced_it() {
-        const ORIGINAL: &[u8] = b"pub table Media(id: Str) { payload: Blob, }";
-        const UPDATED: &[u8] = b"pub table Archive(id: Str) { payload: Blob, }";
-        let (directory, repository, previous, next) = manifest_rollback_state();
-        next.write_worktree(&repository).unwrap();
-        let (source, old_directory, new_directory) = moved_mv_rollback_files(&directory);
-
-        rollback_failed_mv_update(
-            &repository,
-            &previous,
-            &next,
-            &old_directory,
-            &new_directory,
-            true,
-            &source,
-            Some(ORIGINAL),
-            UPDATED,
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&source).unwrap(), ORIGINAL);
-        assert_eq!(
-            fs::read(directory.path().join(".orna/object-identities.cbor")).unwrap(),
-            previous.encode().unwrap()
-        );
-        assert_eq!(fs::read(old_directory.join("row.orna")).unwrap(), b"row");
-        assert!(!new_directory.exists());
-    }
-
-    #[test]
-    fn failed_mv_rollback_accepts_manifest_unchanged_by_failed_write() {
-        const ORIGINAL: &[u8] = b"pub table Media(id: Str) { payload: Blob, }";
-        const UPDATED: &[u8] = b"pub table Archive(id: Str) { payload: Blob, }";
-        let (directory, repository, previous, next) = manifest_rollback_state();
-        let manifest_path = directory.path().join(".orna/object-identities.cbor");
-        let manifest_before = fs::read(&manifest_path).unwrap();
-        let (source, old_directory, new_directory) = moved_mv_rollback_files(&directory);
-
-        rollback_failed_mv_update(
-            &repository,
-            &previous,
-            &next,
-            &old_directory,
-            &new_directory,
-            true,
-            &source,
-            Some(ORIGINAL),
-            UPDATED,
-        )
-        .unwrap();
-
-        assert_eq!(fs::read(&manifest_path).unwrap(), manifest_before);
-        assert_eq!(fs::read(&source).unwrap(), ORIGINAL);
-        assert_eq!(fs::read(old_directory.join("row.orna")).unwrap(), b"row");
-        assert!(!new_directory.exists());
-    }
-
-    #[test]
-    fn failed_mv_rollback_reports_partial_update_for_unknown_manifest_and_source() {
-        const ORIGINAL: &[u8] = b"pub table Media(id: Str) { payload: Blob, }";
-        const UPDATED: &[u8] = b"pub table Archive(id: Str) { payload: Blob, }";
-        let (directory, repository, previous, next) = manifest_rollback_state();
-        fs::write(
-            directory.path().join(".orna/object-identities.cbor"),
-            b"unknown manifest bytes",
-        )
-        .unwrap();
-        let (source, old_directory, new_directory) = moved_mv_rollback_files(&directory);
-        fs::write(&source, b"concurrent source change").unwrap();
-
-        let error = rollback_failed_mv_update(
-            &repository,
-            &previous,
-            &next,
-            &old_directory,
-            &new_directory,
-            true,
-            &source,
-            Some(ORIGINAL),
-            UPDATED,
-        )
-        .unwrap_err();
-
-        assert_eq!(error.code, "E2100");
-        assert_eq!(error.title, "table rename could not be fully rolled back");
-        assert_eq!(fs::read(&source).unwrap(), b"concurrent source change");
-        assert_eq!(fs::read(old_directory.join("row.orna")).unwrap(), b"row");
-        assert!(!new_directory.exists());
     }
 }

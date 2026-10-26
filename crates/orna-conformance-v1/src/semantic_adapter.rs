@@ -28,7 +28,8 @@ use orna_foundation_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointResetRequest, FaultInjector, FaultPoint, ListStreamSource, NoFault, RequestIdentity,
+    ActivationEffectReport, CheckpointResetRequest, DeclaredEffectSet, FaultInjector,
+    FaultPoint, ListStreamSource, NoFault, RequestIdentity,
     RequestStatus, RunObservationRegistration, RunningTableRequestContinuation, RuntimeError,
     RuntimeIdentity, RuntimePublicationMetadataRows, RuntimeState, StreamFailurePayload,
     StreamHandler, StreamHandlerResult,
@@ -40,14 +41,15 @@ use orna_runtime_v1::{
     ValidatedTableActivationCommit, ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
-    AssertionOwner, AssertionPlan, Catalogue, EffectSummary, ModuleInput, Namespace,
-    StandardDependencyProfile, SystemProviders, analyze_with_providers,
+    AssertionOwner, AssertionPlan, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, EffectSummary,
+    ModuleInput, Namespace, StandardDependencyProfile, SystemProviders, analyze_with_providers,
 };
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_stream_v1::{
     AssertionOwnerKind, AsyncCheckpointBackend, CheckpointKey, CheckpointPrecondition,
     CommitIntent, CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass,
-    DiagnosticCode, FailureIdentity, FailureStatus, LeasePurpose, Position, SafeDiagnostic,
+    DiagnosticCode, FailureIdentity, FailureRecord, FailureStatus, LeasePurpose, Position,
+    SafeDiagnostic,
 };
 use orna_syntax_v1::{
     Declaration, Expr, Pattern, Statement, SyntaxSpan, TypeMember, TypeRepresentation,
@@ -257,6 +259,7 @@ impl ConformanceAdapter for SemanticAdapter {
     }
     fn evaluate(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
         TransactionalEvaluator::default()
+            .with_fixture_catalogue()
             .execute_duplicate_key_fixture(unit)
             .unwrap_or_else(Self::unsupported_runtime)
     }
@@ -329,12 +332,12 @@ pub trait RuntimeEvaluator {
 pub struct BoundedEvaluator {
     environment: Environment,
     limits: EvaluatorLimits,
-    functions: BTreeMap<String, RetainedFunction>,
+    functions: Functions,
     nominal_definitions: NominalDefinitions,
 }
 
 struct BoundedSourceExecutor {
-    functions: BTreeMap<String, RetainedFunction>,
+    functions: Functions,
     nominal_definitions: NominalDefinitions,
     limits: EvaluatorLimits,
     descriptor: FunctionDescriptor,
@@ -652,7 +655,7 @@ impl BoundedEvaluator {
         Self {
             environment: BTreeMap::new(),
             limits,
-            functions: BTreeMap::new(),
+            functions: Functions::new(),
             nominal_definitions: NominalDefinitions::new(),
         }
     }
@@ -662,7 +665,7 @@ impl BoundedEvaluator {
         Self {
             environment,
             limits,
-            functions: BTreeMap::new(),
+            functions: Functions::new(),
             nominal_definitions: NominalDefinitions::new(),
         }
     }
@@ -768,7 +771,10 @@ impl BoundedEvaluator {
                 parse_as: "module_unit".into(),
                 source,
             };
-            match staged.evaluate_module(&unit) {
+            // Standard functions keep their module identity (`std.<module>.<name>`)
+            // so their bodies resolve sibling helpers and never shadow user names.
+            let namespace = module_namespace(&unit);
+            match staged.evaluate_module_with_namespace(&unit, namespace.as_deref()) {
                 StageOutcome::Passed => {}
                 outcome => return outcome,
             }
@@ -998,6 +1004,9 @@ impl RuntimeEvaluator for BoundedEvaluator {
                 outcome => return outcome,
             }
         }
+        if let Err(outcome) = bind_standard_function_aliases(&mut staged.functions, project) {
+            return outcome;
+        }
         *self = staged;
         StageOutcome::Passed
     }
@@ -1027,7 +1036,11 @@ impl RuntimeEvaluator for BoundedEvaluator {
         project: &ProjectUnit,
         analysis: &orna_semantic_v1::Analysis,
     ) -> StageOutcome<Diagnostic> {
-        match admit_project_rows(project, analysis, &crate::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() }, self.limits) {
+        // Placeholder identity: ProjectUnit carries no database id or snapshot
+        // tables, so every 60021 stored reference is checked against an empty
+        // table set. Tracked by bead ornadb-0lu1 (thread real identity).
+        let identity = crate::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() };
+        match admit_project_rows(project, analysis, &identity, self.limits) {
             Ok(_) => StageOutcome::Passed,
             Err(diagnostic) => StageOutcome::Failed(*diagnostic),
         }
@@ -1051,6 +1064,86 @@ impl RuntimeEvaluator for BoundedEvaluator {
         }
     }
 }
+
+/// Binds unqualified names from `use std.<module>.{name}` declarations in the
+/// project's modules to the retained standard functions. User functions keep
+/// their own names. Glob and module-alias imports are refused explicitly, a
+/// braced name absent from the pinned module is an import error, and two
+/// modules binding one unqualified name to different targets are ambiguous.
+fn bind_standard_function_aliases(
+    functions: &mut Functions,
+    project: &ProjectUnit,
+) -> Result<(), StageOutcome<Diagnostic>> {
+    let mut aliases = BTreeMap::<String, String>::new();
+    for unit in &project.modules {
+        let parsed = parse_module(&unit.source);
+        for item in parsed.value.items {
+            let Declaration::Use { path, tail } = item.declaration else {
+                continue;
+            };
+            if path.first().map(|segment| segment.name.as_str()) != Some("std") {
+                continue;
+            }
+            let namespace = path
+                .iter()
+                .map(|segment| segment.name.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let names = match tail {
+                orna_syntax_v1::UseTail::None => continue,
+                orna_syntax_v1::UseTail::Names(names) => names,
+                orna_syntax_v1::UseTail::Glob { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard glob imports are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+                orna_syntax_v1::UseTail::Alias { .. } => {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "standard module aliases are not supported by the bounded runtime; import names explicitly",
+                    )));
+                }
+            };
+            for name in names {
+                let target = format!("{namespace}.{}", name.name);
+                if !functions.contains_key(&target) {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_IMPORT,
+                        "imported name is not exported by the pinned standard module",
+                    )));
+                }
+                if let Some(previous) = aliases.insert(name.name.clone(), target.clone())
+                    && previous != target
+                {
+                    return Err(StageOutcome::Failed(standard_import_diagnostic(
+                        DIAG_AMBIGUOUS,
+                        "standard imports bind one unqualified name to different functions",
+                    )));
+                }
+            }
+        }
+    }
+    for (alias, target) in aliases {
+        if let Some(function) = functions.get(&target).cloned() {
+            if !functions.contains_key(&alias) {
+                functions.insert(alias, function);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn standard_import_diagnostic(code: &str, message: &str) -> Diagnostic {
+    Diagnostic::new(
+        SafeText::new(code).expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new(message).expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .redacted()
+}
+
 
 fn module_namespace(unit: &SourceUnit) -> Option<String> {
     let mut components = unit.source_id.split('/').collect::<Vec<_>>();
@@ -1799,22 +1892,58 @@ pub struct TransactionalEvaluator {
     database: TransactionDatabase,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
     sys_host: Option<std::sync::Arc<SysHostAttachment>>,
     explain_catalogue: Option<ActivationExplainCatalogue>,
+    admission: AdmissionCatalogue,
+}
+
+/// Catalogue that admission checks user modules against. `Production` is the
+/// authoritative core catalogue; `ConformanceFixture` additionally reserves the
+/// conformance fixture namespaces and is opted into by the conformance harness
+/// only, through [`TransactionalEvaluator::with_fixture_catalogue`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionCatalogue {
+    Production,
+    ConformanceFixture,
+}
+
+impl AdmissionCatalogue {
+    fn base(self) -> Catalogue {
+        match self {
+            Self::Production => Catalogue::authoritative_core(),
+            Self::ConformanceFixture => Catalogue::authoritative_fixture(),
+        }
+    }
 }
 
 impl TransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). The conformance harness
+    /// opts into the fixture catalogue with [`Self::with_fixture_catalogue`].
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
             entry: entry.into(),
             limits,
+            admission: AdmissionCatalogue::Production,
             database: TransactionDatabase::default(),
             activation_time: None,
             publication_rows: None,
+            mutation_scope: [0; 32],
             sys_host: None,
             explain_catalogue: None,
         }
+    }
+
+    /// Opts this evaluator into the conformance fixture catalogue. Production
+    /// evaluators never use it. The only callers are the conformance harness
+    /// (`CompositeEvaluator::default` in `main.rs` and
+    /// `SemanticAdapter::evaluate`), which need `execute_duplicate_key_fixture`.
+    #[must_use]
+    pub fn with_fixture_catalogue(mut self) -> Self {
+        self.admission = AdmissionCatalogue::ConformanceFixture;
+        self
     }
 
     fn with_activation_time(mut self, activation_time: SystemTime) -> Self {
@@ -1824,6 +1953,11 @@ impl TransactionalEvaluator {
 
     fn with_publication_rows(mut self, rows: RuntimePublicationMetadataRows) -> Self {
         self.publication_rows = Some(rows);
+        self
+    }
+
+    fn with_mutation_scope(mut self, scope: [u8; 32]) -> Self {
+        self.mutation_scope = scope;
         self
     }
 
@@ -1851,7 +1985,7 @@ impl TransactionalEvaluator {
     /// Executes the configured entry function inside one root activation.
     /// Errors escaping the function leave all table writes unpublished.
     pub fn execute_source(&mut self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return *outcome,
         };
@@ -1873,7 +2007,7 @@ impl TransactionalEvaluator {
             return None;
         }
         let mut evaluator = Self::new("bad", self.limits);
-        let mut admitted = match admit_transaction_source(unit, self.limits, "bad") {
+        let mut admitted = match admit_transaction_source(unit, self.limits, "bad", self.admission) {
             Ok(value) => value,
             Err(outcome) => return Some(*outcome),
         };
@@ -1999,6 +2133,7 @@ impl TransactionalEvaluator {
                 limits,
                 activation_time: self.activation_time,
                 publication_rows: self.publication_rows.clone(),
+                mutation_scope: self.mutation_scope,
                 sys_host: self.sys_host.as_deref(),
                 explain_catalogue: self.explain_catalogue.as_ref(),
             };
@@ -2076,6 +2211,7 @@ pub struct DurableTransactionalEvaluator {
     entry: String,
     limits: EvaluatorLimits,
     sys_host: Option<std::sync::Arc<SysHostAttachment>>,
+    admission: AdmissionCatalogue,
     #[cfg(test)]
     activation_time_observer: Option<std::sync::Arc<std::sync::Mutex<Option<SystemTime>>>>,
 }
@@ -2152,12 +2288,16 @@ impl std::fmt::Display for PendingPublicationError {
 impl std::error::Error for PendingPublicationError {}
 
 impl DurableTransactionalEvaluator {
+    /// Creates an evaluator that admits transactions against the production
+    /// catalogue ([`AdmissionCatalogue::Production`]). It has no fixture
+    /// catalogue opt-in.
     #[must_use]
     pub fn new(entry: impl Into<String>, limits: EvaluatorLimits) -> Self {
         Self {
             entry: entry.into(),
             limits,
             sys_host: None,
+            admission: AdmissionCatalogue::Production,
             #[cfg(test)]
             activation_time_observer: None,
         }
@@ -2183,7 +2323,7 @@ impl DurableTransactionalEvaluator {
         if !root_entry.contains('.') {
             return false;
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(_) => return false,
         };
@@ -2210,6 +2350,8 @@ impl DurableTransactionalEvaluator {
 
     /// Executes one admitted source activation against durable committed rows.
     /// Failed source evaluation never reaches the durable commit boundary.
+    /// Zero-scope: this entry point carries no request identity, so its table mutation
+    /// ids stay content-addressed. The CLI never reaches it; conformance and tests do.
     pub async fn execute_source(
         &self,
         repository: &Repository,
@@ -2218,7 +2360,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -2392,7 +2534,7 @@ impl DurableTransactionalEvaluator {
             return replay_or_fence_request(start.request);
         }
 
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => {
                 let outcome = *outcome;
@@ -2427,7 +2569,8 @@ impl DurableTransactionalEvaluator {
         self.record_activation_time(context.activation_time());
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
             .with_sys_host_context(self.sys_host.clone())
-            .with_activation_time(context.activation_time());
+            .with_activation_time(context.activation_time())
+            .with_mutation_scope(request_mutation_scope(&request));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -2489,6 +2632,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal.unwrap_or(request_terminal(&StageOutcome::Passed)?),
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -2566,7 +2710,7 @@ impl DurableTransactionalEvaluator {
             Err(error) => return RunningTableRequestDisposition::Fenced(error),
         };
 
-        let admitted = match admit_transaction_source(unit, self.limits, &self.entry) {
+        let admitted = match admit_transaction_source(unit, self.limits, &self.entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return RunningTableRequestDisposition::Semantic(*outcome),
         };
@@ -2596,7 +2740,8 @@ impl DurableTransactionalEvaluator {
         }
         let mut evaluator = TransactionalEvaluator::new(&self.entry, self.limits)
             .with_sys_host_context(self.sys_host.clone())
-            .with_activation_time(continuation.context().activation_time());
+            .with_activation_time(continuation.context().activation_time())
+            .with_mutation_scope(request_mutation_scope(&continuation.identity()));
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
                 let row = match Value::decode(row) {
@@ -2661,6 +2806,7 @@ impl DurableTransactionalEvaluator {
                 outcome: success_terminal,
                 validator: &mut validator,
                 faults,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -2734,7 +2880,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project transaction roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -2879,7 +3025,7 @@ impl DurableTransactionalEvaluator {
             )
             .await;
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => {
                 return terminalize_observed_outcome(
@@ -2966,7 +3112,7 @@ impl DurableTransactionalEvaluator {
                 "main.ingest",
             )
             .await?;
-        let admitted = match admit_transaction_project(&project, self.limits, "main.ingest") {
+        let admitted = match admit_transaction_project(&project, self.limits, "main.ingest", self.admission) {
             Ok(admitted) => admitted,
             Err(_) => return Ok((outcome, false, None, 0, false)),
         };
@@ -3383,7 +3529,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project stream roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -3452,7 +3598,7 @@ impl DurableTransactionalEvaluator {
                 reason: "project stream roots must be namespace-qualified".into(),
             });
         }
-        let admitted = match admit_transaction_project(project, self.limits, root_entry) {
+        let admitted = match admit_transaction_project(project, self.limits, root_entry, self.admission) {
             Ok(value) => value,
             Err(outcome) => return Ok(*outcome),
         };
@@ -3466,6 +3612,8 @@ impl DurableTransactionalEvaluator {
             .await
     }
 
+    /// Stream rows take delivery-addressed mutation ids (ORNA-LIST-STREAM-MUTATION),
+    /// not the content-addressed source digest, so no request mutation scope applies.
     async fn execute_admitted_project_stream<C>(
         &self,
         target: RuntimeTarget<'_>,
@@ -3551,13 +3699,13 @@ impl DurableTransactionalEvaluator {
                 )
                 .await
             }
-            Ok(StreamRunOutcome::Failed { .. }) => {
+            Ok(StreamRunOutcome::Failed { failure, .. }) => {
                 fail_observed_request_outcome(
                     &state,
                     request,
                     fingerprint,
                     writer,
-                    StageOutcome::Failed(stream_delivery_failure_diagnostic()),
+                    StageOutcome::Failed(stream_delivery_failure_diagnostic(&failure)),
                 )
                 .await
             }
@@ -3608,6 +3756,8 @@ impl DurableTransactionalEvaluator {
         }
     }
 
+    /// Zero-scope: reached only through `execute_project_with_arguments`, which has no
+    /// request identity. Mutation ids stay content-addressed.
     async fn execute_admitted_project_with_arguments(
         &self,
         target: RuntimeTarget<'_>,
@@ -3742,6 +3892,7 @@ impl DurableTransactionalEvaluator {
             .with_sys_host_context(self.sys_host.clone())
             .with_activation_time(context.activation_time())
             .with_publication_rows(publication_rows)
+            .with_mutation_scope(request_mutation_scope(&request))
             .with_explain_catalogue(explain_catalogue);
         for (table, rows) in snapshot.table_rows() {
             for (key, row) in rows {
@@ -3820,6 +3971,7 @@ impl DurableTransactionalEvaluator {
                 outcome: terminal,
                 validator: &mut validator,
                 faults: &NoFault,
+                effects: declared_effect_report(self.sys_host.is_some()),
             })
             .await
         {
@@ -4129,7 +4281,7 @@ impl DurableTransactionalEvaluator {
     /// state or beginning delivery. Callers must use an explicit execution
     /// entry point to acquire a lease, poll the source, and invoke callbacks.
     pub fn admit_list_stream_source(&self, unit: &SourceUnit) -> StageOutcome<Diagnostic> {
-        match admit_list_stream_source(unit, self.limits, &self.entry) {
+        match admit_list_stream_source(unit, self.limits, &self.entry, self.admission) {
             Ok(_) => StageOutcome::Passed,
             Err(outcome) => *outcome,
         }
@@ -4147,7 +4299,7 @@ impl DurableTransactionalEvaluator {
         initial_digest: [u8; 32],
         unit: &SourceUnit,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
-        let mut bridge = match admit_list_stream_source(unit, self.limits, &self.entry) {
+        let mut bridge = match admit_list_stream_source(unit, self.limits, &self.entry, self.admission) {
             Ok(bridge) => bridge,
             Err(outcome) => return Ok(*outcome),
         };
@@ -4167,9 +4319,9 @@ impl DurableTransactionalEvaluator {
             .await
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
-            Ok(StreamRunOutcome::Failed { .. }) => {
-                Ok(StageOutcome::Failed(stream_delivery_failure_diagnostic()))
-            }
+            Ok(StreamRunOutcome::Failed { failure, .. }) => Ok(StageOutcome::Failed(
+                stream_delivery_failure_diagnostic(&failure),
+            )),
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "literal list stream did not exhaust".into(),
             }),
@@ -4408,7 +4560,7 @@ pub fn transactional_table_candidate_validator(
     cwd_generation: orna_repository_v1::CwdGeneration,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
-    let admitted = admit_transaction_source_inner(unit, limits, entry, false)
+    let admitted = admit_transaction_source_inner(unit, limits, entry, false, AdmissionCatalogue::Production)
         .map_err(|failure| *failure)?;
     Ok(Box::new(TransactionalTableCandidateValidator::new(
         cwd_generation,
@@ -4479,7 +4631,7 @@ pub fn transactional_loaded_project_candidate_validator(
             negative_cases: Vec::new(),
         },
     };
-    let admitted = admit_transaction_project(&project, limits, "")
+    let admitted = admit_transaction_project(&project, limits, "", AdmissionCatalogue::Production)
         .map_err(|failure| *failure)?;
     let candidate_table_fields = candidate_table_fields_in_stable_id_order(
         loaded,
@@ -4528,9 +4680,10 @@ fn candidate_table_fields_in_stable_id_order(
             let Declaration::Table { name, .. } = item.declaration else {
                 continue;
             };
+            let table = qualified_table_identity(&Namespace(identity.namespace().to_vec()), &name);
             let fields = ordered_fields
-                .get_mut(&name)
-                .ok_or_else(|| format!("candidate table {name} has no admitted fields"))?;
+                .get_mut(&table)
+                .ok_or_else(|| format!("candidate table {table} has no admitted fields"))?;
             let schema = loaded
                 .source_table_schema(identities, &schema_namespace, &name)
                 .map_err(|_| format!("candidate table {name} has no stable schema"))?;
@@ -4869,12 +5022,35 @@ fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnosti
     .redacted()
 }
 
-fn stream_delivery_failure_diagnostic() -> Diagnostic {
+fn stream_delivery_failure_diagnostic(failure: &FailureRecord) -> Diagnostic {
     Diagnostic::new(
         SafeText::new("ORNA-LIST-STREAM-DELIVERY").expect("static code"),
         DiagnosticSeverity::Error,
         SafeText::new("literal list stream delivery was retained after activation rollback")
             .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .with_cause(stream_failure_cause(failure.diagnostic.code))
+    .redacted()
+}
+
+/// The runtime's typed failure code, carried as a non-catalogue label for the
+/// `--debug` detail. The spec does not catalogue these variants, so the label
+/// deliberately does not use the `ORNA-` prefix and promotes no code.
+fn stream_failure_cause(code: DiagnosticCode) -> Diagnostic {
+    let label = match code {
+        DiagnosticCode::ProviderUnavailable => "stream-failure:provider-unavailable",
+        DiagnosticCode::DecodeRejected => "stream-failure:decode-rejected",
+        DiagnosticCode::ExecutionRejected => "stream-failure:execution-rejected",
+        DiagnosticCode::Cancelled => "stream-failure:cancelled",
+        DiagnosticCode::Internal => "stream-failure:internal",
+        DiagnosticCode::TableAssertionFalse => "stream-failure:table-assertion-false",
+        DiagnosticCode::StaleBaseline => "stream-failure:stale-baseline",
+    };
+    Diagnostic::new(
+        SafeText::new(label).expect("static label"),
+        DiagnosticSeverity::Error,
+        SafeText::redacted(),
     )
     .expect("valid diagnostic")
     .redacted()
@@ -4919,6 +5095,7 @@ fn admit_list_stream_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<ListStreamBridge, AdmissionFailure> {
     let AdmittedTransaction {
         functions,
@@ -4928,7 +5105,7 @@ fn admit_list_stream_source(
         mut table_assertions,
         module_assertions,
         ..
-    } = admit_transaction_source(unit, limits, entry)?;
+    } = admit_transaction_source(unit, limits, entry, admission)?;
     if key_fields.len() != 1 {
         return Err(Box::new(StageOutcome::Skipped {
             reason: "literal list stream bridge requires one explicit-key table".into(),
@@ -5640,6 +5817,7 @@ struct TableEffectHandler<'activation, 'runtime> {
     limits: EvaluatorLimits,
     activation_time: Option<SystemTime>,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    mutation_scope: [u8; 32],
     sys_host: Option<&'activation SysHostAttachment>,
     explain_catalogue: Option<&'activation ActivationExplainCatalogue>,
 }
@@ -6257,6 +6435,7 @@ impl TableEffectHandler<'_, '_> {
         self.next_mutation = self.next_mutation.saturating_add(1);
         let mut digest = Sha256::new();
         digest.update(b"ORNA-SOURCE-MUTATION\0");
+        digest.update(self.mutation_scope);
         digest.update(table.as_bytes());
         digest.update([0]);
         digest.update(&key);
@@ -6343,8 +6522,9 @@ fn admit_transaction_source(
     unit: &SourceUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
-    admit_transaction_source_inner(unit, limits, entry, true)
+    admit_transaction_source_inner(unit, limits, entry, true, admission)
 }
 
 fn admit_transaction_source_inner(
@@ -6352,6 +6532,7 @@ fn admit_transaction_source_inner(
     limits: EvaluatorLimits,
     entry: &str,
     require_entry: bool,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
     if let Err(error) = limits.check_source(&unit.source) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
@@ -6364,12 +6545,12 @@ fn admit_transaction_source_inner(
     if let Err(error) = limits.check_items(parsed.value.items.len()) {
         return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
     }
+    // The single-source seam admits one standalone program, so it is the root
+    // module: its tables keep bare identities, matching the keys below and
+    // the assertion dependencies semantic analysis plans for them.
     let analysis = analyze_with_providers(
-        &[ModuleInput::new(
-            unit.source_id.clone(),
-            unit.source.clone(),
-        )],
-        &Catalogue::authoritative_fixture(),
+        &[ModuleInput::new("main.orna", unit.source.clone())],
+        &admission.base(),
         SystemProviders::Production,
     );
     if let Some(summary) = analysis
@@ -6438,6 +6619,7 @@ fn admit_transaction_project(
     project: &ProjectUnit,
     limits: EvaluatorLimits,
     entry: &str,
+    admission: AdmissionCatalogue,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
     let standard_sources = project
         .modules
@@ -6469,11 +6651,12 @@ fn admit_transaction_project(
                 .verify_source(logical_path, source)
                 .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?;
         }
-        Catalogue::authoritative_fixture()
+        admission
+            .base()
             .with_standard_sources(&profile, sources)
             .map_err(|_| Box::new(StageOutcome::Failed(standard_profile_diagnostic())))?
     } else {
-        Catalogue::authoritative_fixture()
+        admission.base()
     };
     let application_modules = project
         .modules
@@ -6514,6 +6697,7 @@ fn admit_transaction_project(
     let mut table_fields = TableFields::new();
     let mut table_assertions = TableAssertions::new();
     let mut module_assertions = ModuleAssertions::new();
+    let graph = ProjectGraph::new(project);
     let mut nominal_definitions = NominalDefinitions::new();
     for unit in &project.modules {
         if let Err(error) = limits.check_source(&unit.source) {
@@ -6529,21 +6713,14 @@ fn admit_transaction_project(
         }
         let namespace = project_transaction_namespace(project, unit)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
-        let AdmittedTransaction {
-            functions: module_functions,
-            key_fields: module_keys,
-            float_fields: module_float_fields,
-            table_fields: module_table_fields,
-            table_assertions: mut module_assertions_by_table,
-            module_assertions: mut module_assertions_only,
-            nominal_definitions: module_nominal_definitions,
-        } = admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
-            .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         let semantic_namespace = project_semantic_namespace(project, unit).ok_or_else(|| {
             Box::new(StageOutcome::Skipped {
                 reason: "project transaction module has no semantic namespace".into(),
             })
         })?;
+        let mut module =
+            admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
+                .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if !is_standard_source(unit) {
             let plans = analysis
                 .assertions
@@ -6554,12 +6731,23 @@ fn admit_transaction_project(
                     })
                 })?;
             attach_assertion_dependencies(
-                &mut module_assertions_by_table,
-                &mut module_assertions_only,
+                &mut module.table_assertions,
+                &mut module.module_assertions,
                 plans,
             )
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
+            ModuleReferences::new(&semantic_namespace, &parsed.value.items, &graph)
+                .resolve(&mut module);
         }
+        let AdmittedTransaction {
+            functions: module_functions,
+            key_fields: module_keys,
+            float_fields: module_float_fields,
+            table_fields: module_table_fields,
+            table_assertions: module_assertions_by_table,
+            module_assertions: module_assertions_only,
+            nominal_definitions: module_nominal_definitions,
+        } = module;
         if let Err(error) = limits.check_items(module_functions.len()) {
             return Err(Box::new(StageOutcome::Failed(error.diagnostic().clone())));
         }
@@ -6573,10 +6761,14 @@ fn admit_transaction_project(
         }
         if module_keys.keys().any(|name| key_fields.contains_key(name)) {
             return Err(Box::new(StageOutcome::Skipped {
-                reason: "project transaction modules declare a duplicate table name".into(),
+                reason: "project transaction modules declare a duplicate table identity".into(),
             }));
         }
-        functions.extend(module_functions);
+        functions.extend(module_functions).map_err(|_| {
+            Box::new(StageOutcome::Skipped {
+                reason: "project transaction modules bind a second standard layer".into(),
+            })
+        })?;
         key_fields.extend(module_keys);
         float_fields.extend(module_float_fields);
         table_fields.extend(module_table_fields);
@@ -6619,7 +6811,9 @@ fn admit_transaction_project(
     }
     for (alias, target) in standard_aliases {
         if let Some(function) = functions.get(&target).cloned() {
-            functions.entry(alias).or_insert(function);
+            if !functions.contains_key(&alias) {
+                functions.insert(alias, function);
+            }
         }
     }
     // Candidate validation can admit a project without executing a transaction entry.
@@ -6643,11 +6837,26 @@ fn is_standard_source(unit: &SourceUnit) -> bool {
     unit.source_id.starts_with("std/")
 }
 
+/// Declares the effect set of a semantic activation (REQUEST-1 step 5). A
+/// system host may reach effects outside the table transaction, so its
+/// presence declares them possible; otherwise the activation performs only
+/// Orna table writes.
+fn declared_effect_report(sys_host_attached: bool) -> ActivationEffectReport {
+    ActivationEffectReport::declare(if sys_host_attached {
+        DeclaredEffectSet::ExternalPossible
+    } else {
+        DeclaredEffectSet::None
+    })
+}
+
 fn controlled_table_effects(summary: &EffectSummary) -> bool {
-    summary
-        .effects
-        .iter()
-        .all(|effect| matches!(effect.as_str(), "database read" | "database write"))
+    !summary.opaque
+        && summary.effects.iter().all(|effect| {
+            matches!(
+                effect,
+                orna_semantic_v1::EffectKind::TableRead | orna_semantic_v1::EffectKind::TableWrite
+            )
+        })
 }
 
 fn effect_admission_diagnostic() -> Diagnostic {
@@ -6711,7 +6920,483 @@ fn project_transaction_namespace(
     if stem.is_empty() || stem.split('/').any(str::is_empty) {
         return Err("project transaction modules need a non-empty logical namespace".into());
     }
+    // `x/main.orna` defines namespace `x` (ORNA-NS-001); only the root
+    // `main.orna` keeps the `main` prefix that root functions are run by.
+    let stem = stem.strip_suffix("/main").unwrap_or(stem);
     Ok(stem.replace('/', "."))
+}
+
+/// The qualified table identity the runtime keys rows by: the module's
+/// namespace path plus the declared name, as recorded by the committed
+/// identity manifest (root-module tables keep their bare name).
+fn qualified_table_identity(namespace: &Namespace, name: &str) -> String {
+    if namespace.0.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{}.{name}", namespace.0.join("."))
+    }
+}
+
+/// Public tables and functions of every admitted application module, keyed by
+/// semantic namespace, with the prefix of that module's retained function keys.
+struct ProjectGraph {
+    modules: BTreeMap<Namespace, GraphModule>,
+}
+
+struct GraphModule {
+    function_prefix: String,
+    tables: BTreeSet<String>,
+    functions: BTreeSet<String>,
+}
+
+impl ProjectGraph {
+    fn new(project: &ProjectUnit) -> Self {
+        let mut modules = BTreeMap::new();
+        for unit in project.modules.iter().filter(|unit| !is_standard_source(unit)) {
+            let (Some(namespace), Ok(function_prefix)) = (
+                project_semantic_namespace(project, unit),
+                project_transaction_namespace(project, unit),
+            ) else {
+                continue;
+            };
+            let mut tables = BTreeSet::new();
+            let mut functions = BTreeSet::new();
+            for item in parse_module(&unit.source).value.items {
+                if !matches!(item.visibility, orna_syntax_v1::Visibility::Public { .. }) {
+                    continue;
+                }
+                match item.declaration {
+                    Declaration::Table { name, .. } => {
+                        tables.insert(name);
+                    }
+                    Declaration::Function { signature, .. } => {
+                        functions.insert(signature.name);
+                    }
+                    _ => {}
+                }
+            }
+            modules.insert(
+                namespace,
+                GraphModule {
+                    function_prefix,
+                    tables,
+                    functions,
+                },
+            );
+        }
+        Self { modules }
+    }
+}
+
+/// How one module's source spellings reach project tables and functions,
+/// resolved once at admission so the retained evaluator and the table effect
+/// handler only ever see stable identities. Local declarations win, then
+/// explicit imports, then unambiguous wildcard imports (ORNA-IMPORT-003,
+/// ORNA-IMPORT-004, ORNA-IMPORT-007). A qualified path starts at a `use`
+/// binding (ORNA-IMPORT-001, ORNA-IMPORT-002) or spells a module's full
+/// namespace path (ORNA-NS-001, ORNA-NS-002), with or without `use`.
+struct ModuleReferences<'a> {
+    graph: &'a ProjectGraph,
+    namespace: Namespace,
+    local_tables: BTreeSet<String>,
+    tables: BTreeMap<String, String>,
+    functions: BTreeMap<String, String>,
+    modules: BTreeMap<String, Namespace>,
+    declared: BTreeSet<String>,
+}
+
+impl<'a> ModuleReferences<'a> {
+    fn new(namespace: &Namespace, items: &[orna_syntax_v1::Item], graph: &'a ProjectGraph) -> Self {
+        let mut declared = BTreeSet::new();
+        let mut local_tables = BTreeSet::new();
+        let mut tables = BTreeMap::new();
+        for item in items {
+            match &item.declaration {
+                Declaration::Table { name, .. } => {
+                    local_tables.insert(name.clone());
+                    tables.insert(name.clone(), qualified_table_identity(namespace, name));
+                    declared.insert(name.clone());
+                }
+                Declaration::Function { signature, .. } => {
+                    declared.insert(signature.name.clone());
+                }
+                Declaration::Type { name, .. }
+                | Declaration::Enum { name, .. }
+                | Declaration::Protocol { name, .. }
+                | Declaration::Dimension { name, .. }
+                | Declaration::Unit { name, .. } => {
+                    declared.insert(name.clone());
+                }
+                Declaration::Let { pattern, .. } => declared.extend(relation_pattern_names(pattern)),
+                _ => {}
+            }
+        }
+        let mut functions = BTreeMap::new();
+        let mut modules = BTreeMap::new();
+        let mut glob_tables = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut glob_functions = BTreeMap::<String, BTreeSet<String>>::new();
+        for item in items {
+            let Declaration::Use { path, tail } = &item.declaration else {
+                continue;
+            };
+            let target = Namespace(path.iter().map(|segment| segment.name.clone()).collect());
+            let module = graph.modules.get(&target);
+            match tail {
+                orna_syntax_v1::UseTail::None => {
+                    if let Some(last) = target.0.last() {
+                        modules.insert(last.clone(), target.clone());
+                    }
+                }
+                orna_syntax_v1::UseTail::Alias { name, .. } if name != "_" => {
+                    modules.insert(name.clone(), target.clone());
+                }
+                orna_syntax_v1::UseTail::Alias { .. } => {}
+                orna_syntax_v1::UseTail::Names(names) => {
+                    let Some(module) = module else { continue };
+                    for import in names {
+                        if module.tables.contains(&import.name) {
+                            tables
+                                .entry(import.name.clone())
+                                .or_insert_with(|| qualified_table_identity(&target, &import.name));
+                        }
+                        if module.functions.contains(&import.name) && !declared.contains(&import.name) {
+                            functions
+                                .entry(import.name.clone())
+                                .or_insert_with(|| format!("{}.{}", module.function_prefix, import.name));
+                        }
+                    }
+                }
+                orna_syntax_v1::UseTail::Glob { .. } => {
+                    let Some(module) = module else { continue };
+                    for name in &module.tables {
+                        glob_tables
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(qualified_table_identity(&target, name));
+                    }
+                    for name in &module.functions {
+                        glob_functions
+                            .entry(name.clone())
+                            .or_default()
+                            .insert(format!("{}.{name}", module.function_prefix));
+                    }
+                }
+            }
+        }
+        for (name, identities) in glob_tables {
+            if identities.len() == 1 && !declared.contains(&name) {
+                let identity = identities.into_iter().next().expect("one identity");
+                tables.entry(name).or_insert(identity);
+            }
+        }
+        for (name, keys) in glob_functions {
+            if keys.len() == 1 && !declared.contains(&name) {
+                let key = keys.into_iter().next().expect("one function key");
+                functions.entry(name).or_insert(key);
+            }
+        }
+        Self {
+            graph,
+            namespace: namespace.clone(),
+            local_tables,
+            tables,
+            functions,
+            modules,
+            declared,
+        }
+    }
+
+    /// Keys this module's table surfaces by qualified identity and rewrites
+    /// every table and function reference in its bodies and assertions.
+    fn resolve(&self, admitted: &mut AdmittedTransaction) {
+        for table in &self.local_tables {
+            let identity = qualified_table_identity(&self.namespace, table);
+            if &identity == table {
+                continue;
+            }
+            if let Some(mut key) = admitted.key_fields.remove(table) {
+                key.table.clone_from(&identity);
+                admitted.key_fields.insert(identity.clone(), key);
+            }
+            if let Some(fields) = admitted.table_fields.remove(table) {
+                admitted.table_fields.insert(identity.clone(), fields);
+            }
+            if let Some(fields) = admitted.float_fields.floats.remove(table) {
+                admitted.float_fields.floats.insert(identity.clone(), fields);
+            }
+            if let Some(fields) = admitted.float_fields.decimals.remove(table) {
+                admitted.float_fields.decimals.insert(identity.clone(), fields);
+            }
+            if let Some(mut assertions) = admitted.table_assertions.remove(table) {
+                for assertion in &mut assertions {
+                    assertion.owner_name.clone_from(&identity);
+                    assertion.dependencies.remove(table);
+                    assertion.dependencies.insert(identity.clone());
+                }
+                admitted.table_assertions.insert(identity.clone(), assertions);
+            }
+        }
+        for function in admitted.functions.local_values_mut() {
+            let mut shadowed = BTreeSet::new();
+            for parameter in &function.parameters {
+                shadowed.extend(relation_pattern_names(&parameter.pattern));
+            }
+            self.expression(&mut function.body, &shadowed);
+        }
+        for assertion in admitted
+            .table_assertions
+            .values_mut()
+            .flatten()
+            .chain(admitted.module_assertions.iter_mut())
+        {
+            self.expression(&mut assertion.expression, &BTreeSet::new());
+        }
+    }
+
+    /// The namespace owning `path.last()`, through a `use` binding or a full
+    /// namespace path; declared names take precedence over namespace paths.
+    fn member_namespace(&self, path: &[&str]) -> Option<Namespace> {
+        let (first, rest) = path.split_first()?;
+        let (_, intermediate) = rest.split_last()?;
+        if let Some(root) = self.modules.get(*first) {
+            let mut namespace = root.clone();
+            namespace
+                .0
+                .extend(intermediate.iter().map(|part| (*part).to_owned()));
+            return Some(namespace);
+        }
+        if matches!(*first, "std" | "sys")
+            || self.declared.contains(*first)
+            || self.tables.contains_key(*first)
+            || self.functions.contains_key(*first)
+        {
+            return None;
+        }
+        Some(Namespace(
+            path[..path.len() - 1]
+                .iter()
+                .map(|part| (*part).to_owned())
+                .collect(),
+        ))
+    }
+
+    fn table_path(&self, path: &[&str]) -> Option<String> {
+        let namespace = self.member_namespace(path)?;
+        let name = *path.last()?;
+        self.graph
+            .modules
+            .get(&namespace)
+            .is_some_and(|module| module.tables.contains(name))
+            .then(|| qualified_table_identity(&namespace, name))
+    }
+
+    fn function_path(&self, path: &[&str]) -> Option<String> {
+        let namespace = self.member_namespace(path)?;
+        let name = *path.last()?;
+        let module = self.graph.modules.get(&namespace)?;
+        module
+            .functions
+            .contains(name)
+            .then(|| format!("{}.{name}", module.function_prefix))
+    }
+
+    fn callee(&self, callee: &mut Expr, shadowed: &BTreeSet<String>) {
+        let resolved = match &*callee {
+            Expr::Name { text, .. } if !shadowed.contains(text) => self.functions.get(text).cloned(),
+            Expr::Field { .. } => reference_path(callee)
+                .filter(|path| !shadowed.contains(path[0]))
+                .and_then(|path| {
+                    self.function_path(&path)
+                        .filter(|key| *key != path.join("."))
+                }),
+            _ => None,
+        };
+        match resolved {
+            Some(key) => {
+                let span = callee.span();
+                *callee = Expr::Name { text: key, span };
+            }
+            None => self.expression(callee, shadowed),
+        }
+    }
+
+    fn expression(&self, expression: &mut Expr, shadowed: &BTreeSet<String>) {
+        if let Some(path) = reference_path(expression)
+            && !shadowed.contains(path[0])
+        {
+            let identity = match &*expression {
+                Expr::Name { text, .. } => self.tables.get(text.as_str()).cloned(),
+                _ => self.table_path(&path),
+            };
+            if let Some(identity) = identity {
+                let span = expression.span();
+                *expression = Expr::Name {
+                    text: identity,
+                    span,
+                };
+                return;
+            }
+        }
+        match expression {
+            Expr::Name { .. } | Expr::Literal { .. } | Expr::ReplBinding { .. } => {}
+            Expr::InterpolatedString { segments, .. } => {
+                for segment in segments {
+                    if let orna_syntax_v1::StringSegment::Expression { value, .. } = segment {
+                        self.expression(value, shadowed);
+                    }
+                }
+            }
+            Expr::Unary { rhs, .. } | Expr::Group { inner: rhs, .. } => {
+                self.expression(rhs, shadowed);
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                self.expression(lhs, shadowed);
+                self.expression(rhs, shadowed);
+            }
+            Expr::Range { lower, upper, .. } => {
+                for endpoint in [lower, upper].into_iter().flatten() {
+                    self.expression(endpoint, shadowed);
+                }
+            }
+            Expr::Call {
+                callee, arguments, ..
+            }
+            | Expr::GenericCall {
+                callee, arguments, ..
+            } => {
+                self.callee(callee, shadowed);
+                for argument in arguments {
+                    self.expression(&mut argument.value, shadowed);
+                }
+            }
+            Expr::Index { base, index, .. } => {
+                self.expression(base, shadowed);
+                self.expression(index, shadowed);
+            }
+            Expr::Field { base, .. } => self.expression(base, shadowed),
+            Expr::Tuple { elements, .. } | Expr::List { elements, .. } => {
+                for element in elements {
+                    self.expression(element, shadowed);
+                }
+            }
+            Expr::Record { fields, .. } | Expr::Nominal { fields, .. } => {
+                for field in fields {
+                    self.expression(&mut field.value, shadowed);
+                }
+            }
+            Expr::Lambda {
+                parameters, body, ..
+            } => {
+                let mut shadowed = shadowed.clone();
+                for parameter in parameters.iter() {
+                    shadowed.extend(relation_pattern_names(&parameter.pattern));
+                }
+                self.expression(body, &shadowed);
+            }
+            Expr::Block {
+                statements, tail, ..
+            } => {
+                let mut shadowed = shadowed.clone();
+                for statement in statements {
+                    self.statement(statement, &mut shadowed);
+                }
+                if let Some(tail) = tail {
+                    self.expression(tail, &shadowed);
+                }
+            }
+            Expr::Control {
+                binding,
+                condition,
+                body,
+                arms,
+                alternate,
+                ..
+            } => {
+                if let Some(condition) = condition {
+                    self.expression(condition, shadowed);
+                }
+                if let Some(body) = body {
+                    let mut shadowed = shadowed.clone();
+                    if let Some(binding) = binding {
+                        shadowed.extend(relation_pattern_names(binding));
+                    }
+                    self.expression(body, &shadowed);
+                }
+                for arm in arms {
+                    let mut shadowed = shadowed.clone();
+                    shadowed.extend(relation_pattern_names(&arm.pattern));
+                    if let Some(guard) = &mut arm.guard {
+                        self.expression(guard, &shadowed);
+                    }
+                    self.expression(&mut arm.body, &shadowed);
+                }
+                if let Some(alternate) = alternate {
+                    self.expression(alternate, shadowed);
+                }
+            }
+        }
+    }
+
+    fn statement(&self, statement: &mut orna_syntax_v1::Statement, shadowed: &mut BTreeSet<String>) {
+        use orna_syntax_v1::Statement;
+        match statement {
+            Statement::Let { pattern, value, .. } => {
+                self.expression(value, shadowed);
+                shadowed.extend(relation_pattern_names(pattern));
+            }
+            Statement::Assert { value, .. }
+            | Statement::Expression { value, .. }
+            | Statement::Control { value, .. } => self.expression(value, shadowed),
+            Statement::Return { value, .. } | Statement::Break { value, .. } => {
+                if let Some(value) = value {
+                    self.expression(value, shadowed);
+                }
+            }
+            Statement::Assignment { target, value, .. } => {
+                self.assignment_target(target, shadowed);
+                self.expression(value, shadowed);
+            }
+            Statement::Continue { .. } => {}
+        }
+    }
+
+    fn assignment_target(
+        &self,
+        target: &mut orna_syntax_v1::AssignmentTarget,
+        shadowed: &BTreeSet<String>,
+    ) {
+        match target {
+            orna_syntax_v1::AssignmentTarget::Name { .. } => {}
+            orna_syntax_v1::AssignmentTarget::Field { base, .. } => {
+                self.assignment_target(base, shadowed);
+            }
+            orna_syntax_v1::AssignmentTarget::Index { base, index, .. } => {
+                self.assignment_target(base, shadowed);
+                self.expression(index, shadowed);
+            }
+        }
+    }
+}
+
+/// The dotted source path of a name or field chain (`a.b.Item`).
+fn reference_path(expression: &Expr) -> Option<Vec<&str>> {
+    match expression {
+        Expr::Name { text, .. } => Some(vec![text.as_str()]),
+        Expr::Field { base, name, .. } => {
+            let mut path = reference_path(base)?;
+            path.push(name.as_str());
+            Some(path)
+        }
+        _ => None,
+    }
+}
+
+fn request_mutation_scope(request: &RequestIdentity) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"ORNA-SOURCE-MUTATION-SCOPE\0");
+    digest.update(request.session_id);
+    digest.update(request.request_id);
+    digest.finalize().into()
 }
 
 fn durable_activation_digest(previous: [u8; 32], mutations: &[TableMutation]) -> [u8; 32] {
@@ -6953,7 +7638,7 @@ fn lower_relation_bindings(
     table_fields: &TableFields,
 ) -> Functions {
     let mut materialized = functions.clone();
-    for (name, function) in materialized.iter_mut() {
+    for (name, function) in materialized.local_iter_mut() {
         let mut shadowed = BTreeSet::new();
         for parameter in &function.parameters {
             shadowed.extend(relation_pattern_names(&parameter.pattern));
@@ -9856,6 +10541,7 @@ impl<R: RuntimeEvaluator> ConformanceAdapter for RuntimeAdapter<R> {
 #[cfg(test)]
 mod transaction_admission_tests {
     use super::{
+        AdmissionCatalogue,
         SourceUnit, StageOutcome, TRANSACTION_CURSOR_PREFIX, TRANSACTION_INT_CURSOR_PREFIX,
         TableEffectHandler, TransactionDatabase, TransactionKey, TransactionKeyType,
         TransactionTableKey, TransactionalEvaluator, admit_transaction_project, record_field,
@@ -10076,6 +10762,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
@@ -10175,16 +10862,20 @@ mod transaction_admission_tests {
 
         let outcome = evaluator.execute_source(&unit);
         match outcome {
-            // The authoritative fixture currently reports the unresolved-name
-            // boundary for a `std.net.http.get` call in an ordinary helper
-            // body, rather than a propagated `ORNA-EVAL-EFFECT` summary. The
-            // admission boundary must still reject before activation; this
-            // records that precise observed diagnostic until the catalogue can
-            // resolve the helper body transitively.
+            // The single-source effect gate in `admit_transaction_source_inner`
+            // reads the first `main` symbol in `analysis.modules`, which is
+            // ordered by namespace and also holds the catalogue modules. The
+            // production core catalogue declares no `main`, so the gate reads
+            // the user module's `main`, whose summary carries the `network`
+            // effect propagated from `fetch_remote`, and rejects with
+            // `ORNA-EVAL-EFFECT` before table activation. Under the fixture
+            // catalogue the effectless fixture value `bank.main` sorts before
+            // the user namespace, so the gate checked `bank.main` and passed,
+            // and the run failed later with `ORNA-EVAL-NAME` instead.
             StageOutcome::Failed(diagnostic) => assert_eq!(
                 diagnostic.code(),
-                "ORNA-EVAL-NAME",
-                "the current authoritative catalogue rejection must remain fail-closed"
+                "ORNA-EVAL-EFFECT",
+                "admission must reject the user entry's propagated network effect"
             ),
             outcome => panic!(
                 "a transitive external effect must be rejected before table activation: {outcome:?}"
@@ -10224,7 +10915,7 @@ mod transaction_admission_tests {
             },
         };
 
-        match admit_transaction_project(&project, Limits::default(), "main.seed") {
+        match admit_transaction_project(&project, Limits::default(), "main.seed", AdmissionCatalogue::Production) {
             Err(outcome) => assert!(matches!(
                 *outcome,
                 StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-EFFECT"
@@ -10426,6 +11117,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
@@ -10616,6 +11308,7 @@ mod transaction_admission_tests {
                     limits,
                     activation_time: None,
                     publication_rows: None,
+                    mutation_scope: [0; 32],
                     sys_host: None,
                     explain_catalogue: None,
                 };
@@ -10962,6 +11655,7 @@ mod bounded_tests {
 #[cfg(test)]
 mod durable_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, Functions, RunningTableRequestDisposition, SourceUnit,
         StageOutcome, TransactionKeyType, TransactionTableKey, TransactionalEvaluator,
         admitted_transaction_module, lower_relation_bindings,
@@ -11229,7 +11923,7 @@ mod durable_tests {
             source: r#"pub table Note(id: Int) { text: Str, } fn resolved_text() = "resolved"; fn main() { Note.insert({ id: 9, text: resolved_text() }); }"#.into(),
         };
         let initial_digest = [11; 32];
-        let admitted = super::admit_transaction_source(&unit, Limits::default(), "main")
+        let admitted = super::admit_transaction_source(&unit, Limits::default(), "main", AdmissionCatalogue::Production)
             .expect("source is parser, resolver, and typecheck admitted");
         let mut preview = TransactionalEvaluator::new("main", Limits::default());
         let mutations = preview
@@ -12145,14 +12839,14 @@ mod durable_tests {
             .expect("reopened runtime");
         assert!(
             state
-                .committed_table_row("Note", &Value::int(7.into()).encode().unwrap())
+                .committed_table_row("inventory.Note", &Value::int(7.into()).encode().unwrap())
                 .await
                 .unwrap()
                 .is_some()
         );
         assert!(
             state
-                .committed_table_row("Note", &Value::int(8.into()).encode().unwrap())
+                .committed_table_row("inventory.Note", &Value::int(8.into()).encode().unwrap())
                 .await
                 .unwrap()
                 .is_none()
@@ -12200,7 +12894,7 @@ mod durable_tests {
         .unwrap();
         assert!(
             state
-                .committed_table_row("Stock", &north)
+                .committed_table_row("warehouse.Stock", &north)
                 .await
                 .unwrap()
                 .is_some()
@@ -12362,9 +13056,9 @@ mod durable_tests {
             );
 
             assert!(
-                matches!(&lowered["total"].body, Expr::Binary { op, .. } if op == "|"),
+                matches!(&lowered.get("total").expect("total is lowered").body, Expr::Binary { op, .. } if op == "|"),
                 "{operation} shadow was lowered: {:?}",
-                lowered["total"].body
+                lowered.get("total").expect("total is lowered").body
             );
         }
     }
@@ -12411,9 +13105,9 @@ mod durable_tests {
                 "window_case",
             ] {
                 assert!(
-                    matches!(&lowered[name].body, Expr::Binary { op, .. } if op == "|"),
+                    matches!(&lowered.get(name).expect("case is lowered").body, Expr::Binary { op, .. } if op == "|"),
                     "{name} was specialized despite lexical shadowing: {:?}",
-                    lowered[name].body
+                    lowered.get(name).expect("case is lowered").body
                 );
             }
         }
@@ -12749,7 +13443,7 @@ fn checkpoint_atomicity_bridge(
     limits: EvaluatorLimits,
     identity: RuntimeIdentity,
 ) -> Result<ListStreamBridge, RuntimeError> {
-    let admitted = admit_transaction_project(project, limits, "main.ingest")
+    let admitted = admit_transaction_project(project, limits, "main.ingest", AdmissionCatalogue::Production)
         .map_err(|_| RuntimeError::RecoveryInvalid)?;
     admit_project_list_stream(project, &admitted, "main.ingest", identity)
         .map_err(|_| RuntimeError::RecoveryInvalid)
@@ -12770,6 +13464,7 @@ fn checkpoint_atomicity_stream_error(error: orna_runtime_v1::StreamStepError) ->
 #[cfg(test)]
 mod list_stream_tests {
     use super::{
+        AdmissionCatalogue,
         DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
         StageOutcome, admit_project_list_stream, admit_transaction_project,
         stream_handler_diagnostic, substitute_list_item, table_key,
@@ -12857,7 +13552,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            &admit_transaction_project(&project, Limits::default(), "main.ingest")
+            &admit_transaction_project(&project, Limits::default(), "main.ingest", AdmissionCatalogue::Production)
                 .expect("project admission"),
             "main.ingest",
             identity(),
@@ -12986,7 +13681,7 @@ mod list_stream_tests {
 
         let bridge = admit_project_list_stream(
             &project,
-            &admit_transaction_project(&project, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&project, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),
@@ -13019,7 +13714,7 @@ mod list_stream_tests {
             .await
             .expect("reopened runtime");
         assert_eq!(
-            state.committed_table_rows("Reading").await.unwrap().len(),
+            state.committed_table_rows("sensors.Reading").await.unwrap().len(),
             3
         );
         let writer = state.acquire_lease([23; 16]).await.expect("writer lease");
@@ -13053,7 +13748,7 @@ mod list_stream_tests {
 
         let first_bridge = admit_project_list_stream(
             &first,
-            &admit_transaction_project(&first, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&first, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("first project admission"),
             "sensors.ingest",
             identity(),
@@ -13082,7 +13777,7 @@ mod list_stream_tests {
 
         let changed_bridge = admit_project_list_stream(
             &changed,
-            &admit_transaction_project(&changed, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&changed, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("changed project admission"),
             "sensors.ingest",
             identity(),
@@ -13094,7 +13789,7 @@ mod list_stream_tests {
             .await
             .expect("reopened runtime");
         assert_eq!(
-            state.committed_table_rows("Reading").await.unwrap().len(),
+            state.committed_table_rows("sensors.Reading").await.unwrap().len(),
             6,
             "changed literal contents must not resume the predecessor checkpoint"
         );
@@ -13186,7 +13881,7 @@ mod list_stream_tests {
         let expected = authoritative_sensor_project();
         let bridge = admit_project_list_stream(
             &expected,
-            &admit_transaction_project(&expected, Limits::default(), "sensors.ingest")
+            &admit_transaction_project(&expected, Limits::default(), "sensors.ingest", AdmissionCatalogue::Production)
                 .expect("authoritative project admission"),
             "sensors.ingest",
             identity(),
