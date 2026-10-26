@@ -22,7 +22,44 @@ use super::Diagnostic;
 /// additionally names the bytes those digits spell. The candidates are tried in
 /// order by the caller, so the first row that answers is the one the spelling
 /// most directly names.
-pub(super) fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
+///
+/// When the committed descriptor declares the primary key as one `Int` or
+/// `UInt` component, the spelling is parsed as that type only: an integer key
+/// is never reinterpreted as text or bytes.
+///
+/// `orna history KEY` resolves through this same function with no declared
+/// type, so an integer spelling also names the integer row there. That is
+/// deliberate: a row is named by one spelling across both verbs (see the
+/// module doc), and the change is recorded in the CHANGELOG.
+pub(super) fn key_candidates(
+    value: &str,
+    key_type: Option<&str>,
+) -> Result<Vec<TypedKey>, Diagnostic> {
+    match key_type {
+        Some("Int") => {
+            return value
+                .parse::<i64>()
+                .map(|number| vec![TypedKey::Int(number)])
+                .map_err(|_| {
+                    key_error(
+                        "Row key is not an Int key",
+                        format!("got {value:?}; the table's primary key is Int"),
+                    )
+                });
+        }
+        Some("UInt") => {
+            return value
+                .parse::<u64>()
+                .map(|number| vec![TypedKey::UInt(number)])
+                .map_err(|_| {
+                    key_error(
+                        "Row key is not a UInt key",
+                        format!("got {value:?}; the table's primary key is UInt"),
+                    )
+                });
+        }
+        _ => {}
+    }
     let mut candidates = vec![
         TypedKey::Text(value.to_owned()),
         TypedKey::Bytes(value.as_bytes().to_vec()),
@@ -47,16 +84,94 @@ pub(super) fn key_candidates(value: &str) -> Result<Vec<TypedKey>, Diagnostic> {
             .collect();
         candidates.push(TypedKey::Bytes(bytes));
     }
+    // An integer spelling also names the integer key it denotes. Text and
+    // bytes are tried first, so a row keyed by the spelling itself still wins.
+    if let Ok(number) = value.parse::<i64>() {
+        candidates.push(TypedKey::Int(number));
+    } else if let Ok(number) = value.parse::<u64>() {
+        candidates.push(TypedKey::UInt(number));
+    }
     Ok(candidates)
 }
 
+/// Refuses a `--from`/`--until` bound whose spelling does not match a single
+/// primary-key component of type `key_type`. A bound of the wrong type orders
+/// against the keys in the wrong rank, so it would answer empty or wrong
+/// rather than fail; it is refused instead.
+pub(super) fn check_bound_type(bound: &TypedKey, key_type: Option<&str>) -> Result<(), Diagnostic> {
+    let valid = match key_type {
+        Some("Int") => "int:N",
+        Some("UInt") => "uint:N",
+        Some("Str") => "text:KEY",
+        _ => {
+            return Err(key_error(
+                "Range bound cannot address this primary key",
+                format!(
+                    "the primary key is {}, which --from/--until cannot express yet (tracked by ornadb-5il1.461)",
+                    key_type.unwrap_or("not a primitive type")
+                ),
+            ));
+        }
+    };
+    let matches = matches!(
+        (bound, key_type),
+        (TypedKey::Int(_), Some("Int"))
+            | (TypedKey::UInt(_), Some("UInt"))
+            | (TypedKey::Text(_), Some("Str"))
+    );
+    if matches {
+        return Ok(());
+    }
+    Err(key_error(
+        "Range bound does not match the table's primary key type",
+        format!(
+            "the table's primary key is {}; use {valid} for its bounds, not the spelling given",
+            key_type.unwrap_or("not a primitive type")
+        ),
+    ))
+}
+
+/// Refuses any `--from`/`--until` bound on a composite primary key. A bound
+/// spells one primitive component, so over several components it has no
+/// defined order and is refused rather than answered.
+pub(super) fn composite_bound_error() -> Diagnostic {
+    key_error(
+        "Range bound cannot address a composite primary key",
+        "the primary key has several components; --from/--until spell a single \
+         primitive key only, so bounds are refused; drop --from/--until and \
+         filter the listing instead (tracked by ornadb-5il1.461)",
+    )
+}
+
+/// Refuses a `--key` lookup over a single primary-key component whose type
+/// `--key` cannot spell. Only `Int`, `UInt` and `Str` keys are addressable
+/// from the CLI; any other type would silently miss, so it is refused.
+pub(super) fn check_point_key_type(key_type: Option<&str>) -> Result<(), Diagnostic> {
+    match key_type {
+        Some("Int" | "UInt" | "Str") => Ok(()),
+        _ => Err(key_error(
+            "Row key type cannot be addressed by --key yet",
+            format!(
+                "the primary key is {}; --key spells Int, UInt and Str keys only, so this \
+                 key is not addressable from the CLI yet (tracked by ornadb-5il1.461)",
+                key_type.unwrap_or("not a primitive type")
+            ),
+        )),
+    }
+}
+
 fn key_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
-    Diagnostic::target_with_detail(
+    // The human renderer shows the title and help but not `detail`, so the
+    // detail (the valid spelling) is carried in the title.
+    let detail = detail.into();
+    let mut diagnostic = Diagnostic::target_with_detail(
         "E2000",
         title,
         "spell a text key as KEY_TEXT and a byte key as 0x followed by its hex digits",
-        detail.into(),
-    )
+        detail.clone(),
+    );
+    diagnostic.title = std::borrow::Cow::Owned(format!("{title}: {detail}"));
+    diagnostic
 }
 
 #[cfg(test)]
@@ -70,14 +185,14 @@ mod tests {
         // argument must find that row by the printed spelling as well as by its
         // own bytes.
         assert_eq!(
-            key_candidates("song").unwrap(),
+            key_candidates("song", None).unwrap(),
             vec![
                 TypedKey::Text("song".to_owned()),
                 TypedKey::Bytes(b"song".to_vec()),
             ]
         );
         assert_eq!(
-            key_candidates("0x736f6e67").unwrap(),
+            key_candidates("0x736f6e67", None).unwrap(),
             vec![
                 TypedKey::Text("0x736f6e67".to_owned()),
                 TypedKey::Bytes(b"0x736f6e67".to_vec()),
@@ -86,8 +201,41 @@ mod tests {
         );
         // An odd digit count or a non-hex digit is not a byte key, and is
         // refused rather than silently truncated into a different key.
-        assert!(key_candidates("0x736f6").is_err());
-        assert!(key_candidates("0xzz").is_err());
-        assert!(key_candidates("0x").is_err());
+        assert!(key_candidates("0x736f6", None).is_err());
+        assert!(key_candidates("0xzz", None).is_err());
+        assert!(key_candidates("0x", None).is_err());
+    }
+
+    #[test]
+    fn a_schema_typed_integer_key_is_parsed_as_that_type_only() {
+        // An Int primary key is named as Int and never as text or bytes, so a
+        // row keyed `42` is found and `forty-two` is refused, not reinterpreted.
+        assert_eq!(
+            key_candidates("42", Some("Int")).unwrap(),
+            vec![TypedKey::Int(42)]
+        );
+        assert_eq!(
+            key_candidates("-7", Some("Int")).unwrap(),
+            vec![TypedKey::Int(-7)]
+        );
+        assert!(key_candidates("forty-two", Some("Int")).is_err());
+        assert_eq!(
+            key_candidates("42", Some("UInt")).unwrap(),
+            vec![TypedKey::UInt(42)]
+        );
+        assert!(key_candidates("-7", Some("UInt")).is_err());
+    }
+
+    #[test]
+    fn integer_spellings_name_the_integer_key_after_text_and_bytes() {
+        use super::key_candidates;
+        use orna_repository_v1::TypedKey;
+        let five = key_candidates("5", None).unwrap();
+        assert_eq!(five.last(), Some(&TypedKey::Int(5)), "{five:?}");
+        assert_eq!(five.first(), Some(&TypedKey::Text("5".to_owned())));
+        let negative = key_candidates("-3", None).unwrap();
+        assert_eq!(negative.last(), Some(&TypedKey::Int(-3)), "{negative:?}");
+        let large = key_candidates("18446744073709551615", None).unwrap();
+        assert_eq!(large.last(), Some(&TypedKey::UInt(u64::MAX)), "{large:?}");
     }
 }

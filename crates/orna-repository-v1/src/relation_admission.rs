@@ -39,6 +39,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, IndexGeneration, IndexTreeRef,
+    HistoricalFormatContext,
     PrivateCommit, Repository, RepositoryError, RepositoryFormat, RepositoryFormatContext, Uuid,
     allocator::AllocatorError,
     bind_tree_entry_in_index,
@@ -46,9 +47,10 @@ use crate::{
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        RowIndexMutation, StoreRelationEntry,
+        RowIndexMutation, StoreRelationEntry, hex_decode, hex_encode,
         sync_object_files,
     },
+    overflow::{OverflowStore, OverflowWriter},
     row_store::{
         KeyRange, MAX_ROW_RANGE_LIMIT, RowDependency, RowEntry, RowMapSnapshot, RowValue, TypedKey,
     },
@@ -109,6 +111,28 @@ pub const LEGACY_OBJECT_IDENTITY_SIDECAR_PATH: &str = ".orna/object-identities.c
 const STORE_PATH: &str = ".orna/store";
 const STAGED_CANDIDATE_MESSAGE: &str = "orna: staged candidate";
 
+/// Stable relation UUID of the sealed explicit-rekey log (ORNA-EVOL-007,
+/// ORNA-MUT-010): one row per logical rekey a publication committed. It is
+/// the UUIDv8 derived from SHA-256 of `orna.system-relation.v1`, NUL and
+/// `orna.object-rekey`.
+pub const OBJECT_REKEY_RELATION_ID: [u8; 16] = [
+    0x17, 0xb5, 0xc3, 0x0d, 0xc4, 0x72, 0x8b, 0xba, 0xb6, 0xf2, 0x09, 0xdb, 0x6f, 0xad, 0x56, 0x1f,
+];
+/// Field UUIDs of the rekey descriptor, derived like the relation UUID from
+/// `orna.object-rekey.<field>`.
+const REKEY_ORDINAL_FIELD: [u8; 16] = [
+    0x0a, 0xa4, 0x2f, 0xc2, 0xc7, 0xeb, 0x8d, 0x3e, 0xa1, 0x50, 0xf0, 0xec, 0xe1, 0xdf, 0x2d, 0xd5,
+];
+const REKEY_OLD_KEY_FIELD: [u8; 16] = [
+    0x57, 0x3e, 0xe3, 0x4b, 0x3c, 0x58, 0x84, 0xb5, 0xa8, 0xc2, 0x0f, 0x05, 0xbc, 0x79, 0x67, 0xb4,
+];
+const REKEY_NEW_KEY_FIELD: [u8; 16] = [
+    0xb0, 0xfa, 0x34, 0xe6, 0x82, 0xc0, 0x87, 0xb9, 0x96, 0xcf, 0x6a, 0x10, 0x74, 0xe1, 0x27, 0xc2,
+];
+const REKEY_RELATION_FIELD: [u8; 16] = [
+    0xe1, 0x13, 0x1f, 0x2c, 0xf6, 0x74, 0x82, 0x24, 0x96, 0x75, 0xdd, 0x1b, 0x86, 0xbf, 0x9f, 0x25,
+];
+
 /// Failures of store bootstrap, relation admission and identity reads.
 #[derive(Debug)]
 pub enum RelationAdmissionError {
@@ -132,6 +156,12 @@ pub enum RelationAdmissionError {
     Evolution {
         relation_id: [u8; 16],
         refusal: EvolutionRefusal,
+    },
+    /// The staged store keeps a relation `HEAD` commits that no admitted
+    /// staged table owns, so its rows would not belong to a reachable table
+    /// (ORNA-REPO-004).
+    OrphanRelation {
+        relation_id: [u8; 16],
     },
     /// The staged store lacks a relation `HEAD` commits for a table the
     /// staged source still declares, so committing it would drop the
@@ -158,6 +188,13 @@ pub enum RelationAdmissionError {
     NoStagedStore,
     /// A table's hidden allocator ref could not be read.
     Allocator(AllocatorError),
+    /// A rekey log record is not a valid system relation entry.
+    InvalidRekeyLog,
+    /// A source file to restage is not a regular file the captured index
+    /// tracks, or it names Orna metadata.
+    SourceNotStaged {
+        path: String,
+    },
     Format(FormatContextError),
     Repository(RepositoryError),
     Graph(GraphError),
@@ -189,6 +226,11 @@ impl std::fmt::Display for RelationAdmissionError {
                 "relation {} cannot evolve to the staged schema: {refusal}",
                 Uuid::from_bytes(*relation_id)
             ),
+            Self::OrphanRelation { relation_id } => write!(
+                formatter,
+                "relation {} has no admitted table in the staged source; removing a table is not admitted",
+                Uuid::from_bytes(*relation_id)
+            ),
             Self::CommittedRelationUnstaged { relation_id } => write!(
                 formatter,
                 "the staged store lacks committed relation {}; restore it with `git restore --staged .orna/store`",
@@ -210,6 +252,11 @@ impl std::fmt::Display for RelationAdmissionError {
             }
             Self::NoStagedStore => formatter.write_str("the Git index stages no .orna/store"),
             Self::Allocator(error) => write!(formatter, "{error}"),
+            Self::InvalidRekeyLog => formatter.write_str("an object rekey log record is invalid"),
+            Self::SourceNotStaged { path } => write!(
+                formatter,
+                "{path} is not a source file the index tracks; stage it with `git add`"
+            ),
             Self::Format(error) => write!(formatter, "format context: {error:?}"),
             Self::Repository(error) => write!(formatter, "{error}"),
             Self::Graph(error) => write!(formatter, "native graph operation failed: {error}"),
@@ -420,9 +467,12 @@ fn sealed_descriptor(
 }
 
 /// Whether `relation_id` names one of the store's sealed system relations
-/// (the identity inventory or the allocator summary) rather than a table.
+/// (the identity inventory, the allocator summary or the rekey log) rather
+/// than a table.
 pub fn is_system_relation(relation_id: &[u8; 16]) -> bool {
-    *relation_id == OBJECT_IDENTITY_RELATION_ID || *relation_id == ALLOCATOR_RELATION_ID
+    *relation_id == OBJECT_IDENTITY_RELATION_ID
+        || *relation_id == ALLOCATOR_RELATION_ID
+        || *relation_id == OBJECT_REKEY_RELATION_ID
 }
 
 /// The allocator summary row of `table`: its key and stored fields.
@@ -465,6 +515,298 @@ fn decode_allocator_summary_row(
             Ok((*table.as_bytes(), watermark.clone()))
         }
         _ => Err(invalid()),
+    }
+}
+
+/// The sealed closed descriptor of the rekey log relation. Its key is the
+/// dense publication ordinal; its stored fields are the old canonical key,
+/// the new canonical key and the relation UUID, in ascending field-UUID order.
+/// A stored `Blob` field must hold a ROV-3 content reference, so the canonical
+/// ORP key bytes are stored as their lowercase hex `Str` spelling instead.
+pub fn object_rekey_descriptor() -> Result<SchemaDescriptor, RelationAdmissionError> {
+    let field = |id: [u8; 16], name: &str, primitive: &str, role: u64| {
+        Raw::Array(vec![
+            uuid_value(id),
+            Raw::Text(name.to_owned()),
+            Raw::Array(vec![Raw::Int(0.into()), Raw::Text(primitive.to_owned())]),
+            Raw::Int(role.into()),
+            Raw::Array(vec![Raw::Int(0.into())]),
+        ])
+    };
+    SchemaDescriptor::new(Raw::Map(vec![
+        (Raw::Int(0.into()), Raw::Int(1.into())),
+        (Raw::Int(1.into()), uuid_value(OBJECT_REKEY_RELATION_ID)),
+        (
+            Raw::Int(2.into()),
+            Raw::Array(vec![uuid_value(REKEY_ORDINAL_FIELD)]),
+        ),
+        (
+            Raw::Int(3.into()),
+            Raw::Array(vec![
+                field(REKEY_ORDINAL_FIELD, "ordinal", "Int", 0),
+                field(REKEY_OLD_KEY_FIELD, "old_key", "Str", 1),
+                field(REKEY_NEW_KEY_FIELD, "new_key", "Str", 1),
+                field(REKEY_RELATION_FIELD, "relation", "Uuid", 1),
+            ]),
+        ),
+        (Raw::Int(4.into()), Raw::Array(Vec::new())),
+    ]))
+    .map_err(|_| RelationAdmissionError::InvalidRekeyLog)
+}
+
+/// One committed logical rekey (ORNA-EVOL-007, ORNA-MUT-010): its dense
+/// publication ordinal, the stable relation it moved a row in, and the exact
+/// canonical old and new row addresses. Ordinals run from zero in publication
+/// order.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedRekey {
+    ordinal: u64,
+    relation_id: [u8; 16],
+    old_key: Vec<u8>,
+    new_key: Vec<u8>,
+}
+
+impl CommittedRekey {
+    pub const fn ordinal(&self) -> u64 {
+        self.ordinal
+    }
+
+    pub const fn relation_id(&self) -> &[u8; 16] {
+        &self.relation_id
+    }
+
+    pub fn old_key(&self) -> &[u8] {
+        &self.old_key
+    }
+
+    pub fn new_key(&self) -> &[u8] {
+        &self.new_key
+    }
+
+    /// The row key: the ordinal as a canonical Int.
+    fn row_key(&self) -> TypedKey {
+        TypedKey::UInt(self.ordinal)
+    }
+
+    /// The stored fields in descriptor (field-UUID) order: `old_key` and
+    /// `new_key` as their lowercase hex spellings, then `relation`.
+    fn row_fields(&self) -> Result<Vec<u8>, RelationAdmissionError> {
+        Value::new(Raw::Array(vec![
+            Raw::Text(hex_encode(&self.old_key)),
+            Raw::Text(hex_encode(&self.new_key)),
+            uuid_value(self.relation_id),
+        ]))
+        .and_then(|value| value.encode())
+        .map_err(|_| RelationAdmissionError::InvalidRekeyLog)
+    }
+
+    fn from_row(key: &TypedKey, fields: &[u8]) -> Result<Self, RelationAdmissionError> {
+        // The writer emits the ordinal as `UInt`, the one spelling a
+        // non-negative canonical Int key decodes to.
+        let TypedKey::UInt(ordinal) = key else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let Raw::Array(values) = decode_canonical_storage_value(fields)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?
+        else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let [
+            Raw::Text(old_key),
+            Raw::Text(new_key),
+            Raw::Tag(37, relation),
+        ] = values.as_slice()
+        else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let Raw::Bytes(relation) = relation.as_ref() else {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        };
+        let relation_id = <[u8; 16]>::try_from(relation.as_slice())
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let old_key = canonical_key_from_hex(old_key)?;
+        let new_key = canonical_key_from_hex(new_key)?;
+        if old_key == new_key {
+            return Err(RelationAdmissionError::InvalidRekeyLog);
+        }
+        Ok(Self {
+            ordinal: *ordinal,
+            relation_id,
+            old_key,
+            new_key,
+        })
+    }
+}
+
+/// Decodes one rekey log address: the canonical lowercase hex spelling
+/// `hex_encode` writes, naming a canonical ORP key.
+fn canonical_key_from_hex(text: &str) -> Result<Vec<u8>, RelationAdmissionError> {
+    let key = hex_decode(text).ok_or(RelationAdmissionError::InvalidRekeyLog)?;
+    TypedKey::decode_canonical(&key).map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+    Ok(key)
+}
+
+/// Reads the whole rekey log of one format-3 snapshot, validating each row
+/// against the sealed descriptor and checking the ordinals are dense.
+fn read_rekey_rows(
+    format: &HistoricalFormatContext,
+) -> Result<Vec<CommittedRekey>, RelationAdmissionError> {
+    let rows = format.load_row_map(OBJECT_REKEY_RELATION_ID)?;
+    let graph = format.open_native_graph(&rows)?;
+    let descriptor = object_rekey_descriptor()?;
+    if graph.read_schema_descriptor(&graph.open_read_scope()?)? != descriptor {
+        return Err(RelationAdmissionError::InvalidRekeyLog);
+    }
+    let mut log = Vec::new();
+    let mut lower = None;
+    loop {
+        // A fresh scope per page keeps every bounded range read inside its
+        // own object budget.
+        let scope = graph.open_read_scope()?;
+        let range = KeyRange::new(lower.clone(), None, MAX_ROW_RANGE_LIMIT)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let page = graph.range_rows(&range, &scope)?;
+        let full = page.len() == MAX_ROW_RANGE_LIMIT;
+        for row in &page {
+            // A long address is stored through the overflow graph, as its own
+            // field value or with the whole row, so the tuple is read back and
+            // expanded through the graph rather than taken from the page.
+            let fields = graph.stored_row_fields(row, &scope)?;
+            let key = row
+                .key()
+                .canonical_bytes()
+                .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+            descriptor
+                .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key, &fields)
+                .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+            let rekey = CommittedRekey::from_row(row.key(), &fields)?;
+            if rekey.ordinal != log.len() as u64 {
+                return Err(RelationAdmissionError::InvalidRekeyLog);
+            }
+            log.push(rekey);
+        }
+        if !full {
+            break;
+        }
+        // Ordinals are dense, so the next page starts at the next ordinal.
+        lower = Some(TypedKey::UInt(log.len() as u64));
+    }
+    if log.len() as u64 != rows.version().row_count().unwrap_or(u64::MAX) {
+        return Err(RelationAdmissionError::InvalidRekeyLog);
+    }
+    Ok(log)
+}
+
+/// Writes the rekey log's schema node and its complete row map. Each row is
+/// lowered like any other row (store-format-3 §5): an address too long to
+/// stay inline is lowered to its own kind-3 node first, and the row entry
+/// itself only when it still exceeds the inline limits.
+fn write_rekey_relation(
+    writer: &mut NodeWriter<'_>,
+    log: &[CommittedRekey],
+) -> Result<StoreRelationEntry, RelationAdmissionError> {
+    let descriptor = object_rekey_descriptor()?;
+    let (schema_oid, schema_digest) = write_schema_node(writer, &descriptor)?;
+    let mut rows = Vec::with_capacity(log.len());
+    let mut overflow = OverflowWriter::new(&mut *writer);
+    for rekey in log {
+        let key = rekey.row_key();
+        let key_bytes = key
+            .canonical_bytes()
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        let fields = rekey.row_fields()?;
+        descriptor
+            .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key_bytes, &fields)
+            .map_err(|_| RelationAdmissionError::InvalidRekeyLog)?;
+        rows.push(RowEntry::new(key, overflow.lower_row(&fields)?));
+    }
+    rows.sort_by(|left, right| left.key().cmp(right.key()));
+    let primary_root = NativeGraphContext::build_canonical_ordered_map(
+        &rows_domain(&OBJECT_REKEY_RELATION_ID, &schema_digest),
+        &rows,
+        &mut |node| writer.node(node),
+    )?;
+    Ok(StoreRelationEntry {
+        relation_id: OBJECT_REKEY_RELATION_ID,
+        schema_oid,
+        primary_root,
+        secondary_root: None,
+        row_count: rows.len() as u64,
+    })
+}
+
+impl Repository {
+    /// Appends a publication's logical rekeys to the sealed rekey log of
+    /// `store_root` and returns the new store root. The log is rebuilt whole
+    /// from the prior rows the base snapshot `format` carries plus the new
+    /// ones, and every other relation entry of `store_root` is kept. An empty
+    /// publication leaves the store untouched.
+    pub fn append_rekey_log(
+        &self,
+        format: &HistoricalFormatContext,
+        store_root: &NativeOid,
+        rekeys: &[crate::PublicationLogicalRowRekey],
+    ) -> Result<NativeOid, RelationAdmissionError> {
+        if rekeys.is_empty() {
+            return Ok(store_root.clone());
+        }
+        let database_id = *format
+            .database_id()
+            .ok_or(RelationAdmissionError::InvalidRekeyLog)?
+            .as_bytes();
+        let entries = NativeGraphContext::read_store_relations(
+            self,
+            store_root.algorithm(),
+            database_id,
+            store_root,
+        )?;
+        let mut log = if entries
+            .iter()
+            .any(|entry| entry.relation_id == OBJECT_REKEY_RELATION_ID)
+        {
+            read_rekey_rows(format)?
+        } else {
+            Vec::new()
+        };
+        for rekey in rekeys {
+            log.push(CommittedRekey {
+                ordinal: log.len() as u64,
+                relation_id: rekey.relation_id(),
+                old_key: rekey.old_address().to_vec(),
+                new_key: rekey.new_address().to_vec(),
+            });
+        }
+        let mut writer = NodeWriter::new(self)?;
+        let rekey_entry = write_rekey_relation(&mut writer, &log)?;
+        let mut merged = entries
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry))
+            .collect::<BTreeMap<_, _>>();
+        merged.insert(OBJECT_REKEY_RELATION_ID, rekey_entry);
+        let merged = merged.into_values().collect::<Vec<_>>();
+        let root = write_store_root(&mut writer, database_id, &merged)?;
+        writer.sync()?;
+        Ok(root)
+    }
+
+    /// The committed rekey log of a format-3 snapshot, in publication order.
+    /// Empty when the snapshot has no rekey log.
+    pub fn read_committed_rekeys(
+        &self,
+        commit: &GitCommitRef,
+    ) -> Result<Vec<CommittedRekey>, RelationAdmissionError> {
+        let format = self.open_format_context_at_selector(commit.as_str())?;
+        let Some(database_id) = format.database_id() else {
+            return Ok(Vec::new());
+        };
+        if format.repository_format() != RepositoryFormat::Format3
+            || !self
+                .store_relations_in(commit.as_str(), *database_id.as_bytes())?
+                .contains(&OBJECT_REKEY_RELATION_ID)
+        {
+            return Ok(Vec::new());
+        }
+        read_rekey_rows(&format)
     }
 }
 
@@ -730,34 +1072,13 @@ impl Repository {
             watermarks.insert(relation.relation_id, watermark);
         }
         let mut writer = NodeWriter::new(self)?;
-        // An unborn branch commits no relation.
-        let committed: BTreeMap<[u8; 16], NativeOid> = match staged.index.head() {
-            Some(head) => self
-                .store_entries_in(head.as_str(), database_id)?
-                .into_iter()
-                .map(|entry| (entry.relation_id, entry.schema_oid))
-                .collect(),
-            None => BTreeMap::new(),
-        };
-        let (base, evolution_source) = match staged.store_root.as_ref() {
-            // `git rm --cached` leaves skip-worktree payload entries in the
-            // index, so the store tree survives while some node data does
-            // not. A committed relation whose node is absent is unstaged,
-            // not a corrupt store (ORNA-STAGE-004 refuses the candidate).
-            Some(root) => (
-                NativeGraphContext::read_store_relations(self, writer.algorithm, database_id, root)
-                    .map_err(|error| match (error, committed.keys().next()) {
-                        (GraphError::MissingNodeData, Some(relation_id)) => {
-                            RelationAdmissionError::CommittedRelationUnstaged {
-                                relation_id: *relation_id,
-                            }
-                        }
-                        (error, _) => error.into(),
-                    })?,
-                Some(self.open_private_candidate_format_context(&staged.candidate)?),
-            ),
-            None => (Vec::new(), None),
-        };
+        let committed = self.committed_schema_nodes(staged)?;
+        let base = self.staged_store_entries(&writer, staged, &committed)?;
+        let evolution_source = staged
+            .store_root
+            .as_ref()
+            .map(|_| self.open_private_candidate_format_context(&staged.candidate))
+            .transpose()?;
         let admitted = admit_relations(
             &mut writer,
             base,
@@ -769,11 +1090,125 @@ impl Repository {
             changes,
         )?;
         let store_root = write_store_root(&mut writer, database_id, &admitted.entries)?;
+        self.install_staged_store_root(&writer, staged, store_root, admitted, &[])
+    }
+
+    /// Restages only the identity inventory of the staged store, as an
+    /// explicit semantic rename (`orna mv`) does: every table relation, its
+    /// schema node and its rows are kept exactly, and the inventory relation
+    /// is rewritten from `identities` (ORNA-OBJECT-003, ORNA-META-001). Each
+    /// table relation must stay owned by an active identity, so a rename
+    /// cannot orphan committed rows. A staged index without a store gets one
+    /// holding only the inventory; one whose `HEAD` commits relations it
+    /// lacks is refused as unstaged.
+    ///
+    /// `sources` replaces the staged bytes of source files the captured index
+    /// already tracks, keeping each file's mode, so the renamed declaration
+    /// is staged with the inventory that names it, as `git mv` stages a
+    /// move. Every other staged and unstaged path is kept. The store and the
+    /// sources are installed as one index update under the same guards as
+    /// [`Self::stage_store_admission`]: the captured index and `HEAD` must be
+    /// unchanged, and the legacy identity sidecar leaves the index.
+    pub fn stage_object_identities(
+        &self,
+        staged: &StagedCandidate,
+        identities: &[StoredObjectIdentity],
+        sources: &[(&str, &[u8])],
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
+        let database_id = *staged.database_id.as_bytes();
+        let mut writer = NodeWriter::new(self)?;
+        let committed = self.committed_schema_nodes(staged)?;
+        let mut entries = self
+            .staged_store_entries(&writer, staged, &committed)?
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(relation_id) = committed
+            .keys()
+            .find(|relation_id| !entries.contains_key(*relation_id))
+        {
+            return Err(RelationAdmissionError::CommittedRelationUnstaged {
+                relation_id: *relation_id,
+            });
+        }
+        let owners = identities
+            .iter()
+            .filter(|identity| !identity.retired)
+            .map(|identity| identity.id)
+            .collect::<BTreeSet<_>>();
+        if let Some(relation_id) = entries.keys().find(|relation_id| {
+            **relation_id != OBJECT_IDENTITY_RELATION_ID
+                && **relation_id != OBJECT_REKEY_RELATION_ID
+                && !owners.contains(*relation_id)
+        }) {
+            return Err(RelationAdmissionError::OrphanRelation {
+                relation_id: *relation_id,
+            });
+        }
+        let mut blobs = Vec::with_capacity(sources.len());
+        for (path, bytes) in sources {
+            let path = crate::ManagedPath::new(path)?;
+            if path.as_path().starts_with(".orna") {
+                return Err(RelationAdmissionError::SourceNotStaged {
+                    path: path.as_path().display().to_string(),
+                });
+            }
+            blobs.push((path, writer.blob(bytes)?));
+        }
+        entries.insert(
+            OBJECT_IDENTITY_RELATION_ID,
+            write_identity_relation(&mut writer, identities)?,
+        );
+        let created = if committed.contains_key(&OBJECT_IDENTITY_RELATION_ID) {
+            Vec::new()
+        } else {
+            vec![OBJECT_IDENTITY_RELATION_ID]
+        };
+        let entries = entries.into_values().collect::<Vec<_>>();
+        let store_root = write_store_root(&mut writer, database_id, &entries)?;
+        let admitted = AdmittedRelations {
+            entries,
+            created,
+            evolved: Vec::new(),
+            removed: Vec::new(),
+        };
+        self.install_staged_store_root(&writer, staged, store_root, admitted, &blobs)
+    }
+
+    /// The schema node of each relation `HEAD`'s store commits; empty on an
+    /// unborn branch, which commits no relation.
+    fn committed_schema_nodes(
+        &self,
+        staged: &StagedCandidate,
+    ) -> Result<BTreeMap<[u8; 16], NativeOid>, RelationAdmissionError> {
+        let Some(head) = staged.index.head() else {
+            return Ok(BTreeMap::new());
+        };
+        Ok(self
+            .store_entries_in(head.as_str(), *staged.database_id.as_bytes())?
+            .into_iter()
+            .map(|entry| (entry.relation_id, entry.schema_oid))
+            .collect())
+    }
+
+    /// Binds `store_root` at `.orna/store` in the ordinary index, with the
+    /// `sources` blobs at their paths, unless the index already stages
+    /// exactly that store, no source change and no legacy sidecar.
+    fn install_staged_store_root(
+        &self,
+        writer: &NodeWriter<'_>,
+        staged: &StagedCandidate,
+        store_root: NativeOid,
+        admitted: AdmittedRelations,
+        sources: &[(crate::ManagedPath, NativeOid)],
+    ) -> Result<StoreAdmission, RelationAdmissionError> {
         let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
-        let changed = staged.store_root.as_ref() != Some(&store_root) || sidecar_staged;
+        let changed = staged.store_root.as_ref() != Some(&store_root)
+            || sidecar_staged
+            || !sources.is_empty();
         if changed {
             writer.sync()?;
-            self.install_staged_store(staged, &store_root)?;
+            self.install_staged_store(staged, &store_root, sources)?;
         }
         Ok(StoreAdmission {
             store_root,
@@ -784,48 +1219,34 @@ impl Repository {
         })
     }
 
-    /// Stages `identities` as the complete identity inventory of the staged
-    /// store, leaving every other staged relation exactly as it is.
-    ///
-    /// This is how a semantic rename (`orna mv`, an editor rename) moves an
-    /// ObjectId to its new name without committing: the staged store is the
-    /// committed metadata the next `orna commit` reads its identities from
-    /// (ORNA-OBJECT-002, ORNA-OBJECT-003). The store is installed under the
-    /// same locks and stale-index checks as [`Self::stage_store_admission`].
-    /// Returns whether the index changed.
-    pub fn stage_object_identities(
+    /// The validated relation entries of the staged store, empty when the
+    /// index has none. `git rm --cached` leaves skip-worktree payload entries
+    /// in the index, so the store tree survives while some node data does
+    /// not; a committed relation whose node is absent is unstaged, not a
+    /// corrupt store (ORNA-STAGE-004 refuses the candidate).
+    fn staged_store_entries(
         &self,
+        writer: &NodeWriter<'_>,
         staged: &StagedCandidate,
-        identities: &[StoredObjectIdentity],
-    ) -> Result<bool, RelationAdmissionError> {
-        let base_root = staged
-            .store_root
-            .as_ref()
-            .ok_or(RelationAdmissionError::NoStagedStore)?;
-        let database_id = *staged.database_id.as_bytes();
-        let mut writer = NodeWriter::new(self)?;
-        let mut entries = NativeGraphContext::read_store_relations(
+        committed: &BTreeMap<[u8; 16], NativeOid>,
+    ) -> Result<Vec<StoreRelationEntry>, RelationAdmissionError> {
+        let Some(root) = staged.store_root.as_ref() else {
+            return Ok(Vec::new());
+        };
+        NativeGraphContext::read_store_relations(
             self,
             writer.algorithm,
-            database_id,
-            base_root,
-        )?
-        .into_iter()
-        .map(|entry| (entry.relation_id, entry))
-        .collect::<BTreeMap<_, _>>();
-        entries.insert(
-            OBJECT_IDENTITY_RELATION_ID,
-            write_identity_relation(&mut writer, identities)?,
-        );
-        let entries = entries.into_values().collect::<Vec<_>>();
-        let store_root = write_store_root(&mut writer, database_id, &entries)?;
-        let sidecar_staged = self.index_tracks(None, LEGACY_OBJECT_IDENTITY_SIDECAR_PATH)?;
-        if &store_root == base_root && !sidecar_staged {
-            return Ok(false);
-        }
-        writer.sync()?;
-        self.install_staged_store(staged, &store_root)?;
-        Ok(true)
+            *staged.database_id.as_bytes(),
+            root,
+        )
+        .map_err(|error| match (error, committed.keys().next()) {
+            (GraphError::MissingNodeData, Some(relation_id)) => {
+                RelationAdmissionError::CommittedRelationUnstaged {
+                    relation_id: *relation_id,
+                }
+            }
+            (error, _) => error.into(),
+        })
     }
 
     /// The relation UUIDs a format-3 commit's `.orna/store` binds, empty when
@@ -1137,7 +1558,7 @@ impl Repository {
         tree: &IndexTreeRef,
         head: Option<&GitCommitRef>,
     ) -> Result<PrivateCommit, RelationAdmissionError> {
-        let mut command = self.command();
+        let mut command = self.private_commit_command();
         command.args(["commit-tree", tree.as_str()]);
         if let Some(head) = head {
             command.args(["-p", head.as_str()]);
@@ -1225,18 +1646,20 @@ impl Repository {
     }
 
     /// Replaces the ordinary index's `.orna/store` entry with `store_root`
-    /// and drops the legacy identity sidecar, while holding the coordination
-    /// lock and Git's own `index.lock`. A retained publication or checkout
-    /// recovery record owns the index and store worktree until its recovery
-    /// completes, so staging refuses before touching either (22-publication
-    /// recovery table, ORNA-PUB-007; CHECKOUT-3 step 7). The captured index
-    /// and `HEAD` must be unchanged, and the new index is installed by an
-    /// atomic rename. If the index cannot be installed after the store
-    /// worktree moved, the worktree is moved back to the captured store.
+    /// and each `sources` path's staged blob, and drops the legacy identity
+    /// sidecar, while holding the coordination lock and Git's own
+    /// `index.lock`. A retained publication or checkout recovery record owns
+    /// the index and store worktree until its recovery completes, so staging
+    /// refuses before touching either (22-publication recovery table,
+    /// ORNA-PUB-007; CHECKOUT-3 step 7). The captured index and `HEAD` must be
+    /// unchanged, and the new index is installed by an atomic rename. If the
+    /// index cannot be installed after the store worktree moved, the worktree
+    /// is moved back to the captured store.
     fn install_staged_store(
         &self,
         staged: &StagedCandidate,
         store_root: &NativeOid,
+        sources: &[(crate::ManagedPath, NativeOid)],
     ) -> Result<(), RelationAdmissionError> {
         let _coordination = self.acquire_coordination_lock()?;
         self.require_no_pending_publication_recovery_locked()?;
@@ -1280,6 +1703,9 @@ impl Repository {
                     .args(["update-index", "--force-remove", "--"])
                     .arg(LEGACY_OBJECT_IDENTITY_SIDECAR_PATH);
                 self.run(remove)?;
+            }
+            for (path, blob) in sources {
+                self.replace_staged_blob(&candidate_index, path, blob)?;
             }
             let mut write_tree = self.command();
             write_tree
@@ -1334,6 +1760,49 @@ impl Repository {
         })();
         let _ = fs::remove_file(&candidate_index);
         result
+    }
+
+    /// Points the stage-0 entry of `path` in `index` at `blob`, keeping its
+    /// file mode. The path must already be a tracked regular file, so a
+    /// rename never adds, removes or retypes a staged path.
+    fn replace_staged_blob(
+        &self,
+        index: &Path,
+        path: &crate::ManagedPath,
+        blob: &NativeOid,
+    ) -> Result<(), RelationAdmissionError> {
+        let not_staged = || RelationAdmissionError::SourceNotStaged {
+            path: path.as_path().display().to_string(),
+        };
+        let text = path.as_path().to_str().ok_or_else(not_staged)?;
+        let mut list = self.command();
+        list.env("GIT_INDEX_FILE", index)
+            .args(["ls-files", "--stage", "-z", "--"])
+            .arg(path.as_path());
+        let listed = self.run(list)?.stdout;
+        let mut entries = listed.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
+        let entry = entries.next().ok_or_else(not_staged)?;
+        if entries.next().is_some() {
+            return Err(not_staged());
+        }
+        let entry = std::str::from_utf8(entry).map_err(|_| not_staged())?;
+        let (header, listed_path) = entry.split_once('\t').ok_or_else(not_staged)?;
+        let mut fields = header.split(' ');
+        let (Some(mode @ ("100644" | "100755")), Some(_), Some("0"), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            return Err(not_staged());
+        };
+        if listed_path != text {
+            return Err(not_staged());
+        }
+        let mut update = self.command();
+        update
+            .env("GIT_INDEX_FILE", index)
+            .args(["update-index", "--cacheinfo"])
+            .arg(format!("{mode},{},{text}", blob.to_hex()));
+        self.run(update)?;
+        Ok(())
     }
 }
 
@@ -1668,7 +2137,9 @@ fn write_store_root(
 }
 
 /// Writes a closed descriptor as a kind-6 schema node over its OGB-2 byte
-/// index. The digest is the SHA-256 of the encoded descriptor.
+/// index. The digest is the format-3 schema identity, `orna.schema.v3` over
+/// the encoded descriptor (store-format-3 section 5), which every rows
+/// domain of the relation binds.
 fn write_schema_node(
     writer: &mut NodeWriter<'_>,
     descriptor: &SchemaDescriptor,
@@ -1676,7 +2147,7 @@ fn write_schema_node(
     let bytes = descriptor
         .encode()
         .map_err(|_| GraphError::NonCanonicalData)?;
-    let schema_digest: [u8; 32] = Sha256::digest(&bytes).into();
+    let schema_digest = crate::native_graph::schema_identity_v3(&bytes);
     let byte_root = write_byte_index(writer, &bytes)?.ok_or(GraphError::InvalidByteIndex)?;
     let schema_oid = writer.node(&NodeData::Schema {
         encoded_length: bytes.len() as u64,
@@ -1950,6 +2421,20 @@ impl<'a> NodeWriter<'a> {
     }
 }
 
+impl OverflowStore for NodeWriter<'_> {
+    fn oid_width(&self) -> usize {
+        self.algorithm.width()
+    }
+
+    fn write_node(&mut self, node: &NodeData) -> Result<NativeOid, GraphError> {
+        self.node(node)
+    }
+
+    fn write_byte_index(&mut self, bytes: &[u8]) -> Result<NativeOid, GraphError> {
+        write_byte_index(self, bytes)?.ok_or(GraphError::InvalidByteIndex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1992,6 +2477,27 @@ mod tests {
             ALLOCATOR_WATERMARK_FIELD,
             system_uuid("sys.Allocator.watermark")
         );
+        assert_eq!(OBJECT_REKEY_RELATION_ID, system_uuid("orna.object-rekey"));
+        assert_eq!(
+            REKEY_ORDINAL_FIELD,
+            system_uuid("orna.object-rekey.ordinal")
+        );
+        assert_eq!(
+            REKEY_OLD_KEY_FIELD,
+            system_uuid("orna.object-rekey.old_key")
+        );
+        assert_eq!(
+            REKEY_NEW_KEY_FIELD,
+            system_uuid("orna.object-rekey.new_key")
+        );
+        assert_eq!(
+            REKEY_RELATION_FIELD,
+            system_uuid("orna.object-rekey.relation")
+        );
+        // The descriptor and the row codec list fields in this order.
+        assert!(REKEY_ORDINAL_FIELD < REKEY_OLD_KEY_FIELD);
+        assert!(REKEY_OLD_KEY_FIELD < REKEY_NEW_KEY_FIELD);
+        assert!(REKEY_NEW_KEY_FIELD < REKEY_RELATION_FIELD);
     }
 
     #[test]
@@ -2019,6 +2525,131 @@ mod tests {
             ),
             Err(RelationAdmissionError::InvalidAllocatorSummary)
         ));
+    }
+
+    #[test]
+    fn rekey_rows_round_trip_through_the_sealed_descriptor() {
+        let descriptor = object_rekey_descriptor().expect("sealed descriptor is valid");
+        let text_key = |text: &str| TypedKey::Text(text.to_owned()).canonical_bytes().unwrap();
+        let rekey = CommittedRekey {
+            ordinal: 3,
+            relation_id: [0x11; 16],
+            old_key: text_key("london"),
+            new_key: text_key("paris"),
+        };
+        let row_key = rekey.row_key();
+        let key = row_key.canonical_bytes().unwrap();
+        assert_eq!(key, [0x03]);
+        let fields = rekey.row_fields().unwrap();
+        descriptor
+            .validate_stored_row(OBJECT_REKEY_RELATION_ID, &key, &fields)
+            .expect("a rekey row matches the sealed descriptor");
+        assert_eq!(CommittedRekey::from_row(&row_key, &fields).unwrap(), rekey);
+        assert_eq!(
+            CommittedRekey::from_row(&TypedKey::decode_canonical(&key).unwrap(), &fields).unwrap(),
+            rekey
+        );
+        assert!(matches!(
+            CommittedRekey::from_row(&TypedKey::Text("3".to_owned()), &fields),
+            Err(RelationAdmissionError::InvalidRekeyLog)
+        ));
+
+        let row = |old: &str, new: &str| {
+            Value::new(Raw::Array(vec![
+                Raw::Text(old.to_owned()),
+                Raw::Text(new.to_owned()),
+                uuid_value([0x11; 16]),
+            ]))
+            .and_then(|value| value.encode())
+            .unwrap()
+        };
+        let old = hex_encode(&text_key("london"));
+        let new = hex_encode(&text_key("paris"));
+        for fields in [
+            // Only the lowercase spelling is canonical.
+            row(&old.to_uppercase(), &new),
+            // An odd-length spelling names no byte string.
+            row(&old[1..], &new),
+            // A non-shortest Int is not a canonical ORP key.
+            row("1800", &new),
+            // A rekey moves a row to a different address.
+            row(&old, &old),
+        ] {
+            assert!(matches!(
+                CommittedRekey::from_row(&row_key, &fields),
+                Err(RelationAdmissionError::InvalidRekeyLog)
+            ));
+        }
+    }
+
+    /// store-format-3 §5: a rekey log row is lowered bottom-up like every
+    /// other row. An address whose hex spelling passes 8 KiB is lowered to
+    /// its own kind-3 node and its row stays inline, naming that node with
+    /// tag 60113; a row whose addresses fit inline but whose tuple does not
+    /// is lowered whole. The log's primary map stores exactly those values.
+    #[test]
+    fn rekey_log_rows_lower_long_addresses_first() {
+        use crate::native_graph::{CborValue, decode_canonical_content};
+
+        let (_directory, repository) = initialized_repository();
+        let mut writer = NodeWriter::new(&repository).unwrap();
+        let text_key = |letter: &str, length: usize| {
+            TypedKey::Text(letter.repeat(length))
+                .canonical_bytes()
+                .unwrap()
+        };
+        let log = [
+            // 5,000 letters spell about 10 KiB of hex.
+            CommittedRekey {
+                ordinal: 0,
+                relation_id: [0x11; 16],
+                old_key: text_key("o", 5_000),
+                new_key: text_key("n", 5),
+            },
+            // 3,000 letters spell about 6 KiB: each address fits, the row not.
+            CommittedRekey {
+                ordinal: 1,
+                relation_id: [0x11; 16],
+                old_key: text_key("p", 3_000),
+                new_key: text_key("q", 3_000),
+            },
+        ];
+        let entry = write_rekey_relation(&mut writer, &log).unwrap();
+
+        let rows = log
+            .iter()
+            .map(|rekey| {
+                let fields = rekey.row_fields().unwrap();
+                let value = OverflowWriter::new(&mut writer).lower_row(&fields).unwrap();
+                RowEntry::new(rekey.row_key(), value)
+            })
+            .collect::<Vec<_>>();
+        let RowValue::Inline { encoded, .. } = rows[0].value() else {
+            panic!("a row with one long address stays inline");
+        };
+        let CborValue::Array(fields) = decode_canonical_content(encoded).unwrap() else {
+            panic!("a row is a field tuple");
+        };
+        assert!(
+            matches!(fields[0], CborValue::Tag(60_113, _)),
+            "the long old address is lowered alone"
+        );
+        assert!(matches!(fields[1], CborValue::Text(_)));
+        assert!(
+            matches!(rows[1].value(), RowValue::Overflow(_)),
+            "a tuple still over 8 KiB is lowered whole"
+        );
+
+        let (_, schema_digest) =
+            write_schema_node(&mut writer, &object_rekey_descriptor().unwrap()).unwrap();
+        let primary_root = NativeGraphContext::build_canonical_ordered_map(
+            &rows_domain(&OBJECT_REKEY_RELATION_ID, &schema_digest),
+            &rows,
+            &mut |node| writer.node(node),
+        )
+        .unwrap();
+        assert_eq!(entry.primary_root, primary_root);
+        assert_eq!(entry.row_count, 2);
     }
 
     #[test]
@@ -2157,6 +2788,21 @@ mod tests {
             &identities_for(relations),
             CommittedRelationChanges::Allowed,
         )
+    }
+
+    #[test]
+    fn private_carrier_capture_needs_no_configured_identity() {
+        let (directory, repository) = initialized_repository();
+        let root = directory.path();
+        // An empty local identity makes an ambient-identity commit fail on
+        // any host, even one with a global identity, because local config
+        // overrides global config. The carrier must not read it.
+        git(root, &["config", "user.name", ""]);
+        git(root, &["config", "user.email", ""]);
+        let staged = repository
+            .capture_staged_candidate()
+            .expect("a private carrier commit must not require a configured identity");
+        assert!(staged.store_root().is_none());
     }
 
     #[test]
@@ -2527,64 +3173,107 @@ mod tests {
         );
     }
 
-    /// Restaging the inventory alone keeps every table relation's entry, and
-    /// an index without a store has no inventory to restage.
+    /// `orna mv` restages only the inventory (ORNA-OBJECT-003): every
+    /// committed relation keeps its exact entry and `HEAD` is untouched. An
+    /// inventory that would leave a relation without an active owner, and a
+    /// capture the index has moved past, are refused without changing it.
     #[test]
-    fn staging_identities_keeps_every_other_relation() {
+    fn identity_restaging_keeps_every_relation_and_refuses_orphans() {
         let (directory, repository) = initialized_repository();
         let root = directory.path();
-        let unstaged = repository.capture_staged_candidate().unwrap();
-        assert!(matches!(
-            repository.stage_object_identities(&unstaged, &identities_for(&[relation(1)])),
-            Err(RelationAdmissionError::NoStagedStore)
-        ));
         let music = relation(1);
         stage(&repository, &[music]).expect("stage the store");
-        let committed = |commit: &GitCommitRef| {
-            repository
-                .open_pinned_format_context(commit.as_str())
-                .unwrap()
-                .load_row_map(music)
-                .unwrap()
-                .version()
-                .clone()
-        };
-        let music_version = committed(&review_and_commit(&repository, "first"));
-
+        git(root, &["commit", "--quiet", "-m", "first table"]);
+        let head = repository.head().unwrap().expect("committed HEAD");
         let staged = repository.capture_staged_candidate().unwrap();
-        assert!(
-            !repository
-                .stage_object_identities(&staged, &identities_for(&[music]))
-                .unwrap(),
-            "the committed inventory is not staged again"
-        );
-        let renamed = vec![StoredObjectIdentity::new(music, 1, "Song", false)];
-        assert!(
-            repository
-                .stage_object_identities(&staged, &renamed)
-                .unwrap()
-        );
-        // Only the store's node objects are staged; the source is untouched.
-        let staged_paths = git(root, &["diff", "--cached", "--name-only"]);
-        assert!(!staged_paths.is_empty());
-        assert!(
-            staged_paths
-                .lines()
-                .all(|path| path.starts_with(".orna/store/")),
-            "{staged_paths}"
-        );
+        let database_id = *staged.database_id().as_bytes();
+        let music_entry = |store_root: &NativeOid| {
+            NativeGraphContext::read_store_relations(
+                &repository,
+                store_root.algorithm(),
+                database_id,
+                store_root,
+            )
+            .expect("read the staged relation map")
+            .into_iter()
+            .find(|entry| entry.relation_id == music)
+            .expect("the table relation is staged")
+        };
+        let committed_entry = music_entry(staged.store_root().expect("a staged store"));
+
+        let orphaned = repository
+            .stage_object_identities(
+                &staged,
+                &[StoredObjectIdentity::new(music, 1, "Table0", true)],
+                &[],
+            )
+            .expect_err("a retired owner orphans its relation");
+        assert!(matches!(
+            orphaned,
+            RelationAdmissionError::OrphanRelation { relation_id } if relation_id == music
+        ));
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+        // Neither metadata nor an untracked path is a source to restage.
+        for path in [".orna/database.orna", "untracked.orna"] {
+            assert!(matches!(
+                repository
+                    .stage_object_identities(
+                        &staged,
+                        &identities_for(&[music]),
+                        &[(path, b"x".as_slice())],
+                    )
+                    .expect_err("only tracked source files are restaged"),
+                RelationAdmissionError::SourceNotStaged { .. }
+            ));
+        }
+        assert_eq!(git(root, &["status", "--porcelain"]), "");
+
+        // The renamed source is staged with the inventory, keeping its mode,
+        // and the worktree copy is left alone.
+        const RENAMED: &[u8] = b"pub table Archive(id: Str) { title: Str, }\n";
+        let worktree_before = fs::read(root.join("main.orna")).unwrap();
+        let renamed = vec![StoredObjectIdentity::new(music, 1, "Archive", false)];
+        let admission = repository
+            .stage_object_identities(&staged, &renamed, &[("main.orna", RENAMED)])
+            .expect("restage the renamed inventory");
+        assert!(admission.changed());
+        assert!(admission.admitted().is_empty());
+        assert_eq!(music_entry(admission.store_root()), committed_entry);
+        assert_eq!(git(root, &["show", ":main.orna"]).as_bytes(), RENAMED);
+        assert!(git(root, &["ls-files", "--stage", "--", "main.orna"]).starts_with("100644 "));
+        assert_eq!(fs::read(root.join("main.orna")).unwrap(), worktree_before);
         let restaged = repository.capture_staged_candidate().unwrap();
         assert_eq!(
             repository.read_staged_object_identities(&restaged).unwrap(),
+            Some(renamed.clone())
+        );
+        assert!(
+            !repository
+                .stage_object_identities(&restaged, &renamed, &[])
+                .unwrap()
+                .changed()
+        );
+        assert!(matches!(
+            repository
+                .stage_object_identities(
+                    &staged,
+                    &[StoredObjectIdentity::new(music, 1, "Backup", false)],
+                    &[],
+                )
+                .expect_err("the first capture is stale"),
+            RelationAdmissionError::StaleIndex
+        ));
+        assert_eq!(
+            repository
+                .read_staged_object_identities(&repository.capture_staged_candidate().unwrap())
+                .unwrap(),
             Some(renamed)
         );
-        // The table relation keeps its schema node and primary map.
-        let renamed_version = committed(&review_and_commit(&repository, "rename"));
         assert_eq!(
-            renamed_version.schema().schema_oid(),
-            music_version.schema().schema_oid()
+            repository.read_committed_object_identities(&head).unwrap(),
+            Some(identities_for(&[music]))
         );
-        assert_eq!(renamed_version.primary_root(), music_version.primary_root());
     }
 
     /// Deterministic bytes that cut Gear chunks at varied lengths.

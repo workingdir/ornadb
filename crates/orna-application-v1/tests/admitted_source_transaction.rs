@@ -6,6 +6,7 @@ use orna_live_v1::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalRespo
 use orna_protocol_v1::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
+    ActivationEffectReport, DeclaredEffectSet,
     Component, ConsumerIdentity, FaultInjector, FaultPoint, RequestIdentity, RequestState,
     RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation,
     TerminalOutcome, WriterLease,
@@ -259,6 +260,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         failed_transaction.mutations,
         failed_transaction.next_digest,
         Arc::new(FailAfterTableWrite),
+        ActivationEffectReport::declare(DeclaredEffectSet::None),
     )
     .unwrap();
     let failed_commit = block_on(runtime.state.commit_staged_table_request_activation(
@@ -375,6 +377,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         committed_transaction.mutations,
         committed_transaction.next_digest,
         committed_transaction.faults,
+        ActivationEffectReport::declare(DeclaredEffectSet::None),
     )
     .unwrap();
     let committed_terminal_bytes = result_bytes(&committed_response);

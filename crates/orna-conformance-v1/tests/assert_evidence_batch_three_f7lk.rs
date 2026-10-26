@@ -3,7 +3,7 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
-use orna_semantic_v1::{AssertionOwner, ModuleInput, analyze};
+use orna_semantic_v1::{AssertionOwner, Catalogue, ModuleInput, analyze, analyze_with_catalogue};
 
 const COHERENT_CANDIDATE: &str =
     include_str!("fixtures/assert-evidence-batch-three/coherent-candidate.orna");
@@ -110,15 +110,18 @@ fn preserves_source_span_order_within_one_module() {
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().next().expect("module assertion plans");
     assert_eq!(plans.len(), 2);
-    assert_eq!(plans[0].dependencies, ["Alpha".to_owned(), "Beta".to_owned()].into());
-    assert_eq!(plans[1].dependencies, ["Alpha".to_owned(), "Gamma".to_owned()].into());
+    assert_eq!(plans[0].dependencies, ["module-shapes.Alpha".to_owned(), "module-shapes.Beta".to_owned()].into());
+    assert_eq!(plans[1].dependencies, ["module-shapes.Alpha".to_owned(), "module-shapes.Gamma".to_owned()].into());
 }
 
 #[test]
 // Specified: ORNA-ASSERT-030.
 fn assert_030_cross_table_assertion_has_module_not_table_ownership() {
     let source = include_str!("fixtures/reference/examples/valid/cross-table-assertion.orna");
-    let analysis = analyze(&[ModuleInput::new("cross-table-assertion.orna", source)]);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("cross-table-assertion.orna", source)],
+        &Catalogue::authoritative_fixture(),
+    );
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plan = analysis.assertions.values().flatten().next().expect("module assertion plan");
     assert_eq!(plan.owner, AssertionOwner::Module);

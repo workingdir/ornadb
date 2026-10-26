@@ -48,8 +48,8 @@ fn strings(values: &[&str]) -> CanonicalValue {
 }
 
 fn pinned_format_sources() -> Vec<(String, String)> {
-    let all_sources = orna_standard::reference_standard_sources_v1();
-    let pinned_profile = orna_standard::reference_standard_profile_v1();
+    let all_sources = orna_standard_sources::reference_standard_sources_v1();
+    let pinned_profile = orna_evaluator_v1::reference_standard_profile();
     all_sources
         .into_iter()
         .filter(|(path, _)| matches!(path.as_str(), "std/format.orna" | "std/text.orna"))

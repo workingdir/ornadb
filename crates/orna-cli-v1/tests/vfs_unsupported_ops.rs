@@ -101,11 +101,9 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
 
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -124,7 +122,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -134,7 +132,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -218,6 +216,131 @@ else:
     );
 }
 
+/// Mounts a `--cwd` view over one row and returns once `data.orna` is visible.
+/// The caller keeps the returned values alive; `mounted` is declared after
+/// `mount_parent` so it unmounts before the mountpoint directory is removed.
+async fn mount_row_for_errno_probe() -> (TempDir, TempDir, MountedFuse, PathBuf) {
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    {
+        let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+            .await
+            .unwrap();
+        let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+        media_commit::commit_source_captures_for_table(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            relation_id,
+            &format_context,
+            "Music",
+            &[media_commit::SourceCaptureRow {
+                key: "london",
+                blob_fields: &[],
+                source_row: initial,
+                ordinal: 0x93,
+                insert_only: true,
+            }],
+        )
+        .await;
+    }
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedFuse {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let document = mountpoint.join("Music/london/data.orna");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !document.exists() {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            panic!("mount exited before exposing the projected document: {status:?}");
+        }
+        assert!(Instant::now() < deadline, "FUSE mount did not expose the row document");
+        thread::sleep(Duration::from_millis(20));
+    }
+    (repository_directory, mount_parent, mounted, document)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+/// VFS-1 errno table (profiles/vfs-1.md:139; 41-vfs.md:103-105): every
+/// unsupported mutation on the live writable mount returns EPERM, never
+/// EROFS, ENOSYS, or a fabricated success.
+async fn unsupported_mutations_follow_vfs1_errno_table() {
+    if !fuse_available() {
+        return;
+    }
+    let (_repository_directory, _mount_parent, _mounted, document) =
+        mount_row_for_errno_probe().await;
+    let row_directory = document.parent().expect("document has a projected row directory");
+    let table_directory = row_directory.parent().expect("row sits under the table directory");
+    let errno = |error: std::io::Error| error.raw_os_error();
+
+    // create outside the editor scratch namespace: no unresolved draft to own it.
+    let created = row_directory.join("extra.txt");
+    assert_eq!(
+        errno(std::fs::File::create(&created).expect_err("create must be refused")),
+        Some(libc::EPERM),
+        "create of a non-scratch row entry must be EPERM"
+    );
+    assert!(!created.exists(), "refused create must not leave an entry");
+
+    // mkdir: plain directory creation does not invent schema/key semantics.
+    let made = row_directory.join("subdirectory");
+    assert_eq!(
+        errno(std::fs::create_dir(&made).expect_err("mkdir must be refused")),
+        Some(libc::EPERM),
+        "mkdir must be EPERM, not the fuser default ENOSYS"
+    );
+    assert!(!made.exists(), "refused mkdir must not leave a directory");
+
+    // rmdir: directory removal is an unsupported mutation.
+    assert_eq!(
+        errno(std::fs::remove_dir(table_directory).expect_err("rmdir must be refused")),
+        Some(libc::EPERM),
+        "rmdir must be EPERM, not the fuser default ENOSYS"
+    );
+    assert!(table_directory.exists(), "refused rmdir must keep the directory");
+
+    // unlink: data.orna is required and never removable.
+    assert_eq!(
+        errno(std::fs::remove_file(&document).expect_err("data.orna unlink must be refused")),
+        Some(libc::EPERM),
+        "data.orna unlink must be EPERM"
+    );
+    assert!(document.exists(), "refused unlink must keep data.orna");
+
+    // rename: cross-directory moves are unchecked and refused (no EXDEV in the spec).
+    let moved_target = table_directory.join("moved.orna");
+    assert_eq!(
+        errno(std::fs::rename(&document, &moved_target).expect_err("cross-directory rename must be refused")),
+        Some(libc::EPERM),
+        "cross-directory rename must be EPERM"
+    );
+    assert!(document.exists() && !moved_target.exists(), "refused rename must not move data.orna");
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 /// ORNA-VFS-015: `edit --row` admits a row while retaining its owned Blob binding.
@@ -235,12 +358,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "{{ title: \"before\", content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"), }}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -267,7 +385,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &blob_captures,
-            source_row: None,
+            source_row: &row_source,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -278,7 +396,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -317,7 +435,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\ncp \"$ORNA_ROW_SOURCE\" \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -336,7 +454,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -353,7 +471,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
     );
     assert!(mounted.child.wait().unwrap().success());
 
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -391,7 +509,7 @@ async fn edit_row_admits_source_and_preserves_blob_binding() {
         "row edit must retain the owner-issued Blob binding"
     );
 
-    let unmount = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let unmount = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),

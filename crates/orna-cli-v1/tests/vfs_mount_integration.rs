@@ -5,10 +5,10 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
     path::Path,
-    process::{Child, Command, Stdio},
+    process::{Child, ChildStdout, Command, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -56,12 +56,87 @@ impl Drop for MountedProcess {
     }
 }
 
+/// A dirty handle on a mounted document, held by a helper process rather than
+/// the test process. A fork from the test process while a handle is open copies
+/// its descriptor, and the copy's close during exec issues a FUSE FLUSH that
+/// EDIT-1 step 5 may accept. Keeping the handle out of the test process means
+/// other tests' forks cannot trigger that flush.
+struct DirtyDocument {
+    child: Child,
+    replies: BufReader<ChildStdout>,
+}
+
+const DIRTY_DOCUMENT_HELPER: &str = r#"import os, sys
+fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC)
+data = sys.argv[2].encode()
+try:
+    while data:
+        data = data[os.write(fd, data):]
+    print("ready", flush=True)
+except OSError as error:
+    print("err%d" % error.errno, flush=True)
+for line in sys.stdin:
+    if line.strip() == "fsync":
+        try:
+            os.fsync(fd)
+            print("ok", flush=True)
+        except OSError as error:
+            print("err%d" % error.errno, flush=True)
+"#;
+
+impl DirtyDocument {
+    /// Opens `path` for writing with truncation in a helper process and writes
+    /// `body` through that handle.
+    fn open_and_write(path: &Path, body: &str) -> Self {
+        let mut child = Command::new("python3")
+            .arg("-c")
+            .arg(DIRTY_DOCUMENT_HELPER)
+            .arg(path)
+            .arg(body)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("python3 starts the dirty document helper");
+        let mut replies = BufReader::new(child.stdout.take().expect("helper stdout"));
+        let mut reply = String::new();
+        replies
+            .read_line(&mut reply)
+            .expect("dirty document helper reply");
+        assert_eq!(
+            reply.trim_end(),
+            "ready",
+            "dirty document helper could not write {}",
+            path.display()
+        );
+        Self { child, replies }
+    }
+
+    /// `fsync`s the handle through the helper, as `File::sync_all` would.
+    fn sync_all(&mut self) {
+        let stdin = self.child.stdin.as_mut().expect("helper stdin");
+        writeln!(stdin, "fsync").expect("send fsync to dirty document helper");
+        let mut reply = String::new();
+        self.replies
+            .read_line(&mut reply)
+            .expect("dirty document fsync reply");
+        assert_eq!(reply.trim_end(), "ok", "dirty document fsync failed");
+    }
+}
+
+impl Drop for DirtyDocument {
+    fn drop(&mut self) {
+        // EOF ends the helper loop; its exit closes the handle as `drop(File)` would.
+        drop(self.child.stdin.take());
+        let _ = self.child.wait();
+    }
+}
+
 fn run_unmount(repository: &Path, mountpoint: &Path) {
     run_unmount_from(repository, Path::new("."), mountpoint);
 }
 
 fn run_unmount_from(repository: &Path, working_directory: &Path, mountpoint: &Path) {
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(working_directory)
         .args([
             "--db",
@@ -169,6 +244,23 @@ fn fuse_test_available() -> bool {
     }
 }
 
+/// Whether python3, which runs the dirty document helper, is available. Its
+/// tests skip with a note when it is missing, and fail under `ORNA_REQUIRE_FUSE=1`.
+fn dirty_document_helper_available() -> bool {
+    let available = Command::new("python3")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !available {
+        assert!(
+            !fuse_test_required(),
+            "ORNA_REQUIRE_FUSE=1 requires python3 for the dirty document helper"
+        );
+        eprintln!("SKIP: python3 is unavailable for the dirty document helper");
+    }
+    available
+}
+
 fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
     if fuse_test_required() {
         return false;
@@ -185,12 +277,52 @@ fn is_optional_fuse_setup_failure(stderr: &str) -> bool {
         .any(|reason| stderr.contains(reason))
 }
 
+/// Decodes the octal escapes (`\040`, `\011`, `\012`, `\134`) the kernel applies to a
+/// /proc/self/mountinfo path field, so a mountpoint containing spaces, tabs, newlines or
+/// backslashes compares equal to its real path. Any other backslash is kept as written.
+fn unescape_mountinfo_field(field: &str) -> String {
+    let bytes = field.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        let is_octal_escape = bytes[index] == b'\\'
+            && index + 3 < bytes.len()
+            && bytes[index + 1..index + 4].iter().all(|digit| (b'0'..=b'7').contains(digit));
+        if is_octal_escape {
+            let value = bytes[index + 1..index + 4]
+                .iter()
+                .fold(0u32, |acc, digit| acc * 8 + u32::from(digit - b'0'));
+            out.push(value as u8);
+            index += 4;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn mountinfo_contains(mountpoint: &Path) -> bool {
+    // The kernel records the resolved mountpoint, so a symlinked TMPDIR must be resolved too.
+    let mountpoint =
+        std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     let mountpoint = mountpoint.to_str().expect("mountpoint is UTF-8");
     std::fs::read_to_string("/proc/self/mountinfo")
         .expect("read Linux mount table")
         .lines()
-        .any(|line| line.split_whitespace().nth(4) == Some(mountpoint))
+        .any(|line| {
+            line.split_whitespace()
+                .nth(4)
+                .is_some_and(|field| unescape_mountinfo_field(field) == mountpoint)
+        })
+}
+
+#[test]
+fn unescape_mountinfo_field_decodes_octal_escapes() {
+    assert_eq!(unescape_mountinfo_field("/tmp/a\\040b"), "/tmp/a b");
+    assert_eq!(unescape_mountinfo_field("x\\011y\\012z\\134w"), "x\ty\nz\\w");
+    assert_eq!(unescape_mountinfo_field("plain/path"), "plain/path");
+    assert_eq!(unescape_mountinfo_field("trailing\\04"), "trailing\\04");
 }
 
 #[tokio::test]
@@ -218,12 +350,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
         "{{\n    title: \"Live in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -246,7 +373,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x80,
         insert_only: true,
     }];
@@ -269,27 +396,47 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     );
     let current = repository.head().unwrap().unwrap();
     let historical_commit = current.clone();
+    let historical_rows = format3::committed_store_rows(&repository, relation_id);
+    // Advance HEAD past the historical commit by publishing a retitled store
+    // row, so a mount that followed HEAD would show the newer title. Rows
+    // live only in the store (ORNA-REPO-004).
     let revised_row = format!(
-        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\"),\n    cover: null,\n}}\n"
+        "{{\n    title: \"Recorded in London\",\n    artist: \"Kieran\",\n    content: {capture},\n    cover: null,\n}}\n"
     );
-    std::fs::write(
-        repository_directory.path().join("Music/london.orna"),
-        &revised_row,
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let revised_context = format3::format3_context_for_snapshot(&repository, current.as_str());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &revised_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &blob_captures,
+            source_row: &revised_row,
+            ordinal: 0x84,
+            insert_only: false,
+        }],
     )
-    .unwrap();
-    format3::git(repository_directory.path(), &["add", "Music/london.orna"]);
-    format3::git(
-        repository_directory.path(),
-        &[
-            "commit",
-            "--quiet",
-            "-m",
-            "update source row after historical commit",
-        ],
-    );
+    .await;
+    drop(state);
     assert_ne!(
         repository.head().unwrap().unwrap(),
         historical_commit
+    );
+    assert_ne!(
+        format3::committed_store_rows(&repository, relation_id)[0].value(),
+        historical_rows[0].value(),
+        "HEAD carries the retitled row"
     );
     let historical_commit_selector = "HEAD~1";
     let (selected_commit, historical_format) = repository
@@ -326,7 +473,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -346,27 +493,8 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 
     let data_path = mountpoint.join("Music/london/data.orna");
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() || !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the row files; root=[{}], Music=[{}], london=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/london")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path(), blob_path.as_path()]) {
+        return;
     }
 
     let output = Command::new("cat")
@@ -516,11 +644,9 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
@@ -537,7 +663,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -563,7 +689,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -581,21 +707,8 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(Instant::now() < deadline, "FUSE mount did not expose the row document");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return;
     }
     std::fs::write(
         repository_directory.path().join("main.orna"),
@@ -618,7 +731,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let editor = scripts.path().join("editor");
     std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -683,11 +796,9 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
         return None;
     }
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -709,7 +820,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -720,7 +831,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -738,24 +849,8 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return None;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the row document"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return None;
     }
     Some(MountedMusicRow {
         mounted,
@@ -780,7 +875,7 @@ impl MountedMusicRow {
         )
         .unwrap();
         std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 self.repository_directory.path().to_str().unwrap(),
@@ -793,36 +888,44 @@ impl MountedMusicRow {
             .expect("run edit --row against mounted absolute row directory")
     }
 
-    /// Commits `source_row` over `Music/london` as a writer outside this mount.
-    async fn replace_row_as_other_writer(&self, source_row: &str) {
+    /// Commits `source_row` over `Music/london` through `orna edit`. The live
+    /// mount owner executes that edit (ORNA-TURSO-005: other local writers
+    /// coordinate with the owner or fail), so HEAD and the row advance without
+    /// the mount's captured baseline following them.
+    fn replace_row_through_owner(&self, source_row: &str) {
+        let editor = self.scripts.path().join("owner-routed-edit");
+        std::fs::write(
+            &editor,
+            format!("#!/bin/sh\nprintf '%s\\n' '{source_row}' > \"$1\"\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+            .arg("--db")
+            .arg(self.repository_directory.path())
+            .args(["edit", "Music/london/data.orna"])
+            .env("EDITOR", &editor)
+            .output()
+            .expect("run orna edit through the mount owner");
+        assert_saved(&output, "owner-routed other-writer edit");
+    }
+
+    /// A writer outside the mount that takes the writer lease directly is
+    /// refused while the mount owns it (ORNA-TURSO-005).
+    async fn assert_direct_writer_refused(&self) {
         let state = RuntimeState::open(&self.repository, self.runtime_identity, self.digest)
             .await
             .unwrap();
-        let writer = state
+        let Err(refusal) = state
             .acquire_lease(self.runtime_identity.repository_id)
             .await
-            .unwrap();
-        let head = self.repository.head().unwrap().unwrap();
-        let format_context =
-            format3::format3_context_for_snapshot(&self.repository, head.as_str());
-        let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
-        media_commit::commit_source_captures_for_table(
-            &self.repository,
-            &state,
-            writer,
-            &mut bindings,
-            self.relation_id,
-            &format_context,
-            "Music",
-            &[media_commit::SourceCaptureRow {
-                key: "london",
-                blob_fields: &[],
-                source_row: Some(source_row),
-                ordinal: 0x9a,
-                insert_only: false,
-            }],
-        )
-        .await;
+        else {
+            panic!("a direct foreign lease must be refused while the mount owns the writer");
+        };
+        assert!(
+            matches!(refusal, orna_runtime_v1::RuntimeError::LeaseHeld),
+            "a direct foreign lease is refused as LeaseHeld: {refusal:?}"
+        );
     }
 
     /// The `Music/london` row bytes the store holds now. Call after `unmount`.
@@ -895,7 +998,8 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
         return;
     };
     assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
-    row.replace_row_as_other_writer("{ title: \"other\", }\n").await;
+    row.assert_direct_writer_refused().await;
+    row.replace_row_through_owner("{ title: \"other\", }");
     let repository = row.repository_directory.path().to_path_buf();
     std::fs::write(repository.join("notes.txt"), "advance HEAD\n").unwrap();
     format3::git(&repository, &["add", "notes.txt"]);
@@ -924,6 +1028,64 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-008/009/024: a dirty handle whose baseline the owner's `orna edit`
+/// advanced is stale. Its close flush is refused and retained as a draft that
+/// blocks unmount, the mount shows the owner's accepted row, and a save against
+/// that row resolves the draft.
+async fn cwd_mount_close_flush_after_owner_routed_edit_is_stale() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let document = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"stale close\", }\n",
+    );
+    row.replace_row_through_owner("{ title: \"other\", }");
+    drop(document);
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount after the stale close");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted the stale candidate: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna")
+            && diagnostic.contains("sys.vfs.stale_edit"),
+        "unmount names the retained stale draft and its cause: {diagnostic}"
+    );
+    let shown = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        shown.contains("other") && !shown.contains("stale close"),
+        "the mount shows the owner's accepted row, not the stale candidate: {shown}"
+    );
+
+    let mut resolving = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"after refresh\", }\n",
+    );
+    resolving.sync_all();
+    drop(resolving);
+    row.unmount();
+    assert_title(&row.stored_row().await, "after refresh");
+}
+
+#[tokio::test]
 /// ORNA-VFS-005: a HEAD rename of a mounted table keeps saves on the pinned
 /// declaration name the mounted row mutations address.
 async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
@@ -931,7 +1093,7 @@ async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
         return;
     };
     let repository = row.repository_directory.path().to_path_buf();
-    let rename = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let rename = Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(&repository)
         .args(["mv", "Music", "Archive"])
         .output()
@@ -964,11 +1126,9 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
@@ -985,7 +1145,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -998,7 +1158,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("history");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1017,21 +1177,8 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     };
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !document_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("historical mount exited {status}: {stderr}");
-        }
-        assert!(Instant::now() < deadline, "historical mount did not expose the row document");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+        return;
     }
 
     let scripts = TempDir::new().unwrap();
@@ -1039,7 +1186,7 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let marker = scripts.path().join("editor-was-run");
     std::fs::write(&editor, "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n").unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1082,12 +1229,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
         "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1110,7 +1252,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x91,
         insert_only: true,
     }];
@@ -1147,7 +1289,7 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1164,24 +1306,8 @@ async fn cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_ide
         mountpoint: mountpoint.clone(),
     };
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the captured Blob"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[blob_path.as_path()]) {
+        return;
     }
 
     let scratch_path = mountpoint.join("Music/london/.content.mp3.replace");
@@ -1240,12 +1366,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         "{{\n    content: sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 65536), \"audio/mpeg\"),\n}}\n"
     );
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1268,7 +1389,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x91,
         insert_only: true,
     }];
@@ -1304,7 +1425,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
      let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1321,27 +1442,8 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         mountpoint: mountpoint.clone(),
     };
     let blob_path = mountpoint.join("Music/london/content.mp3");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !blob_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose the Blob; root=[{}], Music=[{}], london=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/london")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[blob_path.as_path()]) {
+        return;
     }
 
 
@@ -1413,12 +1515,8 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     );
     let good_row =
         format!("{{\n    title: \"good\",\n    content: {capture},\n    duplicate: null,\n}}\n",);
-    let source_rows = [
-        ("Music/bad.orna", bad_row.as_str()),
-        ("Music/good.orna", good_row.as_str()),
-    ];
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_rows(source, "Music", &source_rows);
+        format3::format3_repository_with_context(source, "Music");
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
@@ -1443,14 +1541,14 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
         media_commit::SourceCaptureRow {
             key: "bad",
             blob_fields: &duplicate_blob_fields,
-            source_row: None,
+            source_row: &bad_row,
             ordinal: 0x81,
             insert_only: true,
         },
         media_commit::SourceCaptureRow {
             key: "good",
             blob_fields: &single_blob_fields,
-            source_row: None,
+            source_row: &good_row,
             ordinal: 0x82,
             insert_only: true,
         },
@@ -1470,7 +1568,7 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1488,27 +1586,8 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
     };
     let good_data_path = mountpoint.join("Music/good/data.orna");
     let bad_data_path = mountpoint.join("Music/bad/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !good_data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited {status}: {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose good row; root=[{}], Music=[{}], good=[{}]",
-            directory_entries(&mountpoint),
-            directory_entries(&mountpoint.join("Music")),
-            directory_entries(&mountpoint.join("Music/good")),
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[good_data_path.as_path()]) {
+        return;
     }
 
     let rows = std::fs::read_dir(mountpoint.join("Music"))
@@ -1550,7 +1629,8 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let stderr_log = std::fs::File::create(mount_parent.path().join("mount-stderr.log")).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1558,32 +1638,16 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
             mountpoint.to_str().unwrap(),
             "--cwd",
         ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stderr_log))
         .spawn()
         .expect("start mount --cwd");
     let mut mounted = MountedProcess {
         child,
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mountpoint) {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not appear in /proc/self/mountinfo"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[mountpoint.as_path()]) {
+        return;
     }
 
     let signal = Command::new("kill")
@@ -1603,10 +1667,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
-        let mut stderr = String::new();
-        if let Some(mut pipe) = mounted.child.stderr.take() {
-            let _ = pipe.read_to_string(&mut stderr);
-        }
+        let stderr = std::fs::read_to_string(mount_parent.path().join("mount-stderr.log")).unwrap_or_default();
         panic!("mount process exits cleanly after SIGTERM ({status}): {stderr}");
     }
 
@@ -1618,7 +1679,7 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         !mountinfo_contains(&mountpoint),
         "SIGTERM left the FUSE mountpoint in /proc/self/mountinfo"
     );
-    let status = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let status = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1647,7 +1708,7 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1663,30 +1724,15 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         child,
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !mountinfo_contains(&mountpoint) {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
-            if is_optional_fuse_setup_failure(&stderr) {
-                eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
-                return;
-            }
-            panic!("mount exited before appearing in mountinfo ({status}): {stderr}");
-        }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not appear in /proc/self/mountinfo"
-        );
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[mountpoint.as_path()]) {
+        return;
     }
 
     assert_eq!(repository.mount_status().unwrap().len(), 1);
-    repository.unmount_view(&mountpoint).unwrap();
-    assert!(repository.mount_status().unwrap().is_empty());
 
+    // SIGKILL the daemon and reap it before anything touches the view record. The record stays
+    // registered to a dead owner, so the daemon's signal helper (which unmounts only once the record
+    // is gone) never runs: the mount stays orphaned and the directory request below sees ENOTCONN.
     let signal = Command::new("kill")
         .args(["-KILL", &mounted.child.id().to_string()])
         .status()
@@ -1707,9 +1753,16 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
         !child_status.success(),
         "SIGKILL should terminate the mount child"
     );
+    assert!(
+        mountinfo_contains(&mountpoint),
+        "the orphaned FUSE mount remains until orna unmount releases it"
+    );
     let dead_mount_error = std::fs::read_dir(&mountpoint)
         .and_then(|entries| entries.collect::<std::io::Result<Vec<_>>>().map(|_| ()))
         .err();
+
+    repository.unmount_view(&mountpoint).unwrap();
+    assert!(repository.mount_status().unwrap().is_empty());
     run_unmount_from(
         repository_directory.path(),
         mount_parent.path(),
@@ -1735,16 +1788,17 @@ fn unmount_releases_a_dead_unregistered_fuse_mount() {
 #[tokio::test]
 /// ORNA-VFS-024: unmount refuses an unresolved draft and succeeds after fsync accepts it.
 async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
+    if !dirty_document_helper_available() {
+        return;
+    }
     if !fuse_test_available() {
         return;
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1766,7 +1820,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x92,
             insert_only: true,
         }],
@@ -1777,7 +1831,7 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1794,22 +1848,12 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
-    let mut document = OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(&data_path)
-        .unwrap();
-    document.write_all(b"{ title: \"after\", }\n").unwrap();
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let mut document = DirtyDocument::open_and_write(&data_path, "{ title: \"after\", }\n");
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1831,25 +1875,23 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
     assert!(mountinfo_contains(&mountpoint));
     assert_eq!(repository.mount_status().unwrap().len(), 1);
 
-    document.sync_all().unwrap();
+    document.sync_all();
     drop(document);
     run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
     assert!(!mountinfo_contains(&mountpoint));
     assert!(repository.mount_status().unwrap().is_empty());
 }
 #[tokio::test]
-/// ORNA-VFS-024: released drafts are discarded; path-based truncates stay pending until fsync.
-async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
+/// ORNA-VFS-024: unmount refuses a dirty draft whose candidate is schema-invalid, and succeeds after a corrected candidate is synced.
+async fn cwd_mount_refuses_unmount_with_invalid_dirty_draft_and_allows_clean_unmount() {
     if !fuse_test_available() {
         return;
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1871,7 +1913,112 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
+            ordinal: 0x92,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+            "--cwd",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start mount --cwd");
+    let mut mounted = MountedProcess {
+        child,
+        mountpoint: mountpoint.clone(),
+    };
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data_path)
+        .unwrap();
+    // A schema-invalid candidate stays unsynced in this open handle. The handle is
+    // dirty, so unmount is refused before any sync accepts the candidate (ORNA-VFS-024).
+    document.write_all(b"{ title: 123, }\n").unwrap();
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run dirty-state unmount");
+    assert!(!refused.status.success(), "dirty mount unmount was accepted");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain"),
+        "unmount refusal did not explain draft recovery: {diagnostic}"
+    );
+    assert!(mountinfo_contains(&mountpoint));
+    assert_eq!(repository.mount_status().unwrap().len(), 1);
+
+    // Replace the refused candidate with a valid row and sync it: the accepted
+    // sync clears the unresolved draft, so unmount can succeed.
+    document.set_len(0).unwrap();
+    document.seek(SeekFrom::Start(0)).unwrap();
+    document.write_all(b"{ title: \"after\", }\n").unwrap();
+    document.sync_all().unwrap();
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+#[tokio::test]
+/// ORNA-VFS-024: released drafts are discarded; path-based truncates stay pending until fsync.
+async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
             ordinal: 0x93,
             insert_only: true,
         }],
@@ -1883,7 +2030,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let start_mount = || {
-        Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+        Command::new(env!("CARGO_BIN_EXE_orna"))
             .args([
                 "--db",
                 repository_directory.path().to_str().unwrap(),
@@ -1901,13 +2048,8 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         child: start_mount(),
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -1926,13 +2068,8 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         child: start_mount(),
         mountpoint: mountpoint.clone(),
     };
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("remount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not reappear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let truncated = Command::new("python3")
@@ -1945,7 +2082,7 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         "path-based truncate failed: {}",
         String::from_utf8_lossy(&truncated.stderr)
     );
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -1973,11 +2110,9 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -1999,7 +2134,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x94,
             insert_only: true,
         }],
@@ -2010,7 +2145,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2027,13 +2162,8 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -2048,7 +2178,7 @@ async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     );
     drop(document);
 
-    let refused = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2086,11 +2216,9 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -2112,7 +2240,7 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x95,
             insert_only: true,
         }],
@@ -2123,7 +2251,7 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2140,13 +2268,8 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let mut document = OpenOptions::new()
@@ -2191,11 +2314,9 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
+        format3::format3_repository_with_context(
             "pub table Music(id: Str) { title: Str, }\n",
             "Music",
-            "Music/london.orna",
-            initial,
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
@@ -2217,7 +2338,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
         &[media_commit::SourceCaptureRow {
             key: "london",
             blob_fields: &[],
-            source_row: Some(initial),
+            source_row: initial,
             ordinal: 0x96,
             insert_only: true,
         }],
@@ -2228,7 +2349,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository_directory.path().to_str().unwrap(),
@@ -2245,13 +2366,8 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
         mountpoint: mountpoint.clone(),
     };
     let data_path = mountpoint.join("Music/london/data.orna");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !data_path.exists() {
-        if let Some(status) = mounted.child.try_wait().unwrap() {
-            panic!("mount exited before data.orna appeared ({status})");
-        }
-        assert!(Instant::now() < deadline, "data.orna did not appear");
-        thread::sleep(Duration::from_millis(20));
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
     }
 
     let document = OpenOptions::new()
@@ -2313,7 +2429,7 @@ struct MountedBlobRow {
 }
 
 fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
-    let child = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let child = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
             "--db",
             repository.to_str().expect("repository path is UTF-8"),
@@ -2331,29 +2447,47 @@ fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
     }
 }
 
-/// Waits for `path` in the live mount. Returns `false` when FUSE setup is optionally unavailable.
-fn wait_for_mount_path(mounted: &mut MountedProcess, path: &Path) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !path.exists() {
+/// Deadline for a `mount --cwd` daemon to expose its mountpoint and the requested paths. Startup
+/// under load can exceed ten seconds, so readiness is polled against the kernel mount table.
+const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Waits until `mounted` is attached at its mountpoint (listed in /proc/self/mountinfo) and every
+/// path in `paths` resolves through it. Returns `false` when FUSE setup is optionally unavailable
+/// and the skip is allowed. Panics with the daemon's exit status and stderr when the daemon exits
+/// before readiness, and with its stderr when it is still not ready after `MOUNT_READY_TIMEOUT`.
+fn wait_for_mount_paths(mounted: &mut MountedProcess, paths: &[&Path]) -> bool {
+    let deadline = Instant::now() + MOUNT_READY_TIMEOUT;
+    while !(mountinfo_contains(&mounted.mountpoint) && paths.iter().all(|path| path.exists())) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = mounted.child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
-            }
+            let stderr = take_child_stderr(&mut mounted.child);
             if is_optional_fuse_setup_failure(&stderr) {
                 eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
                 return false;
             }
-            panic!("mount exited {status}: {stderr}");
+            panic!("mount exited {status} before {paths:?} was exposed: {stderr}");
         }
-        assert!(
-            Instant::now() < deadline,
-            "FUSE mount did not expose {}",
-            path.display()
-        );
+        if Instant::now() >= deadline {
+            let _ = mounted.child.kill();
+            let _ = mounted.child.wait();
+            let stderr = take_child_stderr(&mut mounted.child);
+            panic!(
+                "FUSE mount did not expose {paths:?} within {MOUNT_READY_TIMEOUT:?} (mountinfo has mountpoint: {}; root=[{}]); mount stderr: {stderr}",
+                mountinfo_contains(&mounted.mountpoint),
+                directory_entries(&mounted.mountpoint),
+            );
+        }
         thread::sleep(Duration::from_millis(20));
     }
     true
+}
+
+/// Reads what the mount process wrote to stderr, once it has exited or been killed.
+fn take_child_stderr(child: &mut Child) -> String {
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = pipe.read_to_string(&mut stderr);
+    }
+    stderr
 }
 
 /// Unmounts through `orna unmount` and requires the mount process to exit cleanly.
@@ -2399,12 +2533,7 @@ async fn mount_captured_media(
     );
     let row_source = format!("{{\n    content: {capture},\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_for_table_with_source_row(
-            source,
-            "Music",
-            "Music/london.orna",
-            &row_source,
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
@@ -2423,7 +2552,7 @@ async fn mount_captured_media(
     let capture_rows = [media_commit::SourceCaptureRow {
         key: "london",
         blob_fields: &blob_captures,
-        source_row: None,
+        source_row: &row_source,
         ordinal: 0x93,
         insert_only: true,
     }];
@@ -2444,10 +2573,8 @@ async fn mount_captured_media(
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
-    if !wait_for_mount_path(
-        &mut mounted,
-        &mountpoint.join("Music/london").join(mounted_name),
-    ) {
+    let captured_path = mountpoint.join("Music/london").join(mounted_name);
+    if !wait_for_mount_paths(&mut mounted, &[captured_path.as_path()]) {
         return None;
     }
     Some(MountedBlobRow {
@@ -2496,7 +2623,6 @@ async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement
 }
 
 #[tokio::test]
-#[ignore = "ornadb-5il1.293 open gap: remount after replacement; run with --ignored"]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: the acknowledged replacement survives a restart of the mount process.
 async fn cwd_mount_rename_replacement_survives_remount() {
     let original = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
@@ -2519,7 +2645,7 @@ async fn cwd_mount_rename_replacement_survives_remount() {
     let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &remount_point);
     let remounted_blob = remount_point.join("Music/london/content.mp3");
     assert!(
-        wait_for_mount_path(&mut remounted, &remounted_blob),
+        wait_for_mount_paths(&mut remounted, &[remounted_blob.as_path()]),
         "FUSE remount must expose the committed Blob after a successful mount"
     );
     let restarted = std::fs::read(&remounted_blob).unwrap();
@@ -2527,6 +2653,132 @@ async fn cwd_mount_rename_replacement_survives_remount() {
     assert_eq!(
         restarted, replacement,
         "a restarted mount serves the acknowledged replacement"
+    );
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: an optional field committed as null and later replaced with a Blob renders that Blob as a file, and the replacement survives a restart of the mount process.
+async fn cwd_mount_optional_null_blob_replacement_survives_remount() {
+    if !fuse_test_available() {
+        return;
+    }
+    let media_root = TempDir::new().unwrap();
+    let content = lcg_bytes(0x0123_4567_89ab_cdef, 1_048_576 + 12_345);
+    let cover = lcg_bytes(0xfedc_ba98_7654_3210, 262_144 + 777);
+    std::fs::write(media_root.path().join("tone.mp3"), &content).unwrap();
+    std::fs::write(media_root.path().join("cover.png"), &cover).unwrap();
+    let source = "pub table Music(id: Str) { content: Blob, cover: Blob?, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let content_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+    );
+    let cover_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 4194304), \"image/png\")"
+    );
+    let committed_row = format!("{{\n    content: {content_capture},\n    cover: null,\n}}\n");
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(source, "Music");
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    // The first commit publishes the committed row: `content` is a Blob and `cover` stays null.
+    let content_fields = [("content", content_capture.as_str())];
+    let content_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &content_fields,
+        source_row: &committed_row,
+        ordinal: 0x95,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &content_rows,
+    )
+    .await;
+    // The first publish advances the repository head, so the replacement is
+    // admitted against a format context pinned to that new snapshot.
+    let replacement_commit = repository.head().unwrap().unwrap();
+    let replacement_format_context =
+        format3::format3_context_for_snapshot(&repository, replacement_commit.as_str());
+    // The mount's save captures a replacement Blob at the head it is admitted against, so the
+    // replacement pins belong to that head's graph rather than the one the bindings opened before
+    // the first publish.
+    let replacement_capability = repository.capture_capability(relation_id).unwrap();
+    let mut bindings = bindings.with_repository_capture_capability(replacement_capability);
+    // The second commit replaces the row so `cover` changes from null to a Blob, but it stays
+    // unpublished: the runtime holds `cover` as a Blob while the head still commits it as null.
+    // As the mount's candidate() does, the row omits both Blob fields and binds them.
+    let replacement_row = "{\n}\n";
+    let replacement_fields = [
+        ("content", content_capture.as_str()),
+        ("cover", cover_capture.as_str()),
+    ];
+    let replacement_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &replacement_fields,
+        source_row: replacement_row,
+        ordinal: 0xB5,
+        insert_only: false,
+    }];
+    media_commit::commit_source_replacement_through_save_admission(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &replacement_format_context,
+        "Music",
+        &replacement_rows[0],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let cover_path = mountpoint.join("Music/london/cover.png");
+    if !wait_for_mount_paths(&mut mounted, &[cover_path.as_path()]) {
+        return;
+    }
+    assert_eq!(std::fs::read(&cover_path).unwrap(), cover);
+    assert_eq!(
+        std::fs::read(mountpoint.join("Music/london/content.mp3")).unwrap(),
+        content
+    );
+    unmount_and_reap(repository_directory.path(), &mut mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut remounted = spawn_cwd_mount(repository_directory.path(), &remount_point);
+    let remounted_cover = remount_point.join("Music/london/cover.png");
+    assert!(
+        wait_for_mount_paths(&mut remounted, &[remounted_cover.as_path()]),
+        "FUSE remount must expose the replacement Blob"
+    );
+    let restarted = std::fs::read(&remounted_cover).unwrap();
+    unmount_and_reap(repository_directory.path(), &mut remounted);
+    assert_eq!(
+        restarted, cover,
+        "a restarted mount serves the replacement Blob"
     );
 }
 

@@ -8,7 +8,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pinned_math_module_provides_exact_integer_utilities() {
-    let math_source = orna_standard::reference_standard_sources_v1()
+    let math_source = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .find(|(path, _)| path == "std/math.orna")
         .expect("the pinned math module is published")
