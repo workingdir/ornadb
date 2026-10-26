@@ -17560,7 +17560,7 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
             matches!(
                 &module.symbols[name].ty,
                 Type::Function { result, .. }
-                    if result.as_ref() == &Type::Optional(Box::new(Type::Named("Reading".into())))
+                    if result.as_ref() == &Type::Optional(Box::new(Type::Named("relation-min-max.Reading".into())))
             ),
             "{name}: {:?}",
             module.symbols[name].ty
