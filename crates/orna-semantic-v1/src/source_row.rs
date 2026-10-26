@@ -11,11 +11,25 @@ use super::{
 /// Source-authored row values after schema admission and canonical key lowering.
 /// Blob and owner-supplied fields are absent: their owner must supply pinned
 /// repository bindings or other authorized metadata projections.
+///
+/// Field values are data values lowered without a schema: optional absence
+/// is `null`, a variant or nominal constructor keeps its source name in the
+/// owner slot of a record value, and a stored reference is its target key.
+/// The table's storage descriptor directs their stored encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoweredRowUnit {
     pub owner: String,
     pub canonical_key: Vec<u8>,
     pub fields: BTreeMap<String, Raw>,
+}
+
+/// Lowers one closed data expression, such as a row document field or a
+/// constant insert-time default, to its schema-free data value. `None` for
+/// any expression that needs evaluation: a call other than `Some(value)`, an
+/// operator other than negation, an interpolated string, a range, a block or
+/// a lambda.
+pub fn lower_data_expression(expr: &Expr) -> Option<Raw> {
+    source_row_value(expr)
 }
 
 /// Admit one project row and lower its source-authored, non-Blob values to
@@ -236,6 +250,48 @@ fn source_row_value(expr: &Expr) -> Option<Raw> {
                 return None;
             };
             Raw::Text(format!("{text}.{name}"))
+        }
+        // `Some(value)`: canonical text's present optional (29-formats.md).
+        Expr::Call {
+            callee, arguments, ..
+        } => {
+            let (Expr::Name { text, .. }, [argument]) = (callee.as_ref(), arguments.as_slice())
+            else {
+                return None;
+            };
+            if text != "Some" || argument.name.is_some() {
+                return None;
+            }
+            Raw::Tag(
+                60013,
+                Box::new(Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    source_row_value(&argument.value)?,
+                ])),
+            )
+        }
+        // A nominal record or variant constructor, `Point { x: 1 }` or
+        // `circle { radius: 1 }`, keeps its source name in the owner slot;
+        // the storage descriptor resolves it to the declared ObjectIds.
+        Expr::Nominal { path, fields, .. } => {
+            let name = path
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join(".");
+            let entries = fields
+                .iter()
+                .map(|field| {
+                    Some(Raw::Array(vec![
+                        Raw::Text(field.name.clone()),
+                        source_row_value(&field.value)?,
+                    ]))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Raw::Tag(
+                60009,
+                Box::new(Raw::Array(vec![Raw::Text(name), Raw::Array(entries)])),
+            )
         }
         _ => return None,
     })

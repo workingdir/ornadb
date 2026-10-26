@@ -14,7 +14,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  explain CODE",
     "Repository and maintenance commands:",
     "  init [DIRECTORY]",
-    "  mv OLD NEW                     rename a table in its existing module namespace",
+    "  mv OLD NEW                    rename a table, field, type, variant or unit, keeping its identity",
     "  status [--porcelain|--short|--format human|short|json]",
     "  --format human|short|json status",
     "  fetch [REMOTE] [BRANCH]",

@@ -26,18 +26,8 @@ pub fn entries() -> Vec<Entry> {
             "the CWD relation does not count uncommitted REPL inserts: `main.Contact | count()` ignores the local row (ORNA-STATE-002)",
             cwd_overlays_head,
         ),
-        Entry::gap(
-            "KEY-001",
-            "ornadb-5il1.121",
-            "the format-3 automatic-ID allocator issues no second ID: a second insert into a key-less table is refused",
-            second_automatic_id_is_refused,
-        ),
-        Entry::gap(
-            "KEY-002",
-            "ornadb-5il1.121",
-            "the format-3 automatic-ID allocator issues no second ID, and there is no `orna reset` to move a branch back",
-            second_automatic_id_is_refused,
-        ),
+        Entry::pass("KEY-001", automatic_ids_do_not_reuse_deletion),
+        Entry::pass("KEY-002", automatic_ids_survive_reset),
         Entry::pass("TXN-001", nested_writes_roll_back_with_the_activation),
         Entry::gap(
             "TXN-003",
@@ -158,24 +148,97 @@ fn clone_filter_is_ignored(db: &mut Db) -> Probe {
     ))
 }
 
-fn second_automatic_id_is_refused(db: &mut Db) -> Probe {
-    db.declare("pub table Note { text: Str, }\n")?;
-    let first = db.repl_effect(r#"main.Note.insert({ text: "first" })"#)?;
+const NOTE_SOURCE: &str = "pub table Note {\n    text: Str,\n}\n";
+
+/// The automatic IDs one REPL session allocates, read from the rows it prints.
+fn insert_notes(db: &mut Db, texts: &[&str]) -> Result<Vec<u64>, Failure> {
+    let lines = texts
+        .iter()
+        .map(|text| format!("main.Note.insert({{ text: \"{text}\" }})"))
+        .collect::<Vec<_>>();
+    let inputs = lines.iter().map(String::as_str).collect::<Vec<_>>();
+    let run = db.repl(&inputs)?;
     ensure!(
-        first.stdout.contains("\"id\": 1"),
-        "the first automatic ID is not 1: {}",
-        first.output()
+        run.succeeded() && !run.output().contains("error["),
+        "the REPL rejected the inserts: {}",
+        run.diagnostic()
     );
-    let second = db.repl(&[r#"main.Note.insert({ text: "second" })"#])?;
+    let output = run.output();
+    let ids = output
+        .match_indices("\"id\": ")
+        .filter_map(|(at, prefix)| {
+            output[at + prefix.len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse::<u64>()
+                .ok()
+        })
+        .collect::<Vec<_>>();
     ensure!(
-        second.output().contains("error["),
-        "a second automatic-ID insert is now accepted: {}",
-        second.output()
+        ids.len() == texts.len(),
+        "expected {} automatic IDs, read {}: {output}",
+        texts.len(),
+        ids.len()
     );
-    Ok(format!(
-        "second automatic-ID insert: {}",
-        second.diagnostic()
-    ))
+    Ok(ids)
+}
+
+/// KEY-001 (ORNA-AUTOID-002, ORNA-AUTOID-003): given Note allocates 1, 2, 3;
+/// when 3 is deleted and another Note is inserted; then the new ID is 4.
+fn automatic_ids_do_not_reuse_deletion(db: &mut Db) -> Check {
+    let tables = db.declare(NOTE_SOURCE)?;
+    let note = Db::relation(&tables, "Note")?;
+    ensure!(
+        insert_notes(db, &["a", "b", "c"])? == vec![1, 2, 3],
+        "the first three automatic IDs are not 1, 2, 3"
+    );
+    db.publish()?.ok()?;
+    db.repl_effect("main.Note.delete(3)")?;
+    db.publish()?.ok()?;
+    ensure!(
+        db.query_json(&note, &[])?["rows"].as_u64() == Some(2),
+        "deleting note 3 did not leave two rows"
+    );
+    ensure!(
+        insert_notes(db, &["d"])? == vec![4],
+        "the Note inserted after deleting 3 is not ID 4"
+    );
+    Ok(())
+}
+
+/// KEY-002 (ORNA-AUTOID-002, ORNA-AUTOID-004): given the allocator reached 10
+/// and the branch resets to the commit where rows ended at 7; when a row is
+/// inserted; then the new ID is 11.
+fn automatic_ids_survive_reset(db: &mut Db) -> Check {
+    let tables = db.declare(NOTE_SOURCE)?;
+    let note = Db::relation(&tables, "Note")?;
+    ensure!(
+        insert_notes(db, &["a", "b", "c", "d", "e", "f", "g"])? == (1..=7).collect::<Vec<u64>>(),
+        "the first seven automatic IDs are not 1 through 7"
+    );
+    db.publish()?.ok()?;
+    let rows_end_at_seven = db.git_text(&["rev-parse", "HEAD"])?.trim().to_owned();
+    ensure!(
+        insert_notes(db, &["h", "i", "j"])? == vec![8, 9, 10],
+        "the next three automatic IDs are not 8, 9, 10"
+    );
+    db.publish()?.ok()?;
+    let allocator = format!("refs/orna/ids/{note}");
+    ensure!(
+        db.git_text(&["cat-file", "-p", &allocator])?.trim() == "10",
+        "the allocator did not reach 10"
+    );
+    db.git(&["reset", "--quiet", "--hard", &rows_end_at_seven])?.ok()?;
+    ensure!(
+        db.query_json(&note, &[])?["rows"].as_u64() == Some(7),
+        "the reset branch does not hold the rows that end at 7"
+    );
+    ensure!(
+        insert_notes(db, &["k"])? == vec![11],
+        "the row inserted after the reset is not ID 11"
+    );
+    Ok(())
 }
 
 const TRANSACTION_SOURCE: &str = r#"pub table Note(id: Str) { text: Str, }

@@ -2,12 +2,20 @@
 //!
 //! `commit` "builds the staged candidate, validates it, creates its commit"
 //! (16-administration). Before review, the staged format-3 store is completed
-//! for the staged source: tables without a relation get one, and the
-//! committed identity inventory is reconciled into the store. An unborn
+//! for the staged source: tables without a relation get one, a table whose
+//! schema changed evolves with its committed rows (ORNA-EVOL-002), a retired
+//! table's relation leaves the store, the committed identity inventory is
+//! reconciled into the store, and the allocator summary records each
+//! automatic-key table's current watermark (ORNA-AUTOID-005). An unborn
 //! branch's first commit creates the branch ref.
 
-use orna_repository_v1::FormatContextError;
-use orna_repository_v1::relation_admission::{OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError};
+use orna_repository_v1::{
+    FormatContextError,
+    relation_admission::{
+        CommittedRelationChanges, OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError,
+    },
+    schema_evolution::SchemaChanges,
+};
 
 use super::*;
 
@@ -124,8 +132,12 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
 /// inventory the staged tree already carries (the committed store, a store a
 /// failed earlier commit staged, or a legacy sidecar), so a retried commit
 /// keeps its IDs; new declarations get new IDs and removed ones retire
-/// (ORNA-OBJECT-001, ORNA-OBJECT-005).
-fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String>, Diagnostic> {
+/// (ORNA-OBJECT-001, ORNA-OBJECT-005). A committed relation changes only when
+/// `changes` allows it.
+fn stage_store(
+    repository: &orna_repository_v1::Repository,
+    changes: CommittedRelationChanges,
+) -> Result<Vec<String>, Diagnostic> {
     repository
         .refuse_unretained_committed_store()
         .map_err(|error| relation_failure(error, "staged candidate could not be captured"))?;
@@ -177,16 +189,32 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
             format!("{}: {:?}", error.table(), error.error()),
         )
     })?;
+    let table_name = |relation: &[u8; 16]| {
+        staged_relations
+            .table_name(relation)
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                // A removed table keeps its name in the retired inventory record.
+                previous
+                    .as_ref()
+                    .and_then(|manifest| {
+                        manifest.records().iter().find(|record| {
+                            record.kind() == orna_project_v1::ObjectKind::Table
+                                && record.id() == relation
+                        })
+                    })
+                    .map_or_else(String::new, |record| record.qualified_name().to_owned())
+            })
+    };
     let admission = repository
         .stage_store_admission(
             &staged,
             staged_relations.relations(),
             &identities.to_stored(),
+            changes,
         )
-        .map_err(|error| {
-            relation_failure(error, "staged store could not admit the staged tables")
-        })?;
-    Ok(admission
+        .map_err(|error| admission_error(error, &table_name))?;
+    let mut lines = admission
         .admitted()
         .iter()
         .filter(|relation| **relation != OBJECT_IDENTITY_RELATION_ID)
@@ -197,7 +225,77 @@ fn stage_store(repository: &orna_repository_v1::Repository) -> Result<Vec<String
                 orna_repository_v1::Uuid::from_bytes(*relation).simple()
             )
         })
-        .collect())
+        .collect::<Vec<_>>();
+    for evolved in admission.evolved() {
+        lines.push(format!(
+            "evolved table {} ({}): {} rows rewritten",
+            table_name(evolved.relation_id()),
+            describe_changes(evolved.changes()),
+            evolved.rows()
+        ));
+    }
+    for removed in admission.removed() {
+        lines.push(format!(
+            "removed table {} with {} rows",
+            table_name(removed.relation_id()),
+            removed.rows()
+        ));
+    }
+    Ok(lines)
+}
+
+/// One line naming every field-level change of an evolved table.
+fn describe_changes(changes: &SchemaChanges) -> String {
+    let mut parts = changes
+        .renamed()
+        .iter()
+        .map(|(old, new)| format!("renamed {old} to {new}"))
+        .collect::<Vec<_>>();
+    for (verb, fields) in [
+        ("added", changes.added()),
+        ("removed", changes.removed()),
+        ("converted", changes.converted()),
+    ] {
+        if !fields.is_empty() {
+            parts.push(format!("{verb} {}", fields.join(", ")));
+        }
+    }
+    if parts.is_empty() {
+        "field metadata changed".to_owned()
+    } else {
+        parts.join("; ")
+    }
+}
+
+fn admission_error(
+    error: RelationAdmissionError,
+    table_name: &dyn Fn(&[u8; 16]) -> String,
+) -> Diagnostic {
+    match error {
+        RelationAdmissionError::PendingRuntimeRows { relation_id } => {
+            Diagnostic::target_with_detail(
+                "E2300",
+                "staged schema change waits for unpublished rows",
+                "publish the pending runtime rows with `orna publish`, then retry `orna commit -m MESSAGE`; no commit was created",
+                format!(
+                    "table {} would change while runtime rows written under its committed schema are unpublished",
+                    table_name(&relation_id)
+                ),
+            )
+        }
+        // The refusal names the table and field the staged source must
+        // change, so it is a source diagnostic shown without `--debug`.
+        RelationAdmissionError::Evolution {
+            relation_id,
+            refusal,
+        } => Diagnostic::target_with_detail(
+            "E2101",
+            "staged schema change does not fit the committed rows",
+            "change the staged table so its committed rows fit it (make a new field optional or give it a constant default, keep the primary key, use a lossless type change), stage it, then retry `orna commit -m MESSAGE`; no commit was created",
+            format!("table {}: {refusal}", table_name(&relation_id)),
+        ),
+        other => relation_failure(other, "staged store could not admit the staged tables"),
+    }
 }
 
 /// Reports one review or commit failure with its own code and remedy
@@ -333,7 +431,22 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 )
             })?;
     }
-    let admitted = stage_store(&repository)?;
+    // Unpublished runtime rows were encoded under the committed schemas, so
+    // no committed relation may change under them.
+    let pending = runtime.block_on(state.pending_count()).map_err(|error| {
+        Diagnostic::target_with_detail(
+            "E2300",
+            "pending runtime rows could not be counted",
+            "retry after the local runtime state is available",
+            format!("{error:?}"),
+        )
+    })?;
+    let changes = if pending == 0 {
+        CommittedRelationChanges::Allowed
+    } else {
+        CommittedRelationChanges::PendingRuntimeRows
+    };
+    let admitted = stage_store(&repository, changes)?;
     let capture = runtime.block_on(state.capture()).map_err(|error| {
         Diagnostic::target_with_detail(
             "E2300",
