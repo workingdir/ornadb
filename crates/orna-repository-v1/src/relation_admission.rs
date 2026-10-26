@@ -1137,9 +1137,7 @@ impl Repository {
             .map(|identity| identity.id)
             .collect::<BTreeSet<_>>();
         if let Some(relation_id) = entries.keys().find(|relation_id| {
-            **relation_id != OBJECT_IDENTITY_RELATION_ID
-                && **relation_id != OBJECT_REKEY_RELATION_ID
-                && !owners.contains(*relation_id)
+            !is_system_relation(relation_id) && !owners.contains(*relation_id)
         }) {
             return Err(RelationAdmissionError::OrphanRelation {
                 relation_id: *relation_id,
