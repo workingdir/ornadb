@@ -159,3 +159,6 @@ SOPS is an optional secret provider. A stable `SecretRef` is not secret plaintex
 
 `std.test` supplies expectations, fixtures, property generators and isolated database helpers. Language-level `assert` remains core. A test fixture declares its source, initial snapshots, inputs, expected success/failure and external-effect policy. A temporary branch is not isolation unless the worktree-local CWD and runtime ownership are isolated too. No test may silently use the developer's local database, credentials or live services.
 
+## Binary values and resources
+
+The [Blob API](#blob-values) supplies native integrity and bounded I/O capabilities. `std.io.fs.read_blob` delegates to `sys.blob.capture_file`; package-resource reading delegates to `sys.blob.resource`. Both return ordinary Blob values but have different snapshot/effect boundaries. Media decoders, HTML responses, views and optional analysis remain ordinary versioned libraries. Neither a universal File table nor a devtools-owned asset primitive is required. A `std` submodule pin remains valid; editable app vendoring is explicit, not a silent override of that pin.

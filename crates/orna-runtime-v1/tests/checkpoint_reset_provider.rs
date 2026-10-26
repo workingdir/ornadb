@@ -498,7 +498,7 @@ async fn generic_admin_audit_is_redacted_atomic_and_reopenable() {
     assert!(paused[1].safe_arguments.contains("reason=<redacted>"));
     assert!(!paused[1].safe_arguments.contains("operator"));
     assert_eq!(paused[1].owner, writer);
-    assert_eq!(paused[1].observed_generation, 0);
+    assert_eq!(paused[1].observed_generation, Some(0));
 
     assert_eq!(paused[0].function, "sys.admin.pause_stream");
     assert!(paused[0].succeeded);

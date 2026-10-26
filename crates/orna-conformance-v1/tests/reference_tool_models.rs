@@ -6,6 +6,9 @@ use serde_json::json;
 const SOURCE_PROBES: &str = include_str!("fixtures/reference-tools/source-probes.orna");
 const SOURCE_BLOCKS: &str = include_str!("fixtures/reference-tools/source-blocks.orna");
 const INDEX_HTML: &str = include_str!("fixtures/reference/index.html");
+// The 1.1.0 index is pandoc output without a search widget; the shipped 1.0.0
+// index is the only artifact that carries the navigation search script.
+const LEGACY_SEARCH_INDEX_HTML: &str = include_str!("fixtures/legacy-1.0.0/index.html");
 
 const NAVIGATION_HARNESS: &str = r#"
 const fs = require('fs'), vm = require('vm');
@@ -246,9 +249,10 @@ fn navigation_search_script_resolves_targets_and_matches_reference_queries() {
     let ids = html_attribute_values(INDEX_HTML, "id");
     let unique_ids: BTreeSet<_> = ids.iter().cloned().collect();
     assert_eq!(ids.len(), unique_ids.len(), "duplicate navigation anchors");
-    assert!(unique_ids.contains("nav-search"));
+    let search_ids = html_attribute_values(LEGACY_SEARCH_INDEX_HTML, "id");
+    assert!(search_ids.iter().any(|id| id == "nav-search"));
 
-    let scripts = INDEX_HTML
+    let scripts = LEGACY_SEARCH_INDEX_HTML
         .split_once("<script>")
         .expect("index search script opening tag")
         .1;
@@ -256,7 +260,8 @@ fn navigation_search_script_resolves_targets_and_matches_reference_queries() {
         .split_once("</script>")
         .expect("index search script closing tag")
         .0;
-    let input = json!({"script": script, "ids": unique_ids});
+    let search_targets: BTreeSet<_> = search_ids.iter().cloned().collect();
+    let input = json!({"script": script, "ids": search_targets});
     let mut child = Command::new("node")
         .args(["-e", NAVIGATION_HARNESS])
         .stdin(std::process::Stdio::piped())

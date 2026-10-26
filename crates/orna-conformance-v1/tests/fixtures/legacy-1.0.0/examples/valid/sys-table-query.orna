@@ -1,0 +1,4 @@
+pub fn inventory_table_objects() =
+    sys.catalog.objects
+        | filter(object => object.kind == sys.ObjectKind.table
+            && object.qualified_name.starts_with("inventory."));

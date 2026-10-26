@@ -1,33 +1,66 @@
 %YAML 1.2
 ---
+# Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
 name: Orna
 file_extensions: [orna]
 scope: source.orna
 contexts:
   main:
-    - match: '//.*$'
+    - include: comments
+    - include: strings
+    - include: tokens
+  comments:
+    - match: '//.*'
       scope: 'comment.orna'
-    - begin: '/\*'
-      end: '\*/'
-      scope: 'comment.orna'
-    - begin: '"'
-      end: '"'
-      scope: 'string.quoted.double.orna'
-      patterns:
-        - match: '\\\\(?:["\\\\nrt0]|u\\{[0-9A-Fa-f]{1,6}\\})'
-          scope: constant.character.escape.orna
-        - begin: '(?<!\\\\)\\{'
-          end: '\\}'
-          scope: meta.interpolation.orna
-          patterns:
-            - include: main
-    - match: '(?<![\\p{L}\\p{N}_])(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\\p{L}\\p{N}_])'
+    - match: '/\*'
+      push: block_comment
+  block_comment:
+    - meta_scope: 'comment.orna'
+    - match: '/\*'
+      push: block_comment
+    - match: '\*/'
+      pop: true
+  strings:
+    - match: '"'
+      push: string
+  string:
+    - meta_scope: 'string.quoted.double.orna'
+    - match: '"'
+      pop: true
+    - match: '\\(?:["0\\nrt]|u\{[0-9A-Fa-f]{1,6}\})'
+      scope: 'constant.character.escape.orna'
+    - match: '\{'
+      scope: 'punctuation.orna'
+      push: interpolation
+  interpolation:
+    - clear_scopes: 1
+    - meta_scope: 'meta.interpolation.orna'
+    - match: '\}'
+      scope: 'punctuation.orna'
+      pop: true
+    - include: expressions
+  braces:
+    - match: '\}'
+      scope: 'punctuation.orna'
+      pop: true
+    - include: expressions
+  expressions:
+    - include: comments
+    - include: strings
+    - match: '\{'
+      scope: 'punctuation.orna'
+      push: braces
+    - include: tokens
+  tokens:
+    - match: '(?:(?<=[^.]\.)|(?<=^\.))(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])|(?<![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])(?:continue|protocol|assert|offset|affine|return|static|break|table|while|base|case|else|enum|impl|loop|self|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])(?=[ \t]*:)'
+      scope: 'variable.other.orna'
+    - match: '(?<![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])(?:continue|protocol|assert|offset|affine|return|static|break|false|table|while|base|case|else|enum|impl|loop|null|self|true|type|unit|dim|for|let|pub|use|as|fn|if|in)(?![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])'
       scope: 'keyword.control.orna'
-    - match: '(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]*)?(?:Z|[+-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f_]*|0b[01_]*|[0-9][0-9_]*(?:\.[0-9_]+)?(?:[eE][+-]?[0-9_]*)?f?)'
+    - match: '(?<![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])(?:[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9][0-9]*)?(?:Z|[+\-][0-9]{2}:[0-9]{2})|[0-9]{4}-[0-9]{2}-[0-9]{2}|0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|0b[01](?:_?[01])*|[0-9](?:_?[0-9])*(?:\.[0-9](?:_?[0-9])*)?(?:[Ee][+\-]?[0-9](?:_?[0-9])*)?f?)(?![\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}])'
       scope: 'constant.numeric.orna'
     - match: '(?:\.\.=|=>|==|!=|<=|>=|\?\?|\|\?|&&|\|\||\+=|-=|\*=|/=|\.\.|\||!|=|<|>|\+|-|\*|/|%|\^|\?)'
       scope: 'keyword.operator.orna'
     - match: '(?:\{|\}|\(|\)|\[|\]|,|;|:|\.)'
       scope: 'punctuation.orna'
-    - match: '[_\\p{L}][_\\p{L}\\p{N}]*'
+    - match: '[_\p{L}\p{Nl}][\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Pc}]*'
       scope: 'variable.other.orna'

@@ -1,0 +1,4 @@
+# Bead ids permitted in the bead column of scripts/semantic-known-red.txt.
+# Adding a new bead id here is a reviewed change; the gate rejects any other id.
+ornadb-3iqo
+ornadb-0im9

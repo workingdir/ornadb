@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/top-level-expression.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1006",
+  "message_contains": "module top level accepts declarations only",
+  "status": "expected-not-executed"
+}

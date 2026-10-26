@@ -6,6 +6,10 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Transport-facing live-session adapter for orna.present.v1"
 
+[features]
+# Exposes the owner-bound runtime handle to this crate's integration tests.
+test-support = []
+
 [dependencies]
 futures = "0.3.31"
 getrandom = "0.3.4"
@@ -15,6 +19,7 @@ orna-runtime-v1 = { path = "../orna-runtime-v1" }
 orna-security-v1 = { path = "../orna-security-v1" }
 orna-serving-v1 = { path = "../orna-serving-v1" }
 orna-stream-v1 = { path = "../orna-stream-v1" }
+orna-value-v1 = { path = "../orna-value-v1" }
 
 [lints.rust]
 unsafe_code = "forbid"
@@ -25,3 +30,4 @@ pedantic = { level = "deny", priority = -1 }
 
 [dev-dependencies]
 orna-repository-v1 = { path = "../orna-repository-v1" }
+orna-live-v1 = { path = ".", features = ["test-support"] }

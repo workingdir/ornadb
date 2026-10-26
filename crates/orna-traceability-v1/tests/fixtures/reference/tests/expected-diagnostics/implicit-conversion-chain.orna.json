@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "fixture": "examples/invalid/implicit-conversion-chain.orna",
   "failing_phase": "typecheck",
   "primary_diagnostic": "ORNA091-E-CONVERSION-CHAIN",

@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/ambiguous-consumer.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E9101",
+  "message_contains": "same durable source consumed twice without distinct consumer identity",
+  "status": "expected-not-executed"
+}

@@ -1,0 +1,13 @@
+pub fn one() = 1;
+pub fn add(value: Int, amount: Int) = value + amount;
+
+pub fn run_all() =
+    std.concurrent.parallel([
+        mail.google.sync,
+        () => finance.openbanking.sync(bank.main),
+    ]);
+
+pub fn value() =
+    1
+    | add(2)
+    | add(3);

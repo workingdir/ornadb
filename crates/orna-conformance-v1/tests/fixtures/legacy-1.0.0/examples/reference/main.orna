@@ -1,0 +1,14 @@
+use library;
+use warehouse;
+use sensors;
+use values;
+
+pub fn seed() {
+    library.seed();
+    warehouse.seed();
+}
+
+pub fn exercise() {
+    library.lend("book-1", "reader-1");
+    warehouse.transfer("north", "south", "pencil", 3);
+}

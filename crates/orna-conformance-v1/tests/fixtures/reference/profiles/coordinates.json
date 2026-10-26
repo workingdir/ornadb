@@ -1,0 +1,25 @@
+{
+  "language": "1.1.0",
+  "publication_revision": "final-2026-10-05",
+  "repository_format": 3,
+  "graph": "OGS-1",
+  "rows": "ORP-1",
+  "blob_storage": "OGB-2",
+  "stored_values": "ROV-3",
+  "semantic_values": "SOV-3",
+  "portable_values": "OVB-2",
+  "virtual_filesystem": "VFS-1",
+  "media_policy": "MIME-1",
+  "legacy_wire": "orna.present.v1",
+  "legacy_readers": [
+    {
+      "repository_format": 1,
+      "context": "original 1.0.0"
+    },
+    {
+      "repository_format": 2,
+      "context": "previous-1.1.0-draft.zip"
+    }
+  ],
+  "note": "Format 3 admits one writer/profile set. Legacy contexts are read-only until explicit migration."
+}

@@ -1,9 +1,26 @@
-# Compact stable-storage qualification gate
+# Compact stable-storage qualification gate (historical)
 
-ORNA-COMPACT-013 limits stable compact storage to at most 1.5 times the same
-corpus stored in Prometheus blocks. `verify_stable_storage.py` checks that
-threshold using integer arithmetic and rejects measurements whose corpus
-SHA-256 identifiers differ.
+**Status: historical. These gates support no Orna 1.1.0 claim.**
+
+- These scripts check evidence for ORNA-COMPACT-013, a requirement of the
+  Orna 1.0.0 specification. Orna 1.1.0 retired it. The 1.1.0
+  `provenance/requirement-changes.json` lists it as "superseded by the final
+  single-row-store/native graph/VFS contract". It is not in the 947 IDs of
+  `tests/requirements.json`.
+- Compact storage is a retired writer. Orna 1.1.0 forbids loose, compact and
+  hybrid writes for the new format (ORNA-UPGRADE-003). `api/retired.json`
+  removes the `compact` storage preference.
+- A passing result from these scripts is not conformance evidence. Do not cite
+  it in a release or conformance claim. Remove this directory together with
+  the compact writer.
+
+The text below describes what the scripts check. It is kept for readers of
+old evidence.
+
+The retired ORNA-COMPACT-013 limited stable compact storage to at most 1.5
+times the same corpus stored in Prometheus blocks. `verify_stable_storage.py`
+checks that threshold using integer arithmetic and rejects measurements whose
+corpus SHA-256 identifiers differ.
 
 Provide a JSON file with the measured stable byte counts and the digest of the
 logical corpus used to produce each measurement:
@@ -34,7 +51,7 @@ collect benchmark results or establish a production qualification by itself.
 
 ## Compact row-integrity evidence
 
-`verify_compact_integrity.py` checks the ORNA-COMPACT-013 evidence criterion
+`verify_compact_integrity.py` checks the retired ORNA-COMPACT-013 criterion
 that each acknowledged logical row appears exactly once in compact output.
 Supply the logical row IDs from the submitted evidence in both arrays:
 
@@ -59,7 +76,7 @@ provenance, or claim that a 24-hour production profile was run.
 
 ## Compact bounded-memory evidence
 
-`verify_compact_memory.py` checks the ORNA-COMPACT-013 bounded-memory
+`verify_compact_memory.py` checks the retired ORNA-COMPACT-013 bounded-memory
 criterion against a budget declared for the same profile run. Provide positive
 integer byte counts for the run's declared memory budget and measured peak RSS:
 

@@ -1,3 +1,5 @@
+mod support;
+
 use orna_conformance_v1::{
     EvidenceStatus, Harness, ImplementationEvidenceAggregate, ImplementationEvidenceBinding,
     ImplementationEvidenceSource, Corpus,
@@ -11,8 +13,6 @@ use std::{
 
 const REQUIREMENT_ID: &str = "ORNA-RANGE-001";
 const FIXTURE_ID: &str = "valid/minimal-root.orna";
-const PUBLICATION_DIGEST: &str =
-    "d12cf5d86b9337ccbe45f257bcb8c25bc769e0505500bdc68e21a1b67d728d7d";
 
 struct TemporaryReference(PathBuf);
 
@@ -105,10 +105,11 @@ fn bounded_evidence_cannot_promote_mixed_requirement_to_executed() {
 
     let report = generate_with_implementation_evidence_overlay(root.path(), &overlay)
         .expect("bounded evidence report is accepted");
-    assert_eq!(
-        report.publication_digests.get("Orna-1.0.0.md").map(String::as_str),
-        Some(PUBLICATION_DIGEST)
+    assert!(
+        !report.publication_digests.keys().any(|key| key.starts_with("Orna-")),
+        "1.1.0 normative map pins no markdown publication key"
     );
+    support::assert_markdown_publication_digest(root.path());
     assert!(report
         .requirements
         .iter()
