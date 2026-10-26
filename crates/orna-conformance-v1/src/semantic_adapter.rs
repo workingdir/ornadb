@@ -4777,24 +4777,24 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                         &mut budget,
                         &mut effects,
                     )
-                    .map_err(|_| table_assertion_diagnostic())?;
+                    .map_err(|_| table_evaluation_diagnostic())?;
                     if !matches!(value.raw(), OvbRaw::Bool(true)) {
                         return Err(table_assertion_diagnostic());
                     }
                     continue;
                 }
                 let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
-                    .map_err(|_| table_assertion_diagnostic())?;
+                    .map_err(|_| table_evaluation_diagnostic())?;
                 let mut projections = BTreeSet::new();
                 let mut candidate_rows = 0usize;
-                for (key, encoded) in rows.get(table).ok_or_else(table_assertion_diagnostic)? {
-                    debit_host_step(&mut budget).map_err(|_| table_assertion_diagnostic())?;
+                for (key, encoded) in rows.get(table).ok_or_else(table_evaluation_diagnostic)? {
+                    debit_host_step(&mut budget).map_err(|_| table_evaluation_diagnostic())?;
                     candidate_rows = candidate_rows
                         .checked_add(1)
-                        .ok_or_else(table_assertion_diagnostic)?;
+                        .ok_or_else(table_evaluation_diagnostic)?;
                     self.limits
                         .check_items(candidate_rows)
-                        .map_err(|_| table_assertion_diagnostic())?;
+                        .map_err(|_| table_evaluation_diagnostic())?;
                     let row = candidate_assertion_row(
                         table,
                         key,
@@ -4810,7 +4810,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                         self.limits,
                         &mut budget,
                     )
-                    .map_err(|_| table_assertion_diagnostic())?;
+                    .map_err(|_| table_evaluation_diagnostic())?;
                     match kind {
                         TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
                         TableAssertionKind::Every => {
@@ -4818,7 +4818,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                         }
                         TableAssertionKind::AllUnique => {
                             let projection =
-                                value.encode().map_err(|_| table_assertion_diagnostic())?;
+                                value.encode().map_err(|_| table_evaluation_diagnostic())?;
                             if !projections.insert(projection) {
                                 return Err(table_assertion_diagnostic());
                             }
@@ -4846,7 +4846,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     &mut budget,
                     0,
                 )
-                .map_err(|_| table_assertion_diagnostic())?;
+                .map_err(|_| table_evaluation_diagnostic())?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
                     return Err(table_assertion_diagnostic());
                 }
@@ -4902,28 +4902,28 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                     &mut budget,
                     &mut effects,
                 )
-                .map_err(|_| table_assertion_diagnostic())?;
+                .map_err(|_| table_evaluation_diagnostic())?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
                     return Err(table_assertion_diagnostic());
                 }
                 continue;
             }
             let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
-                .map_err(|_| table_assertion_diagnostic())?;
+                .map_err(|_| table_evaluation_diagnostic())?;
             let mut projections = BTreeSet::new();
             let mut candidate_rows = 0usize;
             for (_, encoded) in rows
                 .get(&self.table)
-                .ok_or_else(table_assertion_diagnostic)?
+                .ok_or_else(table_evaluation_diagnostic)?
             {
-                debit_host_step(&mut budget).map_err(|_| table_assertion_diagnostic())?;
+                debit_host_step(&mut budget).map_err(|_| table_evaluation_diagnostic())?;
                 candidate_rows = candidate_rows
                     .checked_add(1)
-                    .ok_or_else(table_assertion_diagnostic)?;
+                    .ok_or_else(table_evaluation_diagnostic)?;
                 self.limits
                     .check_items(candidate_rows)
-                    .map_err(|_| table_assertion_diagnostic())?;
-                let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+                    .map_err(|_| table_evaluation_diagnostic())?;
+                let row = Value::decode(encoded).map_err(|_| table_row_decode_diagnostic())?;
                 let environment = Environment::from([(binding.to_owned(), row)]);
                 let value = evaluate_with_functions_and_budget(
                     predicate,
@@ -4932,13 +4932,13 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                     self.limits,
                     &mut budget,
                 )
-                .map_err(|_| table_assertion_diagnostic())?;
+                .map_err(|_| table_evaluation_diagnostic())?;
                 match kind {
                     TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
                     TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
                     TableAssertionKind::AllUnique => {
                         let projection =
-                            value.encode().map_err(|_| table_assertion_diagnostic())?;
+                            value.encode().map_err(|_| table_evaluation_diagnostic())?;
                         if !projections.insert(projection) {
                             return Err(table_assertion_diagnostic());
                         }
@@ -4956,7 +4956,7 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 &mut budget,
                 0,
             )
-            .map_err(|_| table_assertion_diagnostic())?;
+            .map_err(|_| table_evaluation_diagnostic())?;
             if !matches!(value.raw(), OvbRaw::Bool(true)) {
                 return Err(table_assertion_diagnostic());
             }
@@ -5051,6 +5051,26 @@ fn table_assertion_diagnostic() -> SafeDiagnostic {
         code: DiagnosticCode::TableAssertionFalse,
         class: DiagnosticClass::Permanent,
     }
+}
+
+fn table_evaluation_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::ExecutionRejected,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+fn table_row_decode_diagnostic() -> SafeDiagnostic {
+    SafeDiagnostic {
+        code: DiagnosticCode::DecodeRejected,
+        class: DiagnosticClass::Permanent,
+    }
+}
+
+/// True only when a table assertion evaluated to false (ORNA-A091-009). Other
+/// validator failures are evaluation or decode errors with their own codes.
+pub fn is_table_assertion_false(diagnostic: SafeDiagnostic) -> bool {
+    diagnostic.code == DiagnosticCode::TableAssertionFalse
 }
 
 fn stream_error_diagnostic(error: orna_runtime_v1::StreamStepError) -> Diagnostic {
@@ -7509,9 +7529,13 @@ fn admitted_transaction_module(
                             .and_then(TransactionKeyType::from_syntax)
                     })
                     .collect::<Result<Vec<_>, String>>()?;
-                if fields.is_empty() {
-                    return Err("transactional source seam requires an explicit table key".into());
-                }
+                // ORNA-AUTOID-001: a keyless table carries the implicit automatic
+                // key `id: Int`, matching the admission the semantic model records.
+                let (fields, key_types) = if keys.is_empty() {
+                    (vec![String::from("id")], vec![TransactionKeyType::Int])
+                } else {
+                    (fields, key_types)
+                };
                 key_fields.insert(
                     name.clone(),
                     TransactionTableKey::new(name.clone(), fields, key_types)?,
@@ -10056,16 +10080,16 @@ fn candidate_assertion_row(
     table_fields: &TableFields,
     key_fields: &TableFields,
 ) -> Result<Value, SafeDiagnostic> {
-    let row = Value::decode(encoded).map_err(|_| table_assertion_diagnostic())?;
+    let row = Value::decode(encoded).map_err(|_| table_row_decode_diagnostic())?;
     let OvbRaw::Array(values) = row.raw() else {
         return Ok(row);
     };
     let names = table_fields
         .get(table)
-        .ok_or_else(table_assertion_diagnostic)?;
+        .ok_or_else(table_evaluation_diagnostic)?;
     let key_names = key_fields
         .get(table)
-        .ok_or_else(table_assertion_diagnostic)?;
+        .ok_or_else(table_evaluation_diagnostic)?;
     let key_values = candidate_key_components(key, key_names)?;
     let mut fields = key_names
         .iter()
@@ -10076,13 +10100,13 @@ fn candidate_assertion_row(
             let name = OvbRaw::Text(name);
             let encoded_name = Value::new(name.clone())
                 .and_then(|value| value.encode())
-                .map_err(|_| table_assertion_diagnostic())?;
+                .map_err(|_| table_evaluation_diagnostic())?;
             Ok((encoded_name, (name, value)))
         })
         .collect::<Result<Vec<_>, SafeDiagnostic>>()?;
     fields.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
     let fields = fields.into_iter().map(|(_, field)| field).collect();
-    Value::new(OvbRaw::Map(fields)).map_err(|_| table_assertion_diagnostic())
+    Value::new(OvbRaw::Map(fields)).map_err(|_| table_evaluation_diagnostic())
 }
 
 /// Key components are stored in the entry key, not the row value: a single
@@ -10096,17 +10120,17 @@ fn candidate_key_components(key: &[u8], key_names: &[String]) -> Result<Vec<OvbR
     let components = match (key_names, Value::decode(key)) {
         ([_], Ok(decoded)) => vec![decoded.raw().clone()],
         ([_], Err(_)) => {
-            let text = std::str::from_utf8(key).map_err(|_| table_assertion_diagnostic())?;
+            let text = std::str::from_utf8(key).map_err(|_| table_row_decode_diagnostic())?;
             vec![OvbRaw::Text(text.to_owned())]
         }
         (_, Ok(decoded)) => match decoded.raw() {
             OvbRaw::Array(values) => values.clone(),
-            _ => return Err(table_assertion_diagnostic()),
+            _ => return Err(table_row_decode_diagnostic()),
         },
-        _ => return Err(table_assertion_diagnostic()),
+        _ => return Err(table_row_decode_diagnostic()),
     };
     if components.len() != key_names.len() {
-        return Err(table_assertion_diagnostic());
+        return Err(table_row_decode_diagnostic());
     }
     Ok(components)
 }
@@ -10125,7 +10149,7 @@ fn named_candidate_rows(
                 .map(|(key, encoded)| {
                     let row =
                         candidate_assertion_row(table, key, encoded, table_fields, key_fields)?;
-                    let encoded = row.encode().map_err(|_| table_assertion_diagnostic())?;
+                    let encoded = row.encode().map_err(|_| table_evaluation_diagnostic())?;
                     Ok((key.clone(), encoded))
                 })
                 .collect::<Result<Vec<_>, SafeDiagnostic>>()?;

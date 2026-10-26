@@ -38,6 +38,7 @@ pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, PendingPublicationError,
     RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
     SemanticAdapter, TransactionalEvaluator, project_declares_assertions,
+    is_table_assertion_false,
     transactional_loaded_project_candidate_validator,
     transactional_table_candidate_validator,
 };
