@@ -3343,17 +3343,19 @@ fn run_repl_input(
         .state
         .as_ref()
         .expect("runtime state initialized");
-    let (committed_rows, _) = committed_rows_at(
+    // The runtime doc for `begin_admitted_table_activation_over_committed`
+    // requires the pin to be read before the rows it binds.
+    let pin = transactions
+        .runtime
+        .block_on(state.published_pin())
+        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let (committed_rows, storage_orders) = committed_rows_at(
         repository,
         &transactions.commit,
         &transactions.table_schemas,
         &transactions.tables,
     )
     .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    let pin = transactions
-        .runtime
-        .block_on(state.published_pin())
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let committed = PinnedCommittedRows::new(pin, committed_rows)
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let snapshot = transactions
@@ -3389,6 +3391,7 @@ fn run_repl_input(
         repository,
         &transactions.format_context,
         &snapshot,
+        &storage_orders,
         request,
     );
     #[cfg(test)]

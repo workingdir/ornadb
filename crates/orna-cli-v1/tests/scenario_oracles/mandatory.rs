@@ -106,6 +106,9 @@ pub fn entries() -> Vec<Entry> {
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) { name: Str, }\n";
 const INSERT_ALICE: &str = r#"main.Contact.insert({ id: "alice", name: "Alice" })"#;
 
+// ORNA-STATE-001: the CWD relation counts uncommitted REPL rows. The HEAD half
+// is checked through `orna query --at HEAD`; `as_of(HEAD)` is not executed in
+// the REPL (it is unexecuted there), so this oracle does not claim it.
 fn cwd_counts_uncommitted_insert(db: &mut Db) -> Check {
     let tables = db.declare(CONTACT_SOURCE)?;
     let relation = Db::relation(&tables, "Contact")?;
