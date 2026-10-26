@@ -180,3 +180,121 @@ fn refused_commit(root: &std::path::Path) -> String {
     );
     transcript(&committed)
 }
+
+/// ORNA-ASSERT-026: the assertion depends on Book and Loan only, so a write to
+/// the unrelated Note table must not evaluate it. The store is empty, so the
+/// assertion's `exists(Book, id == 1)` conjunct is false on this candidate.
+const NOTE_BESIDE_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+pub table Note(id: Int) {\n    body: Str,\n}\n\n\
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id)) \
+&& exists(Book, book => book.id == 1);\n";
+
+#[test]
+fn write_to_a_table_outside_the_dependency_set_skips_the_module_assertion() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, NOTE_BESIDE_LIBRARY);
+    commit_source(&root, "module assertion gating fixture");
+
+    let output = orna_repl(
+        &root,
+        "main.Note.insert({ id: 1, body: \"unrelated\" })\n\
+         main.Note | count()",
+    );
+    let text = transcript(&output);
+    assert_success(&output, "unrelated-table REPL write");
+    assert!(!text.contains("ORNA-A091-009"), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 : Int"),
+        "{text}"
+    );
+}
+
+#[test]
+fn write_to_a_dependency_table_still_evaluates_the_module_assertion() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, NOTE_BESIDE_LIBRARY);
+    commit_source(&root, "module assertion gating fixture");
+
+    // Book 1 is the conjunct the assertion needs; a Book write must still be
+    // evaluated, so inserting Book 2 (which leaves Book 1 absent) is refused.
+    let output = orna_repl(&root, "main.Book.insert({ id: 2, title: \"Dune\" })");
+    let text = transcript(&output);
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+}
+
+const SEED_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id));\n\n\
+pub fn seed() {\n    Book.insert({ id: 1, title: \"Dune\" });\n    Loan.insert({ id: 2, book_id: 9 });\n}\n";
+
+#[test]
+fn violating_statement_in_a_multi_statement_call_rolls_back_every_write() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, SEED_LIBRARY);
+    commit_source(&root, "multi-statement module assertion fixture");
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let status = git(&root, &["status", "--porcelain"]);
+    let before = orna_repl(&root, "main.Book | count()");
+    assert_success(&before, "count before rejected call");
+
+    // The Book insert is valid on its own; the Loan insert violates the
+    // assertion. ORNA-ASSERT-029 requires the whole boundary to roll back.
+    let output = orna_repl(&root, "main.seed()\nmain.Book | count()\nmain.Loan | count()");
+    let text = transcript(&output);
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(stdout.contains("0 : Int"), "{text}");
+    assert!(!stdout.contains("1 : Int"), "{text}");
+
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&root, &["status", "--porcelain"]), status);
+}
+
+#[test]
+fn valid_multi_statement_call_admits_every_write() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(
+        &directory,
+        &SEED_LIBRARY.replace("Loan.insert({ id: 2, book_id: 9 })", "Loan.insert({ id: 2, book_id: 1 })"),
+    );
+    commit_source(&root, "valid multi-statement fixture");
+
+    let output = orna_repl(&root, "main.seed()\nmain.Book | count()\nmain.Loan | count()");
+    let text = transcript(&output);
+    assert_success(&output, "valid multi-statement call");
+    assert!(!text.contains("ORNA-A091-009"), "{text}");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert_eq!(stdout.matches("1 : Int").count(), 2, "{text}");
+}
+
+const TWO_MODULE_ASSERTIONS: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id)) \
+&& exists(Book, book => book.id == 77);\n\
+assert every(Loan, loan => exists(Book, book => book.id == loan.book_id)) \
+&& exists(Loan, loan => loan.id == 88);\n";
+
+#[test]
+fn several_false_module_assertions_reject_the_write_and_keep_the_store() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, TWO_MODULE_ASSERTIONS);
+    commit_source(&root, "several module assertions fixture");
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let status = git(&root, &["status", "--porcelain"]);
+
+    // Both module assertions are false for this candidate. Whichever is
+    // evaluated first, the boundary is refused as a whole (ORNA-ASSERT-027..029).
+    let output = orna_repl(
+        &root,
+        "main.Book.insert({ id: 1, title: \"Dune\" })\nmain.Book | count()",
+    );
+    let text = transcript(&output);
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("0 : Int"),
+        "{text}"
+    );
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&root, &["status", "--porcelain"]), status);
+}
