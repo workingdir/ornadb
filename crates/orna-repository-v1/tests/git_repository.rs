@@ -4415,7 +4415,7 @@ fn recovery_after_ref_advance_preserves_unrelated_partial_staging() {
 }
 
 #[test]
-fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation() {
+fn runtime_completion_finalizes_a_descendant_head_without_rewriting_it() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
     let managed = ManagedPath::new("generated/row.orna").unwrap();
@@ -4453,15 +4453,17 @@ fn runtime_completion_preserves_the_journal_when_head_moved_after_reconciliation
         &["commit", "-m", "ordinary commit after publication"],
     );
 
-    assert!(matches!(
-        repo.mark_runtime_complete([28; 16], &mut journal),
-        Err(orna_repository_v1::RepositoryError::StaleHead)
-    ));
+    // ORNA-PUB-009 recovery row "Ref no longer H or N": the ordinary commit
+    // descends from the candidate, so the batch is present. Completion clears
+    // the journal and leaves HEAD, index and worktree untouched.
+    let follow_up = repo.head().unwrap().unwrap();
+    repo.mark_runtime_complete([28; 16], &mut journal).unwrap();
+    assert_eq!(repo.read_publication_journal().unwrap(), None);
+    assert_eq!(repo.head().unwrap().unwrap(), follow_up);
     assert_eq!(
-        journal.stage(),
-        orna_repository_v1::PublicationJournalStage::WorktreeReconciled
+        fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+        "ordinary commit\n"
     );
-    assert_eq!(repo.read_publication_journal().unwrap(), Some(journal));
 }
 
 /// Builds a one-row legacy candidate on `head` and its Prepared journal.
