@@ -199,7 +199,8 @@ impl ServeApp {
         if admitted.requires_publication_metadata() {
             return Err("serve.table_read_unsupported");
         }
-        let (rows, storage_orders) = committed_rows_at(&repository, &commit, &admitted, &tables)
+        let schemas = admitted_table_schemas(&admitted);
+        let (rows, storage_orders) = committed_rows_at(&repository, &commit, &schemas, &tables)
             .map_err(|error| match error {
                 CommittedRowsError::Limit => "serve.table_read_limit",
                 CommittedRowsError::Unavailable => "serve.table_rows_unavailable",
