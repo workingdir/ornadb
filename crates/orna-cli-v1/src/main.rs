@@ -3362,7 +3362,7 @@ fn run_repl_input(
         &transactions.project,
         repository,
         &transactions.format_context,
-        snapshot.context(),
+        &snapshot,
         request,
     );
     #[cfg(test)]
