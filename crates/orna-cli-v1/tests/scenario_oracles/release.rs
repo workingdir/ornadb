@@ -16,24 +16,24 @@ use sha2::{Digest, Sha256};
 use crate::{
     harness::{
         Check, Db, Entry, Failure, Probe, check_refuses, ensure, hex, repl_refuses, unknown_command,
+        vendored_fixture,
     },
     mandatory::{LIVE_BLOCKER as LIVE_WATCH, watches_receive_no_update},
 };
 
-/// Byte-identical copy of the release `tests/final-vectors.json`, vendored
-/// by orna-value-v1 and pinned to the release `SHA256SUMS` entry.
-const FINAL_VECTORS_JSON: &str =
-    include_str!("../../../orna-value-v1/src/fixtures/reference/tests/final-vectors.json");
+/// Byte-identical copy of the release `tests/final-vectors.json`, vendored in
+/// this crate and pinned to the release `SHA256SUMS` entry.
 const FINAL_VECTORS_SHA256: &str =
     "985140787cde755ae53034de28d46cb4f5696d8bc95e385876e95ec0c953899d";
 
 static FINAL_VECTORS: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    let text = vendored_fixture("tests/fixtures/reference/tests/final-vectors.json");
     assert_eq!(
-        hex(&Sha256::digest(FINAL_VECTORS_JSON.as_bytes())),
+        hex(&Sha256::digest(text.as_bytes())),
         FINAL_VECTORS_SHA256,
         "the vendored final vectors no longer match the release file"
     );
-    serde_json::from_str(FINAL_VECTORS_JSON).expect("the release vectors are JSON")
+    serde_json::from_str(&text).expect("the release vectors are JSON")
 });
 
 const BLOB_OPERATIONS: &str = "the evaluator dispatches no Blob operation beyond file capture and annotation: `sys.blob` reads, comparisons, digests, writers and constructors are unsupported";
