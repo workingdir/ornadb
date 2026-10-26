@@ -441,3 +441,47 @@ fn repl_root_main_alias_targets_root_namespace_without_user_main() {
 #[path = "support/format3.rs"]
 mod format3;
 use format3::*;
+
+const CONTACT_SOURCE: &str = "pub table Contact(id: Str) { name: Str, }\n";
+
+/// ORNA-STATE-002: an uncommitted REPL insert is part of the CWD relation, so
+/// `main.Contact | count()` in a later submission counts it without a publish.
+#[test]
+fn repl_counts_an_uncommitted_insert_in_the_cwd() {
+    let (directory, _repository, _relation_id, _context) =
+        format3_repository_with_context(CONTACT_SOURCE, "Contact");
+    let root = directory.path();
+    let input = "main.Contact.insert({ id: \"alice\", name: \"Alice\" })\nmain.Contact | count()";
+    let output = run_repl(root, input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
+    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "insert rejected: {stdout}");
+    assert!(
+        stdout.contains("> 1 : Int"),
+        "CWD must count the uncommitted row (1): {stdout}"
+    );
+}
+
+/// ORNA-STATE-002 on the Blob path: two uncommitted Blob-bearing inserts are
+/// both counted, exercising the snapshot-based Blob restore base in
+/// `normalize_repl_mutations`.
+#[test]
+fn repl_counts_uncommitted_blob_bearing_inserts_in_the_cwd() {
+    let (directory, _repository, _relation_id) = format3_repository(MUSIC_SOURCE);
+    let root = directory.path();
+    std::fs::write(root.join("first.mp3"), b"synthetic first audio").expect("write first media");
+    std::fs::write(root.join("second.mp3"), b"synthetic second audio").expect("write second media");
+    let root_text = root.to_string_lossy();
+    let input = format!(
+        "let a = sys.blob.annotate(sys.blob.capture_file({root:?}, \"first.mp3\", 64), \"audio/mpeg\");\nmain.add(\"one\", \"First\", a).id\nlet b = sys.blob.annotate(sys.blob.capture_file({root:?}, \"second.mp3\", 64), \"audio/mpeg\");\nmain.add(\"two\", \"Second\", b).id\nmain.media | count()",
+        root = root_text.as_ref(),
+    );
+    let output = run_repl(root, &input);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
+    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "insert rejected: {stdout}");
+    assert!(
+        stdout.contains("> 2 : Int"),
+        "CWD must count both uncommitted Blob rows (2): {stdout}"
+    );
+}
