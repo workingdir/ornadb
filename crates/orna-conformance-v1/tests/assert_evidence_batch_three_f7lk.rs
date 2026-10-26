@@ -110,8 +110,8 @@ fn preserves_source_span_order_within_one_module() {
     assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
     let plans = analysis.assertions.values().next().expect("module assertion plans");
     assert_eq!(plans.len(), 2);
-    assert_eq!(plans[0].dependencies, ["Alpha".to_owned(), "Beta".to_owned()].into());
-    assert_eq!(plans[1].dependencies, ["Alpha".to_owned(), "Gamma".to_owned()].into());
+    assert_eq!(plans[0].dependencies, ["module-shapes.Alpha".to_owned(), "module-shapes.Beta".to_owned()].into());
+    assert_eq!(plans[1].dependencies, ["module-shapes.Alpha".to_owned(), "module-shapes.Gamma".to_owned()].into());
 }
 
 #[test]
