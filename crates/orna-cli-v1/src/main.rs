@@ -3462,7 +3462,7 @@ fn run_repl_input(
         if cancelled {
             original
         } else {
-            REPL_EFFECT_UNCERTAIN.to_owned().into()
+            repl_effect_uncertain(settlement_cause(&original))
         }
     };
     let admission = match transactions
@@ -3525,6 +3525,14 @@ fn run_repl_input(
             abandon("ORNA-REPL-EFFECT".to_owned().into())
         }
     };
+    let unsettled_after_evaluation_because = |cause: String| -> repl::ReplFailure {
+        if external_possible {
+            let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
+            repl_effect_uncertain(cause)
+        } else {
+            abandon(repl_effect_cancelled(cause))
+        }
+    };
     if activation.mutations().is_empty() {
         // Read-only results are retained: the request completes with its
         // terminal outcome instead of being left running.
@@ -3577,14 +3585,19 @@ fn run_repl_input(
         let Some(cwd_generation) = cwd_generation else {
             return Err(unsettled_after_evaluation());
         };
-        let Ok(mut validator) = transactional_loaded_project_candidate_validator(
+        let mut validator = match transactional_loaded_project_candidate_validator(
             &transactions.project,
             &transactions.identities,
             cwd_generation,
             Arc::clone(&transactions.table_object_ids),
             Limits::default(),
-        ) else {
-            return Err(unsettled_after_evaluation());
+        ) {
+            Ok(validator) => validator,
+            Err(outcome) => {
+                return Err(unsettled_after_evaluation_because(stage_outcome_cause(
+                    &outcome,
+                )));
+            }
         };
         let committed = transactions
             .runtime
@@ -3604,15 +3617,27 @@ fn run_repl_input(
             ));
         match committed {
             Ok(_) => {}
-            // Validation runs before any publication, so a failed assertion
+            // Validation runs before any publication, so a failed validation
             // leaves the input uncommitted. It is cancelled unless an external
-            // binding was actually dispatched during evaluation.
-            Err(TableActivationError::ValidationFailed(_)) if !external_dispatched => {
-                return Err(abandon("ORNA-A091-009".to_owned().into()));
+            // binding was actually dispatched during evaluation. Only a false
+            // assertion is ORNA-A091-009; other validator failures keep their
+            // diagnostic in the detail.
+            Err(TableActivationError::ValidationFailed(diagnostic)) if !external_dispatched => {
+                let failure = if orna_conformance_v1::is_table_assertion_false(diagnostic) {
+                    repl::ReplFailure::from("ORNA-A091-009".to_owned())
+                } else {
+                    repl_effect_cancelled(format!(
+                        "table assertion validation did not complete: {diagnostic:?}"
+                    ))
+                };
+                return Err(abandon(failure));
             }
-            Err(_) => {
+            Err(error) => {
                 finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-                return Err(REPL_EFFECT_UNCERTAIN.to_owned().into());
+                return Err(repl_effect_uncertain(format!(
+                    "table commit failed with {}",
+                    table_activation_cause(&error)
+                )));
             }
         }
     } else {
@@ -3663,13 +3688,20 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
     if !failure.external_effects_possible {
         return repl::ReplFailure::from(cause);
     }
+    repl_effect_uncertain(format!(
+        "external effects may already have happened after evaluation failed with {cause}"
+    ))
+}
+
+/// Submission failure for an input whose external effects may already have
+/// happened. The code stays `ORNA-REPL-EFFECT-UNCERTAIN`; `message` names the
+/// cause that stopped settlement, so the outcome is diagnosable without replay.
+fn repl_effect_uncertain(message: String) -> repl::ReplFailure {
     repl::ReplFailure {
         code: REPL_EFFECT_UNCERTAIN.to_owned(),
         detail: Some(orna_evaluator_v1::ReplDetail {
             code: REPL_EFFECT_UNCERTAIN.to_owned(),
-            message: format!(
-                "external effects may already have happened after evaluation failed with {cause}"
-            ),
+            message,
             span: None,
             notes: Vec::new(),
             help: vec![
@@ -3677,6 +3709,48 @@ fn repl_evaluation_failure(failure: ReplEvaluationFailure) -> repl::ReplFailure 
                     .to_owned(),
             ],
         }),
+    }
+}
+
+/// Submission failure for an input that was not published and is cancelled.
+/// `message` names the cause so the failure stays diagnosable.
+fn repl_effect_cancelled(message: String) -> repl::ReplFailure {
+    repl::ReplFailure {
+        code: "ORNA-REPL-EFFECT".to_owned(),
+        detail: Some(orna_evaluator_v1::ReplDetail {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            message,
+            span: None,
+            notes: Vec::new(),
+            help: Vec::new(),
+        }),
+    }
+}
+
+/// The failure that stopped settlement, named for the uncertain detail.
+fn settlement_cause(failure: &repl::ReplFailure) -> String {
+    match &failure.detail {
+        Some(detail) => format!("{}: {}", failure.code, detail.message),
+        None => failure.code.clone(),
+    }
+}
+
+/// The commit error's inner cause, for the uncertain detail.
+fn table_activation_cause(error: &TableActivationError) -> String {
+    match error {
+        TableActivationError::Runtime(runtime) => runtime.to_string(),
+        TableActivationError::ValidationFailed(diagnostic) => format!("{diagnostic:?}"),
+    }
+}
+
+/// The validator-build outcome's cause, for the unsettled detail.
+fn stage_outcome_cause(outcome: &StageOutcome<orna_foundation_v1::Diagnostic>) -> String {
+    match outcome {
+        StageOutcome::Failed(diagnostic) | StageOutcome::Cancelled(diagnostic) => {
+            format!("{}: {}", diagnostic.code(), diagnostic.message())
+        }
+        StageOutcome::Skipped { reason } => reason.clone(),
+        StageOutcome::Passed => "validator build produced no validator".to_owned(),
     }
 }
 
