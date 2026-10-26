@@ -4920,11 +4920,12 @@ impl Repository {
         }
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
-        // A normal Git writer may have moved HEAD after reconciliation but
-        // before the separately durable runtime completion.  Do not discard
-        // the journal in that state: PUB-1 recovery must retain it to
-        // reconcile the newer ref rather than treating cleanup as complete.
-        if self.head()?.as_ref() != Some(journal.new_head()) {
+        // ORNA-PUB-009 and recovery row "Ref no longer H or N": a normal Git
+        // writer may advance HEAD past the candidate after reconciliation.
+        // Ancestry proves the batch is present, so completion proceeds without
+        // rewriting the ref, index or worktree. Any HEAD that does not contain
+        // the candidate is a recovery conflict.
+        if !self.head_contains_commit(journal.new_head())? {
             return Err(RepositoryError::StaleHead);
         }
         journal.advance(PublicationJournalStage::RuntimeCompleted)?;
@@ -5083,7 +5084,7 @@ impl Repository {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
         if journal.stage() == PublicationJournalStage::WorktreeReconciled {
-            if self.head()?.as_ref() != Some(journal.new_head()) {
+            if !self.head_contains_commit(journal.new_head())? {
                 return Err(RepositoryError::StaleHead);
             }
             return Err(RepositoryError::RuntimeCompletionRequired);
@@ -5091,7 +5092,7 @@ impl Repository {
         if matches!(
             journal.stage(),
             PublicationJournalStage::RuntimeCompleted | PublicationJournalStage::Complete
-        ) && self.head()?.as_ref() != Some(journal.new_head())
+        ) && !self.head_contains_commit(journal.new_head())?
         {
             return Err(RepositoryError::StaleHead);
         }
@@ -11909,7 +11910,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_fences_runtime_completion_after_head_moves() {
+    fn recovery_finalizes_runtime_completed_descendant_head() {
         let root = tempfile::TempDir::new().unwrap();
         git(root.path(), &["init", "-b", "main"]);
         crate::test_support::configure_fixture_git_identity(root.path());
@@ -11966,9 +11967,116 @@ mod tests {
         fs::write(root.path().join("ordinary.txt"), "later\n").unwrap();
         git(root.path(), &["add", "ordinary.txt"]);
         git(root.path(), &["commit", "-m", "ordinary follow-up"]);
+        let follow_up = repository.head().unwrap().unwrap();
+
+        // Spec ORNA-PUB-009 / recovery table row "Ref no longer H or N": the
+        // ordinary descendant proves the batch is present, so cleanup finishes
+        // under the new ref without rewriting it (ORNA-PUB-017).
+        assert!(repository.recover_publication().unwrap().is_some());
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(repository.head().unwrap().unwrap(), follow_up);
+    }
+
+    /// Builds a publication whose candidate is reconciled into the ordinary
+    /// index and worktree (stage `WorktreeReconciled`) and whose ref is the
+    /// candidate, as a crash after reconciliation leaves it.
+    fn publication_reconciled_at_candidate(root: &Path) -> (Repository, PublicationJournal) {
+        git(root, &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root);
+        git(root, &["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("main.orna"), "module main;\n").unwrap();
+        fs::write(root.join("ordinary.txt"), "base\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-m", "initial"]);
+
+        let repository = Repository::discover(root).unwrap();
+        let path = ManagedPath::new("generated/row.orna").unwrap();
+        let old_head = repository.head().unwrap().unwrap();
+        let index = repository.index_generation().unwrap();
+        let candidate = repository
+            .build_private_commit(
+                &old_head,
+                &[ManagedFileChange::new(
+                    path.clone(),
+                    Some(b"published\n".to_vec()),
+                )],
+                "orna: publish runtime data",
+            )
+            .unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            old_head,
+            candidate.commit().clone(),
+            index.tree().unwrap().clone(),
+            [33; 16],
+            vec![PublicationJournalEntry::new(
+                path,
+                None,
+                Some(b"published\n".to_vec()),
+            )],
+        )
+        .unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        repository
+            .advance_current_ref(&journal.old_head().clone(), &candidate)
+            .unwrap();
+        journal.advance(PublicationJournalStage::RefAdvanced).unwrap();
+        journal.advance(PublicationJournalStage::IndexReconciled).unwrap();
+        journal.advance(PublicationJournalStage::WorktreeReconciled).unwrap();
+        repository.write_publication_journal(&journal).unwrap();
+        (repository, journal)
+    }
+
+    #[test]
+    fn recovery_finalizes_worktree_reconciled_descendant_head() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        fs::write(root.path().join("ordinary.txt"), "later\n").unwrap();
+        git(root.path(), &["add", "ordinary.txt"]);
+        git(root.path(), &["commit", "-m", "ordinary follow-up"]);
+        let follow_up = repository.head().unwrap().unwrap();
+
+        // The runtime transaction must still complete before cleanup.
+        assert!(matches!(
+            repository.recover_publication(),
+            Err(RepositoryError::RuntimeCompletionRequired)
+        ));
+        repository
+            .mark_runtime_complete([33; 16], &mut journal)
+            .unwrap();
+        assert!(repository.read_publication_journal().unwrap().is_none());
+        assert_eq!(repository.head().unwrap().unwrap(), follow_up);
+        assert_eq!(
+            fs::read_to_string(root.path().join("ordinary.txt")).unwrap(),
+            "later\n"
+        );
+    }
+
+    /// Recovery table row "Ref no longer H or N" without ancestry proof: a
+    /// HEAD that does not contain the candidate is a recovery conflict. The
+    /// journal and the newer ref are both preserved.
+    #[test]
+    fn recovery_fences_head_that_does_not_contain_candidate() {
+        let root = tempfile::TempDir::new().unwrap();
+        let (repository, mut journal) = publication_reconciled_at_candidate(root.path());
+
+        let old_head = journal.old_head().clone();
+        let tree = git(
+            root.path(),
+            &["rev-parse", &format!("{}^{{tree}}", old_head.as_str())],
+        );
+        let sibling = git(
+            root.path(),
+            &["commit-tree", tree.trim(), "-p", old_head.as_str(), "-m", "sibling"],
+        );
+        git(root.path(), &["update-ref", "refs/heads/main", sibling.trim()]);
 
         assert!(matches!(
             repository.recover_publication(),
+            Err(RepositoryError::StaleHead)
+        ));
+        assert!(matches!(
+            repository.mark_runtime_complete([33; 16], &mut journal),
             Err(RepositoryError::StaleHead)
         ));
         assert_eq!(
@@ -11977,8 +12085,9 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .stage(),
-            PublicationJournalStage::RuntimeCompleted
+            PublicationJournalStage::WorktreeReconciled
         );
+        assert_eq!(repository.head().unwrap().unwrap().as_str(), sibling.trim());
     }
 
     #[test]
