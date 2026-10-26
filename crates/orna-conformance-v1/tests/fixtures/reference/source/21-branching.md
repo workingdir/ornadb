@@ -1,54 +1,54 @@
 # 21. Branching, staging and checkout {#branching}
 
-## Branches and pending changes
 
-A branch is a Git reference to a commit, not a container for uncommitted work. `HEAD` selects the current branch or a detached commit. The worktree, its staging area and its local durable CWD overlay belong to the worktree instance.
+Branches remain ordinary Git refs. Worktrees own pending state; a branch is
+not a bag of unpublished changes. Mounts are projections of a worktree or a
+pinned commit, not additional branch semantics.
 
-```bash
-git branch experiment       # create at HEAD; remain on the current branch
-git switch -c experiment    # create at HEAD and select it
-```
+**ORNA-BRANCH-001** Creating a branch at HEAD MUST preserve CWD/index and create no implicit commit.
+**ORNA-BRANCH-002** Selecting a branch at the same commit MUST preserve pending data, staged/unstaged source differences and non-rewindable continuity state.
+**ORNA-BRANCH-003** A different-commit checkout MUST run CHECKOUT-3 with exact target validation, conflict preservation and recoverable state transitions.
 
-The corresponding `orna` commands preserve these meanings. Neither command creates a commit. Creating and selecting a branch at the current `HEAD` carries staged changes, unstaged changes and pending logical database changes unchanged. The new branch's committed history remains the same as the old `HEAD` until a commit is made.
+## Logical staging over a managed root
 
-**ORNA-BRANCH-001** Creating a branch without an explicit start point MUST resolve the current Git `HEAD`, create the new branch by compare-and-set against nonexistence, and leave CWD and the index unchanged. The operation MUST NOT commit pending data.
+Source/resources use normal Git paths and index semantics. Rows no longer have
+physical Git paths. `orna add --row TABLE KEY_TEXT` is the specified adapter
+for staging a row's current stored value (or deletion) using a canonical
+schema-typed key expression. `orna add --table TABLE` stages a whole selected
+table only after showing/confirming its scope under the host's interaction
+policy. These are metadata adapters, not new table representations.
 
-**ORNA-BRANCH-002** Selecting a new branch at the same commit MUST preserve the staged/unstaged distinction, pending table changes, local allocator high-water marks and source checkpoints. A branch switch cannot reset an allocator or discard unpublished rows merely because they are not in Git yet.
+The staging operation modifies a candidate `.orna/store` in the Git index and
+records exact staged row generations. Later CWD mutations remain unstaged.
+`orna restore --staged --row TABLE KEY_TEXT` restores that staged row to HEAD.
+Do not claim ordinary `git add` can interpret virtual row paths.
 
-**ORNA-BRANCH-003** Switching to another commit MUST carry nonconflicting local changes using Git-compatible worktree/index rules and equivalent logical row/schema checks. If a change would be overwritten, or the resulting candidate database would be invalid, the default operation MUST fail with CWD, index and `HEAD` unchanged.
+**ORNA-STAGE-001** Staging MUST bind the exact selected source/schema/row/content candidate and preserve unrelated staged or partially staged paths.
+**ORNA-STAGE-002** The index store MUST remain semantically complete and decode under its staged schema; missing dependencies or incompatible staged schemas MUST be rejected, not silently repaired using CWD.
+**ORNA-STAGE-003** Repeated staging MUST be deterministic and metadata-only staging MUST NOT hydrate media payloads.
+**ORNA-STAGE-004** Internal `.orna/store` paths MUST be managed atomically by Orna. Direct edits by other Git tools are detected as external candidate changes, not accepted without graph/schema validation.
 
-**ORNA-BRANCH-004** A historical snapshot containing no Git commit is not a branch start point. An unborn `HEAD` fails `create_branch` without an explicit committed start point. Selecting a new unborn symbolic branch with `orna switch -c` is separately defined in [administration](#administration). Orphan-branch creation remains a separate explicit Git operation and does not manufacture an empty commit.
+## CHECKOUT-3
 
-An explicit committed start point may be a commit, peeled tag or another branch. Snapshot references must belong to this repository or resolve to a commit reachable through an explicitly attached repository import; a database identifier alone does not authorise cross-repository reference creation.
+1. Resolve the selector once to an exact commit and, if applicable, an exact
+   target ref. Acquire workspace mutation authority; fence new activations.
+2. Wait for existing transactions to reach a boundary; cancellation joins owned
+   children. Do not kill unrelated worktrees or quietly publish their work.
+3. Admit target format, source graph, schema/catalogue and logical root.
+   Verify available object structure; retain exact promises for lazy payloads.
+   Validate affected row/reference/assertion obligations before visibility.
+4. Compute staged/unstaged/pending carry-forward. Preserve safe independent
+   edits; reject overlapping row/source/schema changes unless explicit reviewed
+   resolution exists. A force token binds exact discarded-state identities.
+5. Journal old/new HEAD/ref/index/worktree/store generations and continuity
+   protection. Use Git-compatible index/ref locks and expected-old ref updates.
+6. Install the coherent target and local base, leaving newer unrelated edits
+   intact. Cache invalidation and VFS directory lookups switch by generation;
+   existing read handles keep their pins. Unadmitted drafts are retained.
+7. Complete recovery records before admitting new mutations. Do not rewind
+   allocator authority, revive old sessions or rerun historical consumers.
 
-### Staging logical changes
-
-`orna add` stages the selected logical CWD generation for the named paths or tables. Later edits remain unstaged. For loose rows, the staged tree is the normal Git index. For pending compact rows, Orna maintains a staged logical delta bound to the index generation, and builds its staged immutable objects without consuming newer unstaged deltas. A stage record stores its base commit, per-key before/after state and schema revision.
-
-`orna commit` and `sys.admin.commit` commit the staged state, not every value visible in CWD. They validate the staged candidate schema and assertions, build a commit from that candidate, and preserve unstaged changes against the resulting commit. An empty staged delta is a no-op error unless an explicit Git-compatible empty-commit option is used. Automatic publication has a distinct rule: it publishes only the frozen runtime batch and never unrelated user staging.
-
-A plain Git commit can operate on materialised staged paths. It cannot implicitly publish rows that have never been materialised or staged into its index. `orna status` reports that remaining local tail. A later Orna command reconciles the actual `HEAD` with its index-generation record and refuses stale staging instead of silently selecting an old overlay.
-
-### Checkout preview and consent
-
-`sys.admin.plan_checkout(target)` is read-only. It resolves the target and returns `sys.CheckoutPlan`: the exact target commit/branch, expected `HEAD`, CWD generation, index and worktree digests, pending generation, affected consumers, conflicts and any changes a destructive checkout would discard.
-
-The plan token is SHA-256 over the canonical typed plan, excluding the token itself. It is a state precondition, not an authentication credential. `sys.admin.checkout(..., expected_plan: token)` rechecks it while holding the worktree mutation lock. Any relevant change produces `sys.git.stale_plan`.
-
-A nonforced checkout needs no preview token when it can recompute and apply a safe carry-forward under the lock. A forced checkout requires both `force: true` and a matching plan token. The host must have obtained explicit consent for the listed discard set; a noninteractive caller expresses that consent by supplying both arguments. Force cannot bypass schema validity, assertions, object availability, active-transaction fencing or repository-integrity checks.
-
-The target form preserves attachment semantics: a `BranchRef`, or a string resolving unambiguously to a local branch, selects that branch; an exact commit, snapshot, object ID or tag selects detached `HEAD`. No implicit branch guessing occurs for an ambiguous string.
-
-### Checkout algorithm CHECKOUT-1
-
-1. Acquire the worktree mutation lock, observe the current symbolic or detached `HEAD`, and prevent new activation admission during the switch.
-2. Wait for ordinary active transactions to reach a boundary. A forced operation may request their cancellation and join cleanup, but may not terminate unrelated worktrees. Reject reentrant checkout from an activation that owns uncommitted table writes.
-3. Resolve the committed target, obtain required objects and validate its source graph, schema, stored values, assertions and checkpoint formats in isolation.
-4. Compute the staged, unstaged and pending logical carry-forward. Conflicting local edits cause `sys.git.dirty_conflict` unless the exact destructive plan has been authorised. Untracked or ignored paths are never overwritten as an incidental consequence of resolving a database change.
-5. Pause affected consumers at completed item/batch boundaries. Preserve their worktree-local progress when switching to the same state or carrying compatible changes. If their checkpoint/code/source configuration is incompatible, leave them paused and report the reason; do not silently restart at a guessed position.
-6. Recheck the plan, index, worktree and `HEAD` preconditions. Write a durable transition journal containing before/after state and exact discard consent, then apply the Git index/worktree and logical CWD transition as one recoverable generation change.
-7. Publish the selected `HEAD` and CWD generation only when their relationship is recoverable. Existing pinned readers continue reading their old generation; new readers observe the new generation. Complete the journal and release admission.
-8. Resume only consumers proven compatible with the resulting state. A consumer requiring an explicit reset remains paused. Return the selected snapshot and make the operation inspectable through invocation/change metadata.
-
-On a crash, recovery compares journalled object identities and generations; it completes the recorded transition or preserves the old state. It never runs a blind hard reset over subsequently changed files. Unexpected external edits are preserved and reported as conflicts.
-
+**ORNA-CHECKOUT-001** A failed/stale checkout plan MUST leave current accepted state unchanged and preserve all drafts/unrelated changes.
+**ORNA-CHECKOUT-002** Checkout recovery MUST inspect actual refs and journal progress; it MUST NOT force a ref back after another writer advances it.
+**ORNA-CHECKOUT-003** A commit mount MUST be immutable; a branch-name snapshot mount MUST resolve once rather than move during reads.
+**ORNA-CHECKOUT-004** A workspace mount MUST share the selected worktree's CWD, not create an untracked independent copy. Independent work requires another worktree/clone.

@@ -11,7 +11,7 @@ mod format3;
 #[path = "support/orna_cli_run.rs"]
 mod cli;
 
-const BINARY: &str = env!("CARGO_BIN_EXE_orna-cli-v1");
+const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 
 struct RunningServer(Child);
 
@@ -24,7 +24,9 @@ impl Drop for RunningServer {
 
 fn http_get(address: &str, path: &str) -> std::io::Result<(u16, String)> {
     let mut stream = TcpStream::connect(address)?;
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    // Host must name the listener's own authority, port included (RFC 9110);
+    // `orna serve` refuses any other Host.
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     let (headers, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
@@ -111,8 +113,8 @@ fn devtools_are_absent_while_local_query_and_serving_remain_available() {
         thread::sleep(Duration::from_millis(25));
     }
     let (status, body) = root.expect("local server becomes available");
-    assert_eq!(status, 200);
-    assert!(!body.contains("/devtools/tables"));
+    assert_eq!(status, 404, "no serve entry: no native root page");
+    assert!(!body.contains("<html"));
     let (status, _) = http_get(&address, "/devtools/tables").expect("request removed route");
     assert_eq!(status, 404, "removed devtools route must not be reinstalled");
 }

@@ -1,1 +1,1 @@
-fn bad() = std.collection.map(1, value => value);
+fn bad() = map(1, value => value);

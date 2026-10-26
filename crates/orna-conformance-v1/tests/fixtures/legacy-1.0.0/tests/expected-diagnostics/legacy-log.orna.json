@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-log.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E1001",
+  "message_contains": "`log` is not a declaration in Orna 1.0",
+  "status": "expected-not-executed"
+}

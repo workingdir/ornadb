@@ -1,0 +1,2 @@
+pub fn bad() =
+    sys.storage(contacts.Contact);

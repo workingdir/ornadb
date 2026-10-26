@@ -30,7 +30,9 @@ const DATABASE_FILE: &str = "database.orna";
 const MAIN_FILE: &str = "main.orna";
 const MAX_METADATA_BYTES: u64 = 64 * 1024;
 const REPOSITORY_FORMAT: i64 = 3;
-const STORAGE_PROFILE: &str = "store-3";
+/// The storage profile of the format-3 writer. `sys.rt.info` reports it as
+/// `storage_manifest_version` of an attached repository.
+pub const STORAGE_PROFILE: &str = "store-3";
 const MAX_INHERITED_GIT_CONFIG_ENTRIES: usize = 1024;
 
 /// A stable repository identity, represented by UUIDv4 bytes.
@@ -214,6 +216,31 @@ pub fn inspect_metadata(
     repository: &Repository,
 ) -> Result<Option<RepositoryMetadata>, RepositoryInitError> {
     inspect_metadata_unlocked(repository)
+}
+
+/// Reads canonical metadata for a runtime identity. A pending migration
+/// candidate that still carries legacy `format.orna` is accepted only when its
+/// publication journal records migration continuity; its `database.orna` then
+/// supplies the identity. Every other repository keeps the strict contract.
+pub fn inspect_metadata_for_runtime(
+    repository: &Repository,
+) -> Result<Option<RepositoryMetadata>, RepositoryInitError> {
+    match inspect_metadata_unlocked(repository) {
+        Err(RepositoryInitError::MetadataUnsupported) => {
+            let journal = repository
+                .read_publication_journal()
+                .map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
+            if journal.as_ref().and_then(|j| j.migration_continuity()).is_none() {
+                return Err(RepositoryInitError::MetadataUnsupported);
+            }
+            let database = read_regular_file(&metadata_root(repository).join(DATABASE_FILE))?
+                .ok_or(RepositoryInitError::MetadataIncomplete)?;
+            let database_id = format_context::parse_any_database_id(&database)
+                .map_err(|_| RepositoryInitError::MetadataMalformed)?;
+            Ok(Some(RepositoryMetadata { database_id }))
+        }
+        other => other,
+    }
 }
 
 fn initialize_git(target: &Path) -> Result<(), RepositoryInitError> {

@@ -1,0 +1,2 @@
+pub fn recent(rows, duration = 7.days) =
+    rows | filter(row => row.time >= now() - duration);

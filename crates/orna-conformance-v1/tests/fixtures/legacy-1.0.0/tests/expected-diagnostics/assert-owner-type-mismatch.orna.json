@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/assert-owner-type-mismatch.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA-A091-004",
+  "message_contains": "table assertion must be a predicate over Relation<User>",
+  "status": "expected-not-executed"
+}

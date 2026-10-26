@@ -1,1 +1,1 @@
-pub type GBP { pub value: Int, }
+pub type GBP { impl Currency { static code = "GBP"; static minor_digits = 2; } }

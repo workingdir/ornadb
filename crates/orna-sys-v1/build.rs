@@ -28,6 +28,74 @@ fn rust_sources(root: &Path, output: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Runs `git` in the package directory. `None` when git is unavailable, the
+/// directory is not a checkout, or the output is empty.
+fn git_output(manifest: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(manifest)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
+/// The directory owning the Cargo workspace that contains `manifest`: the
+/// nearest ancestor (or `manifest` itself) whose `Cargo.toml` declares a
+/// `[workspace]`, or `manifest` for a package outside any workspace.
+fn workspace_root(manifest: &Path) -> PathBuf {
+    manifest
+        .ancestors()
+        .find(|directory| {
+            fs::read_to_string(directory.join("Cargo.toml")).is_ok_and(|text| {
+                text.lines()
+                    .any(|line| line.trim_start().starts_with("[workspace"))
+            })
+        })
+        .unwrap_or(manifest)
+        .to_path_buf()
+}
+
+/// The commit of `HEAD` when the repository toplevel of `manifest` contains the
+/// workspace root. A repository nested inside the workspace, such as a vendored
+/// checkout, is not this workspace's repository, so its commit is not reported.
+fn workspace_commit(manifest: &Path) -> Option<String> {
+    let toplevel = git_output(manifest, &["rev-parse", "--show-toplevel"])?;
+    let toplevel = fs::canonicalize(toplevel).ok()?;
+    let workspace = fs::canonicalize(workspace_root(manifest)).ok()?;
+    if !workspace.starts_with(&toplevel) {
+        return None;
+    }
+    git_output(manifest, &["rev-parse", "--verify", "HEAD"])
+}
+
+/// The `build_id` of this build: the full git commit of `HEAD`, or the package
+/// version with a `+nogit` suffix when the manifest's repository does not contain
+/// the workspace.
+///
+/// The files that move `HEAD` are watched so that a new commit reruns this
+/// script and the emitted identity follows the checkout.
+fn build_id(manifest: &Path) -> String {
+    let Some(commit) = workspace_commit(manifest) else {
+        let version = env::var("CARGO_PKG_VERSION").expect("package version");
+        return format!("{version}+nogit");
+    };
+    for git_path in ["HEAD", "refs", "packed-refs"] {
+        if let Some(path) = git_output(manifest, &["rev-parse", "--git-path", git_path]) {
+            let path = manifest.join(path);
+            if path.exists() {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
+    commit
+}
+
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("manifest directory"));
     let source_root = manifest.join("src");
@@ -41,6 +109,17 @@ fn main() {
     // Watch the directory recursively so adding a new annotated module also
     // invalidates the collected schema, even before that file is known here.
     println!("cargo:rerun-if-changed={}", source_root.display());
+
+    // `sys.RuntimeInfo` coordinates this build reports; see `src/host_context.rs`.
+    println!(
+        "cargo:rustc-env=ORNA_SYS_LANGUAGE_VERSION={}",
+        build_support::GENERATED_API_LANGUAGE_VERSION
+    );
+    println!(
+        "cargo:rustc-env=ORNA_SYS_SYS_VERSION={}",
+        build_support::GENERATED_API_SYS_VERSION
+    );
+    println!("cargo:rustc-env=ORNA_SYS_BUILD_ID={}", build_id(&manifest));
 
     // `syn` scans written Rust source and cannot see items emitted later by
     // `macro_rules!` or procedural-macro expansion. Annotated methods in impls

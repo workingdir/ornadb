@@ -9,7 +9,7 @@ fn canonical(raw: Raw) -> CanonicalValue {
 
 #[test]
 fn pinned_option_module_executes_its_orna_implementations() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/option.orna")
         .collect::<Vec<_>>();

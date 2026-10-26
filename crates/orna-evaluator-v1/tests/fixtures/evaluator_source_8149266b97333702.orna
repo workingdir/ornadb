@@ -1,1 +1,1 @@
-std.collection.first(values: [1])
+first(values: [1])

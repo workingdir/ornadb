@@ -200,49 +200,43 @@ pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
     format3_repository(include_str!("../fixtures/media/empty-media-main.orna"))
 }
 
-/// Creates an Object project, its canonical identity manifest, source rows, and
-/// matching native descriptor roots in one committed repository.
-pub fn object_format3_repository(
-    media_root: &Path,
-) -> (TempDir, Repository, [u8; 16], Format3Context) {
-    let (directory, repository, relation_id, schema_root, store_root) = format3_repository_parts(
+/// Creates an Object project, its canonical identity manifest, and matching
+/// native descriptor roots in one committed repository. The Object rows are
+/// not committed: format 3 keeps rows only in `.orna/store`
+/// (ORNA-REPO-004), so a caller admits [`object_source_row`] documents into
+/// the store.
+pub fn object_format3_repository() -> (TempDir, Repository, [u8; 16], Format3Context) {
+    format3_repository_with_context(
         include_str!("../fixtures/media/offline-query-main.orna"),
         "Object",
-    );
-    let root = directory.path();
-    let media_root = format!("{:?}", media_root.to_string_lossy().as_ref());
-    for (name, fixture) in [
-        ("song", include_str!("../fixtures/media/source-song.orna")),
-        ("image", include_str!("../fixtures/media/source-image.orna")),
-        ("overflow", include_str!("../fixtures/media/overflow.orna")),
-    ] {
-        let source = fixture.replace("__MEDIA_ROOT__", &media_root);
-        let path = root.join("Object").join(format!("{name}.orna"));
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, source).unwrap();
-    }
-    git(root, &["add", "--all"]);
-    git(root, &["commit", "--quiet", "-m", "add source Object rows"]);
-    let commit = repository.head().unwrap().unwrap();
-    let context =
-        persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
-    (directory, repository, relation_id, context)
+    )
+}
+
+/// The source document of one fixture Object row (`song`, `image` or
+/// `overflow`), naming its media under `media_root`.
+pub fn object_source_row(media_root: &Path, key: &str) -> String {
+    let fixture = match key {
+        "song" => include_str!("../fixtures/media/source-song.orna"),
+        "image" => include_str!("../fixtures/media/source-image.orna"),
+        "overflow" => include_str!("../fixtures/media/overflow.orna"),
+        other => panic!("no fixture Object row {other:?}"),
+    };
+    fixture.replace(
+        "__MEDIA_ROOT__",
+        &format!("{:?}", media_root.to_string_lossy().as_ref()),
+    )
 }
 
 /// Adds one admitted source row to the native Format-3 graph and commits a
-/// canonical graph snapshot. The ordinary source publication helper only
-/// stages its loose-row bytes; history reads the immutable native graph.
+/// canonical graph snapshot. History reads the immutable native graph.
 pub fn commit_source_row_to_native_graph(
     root: &Path,
     repository: &Repository,
-    source_commit: &str,
     relation_id: [u8; 16],
     context: &Format3Context,
     key: &str,
 ) -> String {
     let head = repository.head().unwrap().unwrap();
-    let source_path = format!("{source_commit}:Object/{key}.orna");
-    let original_source = git_output(root, &["show", &source_path], None);
     let format = repository
         .open_pinned_format_context(head.as_str())
         .unwrap();
@@ -307,8 +301,7 @@ pub fn commit_source_row_to_native_graph(
     append_cbor_bytes(&mut store_root, &git_oid_bytes(&relation_map));
     let store_root = native_fixture_node(root, &store_root, &[(relation_map.as_str(), "tree")]);
 
-    std::fs::write(root.join(format!("Object/{key}.orna")), &original_source).unwrap();
-    git(root, &["add", "--all"]);
+    // The index equals `HEAD`, so its tree carries the committed source.
     let staged_tree = String::from_utf8(git_output(root, &["write-tree"], None))
         .unwrap()
         .trim()
@@ -407,39 +400,15 @@ pub fn format3_repository_for_table(
         format3_repository_parts(media_source, table_name);
     (directory, repository, relation_id)
 }
-/// Creates an empty format-3 table, commits one source row, and returns a
-/// context pinned to that exact row-source snapshot.
-pub fn format3_repository_for_table_with_source_row(
+/// Creates an empty format-3 table and returns a context pinned to that
+/// exact committed snapshot. Rows enter the store through admission, never as
+/// committed files (ORNA-REPO-004).
+pub fn format3_repository_with_context(
     media_source: &str,
     table_name: &str,
-    source_row_path: &str,
-    source_row: &str,
 ) -> (TempDir, Repository, [u8; 16], Format3Context) {
-    format3_repository_for_table_with_source_rows(
-        media_source,
-        table_name,
-        &[(source_row_path, source_row)],
-    )
-}
-
-pub fn format3_repository_for_table_with_source_rows(
-    media_source: &str,
-    table_name: &str,
-    source_rows: &[(&str, &str)],
-) -> (TempDir, Repository, [u8; 16], Format3Context) {
-    assert!(!source_rows.is_empty());
     let (directory, repository, relation_id, schema_root, store_root) =
         format3_repository_parts(media_source, table_name);
-    for (source_row_path, source_row) in source_rows {
-        let path = directory.path().join(source_row_path);
-        std::fs::create_dir_all(path.parent().expect("source row has a parent")).unwrap();
-        std::fs::write(path, source_row).unwrap();
-    }
-    git(directory.path(), &["add", "--all"]);
-    git(
-        directory.path(),
-        &["commit", "--quiet", "-m", "add source row fixture"],
-    );
     let commit = repository.head().unwrap().unwrap();
     let context =
         persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
@@ -466,7 +435,14 @@ fn format3_repository_parts(
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
     let table = identities
-        .source_table_schema(&analysis, "", "main.orna", declaration_name)
+        .source_table_schema(
+            &modules,
+            &analysis,
+            Some(database_id),
+            "",
+            "main.orna",
+            declaration_name,
+        )
         .unwrap();
     let relation_id = *table.table_object_id();
     let schema_source = table.descriptor().encode().unwrap();
@@ -481,7 +457,15 @@ fn format3_repository_parts(
         &["commit", "--quiet", "-m", "format3 capture fixture"],
     );
 
-    let schema_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    // The byte index names its chunk by the chunk's SHA-256; the kind-6 node
+    // and the rows domain carry the format-3 schema identity: SHA-256 of
+    // `orna.schema.v3`, NUL and the descriptor bytes.
+    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let schema_digest: [u8; 32] = Sha256::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_source)
+        .finalize()
+        .into();
     let chunk_oid = git_object(root, "blob", &schema_source);
     let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
     append_cbor_head(&mut byte_index, 0, schema_source.len());
@@ -489,7 +473,7 @@ fn format3_repository_parts(
     byte_index.push(0x83);
     append_cbor_head(&mut byte_index, 0, schema_source.len());
     append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
-    append_cbor_bytes(&mut byte_index, &schema_digest);
+    append_cbor_bytes(&mut byte_index, &chunk_digest);
     let byte_index_oid = native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
     let mut schema = vec![0x85, 0x01, 0x06];

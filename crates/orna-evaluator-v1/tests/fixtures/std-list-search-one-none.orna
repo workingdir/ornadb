@@ -1,1 +1,1 @@
-std.collection.one([1, 2], value => value == 9)
+one([1, 2], value => value == 9)

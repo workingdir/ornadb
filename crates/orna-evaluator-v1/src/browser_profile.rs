@@ -9,7 +9,7 @@ use std::fmt;
 use std::ptr;
 
 use orna_foundation_v1::CanonicalValue;
-use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{Catalogue, ModuleInput, SystemProviders, analyze_with_providers};
 use orna_syntax_v1::{Declaration, parse_module_with_file};
 
 use crate::{Environment, EvaluationError, Functions, Limits, PureFunction, invoke_named};
@@ -65,9 +65,10 @@ pub fn execute_browser_profile(
         return Err(BrowserProfileError::code(code));
     }
 
-    let analysis = analyze_with_catalogue(
+    let analysis = analyze_with_providers(
         &[ModuleInput::new(PROFILE_SOURCE_PATH, source.to_owned())],
         &Catalogue::authoritative_core(),
+        SystemProviders::Production,
     );
     if !analysis.is_ok() {
         let code = analysis

@@ -1,0 +1,20 @@
+pub table Song(id: Str) {
+    title: Str,
+    content: Blob,
+}
+
+pub fn import_song(id: Str, title: Str, root: Str, path: Str) {
+    let content = sys.blob.capture_file(root, path, max_bytes: 67108864);
+    Song.insert({ id: id, title: title, content: content });
+}
+
+
+pub fn length_of(id: Str): Int {
+    let song = Song | one(item => item.id == id);
+    sys.blob.length(song.content)
+}
+
+pub fn first_bytes(id: Str): Blob {
+    let song = Song | one(item => item.id == id);
+    sys.blob.read(song.content, offset: 0, length: 32)
+}

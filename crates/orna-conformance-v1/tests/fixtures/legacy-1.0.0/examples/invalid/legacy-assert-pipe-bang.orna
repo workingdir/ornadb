@@ -1,0 +1,1 @@
+pub fn bad(amount: Int) { amount > 0 |! InvalidAmount; }
