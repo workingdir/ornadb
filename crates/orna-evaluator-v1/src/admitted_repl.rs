@@ -1917,6 +1917,48 @@ mod tests {
     }
 
     #[test]
+    fn loaded_module_path_resolves_after_use_and_reports_the_missing_member() {
+        let (_directory, project) = loaded_project(
+            &[
+                (
+                    "main.orna",
+                    include_str!(
+                        "fixtures/repl-inline-use-library-pub-fn-run-int-library-loc-22e03d25.orna"
+                    ),
+                ),
+                (
+                    "library.orna",
+                    include_str!(
+                        "fixtures/repl-inline-pub-fn-local-value-int-int-value-1-be07d8e1.orna"
+                    ),
+                ),
+            ],
+            None,
+        );
+        let mut session = AdmittedReplSession::from_loaded_project(
+            &project,
+            Vec::<(String, String)>::new(),
+            Limits::default(),
+        )
+        .unwrap();
+        assert_eq!(session.submit("use library;\n"), Ok(None));
+        assert_eq!(session.submit("library.local(40)\n"), Ok(Some(Value::int(41.into()))));
+
+        let error = session.submit("library.twice(\"x\")\n").unwrap_err();
+        let detail = error.detail.as_ref().expect("unresolved members carry a located detail");
+        assert_eq!(detail.message, "`twice` is not a member of module `library`");
+        assert_eq!(detail.span, Some(8..13));
+        assert!(
+            detail
+                .help
+                .iter()
+                .any(|help| help == "check the spelling of `twice` against the exports of `library`"),
+            "{:?}",
+            detail.help
+        );
+    }
+
+    #[test]
     fn binding_without_a_name_points_at_the_offending_token() {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error = session.submit("let = 3;").unwrap_err();

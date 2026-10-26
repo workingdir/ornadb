@@ -175,6 +175,15 @@ impl ServeApp {
                 });
             }
         };
+        let table_names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)
+            .map_err(|_| "serve.table_rows_unavailable")?;
+        if legacy_bare_module_table(&state, &runtime, &candidates)
+            .map_err(|_| "serve.table_rows_unavailable")?
+            .is_some()
+        {
+            return Err("serve.table_rows_unavailable");
+        }
         let committed = tables
             .iter()
             .map(|table| CommittedTableIdentity::new(table.table(), table.object_id()));
