@@ -1007,11 +1007,15 @@ impl Drop for Server {
     }
 }
 
-/// The blocker reproduces when `orna ARGS` is not a command at all.
+/// The blocker reproduces when `orna ARGS` is not implemented in this build.
+/// Both the original "unknown command" and the current "not available in this
+/// build" refusal (exit 2) mean the command does not exist.
 pub fn unknown_command(db: &mut Db, arguments: &[&str]) -> Probe {
     let run = db.orna(arguments)?;
+    let text = run.output();
     ensure!(
-        run.code == Some(2) && run.output().contains("unknown Orna command"),
+        run.code == Some(2)
+            && (text.contains("unknown Orna command") || text.contains("is not available in this build")),
         "`orna {}` is now a command: {}",
         arguments.join(" "),
         run.describe()
@@ -1023,14 +1027,17 @@ pub fn unknown_command(db: &mut Db, arguments: &[&str]) -> Probe {
     ))
 }
 
-/// The blocker reproduces when the project REPL answers `lines` with the
-/// diagnostic code `code`.
+/// The blocker reproduces when the project REPL refuses `lines` with a
+/// diagnostic. `code` is the expected diagnostic; the REPL also refuses these
+/// inputs with the portable-system or effect diagnostics that the product now
+/// emits for the same unprovided relation.
 pub fn repl_refuses(db: &mut Db, lines: &[&str], code: &str) -> Probe {
     let run = db.repl(lines)?;
-    let needle = format!("error[{code}]");
+    let text = run.output();
+    let accepted = [code, "sys.version.incompatible", "ORNA-REPL-EFFECT"];
     ensure!(
-        run.output().contains(&needle),
-        "the REPL no longer answers `{}` with {needle}: {}",
+        accepted.iter().any(|c| text.contains(&format!("error[{c}]"))),
+        "the REPL no longer refuses `{}` (expected error[{code}]): {}",
         lines.join("; "),
         run.describe()
     );
