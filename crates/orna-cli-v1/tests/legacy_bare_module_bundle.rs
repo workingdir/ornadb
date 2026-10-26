@@ -1,5 +1,6 @@
 //! A repository written by the pre-qualified-storage build, committed as a git
-//! bundle with its runtime `state.db` (ornadb-5il1.199).
+//! bundle with its runtime state store `legacy-bare-module-state.sqlite3`
+//! (copied to `.git/orna/state.db` by the test; ornadb-5il1.199).
 //!
 //! The bundle was produced by the `origin/main` CLI before module tables were
 //! stored under their qualified names: `a.Item` is stored as the bare `Item`
