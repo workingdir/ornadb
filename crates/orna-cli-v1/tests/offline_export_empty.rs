@@ -14,9 +14,9 @@ fn declared_catalogue(file: &str) -> PathBuf {
     path
 }
 
-/// Runs `orna-cli-v1 import <bundle> --dry-run`.
+/// Runs `orna import <bundle> --dry-run`.
 fn run_import(bundle: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("import")
         .arg(bundle)
         .arg("--dry-run")

@@ -10,7 +10,7 @@ fn boolean(value: bool) -> CanonicalValue {
 }
 
 fn pinned_sorting_session() -> (AdmittedReplSession, StandardDependencyProfile) {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| SORTING_MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();
