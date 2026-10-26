@@ -54,14 +54,22 @@ metadata migration. ORNA-UPGRADE-005 requires the annotation change to be
 reported as a semantic profile transition, because preserving raw bytes does not
 prove unchanged annotated value identity.
 
-* The defaults are counted while the metadata of legacy Blob entries is decoded.
-  No payload is read. `MigrationAnnotationDefaults::from_legacy_inventory`
-  already reports `payload_inspected() == false`.
-* The decoded count is the coordinate `annotation_defaults`. It is recorded in
-  `.orna/migration.json` (`MIGRATION_RECORD`) and in the publication journal.
-* `--annotation-defaults N` keeps its name and becomes an expected-count
-  assertion. A mismatch with the decoded count refuses before any copy is
-  created. The flag no longer declares the coordinate.
+* Target design: the defaults are counted while the metadata of legacy Blob
+  entries is decoded. No payload is read.
+  `MigrationAnnotationDefaults::from_legacy_inventory` already reports
+  `payload_inspected() == false`.
+* Target design: the decoded count is the coordinate `annotation_defaults`,
+  recorded in `.orna/migration.json` (`MIGRATION_RECORD`) and in the publication
+  journal. `--annotation-defaults N` then becomes an expected-count assertion
+  that refuses before any copy is created.
+* Current state (not yet the target): the decoder is not wired into the migrate
+  copy path. `migrate copy --annotation-defaults N` feeds the operator-declared
+  count straight into `MigrationAnnotationDefaults::new`
+  (`crates/orna-cli-v1/src/cli_dispatch.rs`), so the flag is the coordinate
+  today and no decoded-count assertion runs. `from_legacy_inventory` and
+  `LegacyAnnotationInventory::annotation_defaults` are exercised only by tests.
+  ORNA-UPGRADE-004 is therefore not met by production yet. Wiring the decoder
+  and the expected-count assertion is tracked by bead `ornadb-i6ma`.
 * Format-2 compact input stays outside this decision. The specification names
   Apache Parquet 2.13.0 for legacy compact-input interpretation
   (`reference/Orna-1.1.0/source/35-references.md`) and gives no record shape for
@@ -97,19 +105,21 @@ treats the decoded rows as the complete authoritative set.
 * Reusing the publish lock, lease and journal keeps one writer path and one
   protected transition. The journal already carries the migration coordinates,
   so recovery needs no new state.
-* A declared count alone records nothing about the metadata the migration read.
-  Recording the decoded count makes the migration report derive from the legacy
-  metadata (ORNA-UPGRADE-005). The flag then checks the operator's review
-  against it.
+* Target design: a declared count alone records nothing about the metadata the
+  migration read. Recording the decoded count makes the migration report derive
+  from the legacy metadata (ORNA-UPGRADE-005), and the flag then checks the
+  operator's review against it. Today the operator count is recorded, so the
+  report does not yet derive from decoded metadata.
 
 ## Consequences
 
 * The CLI help (`crates/orna-cli-v1/src/cli_help.rs`) and
   `crates/orna-cli-v1/README.md` describe `--annotation-defaults` as the
-  operator-supplied decoded count today. When the decoder lands, both change to
-  describe an expected-count assertion.
+  operator-supplied decoded count today. When the decoder lands (`ornadb-i6ma`),
+  both change to describe an expected-count assertion.
 * Until the decoder lands, `annotation_defaults` records the operator-declared
-  count that `migrate copy --annotation-defaults N` takes today.
+  count that `migrate copy --annotation-defaults N` takes today, with no
+  assertion against decoded rows.
 * Once the `upgrade` surface is enabled, `orna upgrade --to-format 3` holds the
   publish lock and writer lease for the whole protected transition, and a
   concurrent `orna publish` contends for the same lease.
