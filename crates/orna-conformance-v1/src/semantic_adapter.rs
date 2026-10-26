@@ -4576,6 +4576,25 @@ pub fn transactional_table_candidate_validator(
     )))
 }
 
+/// Reports whether any committed module declares a table-level or module-level
+/// assertion. Projects without assertions have nothing for the assertion
+/// validator to check.
+pub fn project_declares_assertions(loaded: &orna_project_v1::LoadedProject) -> bool {
+    loaded.modules().iter().any(|module| {
+        parse_module(&module.source)
+            .value
+            .items
+            .iter()
+            .any(|item| match &item.declaration {
+                Declaration::Assertion { .. } => true,
+                Declaration::Table { members, .. } => members
+                    .iter()
+                    .any(|member| matches!(member, orna_syntax_v1::TableMember::Assertion { .. })),
+                _ => false,
+            })
+    })
+}
+
 /// Builds a transaction validator from every committed project module. This
 /// keeps mounted row saves on the same cross-module assertion and effect
 /// admission path as project-backed transactions.
@@ -4794,7 +4813,9 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                     .map_err(|_| table_assertion_diagnostic())?;
                     match kind {
                         TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
-                        TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
+                        TableAssertionKind::Every => {
+                            return Err(table_assertion_diagnostic());
+                        }
                         TableAssertionKind::AllUnique => {
                             let projection =
                                 value.encode().map_err(|_| table_assertion_diagnostic())?;
@@ -10067,11 +10088,21 @@ fn candidate_assertion_row(
 /// Key components are stored in the entry key, not the row value: a single
 /// key encodes its value directly, a composite key encodes an array in
 /// declared order (see `encoded_table_key`).
+///
+/// Mounted source-row writes store a text primary key as its raw UTF-8 bytes
+/// (see `runtime_table_key_bytes` in the CLI mount), so a single key that does
+/// not decode as a canonical value is read as that text.
 fn candidate_key_components(key: &[u8], key_names: &[String]) -> Result<Vec<OvbRaw>, SafeDiagnostic> {
-    let decoded = Value::decode(key).map_err(|_| table_assertion_diagnostic())?;
-    let components = match (key_names, decoded.raw()) {
-        ([_], raw) => vec![raw.clone()],
-        (_, OvbRaw::Array(values)) => values.clone(),
+    let components = match (key_names, Value::decode(key)) {
+        ([_], Ok(decoded)) => vec![decoded.raw().clone()],
+        ([_], Err(_)) => {
+            let text = std::str::from_utf8(key).map_err(|_| table_assertion_diagnostic())?;
+            vec![OvbRaw::Text(text.to_owned())]
+        }
+        (_, Ok(decoded)) => match decoded.raw() {
+            OvbRaw::Array(values) => values.clone(),
+            _ => return Err(table_assertion_diagnostic()),
+        },
         _ => return Err(table_assertion_diagnostic()),
     };
     if components.len() != key_names.len() {
