@@ -5,12 +5,17 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The read-side `sys.blob` operations `length` and `digest` run natively from the Blob's stored identity. `read`, `verify` and `to_bytes` run natively on Blobs whose content is held in the value; a Blob that decodes to descriptor content (stored or captured ROV-3 values) fails with `sys.blob.unavailable` until its descriptor is bound (ornadb-55op). `digest` returns the raw-content SHA-256 commitment (`Digest`, tag 60025) from the Blob's stored content identity, without reading content. `read` returns a bounded Blob slice; `to_bytes` and `read` refuse more than 8 MiB in one call with `sys.blob.limit`. `verify` streams the content in bounded chunks and checks its SHA-256; it is not a full-verification claim. `from_bytes` builds a Blob from integers in `0..=255` with the `application/octet-stream` fallback, refusing an out-of-range integer with `sys.blob.bounds` and more than 8 MiB with `sys.blob.limit`. `sys.blob.media_type` and `sys.blob.suffix` are native metadata reflection. `sys.blob.same_content` returns false from the stored identities when they differ, returns true at once when both sides share a content source or descriptor witness, and otherwise streams both sides in bounded chunks and compares exact bytes (ORNA-BLOB-005). `sys.blob.capture_file` is invoked as an effect, not read.
+- Known gap: `sys.blob.verify` does not check the native dependency structure. Orna-1.1.0 `34-system-reference.md` (`sys.blob.verify`) requires "complete content and its native dependency structure"; this build checks content only. The gap stays open under ornadb-5il1.120.
 
 ### Fixed
 - Runtime `reserve_request` now refuses a secondary handle that does not own the worktree lock with `LeaseHeld` before inserting a row (ORNA-TURSO-005, ornadb-f69b). Test setup that reserved through a secondary handle now reserves through the host's owner-bound runtime, or releases the owner handle first.
 - Secondary runtime handles (another live runtime holds the worktree owner lock) are refused with `LeaseHeld` by the writer-lease entry points `begin_observed_request` (with admission), `acquire_lease`, `current_lease`, `takeover_lease`, `recover_abandoned`, and by every owner-fenced write: the central owner check (`require_current_owner`, used by `require_owner` and `require_recovery_owner`), the legacy request transition (`transition_request`: start, complete, cancel) and `register_stream_observation` (ORNA-TURSO-005, ornadb-3c2s). A secondary can no longer read, take over or reclaim the writer lease, nor commit an owner-fenced write, so a second local writer must coordinate with the owner or fail. Tests that relied on a second handle performing this setup now use the owner handle, a handle outside the owner lock for compare-and-swap races, or a real secondary for `LeaseHeld` assertions. Publication-intent writers (`bind_compact_publication` and its receipt and completion transactions) are not yet lease-fenced and remain a tracked residual.
 - One-shot `invoke` and `run` over committed tables (ornadb-03ol) now convert the merged activation snapshot (committed base plus the CWD tail) to evaluator records through the single stored-to-evaluator conversion `orna_project_v1::evaluator_rows_from_stored`, keyed by table name and ordered by storage order. Committed rows are no longer converted separately from the tail. A live-row test (`invoke_reads_every_scalar_field_type_of_a_committed_row`) reads Int, Str, Bool, Float and Decimal fields back from a committed row.
 
+- Private staged identity carriers (the unreachable commit that `capture_staged_candidate` names for loading) now set a fixed internal author and committer identity through the environment, so they no longer depend on the ambient `user.name`/`user.email`. A machine or CI runner without a git identity can capture them (bead ornadb-36nj). Publication candidates ref-advance the user's branch and keep the configured identity, so a published branch tip records the configured author. Reviewed user commits are unchanged.
+- The `replacement_runtime_fences` embedded test (ORNA-TURSO-005/006) now expects `LeaseHeld` for the Secondary handle that does not own the worktree lock, and proves TURSO-006 fencing on the replacement owner, which refuses the stale owner's lease with `OwnerLost` (ornadb-olxr).
+- The `mv_restores_the_source_when_staging_the_inventory_fails` test no longer compares the source's change time or inode number; restore is observed by the refused output, the unchanged index bytes, the publication journal, and the staged identities. Inode numbers are reused on tmpfs, and change time is not specific to restore (ornadb-srco).
 ### Breaking / API
 - `ActivationEffectReport` is built only through `ActivationEffectReport::declare(DeclaredEffectSet)`, which yields a `ControlledEffectToken` for `DeclaredEffectSet::None`. `ActivationWork::with_effects` takes this report.
 - `RuntimeState::record_controlled_transaction` now requires `&ControlledEffectToken` as its final argument.
@@ -31,6 +36,7 @@ been published.
 - Test-expectation migration (ornadb-0im9): bare root intrinsic names (`sort_by`, `every`, `sum`, `min`, `max`, ...) resolve without a standard profile (09-standard-library L7), so the five finite-list tests that expected them unresolved now assert `is_ok`; their qualified `std.collection` assertions remain unresolved without a profile. Added signature regression table `root_intrinsic_calls_are_checked_against_their_signatures` (arity, argument types, callback arity/return; bad calls report `ORNA-S021-TYPE`). Known-red entries for those tests are removed.
 
 ### Fixes
+- Test expectation realigned with shipped behaviour (nightly triage, no product change): `trace_event_accessors_expose_the_closed_facts` now expects the redacted observation purpose `<redacted>`, as documented on `InspectTraceEvent::purpose` (secret-trace redaction, #2204).
 - REPL results carrying a format-3 Blob (`ROV3`) now present its payload-free summary (`type`, `length`, `sha256`, `suffix`, `media_type`) at the REPL canonical boundary. Blob capture followed by an insert no longer fails with `ORNA-EVAL-VALUE` and then `ORNA-REPL-EFFECT-UNCERTAIN` (tracked by ornadb-rg5g). The descriptor OID and payload bytes do not cross the boundary. The summary is a metadata Map, not a Blob: `$_` after such a line holds that Map, so `sys.blob.media_type($_)` or `sys.blob.annotate($_, ...)` on the next line is a type error.
 - An uncertain REPL outcome, where external effects may already have happened, keeps `ORNA-REPL-EFFECT-UNCERTAIN` as its code and names the evaluator cause in the located detail instead of dropping it.
 - Known limitation: carrying the live context result through `$_` (preserving `ORNA-BLOB-008` held-context behaviour) is not in this change; it is tracked as P2 follow-up `ornadb-ssrk`. Until it lands, `$_` after a Blob result is the payload-free Map described above. `SOV3` `ContextualBlob` values still fail canonical validation at the REPL boundary.
@@ -429,10 +435,12 @@ been published.
   payload was never stored. The observed generation is nullable in the audit
   schema, migrated in place for existing stores; unobservable rows are
   excluded from the checkpoint-reset generation ordering.
-- A skip lease refused because the
-  failure is no longer open is `sys.failure.state_conflict`, not
-  `sys.failure.skip_unsupported`, and `orna_runtime_v1::failure_transition_error`
-  no longer takes a lease purpose.
+- A skip lease refused because the failure is no longer open is
+  `RejectReason::RetryNotAllowed` at the stream layer. No production path maps
+  it to a public `sys.failure.*` code: the `RuntimeError::StreamFailure*`
+  variants keep their `public_code` strings for round-trip but nothing
+  constructs them. The unreached `failure_transition_error` mapping is removed
+  until `sys.admin.{retry,skip,resolve}_failure` exists (ornadb-5il1.296).
 - Removed the unreachable duplicate explain implementations:
   `orna_sys_v1::ExplainQueryProvider`, `QueryPlanResolver` and their constants,
   `orna_sys_v1::explain_diagnostic` with `Explanation` and

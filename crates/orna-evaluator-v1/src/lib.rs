@@ -3220,6 +3220,8 @@ enum Value {
     ContextualBlob(ContextValue),
     Date(String),
     Uuid([u8; 16]),
+    /// A nominal `Digest` (tag 60025): the raw-content SHA-256 commitment.
+    Digest([u8; 32]),
     /// OVB's complete stored identity is retained, including its snapshot pin.
     Reference(CanonicalValue),
     /// A stored table reference (tag 60021): database identity, table and key.
@@ -3711,6 +3713,13 @@ impl Value {
             Self::ContextualBlob(value) => value.raw().clone(),
             Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
             Self::Uuid(value) => object_id_raw(value),
+            Self::Digest(value) => Raw::Tag(
+                60025,
+                Box::new(Raw::Array(vec![
+                    Raw::Text("sha256".to_owned()),
+                    Raw::Bytes(value.to_vec()),
+                ])),
+            ),
             Self::Reference(value) => value.raw().clone(),
             Self::TableReference(value) => value.raw().clone(),
             Self::Instant {
@@ -3895,6 +3904,22 @@ impl Value {
                     .try_into()
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
                 Ok(Self::Uuid(bytes))
+            }
+            Raw::Tag(60025, boxed) => {
+                let Raw::Array(items) = boxed.as_ref() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                let [Raw::Text(algorithm), Raw::Bytes(bytes)] = items.as_slice() else {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                };
+                if algorithm.as_str() != "sha256" {
+                    return Err(error("ORNA-EVAL-VALUE"));
+                }
+                let bytes = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| error("ORNA-EVAL-VALUE"))?;
+                Ok(Self::Digest(bytes))
             }
             Raw::Tag(60010, _) => Ok(Self::Reference(value.clone())),
             Raw::Tag(60021, _) => Ok(Self::TableReference(value.clone())),
@@ -8143,7 +8168,7 @@ impl Context<'_, '_> {
     /// role, so a source-level `sys.blob.*` call cannot reach native code the
     /// registry has not declared.
 #[cfg(feature = "system-host-bindings")]
-    fn call_blob_annotation(
+    fn call_blob_operation(
         &mut self,
         operation: &str,
         arguments: &[orna_syntax_v1::Argument],
@@ -8165,49 +8190,96 @@ impl Context<'_, '_> {
         if let Some(input) = input {
             supplied[0] = Some(input);
         }
-        let positional = arguments.iter().all(|argument| argument.name.is_none());
-        if positional {
-            let offset = usize::from(has_input);
-            if arguments.len() > parameters.len().saturating_sub(offset) {
-                return Err(error("ORNA-EVAL-ARGUMENT"));
-            }
-            for (position, argument) in arguments.iter().enumerate() {
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                supplied[offset + position] = Some(value);
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
+        // Leading positional arguments fill the next free slot in declaration
+        // order; named arguments may follow them (spec examples/valid/blob-range.orna:
+        // `sys.blob.read(value, offset: 1, length: 2)`), never precede them.
+        let mut next_positional = usize::from(has_input);
+        let mut named_seen = false;
+        for argument in arguments {
+            let position = match argument.name.as_deref() {
+                None => {
+                    if named_seen || next_positional >= parameters.len() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    let position = next_positional;
+                    next_positional += 1;
+                    position
                 }
-            }
-        } else {
-            for argument in arguments {
-                let Some(name) = argument.name.as_deref() else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                let Some(position) = parameters
-                    .iter()
-                    .position(|parameter| parameter.name == name)
-                else {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
-                };
-                if supplied[position].is_some() {
-                    return Err(error("ORNA-EVAL-ARGUMENT"));
+                Some(name) => {
+                    named_seen = true;
+                    let Some(position) = parameters
+                        .iter()
+                        .position(|parameter| parameter.name == name)
+                    else {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    };
+                    if supplied[position].is_some() {
+                        return Err(error("ORNA-EVAL-ARGUMENT"));
+                    }
+                    position
                 }
-                let value = self.evaluate(&argument.value, scope, depth + 1)?;
-                supplied[position] = Some(value);
-                if self.transfer.is_some() {
-                    return Ok(Value::Null);
-                }
+            };
+            let value = self.evaluate(&argument.value, scope, depth + 1)?;
+            supplied[position] = Some(value);
+            if self.transfer.is_some() {
+                return Ok(Value::Null);
             }
         }
 
         let mut supplied_values = Vec::with_capacity(parameters.len());
+        let mut bounds = Vec::new();
         for (position, parameter) in parameters.iter().enumerate() {
             let value = match supplied[position].take() {
                 Some(value) => value,
                 None if parameter.default.as_deref() == Some("null") => Value::Null,
                 None => return Err(error("ORNA-EVAL-ARGUMENT")),
             };
-            supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+            if crate::sys_bindings::is_blob_from_bytes_operation(operation) {
+                let Value::List(items) = value else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                if items.len() as u64 > crate::sys_bindings::MAX_BLOB_CALL_BYTES {
+                    return Err(error("sys.blob.limit"));
+                }
+                let integers = items
+                    .iter()
+                    .map(|item| match item {
+                        Value::Int(integer) => Ok(integer.clone()),
+                        _ => Err(error("ORNA-EVAL-TYPE")),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let annotated = crate::sys_bindings::dispatch_blob_from_bytes(&integers)?;
+                return Value::from_context_value(&annotated, self, 0);
+            }
+            if matches!(&parameter.ty, orna_sys_v1::AbiType::Named(name) if name == "Int") {
+                let Value::Int(bound) = value else {
+                    return Err(error("ORNA-EVAL-TYPE"));
+                };
+                bounds.push(bound);
+            } else {
+                supplied_values.push(Self::blob_annotation_argument(value, &parameter.ty)?);
+            }
+        }
+        if crate::sys_bindings::is_blob_read_operation(operation) {
+            let source = supplied_values
+                .first()
+                .ok_or_else(|| error("ORNA-EVAL-ARGUMENT"))?;
+            return match crate::sys_bindings::dispatch_blob_read(operation, source, &bounds)? {
+                crate::sys_bindings::BlobReadValue::Int(length) => {
+                    Ok(Value::Int(BigInt::from(length)))
+                }
+                crate::sys_bindings::BlobReadValue::Blob(value) => {
+                    Value::from_context_value(&value, self, 0)
+                }
+                crate::sys_bindings::BlobReadValue::Bytes(bytes) => Ok(Value::List(List::from(
+                    bytes
+                        .into_iter()
+                        .map(|byte| Value::Int(BigInt::from(byte)))
+                        .collect::<Vec<_>>(),
+                ))),
+                crate::sys_bindings::BlobReadValue::Unit => Ok(Value::Unit),
+                crate::sys_bindings::BlobReadValue::Digest(value) => Ok(Value::Digest(value)),
+            };
         }
         if crate::sys_bindings::is_blob_reflection_operation(operation) {
             return crate::sys_bindings::dispatch_blob_reflection(
@@ -8534,7 +8606,7 @@ impl Context<'_, '_> {
         });
         #[cfg(feature = "system-host-bindings")]
         if let Some(operation) = declared {
-            return self.call_blob_annotation(&operation, arguments, input, scope, depth);
+            return self.call_blob_operation(&operation, arguments, input, scope, depth);
         }
         #[cfg(feature = "system-host-bindings")]
         if let Some(operation_name) = resolved_function.as_deref()
@@ -13500,6 +13572,7 @@ fn write_json_value(
         | Value::ContextualBlob(_)
         | Value::Date(_)
         | Value::Uuid(_)
+        | Value::Digest(_)
         | Value::Reference(_)
         | Value::TableReference(_)
         | Value::Instant { .. }
@@ -13633,6 +13706,7 @@ fn encode_orna_value(value: &Value, depth: usize) -> Result<String, EvaluationEr
             return Err(error("ORNA-EVAL-UNSUPPORTED"));
         }
         Value::Uuid(value) => encode_orna_string(&format_uuid_bytes(value)),
+        Value::Digest(value) => encode_orna_string(&format_digest_hex(value)),
         Value::TableReference(value) => encode_orna_string(&orna_value_v1::base64_encode(
             &value.encode().map_err(|_| error("ORNA-EVAL-VALUE"))?,
         )),
@@ -13723,6 +13797,11 @@ fn format_uuid_bytes(bytes: &[u8; 16]) -> String {
         write!(output, "{byte:02x}").expect("String writes succeed");
     }
     output
+}
+
+/// Renders a Digest as lowercase 64-hex; it is never an implicit string value.
+fn format_digest_hex(bytes: &[u8; 32]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn money_amount(value: &Value) -> Result<DecimalValue, EvaluationError> {

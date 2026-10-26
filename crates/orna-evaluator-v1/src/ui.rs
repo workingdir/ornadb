@@ -230,6 +230,7 @@ fn ui_value_type_name(value: &Value) -> String {
         Value::ContextualBlob(_) => "std.binary_large_object".into(),
         Value::Date(_) => "std.date".into(),
         Value::Uuid(_) => "std.uuid".into(),
+        Value::Digest(_) => "std.digest".into(),
         Value::Reference(_) => "std.reference".into(),
         Value::TableReference(_) => "std.table_reference".into(),
         Value::Instant { .. } => "std.timestamp".into(),

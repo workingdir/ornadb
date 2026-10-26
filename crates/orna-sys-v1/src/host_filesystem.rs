@@ -225,7 +225,7 @@ impl FilesystemProvider {
     /// `max_bytes` above the provider limit is not itself a failure, because
     /// the contract bounds the source and the captured Blob, not the request.
     #[sys_host_operation(
-        r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["read"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.source_denied","sys.blob.bounds","sys.blob.limit","sys.blob.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
+        r###"{"name":"sys.blob.capture_file","version":{"major":1,"minor":0},"signature":"fn sys.blob.capture_file(root: Str, path: Str, max_bytes: Int): Blob","effects":["invoke"],"preconditions":["root is explicitly allowlisted by the host and held for the provider lifetime","path is relative and contains no parent traversal or symbolic-link component","target is a regular file whose identity, size and modification time remain stable during capture","the source and captured Blob fit within max_bytes and the provider limit"],"failures":["sys.blob.source_denied","sys.blob.bounds","sys.blob.limit","sys.blob.source_changed"],"role":"host.sys.blob.capture@1.0","provider":"orna.sys.host.filesystem.v1","implementation":"capture_file"}"###
     )]
     pub fn capture_file(
         &self,

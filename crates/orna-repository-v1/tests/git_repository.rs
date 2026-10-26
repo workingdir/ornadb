@@ -3483,6 +3483,49 @@ fn publication_journal_round_trips_atomically_and_advances_monotonically() {
 }
 
 #[test]
+fn published_branch_tip_keeps_the_configured_identity() {
+    let root = repository();
+    git(root.path(), &["config", "user.name", "Identity X"]);
+    git(
+        root.path(),
+        &["config", "user.email", "identity-x@example.invalid"],
+    );
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let bytes = b"identity row\n".to_vec();
+    let head_before = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head_before,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(bytes.clone()),
+            )],
+            "orna: publish identity row",
+        )
+        .unwrap();
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head_before.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [5; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(bytes),
+        )],
+    )
+    .unwrap();
+    repo.publish_candidate(&index_before, &candidate, &mut journal)
+        .unwrap();
+    repo.clear_publication_journal().unwrap();
+
+    let tip = git(root.path(), &["log", "-1", "--format=%an <%ae>"]);
+    assert_eq!(tip.trim(), "Identity X <identity-x@example.invalid>");
+}
+
+#[test]
 fn republish_after_edit_bumps_the_revision_and_serves_the_edited_bytes() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();

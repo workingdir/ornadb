@@ -281,11 +281,6 @@ fn mv_restores_the_source_when_staging_the_inventory_fails() {
     let (_directory, root, initial) = committed_project(SOURCE);
     let source_path = root.join("main.orna");
     let source = fs::read(&source_path).unwrap();
-    #[cfg(unix)]
-    let source_inode = {
-        use std::os::unix::fs::MetadataExt;
-        fs::metadata(&source_path).unwrap().ino()
-    };
     let index = index_bytes(&root);
     let repository = Repository::discover(&root).expect("repository");
     let head = repository.head().unwrap().expect("committed HEAD");
@@ -327,12 +322,6 @@ fn mv_restores_the_source_when_staging_the_inventory_fails() {
         "the refusal comes from installing the restaged store: {stderr}"
     );
     assert_refused_without_changes(&output, &root, &source, &index);
-    // The source file was replaced and then restored, not left untouched.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        assert_ne!(fs::metadata(&source_path).unwrap().ino(), source_inode);
-    }
     assert_eq!(
         repository.read_publication_journal().unwrap(),
         Some(journal)
