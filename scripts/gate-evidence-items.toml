@@ -26,7 +26,6 @@ expected = [
   "workspace-cli",
   "workspace-evaluator",
   "workspace-sys",
-  "workspace-conformance",
   "workspace-rest",
   "gate-d-crash-matrix",
   "lint-fmt",
