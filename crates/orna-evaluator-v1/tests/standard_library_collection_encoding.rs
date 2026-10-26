@@ -7,7 +7,7 @@ use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
 fn pinned_functions() -> Functions {
-    let mut functions = BTreeMap::new();
+    let mut functions = Functions::new();
     for (path, source) in orna_evaluator_v1::reference_standard_sources() {
         let parsed = orna_syntax_v1::parse_module(&source);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
@@ -183,8 +183,11 @@ fn map_merge_keeps_left_key_positions_and_right_values() {
     );
 }
 
+/// `set` is built on `distinct`, which has no default Float identity
+/// (09-standard-library.md:32, :50; ORNA-FLOAT-003). The map keeps the signed
+/// zero key because `map` orders keys by the total order, not by hashing.
 #[test]
-fn ovb_sorts_structural_keys_but_collections_keep_signed_zero_representatives() {
+fn ovb_sorts_structural_keys_but_maps_keep_signed_zero_while_float_sets_are_refused() {
     assert_eq!(
         evaluate(include_str!("fixtures/stdlib-record-order-ovb-o3yue.orna")),
         Ok(value(Raw::Bytes(vec![
@@ -202,12 +205,11 @@ fn ovb_sorts_structural_keys_but_collections_keep_signed_zero_representatives() 
             Raw::Text("last".into()),
         ])])))
     );
-    assert_eq!(
-        evaluate(include_str!(
-            "fixtures/stdlib-set-signed-zero-ovb-o3yue.orna"
-        )),
-        Ok(encoded(Raw::Array(vec![Raw::Float((-0.0f64).to_bits())])))
-    );
+    let error = evaluate(include_str!(
+        "fixtures/stdlib-set-signed-zero-ovb-o3yue.orna"
+    ))
+    .expect_err("Float set must be refused without a default hash key");
+    assert_eq!(error.code(), "ORNA-EVAL-UNSUPPORTED");
 }
 
 #[test]

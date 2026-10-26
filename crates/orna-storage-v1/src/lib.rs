@@ -1008,7 +1008,7 @@ fn build_frozen_publication_store_root(
         if !relation_bases.contains_key(&relation_id) {
             let rows = format
                 .load_row_map(relation_id)
-                .map_err(|_| Error::RepositoryUnavailable)?;
+                .map_err(repository_format_error)?;
             let graph = format
                 .open_native_graph(&rows)
                 .map_err(|_| Error::RepositoryUnavailable)?;
@@ -1133,6 +1133,9 @@ fn build_frozen_publication_store_root(
         .collect::<Vec<_>>();
     let store_root = base_graph
         .maintain_relations_rows(&candidates, &scope)
+        .map_err(|_| Error::RepositoryUnavailable)?;
+    let store_root = repository
+        .append_rekey_log(&format, &store_root, &logical_rekeys)
         .map_err(|_| Error::RepositoryUnavailable)?;
     let (_, graph, _) = relation_candidates.swap_remove(0);
     Ok((graph, store_root, logical_rekeys))
@@ -1336,6 +1339,10 @@ impl RuntimePublicationCoordinator {
             .complete_publication(freeze, &commit)
             .await
             .map_err(|_| Error::RuntimeUnavailable)?;
+        // Gate D boundary: the runtime tail is consumed but the repository
+        // journal still names WorktreeReconciled; recovery must complete the
+        // runtime step idempotently before clearing the journal (ORNA-PUB-006).
+        orna_repository_v1::publication_crash_barrier("runtime-complete");
         repository
             .mark_runtime_complete(freeze.intent_id, &mut self.journal)
             .map_err(|_| Error::RepositoryUnavailable)?;
@@ -1458,6 +1465,17 @@ fn map_publication_repository_error(error: RepositoryError) -> Error {
     }
 }
 
+/// Keeps a malformed native graph distinct from an unavailable one at the
+/// storage boundary; every other format fault stays `RepositoryUnavailable`.
+fn repository_format_error(error: orna_repository_v1::FormatContextError) -> Error {
+    match error {
+        orna_repository_v1::FormatContextError::GraphMalformed(_) => {
+            Error::RepositoryMalformed(error)
+        }
+        _ => Error::RepositoryUnavailable,
+    }
+}
+
 /// Opens the committed format context at `snapshot` only when that snapshot
 /// has a row writer. Format-1/2 commits keep their versioned readers, but the
 /// loose and compact row writers are retired (ORNA-UPGRADE-003, ORNA-ROW-013).
@@ -1520,6 +1538,7 @@ pub enum Error {
     InvalidTransition,
     RuntimeUnavailable,
     RepositoryUnavailable,
+    RepositoryMalformed(orna_repository_v1::FormatContextError),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1543,6 +1562,9 @@ impl fmt::Display for Error {
             Self::InvalidTransition => "invalid publication transition",
             Self::RuntimeUnavailable => "runtime contract unavailable",
             Self::RepositoryUnavailable => "repository projection is unavailable",
+            Self::RepositoryMalformed(error) => {
+                return write!(f, "repository projection is malformed: {error}");
+            }
         })
     }
 }
@@ -1611,39 +1633,6 @@ mod tests {
         (temp, repository)
     }
 
-    fn decode_base64(value: &str) -> Vec<u8> {
-        fn digit(byte: u8) -> u8 {
-            match byte {
-                b'A'..=b'Z' => byte - b'A',
-                b'a'..=b'z' => byte - b'a' + 26,
-                b'0'..=b'9' => byte - b'0' + 52,
-                b'+' => 62,
-                b'/' => 63,
-                b'=' => 0,
-                _ => panic!("invalid fixture encoding"),
-            }
-        }
-
-        let bytes = value.as_bytes();
-        let (chunks, remainder) = bytes.as_chunks::<4>();
-        assert!(remainder.is_empty());
-        let mut decoded = Vec::with_capacity(bytes.len() / 4 * 3);
-        for chunk in chunks {
-            let word = (u32::from(digit(chunk[0])) << 18)
-                | (u32::from(digit(chunk[1])) << 12)
-                | (u32::from(digit(chunk[2])) << 6)
-                | u32::from(digit(chunk[3]));
-            decoded.push((word >> 16) as u8);
-            if chunk[2] != b'=' {
-                decoded.push((word >> 8) as u8);
-            }
-            if chunk[3] != b'=' {
-                decoded.push(word as u8);
-            }
-        }
-        decoded
-    }
-
     fn compact_columns() -> Vec<u8> {
         let field_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
         CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
@@ -1709,7 +1698,7 @@ mod tests {
 
     fn compact_runtime_parquet() -> (Vec<u8>, [u8; 32]) {
         const PARQUET: &str = "UEFSMRUGFRAVEBWRgLnnCkwVAhUAFQIVABUAFQASAAABAAAAAAAAABkSAhkYCAEAAAAAAAAAGRgIAQAAAAAAAAAVAhkWAAAZHBYIFTwWAAAAFQIZLEgGc2NoZW1hFQIAFQQlABgiZl8wMThmMDAwMDAwMDA3MDAwODAwMDAwMDAwMDAwMDAwMQAWAhkcGRwmABwVBBklAAYZGCJmXzAxOGYwMDAwMDAwMDcwMDA4MDAwMDAwMDAwMDAwMDAxFQwWAhY8FkgmCDw2ACgIAQAAAAAAAAAYCAEAAAAAAAAAEREAABaCARUUFkQVPgAWPBYCJggWSBQAABl8GAxvcm5hLnByb2ZpbGUYEmNvbXBhY3Qtc3RvcmFnZS12MQAYCm9ybmEudGFibGUYJDAwMDAwMDAwLTAwMDAtMDAwMC0wMDAwLTAwMDAwMDAwMDAwMQAYEm9ybmEuc2NoZW1hLnNoYTI1NhhANThhMDg5NzBhZGMyMzE4N2U5Nzk0NDVlOTNiODQzN2ExNjI3ZWUxMDk0ZjI2NTg5YTJlZmVmZWE4NTFiMmExZQAYD29ybmEuc2NoZW1hLm92YhiYAXBRQUJBZGdsVUFBQUFBQUFBQUFBQUFBQUFBQUFBQUVDZ2RnbFVBR1BBQUFBQUhBQWdBQUFBQUFBQUFFRGdZWFlKVkFCandBQUFBQndBSUFBQUFBQUFBQUJlQ0ptWHpBeE9HWXdNREF3TURBd01EY3dNREE0TURBd01EQXdNREF3TURBd01EQXhnZ0JqU1c1MEFJRUFCSUE9ABgQb3JuYS5jb2x1bW5zLm92YhhgZ1lXQjJDVlFBWThBQUFBQWNBQ0FBQUFBQUFBQUFZRjRJbVpmTURFNFpqQXdNREF3TURBd056QXdNRGd3TURBd01EQXdNREF3TURBd01ER0NBR05KYm5SbGFXNTBOalNBABgMb3JuYS5lbmNvZGVyGA90ZXN0LWVuY29kZXItdjEAGBFvcm5hLnRlc3QucGF5bG9hZBgOY29tcGFjdCBvYmplY3QAGBlwYXJxdWV0LXJzIHZlcnNpb24gNTkuMy4wGRwcAAAA3AIAAFBBUjE=";
-        let original = decode_base64(PARQUET);
+        let original = orna_value_v1::base64_decode(PARQUET).unwrap();
         let reader = SerializedFileReader::new(Bytes::from(original.clone())).unwrap();
         let file = reader.metadata().file_metadata();
         let schema = compact_schema();

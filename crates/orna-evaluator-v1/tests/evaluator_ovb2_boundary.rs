@@ -109,6 +109,81 @@ fn native_sys_blob_annotate_canonicalizes_mime_and_preserves_content_identity() 
 }
 
 #[test]
+fn native_sys_blob_from_bytes_builds_an_ovb2_blob_from_integer_bytes() {
+    let built = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-from-bytes.orna").trim(),
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch native Blob constructor");
+    assert_eq!(built.format(), ValueFormat::Ovb2);
+    let blob = built.blob().expect("constructed OVB-2 Blob");
+    assert_eq!(blob.media_type(), "application/octet-stream");
+    assert_eq!(blob.suffix(), None);
+    assert_eq!(blob.read_to_end().unwrap(), [0u8, 255, 7]);
+
+    let error = evaluate_expression_ovb2(
+        include_str!("fixtures/sys-blob-from-bytes-out-of-range.orna").trim(),
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect_err("an integer outside 0..=255 is not a byte");
+    assert_eq!(error.code(), "sys.blob.bounds");
+}
+
+#[test]
+fn native_sys_blob_length_read_verify_and_to_bytes_dispatch_through_call() {
+    let length = evaluate_expression_ovb2(
+        "sys.blob.length(sys.blob.from_bytes([0, 255, 7]))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch sys.blob.length");
+    assert_eq!(length.format(), ValueFormat::Ovb2);
+
+    let sliced = evaluate_expression_ovb2(
+        "sys.blob.length(sys.blob.read(sys.blob.from_bytes([0, 1, 2]), offset: 1, length: 2))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch sys.blob.read within bounds");
+    assert_eq!(sliced.format(), ValueFormat::Ovb2);
+
+    let past_end = evaluate_expression_ovb2(
+        "sys.blob.read(sys.blob.from_bytes([0, 1]), offset: 3, length: 1)",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect_err("a read starting past EOF is a bounds failure");
+    assert_eq!(past_end.code(), "sys.blob.bounds");
+
+    // A read starting exactly at EOF is in bounds and yields an empty slice.
+    let at_end = evaluate_expression_ovb2(
+        "sys.blob.length(sys.blob.read(sys.blob.from_bytes([0, 1]), offset: 2, length: 1))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("a read starting at EOF is in bounds");
+    assert_eq!(at_end.format(), ValueFormat::Ovb2);
+    assert_eq!(at_end.raw(), &Raw::Int(0.into()));
+
+    evaluate_expression_ovb2(
+        "sys.blob.verify(sys.blob.from_bytes([1, 2, 3]))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch sys.blob.verify on a fresh blob");
+
+    let round_trip = evaluate_expression_ovb2(
+        "sys.blob.length(sys.blob.from_bytes(sys.blob.to_bytes(sys.blob.from_bytes([0, 255, 7]))))",
+        &BTreeMap::new(),
+        Limits::default(),
+    )
+    .expect("dispatch sys.blob.to_bytes and feed the list back to from_bytes");
+    assert_eq!(round_trip.format(), ValueFormat::Ovb2);
+}
+
+#[test]
 fn native_sys_blob_annotate_reports_mime_policy_failures() {
     let blob_value = annotated_blob_value(b"payload");
     let environment = BTreeMap::from([("asset".to_owned(), blob_value)]);

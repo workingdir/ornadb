@@ -9,7 +9,7 @@ fn invalid_fixture_project() -> TempDir {
     std::fs::write(directory.path().join("main.orna"), INVALID_SOURCE)
         .expect("copy real Orna fixture source");
 
-    let initialized = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    let initialized = Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(["init", directory.path().to_str().expect("UTF-8 path")])
         .output()
@@ -23,7 +23,7 @@ fn invalid_fixture_project() -> TempDir {
 }
 
 fn check(project: &TempDir, color: &str) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args([
             "--db",

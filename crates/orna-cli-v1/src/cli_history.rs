@@ -23,7 +23,8 @@ use orna_repository_v1::{
 use orna_runtime_v1::TableObjectId;
 use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use orna_repository_v1::relation_admission::CommittedRekey;
 
 /// Most revisions one history listing reports when `--limit` is not given.
 const DEFAULT_HISTORY_LIMIT: usize = 64;
@@ -248,7 +249,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // are bounded point reads of the committed row map, so the row that answers
     // is a real committed row rather than a reinterpretation of the argument.
     let mut row = None;
-    for candidate in cli_row_key::key_candidates(key)? {
+    for candidate in cli_row_key::key_candidates(key, None)? {
         row = graph
             .lookup_row(&candidate, &scope)
             .map_err(|error| history_error("Row lookup failed", format!("{error:?}")))?;
@@ -548,6 +549,10 @@ enum RowChange {
         before: HistoryRow,
         after: HistoryRow,
     },
+    Rekeyed {
+        before: HistoryRow,
+        after: HistoryRow,
+    },
 }
 
 fn history_row(
@@ -789,15 +794,22 @@ fn run_diff(
     let (after, after_read) = read_relation_rows(&after_format, relation, after_schema.binding())?;
     let payload_bytes_read = before_read.payload_bytes_read + after_read.payload_bytes_read;
     let native_objects_read = before_read.objects_read + after_read.objects_read;
-    let changes = compare_rows(before, after);
-    let (added, changed, removed) = counts(&changes);
+    let window = rekey_window(repository, &from_commit, &to_commit, relation)?;
+    let (before, after, paired) = pair_rekeys(before, after, &window);
+    let mut changes = compare_rows(before, after);
+    changes.extend(
+        paired
+            .into_iter()
+            .map(|(before, after)| RowChange::Rekeyed { before, after }),
+    );
+    let (added, changed, removed, rekeyed) = counts(&changes);
     match format {
         HistoryFormat::Human => {
             for change in &changes {
                 println!("{}", human_change(change));
             }
             println!(
-                "{added} added; {changed} changed; {removed} removed; {} rows in {to_label}",
+                "{added} added; {changed} changed; {removed} removed; {rekeyed} rekeyed; {} rows in {to_label}",
                 changes
                     .iter()
                     .filter(|change| !matches!(change, RowChange::Removed(_)))
@@ -817,6 +829,7 @@ fn run_diff(
                     "added": added,
                     "changed": changed,
                     "removed": removed,
+                    "rekeyed": rekeyed,
                     "media_payload_bytes_read": payload_bytes_read,
                     "native_objects_read": native_objects_read,
                     "changes": entries,
@@ -950,6 +963,14 @@ fn change_json(change: &RowChange) -> serde_json::Value {
             "before": { "annotations": annotations_of(before) },
             "after": { "annotations": annotations_of(after) },
         }),
+        RowChange::Rekeyed { before, after } => serde_json::json!({
+            "change": "rekeyed",
+            "key": render_key(&after.key),
+            "from_key": render_key(&before.key),
+            "content_changed": content_changed(before, after),
+            "before": { "annotations": annotations_of(before) },
+            "after": { "annotations": annotations_of(after) },
+        }),
     }
 }
 
@@ -965,22 +986,126 @@ fn human_change(change: &RowChange) -> String {
             content_changed(before, after),
             annotations_changed(before, after),
         ),
+        RowChange::Rekeyed { before, after } => format!(
+            "rekeyed {} -> {} (content={}, annotation={})",
+            render_key(&before.key),
+            render_key(&after.key),
+            content_changed(before, after),
+            annotations_changed(before, after),
+        ),
     }
 }
 
-/// Counts the changes as `(added, changed, removed)`.
-fn counts(changes: &[RowChange]) -> (usize, usize, usize) {
+/// Counts the changes as `(added, changed, removed, rekeyed)`.
+fn counts(changes: &[RowChange]) -> (usize, usize, usize, usize) {
     let mut added = 0;
     let mut changed = 0;
     let mut removed = 0;
+    let mut rekeyed = 0;
     for change in changes {
         match change {
             RowChange::Added(_) => added += 1,
             RowChange::Changed { .. } => changed += 1,
             RowChange::Removed(_) => removed += 1,
+            RowChange::Rekeyed { .. } => rekeyed += 1,
         }
     }
-    (added, changed, removed)
+    (added, changed, removed, rekeyed)
+}
+
+/// The row moves the committed rekeys of `relation` make between the two
+/// pinned snapshots, as `(old, new)` key pairs in the order that leads from
+/// `from` to `to`. Each snapshot's log holds every rekey of the history it
+/// descends from. When `to`'s log extends `from`'s, the window is the rekeys
+/// appended since; when `from`'s extends `to`'s (a reverse diff), it is those
+/// rekeys undone, newest first. Otherwise the two histories prove no shared
+/// identity, so the window is empty and the diff reports conservative
+/// removals and additions (ORNA-SYS-051).
+fn rekey_window(
+    repository: &Repository,
+    from: &GitCommitRef,
+    to: &GitCommitRef,
+    relation: [u8; 16],
+) -> Result<Vec<(Vec<u8>, Vec<u8>)>, Diagnostic> {
+    let from_log = repository
+        .read_committed_rekeys(from)
+        .map_err(|error| history_error("Rekey log could not be read", format!("{error:?}")))?;
+    let to_log = repository
+        .read_committed_rekeys(to)
+        .map_err(|error| history_error("Rekey log could not be read", format!("{error:?}")))?;
+    let in_relation = |rekey: &&CommittedRekey| rekey.relation_id() == &relation;
+    if to_log.starts_with(&from_log) {
+        return Ok(to_log[from_log.len()..]
+            .iter()
+            .filter(in_relation)
+            .map(|rekey| (rekey.old_key().to_vec(), rekey.new_key().to_vec()))
+            .collect());
+    }
+    if from_log.starts_with(&to_log) {
+        return Ok(from_log[to_log.len()..]
+            .iter()
+            .rev()
+            .filter(in_relation)
+            .map(|rekey| (rekey.new_key().to_vec(), rekey.old_key().to_vec()))
+            .collect());
+    }
+    Ok(Vec::new())
+}
+
+/// Pairs each row the window moved, so the move reads as one rekeyed change
+/// instead of a removal plus an addition. The moves are folded first: each
+/// key a chain ends on is traced back to the key it started from, so `a -> b`
+/// then `b -> c` pairs `before[a]` with `after[c]`, and a swap through a
+/// temporary key pairs both rows crosswise. A row whose start or end key is
+/// absent from its side stays in the comparison as the plain removal or
+/// addition it is. A start key reused by a later insert proves no identity,
+/// so every chain tracing back to it stays a removal plus an addition
+/// (ORNA-SYS-051). The log records rekeys only, so a key a later commit
+/// deleted and inserted again still reads as the end of its chain.
+fn pair_rekeys(
+    mut before: BTreeMap<Vec<u8>, HistoryRow>,
+    mut after: BTreeMap<Vec<u8>, HistoryRow>,
+    moves: &[(Vec<u8>, Vec<u8>)],
+) -> (
+    BTreeMap<Vec<u8>, HistoryRow>,
+    BTreeMap<Vec<u8>, HistoryRow>,
+    Vec<(HistoryRow, HistoryRow)>,
+) {
+    // The key each moved row started the window at, by the key it ends on.
+    let mut origins = BTreeMap::<Vec<u8>, Vec<u8>>::new();
+    // Keys a rekey moved a row away from. A later move from one of them that
+    // continues no chain moves a row inserted there afterwards, so that start
+    // key is reused; this also covers two ends claiming one start key.
+    let mut vacated = BTreeSet::<Vec<u8>>::new();
+    let mut reused = BTreeSet::<Vec<u8>>::new();
+    for (old, new) in moves {
+        let origin = match origins.remove(old) {
+            Some(origin) => origin,
+            None => {
+                if vacated.contains(old) {
+                    reused.insert(old.clone());
+                }
+                old.clone()
+            }
+        };
+        vacated.insert(old.clone());
+        origins.insert(new.clone(), origin);
+    }
+    let mut pairs = Vec::new();
+    for (end, origin) in origins {
+        // A row moved away and back again has no net rekey to report, and a
+        // reused start key cannot say which row an end continues.
+        if end == origin || reused.contains(&origin) {
+            continue;
+        }
+        let (Some(old), Some(new)) = (before.get(&origin), after.get(&end)) else {
+            continue;
+        };
+        pairs.push((old.clone(), new.clone()));
+        before.remove(&origin);
+        after.remove(&end);
+    }
+    (before, after, pairs)
 }
 
 /// Renders a canonical row key the way `orna query` prints one: a text key as
@@ -1021,18 +1146,28 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn history_error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
-    Diagnostic::target_with_detail(
+    // The human renderer shows the title and help but not `detail`, so the
+    // detail is carried in the title as well.
+    let detail = detail.into();
+    let mut diagnostic = Diagnostic::target_with_detail(
         "E2000",
         title,
         "run `orna history <relation-hex> <key>` inside an initialized repository",
-        detail.into(),
-    )
+        detail.clone(),
+    );
+    diagnostic.title = std::borrow::Cow::Owned(format!("{title}: {detail}"));
+    diagnostic
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{DEFAULT_HISTORY_LIMIT, HistoryFormat, parse_options, parse_relation_id};
+    use super::{
+        DEFAULT_HISTORY_LIMIT, HistoryFormat, HistoryRow, pair_rekeys, parse_options,
+        parse_relation_id, render_key,
+    };
     use crate::Exit;
+    use orna_repository_v1::TypedKey;
+    use std::collections::BTreeMap;
 
     fn words(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
@@ -1253,5 +1388,86 @@ mod tests {
         assert!(!parse_options(&plain).unwrap().reverse);
         let flagged = words(&["0102", "--reverse", "song"]);
         assert!(parse_options(&flagged).unwrap().reverse);
+    }
+
+    #[test]
+    fn rekey_pairing_folds_chains_and_swaps() {
+        let key = |name: &str| TypedKey::Text(name.to_owned()).canonical_bytes().unwrap();
+        let rows = |names: &[&str]| {
+            names
+                .iter()
+                .map(|name| {
+                    let row = HistoryRow {
+                        key: TypedKey::Text((*name).to_owned()),
+                        fields: Vec::new(),
+                    };
+                    (key(name), row)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let moves = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(old, new)| (key(old), key(new)))
+                .collect::<Vec<_>>()
+        };
+        let rekeyed = |paired: &[(HistoryRow, HistoryRow)]| {
+            paired
+                .iter()
+                .map(|(old, new)| format!("{}->{}", render_key(&old.key), render_key(&new.key)))
+                .collect::<Vec<_>>()
+        };
+
+        // A chain across publications reads as one rekey from start to end.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["a"]),
+            rows(&["c"]),
+            &moves(&[("a", "b"), ("b", "c")]),
+        );
+        assert!(before.is_empty() && after.is_empty());
+        assert_eq!(rekeyed(&paired), ["a->c"]);
+
+        // A swap through a temporary key pairs both rows crosswise.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["a", "b"]),
+            rows(&["a", "b"]),
+            &moves(&[("a", "t"), ("b", "a"), ("t", "b")]),
+        );
+        assert!(before.is_empty() && after.is_empty());
+        assert_eq!(rekeyed(&paired), ["b->a", "a->b"]);
+
+        // A row moved away and back again has no net rekey.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["a"]),
+            rows(&["a"]),
+            &moves(&[("a", "t"), ("t", "a")]),
+        );
+        assert!(paired.is_empty());
+        assert_eq!((before.len(), after.len()), (1, 1));
+
+        // A chain whose end row is gone stays a plain removal.
+        let (before, after, paired) = pair_rekeys(rows(&["a"]), rows(&[]), &moves(&[("a", "b")]));
+        assert!(paired.is_empty());
+        assert_eq!((before.len(), after.len()), (1, 0));
+
+        // `m -> z`, a new row inserted at `m`, then `m -> c` with `c < z`:
+        // the reused start key proves neither end's identity, so both stay
+        // additions and the original row a removal.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["m"]),
+            rows(&["c", "z"]),
+            &moves(&[("m", "z"), ("m", "c")]),
+        );
+        assert!(paired.is_empty());
+        assert_eq!((before.len(), after.len()), (1, 2));
+
+        // A row that returns to its start key and moves on is still tracked.
+        let (before, after, paired) = pair_rekeys(
+            rows(&["m"]),
+            rows(&["c"]),
+            &moves(&[("m", "z"), ("z", "m"), ("m", "c")]),
+        );
+        assert!(before.is_empty() && after.is_empty());
+        assert_eq!(rekeyed(&paired), ["m->c"]);
     }
 }

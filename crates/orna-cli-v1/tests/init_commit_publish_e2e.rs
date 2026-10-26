@@ -40,7 +40,7 @@ fn isolate_git(command: &mut Command) {
 }
 
 fn orna(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command);
     command
         .args(arguments)
@@ -50,7 +50,7 @@ fn orna(directory: &Path, arguments: &[&str]) -> Output {
 }
 
 fn orna_repl(root: &Path, input: &str) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command);
     let mut child = command
         .args(["--db", root.to_str().expect("UTF-8 test path"), "repl"])
@@ -434,6 +434,105 @@ fn a_legacy_identity_sidecar_keeps_its_table_id_through_the_first_commit() {
     assert_eq!(
         admitted,
         vec![format!("Music as relation {}", "07".repeat(16))]
+    );
+}
+
+/// The staged candidate failed format admission as a mixed snapshot: exit 1,
+/// ORNA-REPO-CONTEXT-004 naming `entry`, and no `admitted table` line, since
+/// no commit exists.
+fn assert_mixed_metadata_refused(refused: &Output, entry: &str) {
+    assert_eq!(refused.status.code(), Some(1), "{}", transcript(refused));
+    let message = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        message.contains("error[ORNA-REPO-CONTEXT-004]") && message.contains(entry),
+        "the refusal names {entry}\n{}",
+        transcript(refused)
+    );
+    assert!(
+        !transcript(refused).contains("admitted table"),
+        "{}",
+        transcript(refused)
+    );
+}
+
+/// ORNA-META-001: under `.orna/` a format-3 snapshot tracks only
+/// `database.orna` and `store`, so `orna commit` refuses a staged candidate
+/// that tracks anything else there, naming the entry with format admission's
+/// mixed-format code (ORNA-REPO-CONTEXT-004; Gate A, "unknown/mixed formats
+/// fail early"). On an unborn branch a stray entry is refused when the staged
+/// candidate is captured, and `.orna/migration.json`, which reading a
+/// snapshot still tolerates while `orna migrate copy` writes it, by the commit
+/// gate. Neither refusal creates the branch, and the first commit without them
+/// tracks only the metadata and the store.
+#[test]
+fn first_commit_refuses_extra_metadata_entries() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    fs::write(root.join(".orna/notes.txt"), "not format-3 metadata\n")
+        .expect("write a stray metadata entry");
+    git(
+        &root,
+        &["add", "main.orna", ".orna/database.orna", ".orna/notes.txt"],
+    );
+    let staged = git(&root, &["ls-files", "--stage"]);
+    let refused = orna(&root, &["commit", "-m", "Declare Music"]);
+    assert_mixed_metadata_refused(&refused, ".orna/notes.txt");
+    assert_eq!(
+        git(&root, &["ls-files", "--stage"]),
+        staged,
+        "capture leaves the index unchanged"
+    );
+    assert!(
+        git_fails(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]),
+        "the branch is still unborn"
+    );
+
+    git(&root, &["rm", "--cached", "--quiet", ".orna/notes.txt"]);
+    fs::write(root.join(".orna/migration.json"), "{}\n").expect("write a migration record");
+    git(&root, &["add", ".orna/migration.json"]);
+    let refused = orna(&root, &["commit", "-m", "Declare Music"]);
+    assert_mixed_metadata_refused(&refused, ".orna/migration.json");
+    assert!(
+        git_fails(&root, &["rev-parse", "--verify", "--quiet", "HEAD"]),
+        "the branch is still unborn"
+    );
+
+    git(
+        &root,
+        &["rm", "--cached", "--quiet", ".orna/migration.json"],
+    );
+    commit_source(&root, "Declare Music");
+    assert_eq!(git(&root, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    assert_eq!(
+        tracked_metadata(&root),
+        ".orna/database.orna\n.orna/store\n"
+    );
+}
+
+/// The commit gate refuses a transitional `.orna/` entry on every later
+/// commit too (ORNA-META-001, ORNA-REPO-CONTEXT-004), so neither `HEAD` nor
+/// any ref moves and the committed metadata stays `database.orna` and `store`.
+#[test]
+fn later_commit_refuses_a_transitional_metadata_entry() {
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, MUSIC_SOURCE);
+    commit_source(&root, "Declare Music");
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let refs = git(&root, &["for-each-ref"]);
+
+    fs::write(root.join(".orna/migration.json"), "{}\n").expect("write a migration record");
+    git(&root, &["add", ".orna/migration.json"]);
+    let refused = orna(&root, &["commit", "-m", "Record a migration"]);
+    assert_mixed_metadata_refused(&refused, ".orna/migration.json");
+    assert_eq!(
+        git(&root, &["rev-parse", "HEAD"]),
+        head,
+        "no commit was made"
+    );
+    assert_eq!(git(&root, &["for-each-ref"]), refs, "no ref moved");
+    assert_eq!(
+        tracked_metadata(&root),
+        ".orna/database.orna\n.orna/store\n"
     );
 }
 

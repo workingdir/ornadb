@@ -32,12 +32,18 @@ mod blob_store;
 mod crash_barrier;
 mod compact;
 pub mod complete_copy;
+pub mod format2_orr;
+pub mod format2_rov;
+pub mod format2_ogb;
+pub mod format2_read;
 mod init;
 pub mod migration_copy;
 mod mount;
 mod native_graph;
 mod object_reader;
 pub mod offline_copy;
+mod orp;
+mod overflow;
 pub mod publication_describe;
 mod publication_transaction;
 pub mod relation_admission;
@@ -56,6 +62,8 @@ pub use compact::{
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{CompactPublicationPlan, CompactSegment};
+#[cfg(feature = "legacy-fixture-writer")]
+pub use compact::write_legacy_format1_fixture;
 pub use init::format_context::{
     FINAL_REPOSITORY_FORMAT, REPOSITORY_LAYOUT_VERSION, CaptureCapabilityError,
     CommittedTableBinding, FinalFormatCapability, FormatContextError, HistoricalFormatContext,
@@ -326,11 +334,29 @@ fn reviewed_candidate_runtime_intent_id(review: &ReviewedCandidateReview, messag
     intent
 }
 
+/// The commit gate's refusal as the commit's failure. A candidate that mixes
+/// formats keeps its format error, which names the tracked path that does not
+/// belong to format 3 (ORNA-META-001, ORNA-REPO-CONTEXT-004); any other
+/// invalid candidate is `InvalidCommitCandidate` (`sys.admin.assertion_failed`).
+fn commit_gate_refusal(error: FormatContextError) -> RepositoryError {
+    match error {
+        mixed @ FormatContextError::MixedFormats { .. } => RepositoryError::FormatContext(mixed),
+        _ => RepositoryError::InvalidCommitCandidate,
+    }
+}
+
 const JOURNAL_MAGIC: &[u8] = b"ORNA-PUB-JOURNAL\0";
 const CHECKOUT_JOURNAL_MAGIC: &[u8] = b"ORNA-CHECKOUT-JOURNAL\0";
 const GIT_INDEX_LOCK_MAGIC: &[u8] = b"ORNA-GIT-INDEX-LOCK\0";
 const MAX_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 const MAX_MIGRATION_IDENTITY_RECORDS: usize = 65_536;
+/// Longest a publication waits for the repository coordination lock before it
+/// reports `RepositoryBusy`. Bounded so a hung holder or a same-thread
+/// re-entry cannot block publication forever; long enough to queue behind any
+/// short coordination section that holds the lock.
+const COORDINATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Sleep between try-lock attempts while the coordination lock is contended.
+const COORDINATION_LOCK_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 const MAX_MIGRATION_IDENTITY_COMPONENT_BYTES: usize = 1024 * 1024;
 const MAX_MIGRATION_ANNOTATION_DEFAULTS: usize = 1_000_000_000;
 
@@ -2201,32 +2227,62 @@ impl RuntimePaths {
 pub struct ManagedPath(PathBuf);
 
 impl ManagedPath {
-    /// Creates a normalized, repository-relative path.
-    ///
-    /// Absolute paths, `.git` administration paths, tracked `.orna/cache.db`, and
-    /// parent traversal or empty paths are rejected before they reach Git.
+    /// Creates a normalized, repository-relative path for a write, a stage, or
+    /// a committed-tree entry.
+    /// Absolute paths, `.git` administration components at any depth, tracked
+    /// `.orna/cache.db`, parent traversal, backslashes, NUL, and empty
+    /// components are rejected before they reach Git. No length limit applies
+    /// here: Git stores committed names of any length, so an overlong committed
+    /// entry must still list. The filesystem reports an overlong name when Orna
+    /// creates it.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, RepositoryError> {
-        let path = path.as_ref();
+        Self::normalize(path.as_ref(), true).map(Self)
+    }
+
+    /// Wraps a path Git reports for the local worktree (untracked, ignored, or
+    /// changed). A user-created directory such as `Sub/.GIT/` is ordinary local
+    /// data that Git lists, so this keeps the structural checks but not the Git
+    /// metadata refusal. It only feeds conflict classification, never a write.
+    fn from_worktree_listing(path: &str) -> Result<Self, RepositoryError> {
+        Self::normalize(Path::new(path), false).map(Self)
+    }
+
+    fn normalize(path: &Path, strict: bool) -> Result<PathBuf, RepositoryError> {
         if path.as_os_str().is_empty() || path.is_absolute() {
             return Err(RepositoryError::UnsafeManagedPath);
+        }
+        if strict {
+            // Git treats `\` as ordinary, but Windows checkouts and sync tools do
+            // not, so `..\x` would traverse there. NUL cannot name a file at all.
+            // Empty components (`a//b`, `a/`) are refused as Git's verify_path does.
+            let bytes = path.as_os_str().as_encoded_bytes();
+            if bytes.iter().any(|byte| matches!(*byte, b'\\' | 0))
+                || bytes.split(|byte| *byte == b'/').any(<[u8]>::is_empty)
+            {
+                return Err(RepositoryError::UnsafeManagedPath);
+            }
         }
         let mut normalized = PathBuf::new();
         for component in path.components() {
             match component {
-                Component::Normal(value) => normalized.push(value),
+                Component::Normal(value) => {
+                    if strict
+                        && orna_foundation_v1::is_git_metadata_component(value.as_encoded_bytes())
+                    {
+                        return Err(RepositoryError::UnsafeManagedPath);
+                    }
+                    normalized.push(value);
+                }
                 Component::CurDir => {}
                 Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
                     return Err(RepositoryError::UnsafeManagedPath);
                 }
             }
         }
-        if normalized.components().next().is_none()
-            || normalized.components().next() == Some(Component::Normal(".git".as_ref()))
-            || normalized == Path::new(".orna/cache.db")
-        {
+        if normalized.components().next().is_none() || normalized == Path::new(".orna/cache.db") {
             return Err(RepositoryError::UnsafeManagedPath);
         }
-        Ok(Self(normalized))
+        Ok(normalized)
     }
 
     pub fn as_path(&self) -> &Path {
@@ -2417,6 +2473,7 @@ pub struct Repository {
     worktree: PathBuf,
     runtime: RuntimePaths,
     objects: std::sync::Arc<object_reader::ObjectReader>,
+    coordination_lock_wait: std::time::Duration,
 }
 
 /// Binds a candidate tree entry at its exact index position.
@@ -2498,7 +2555,19 @@ impl Repository {
             objects: std::sync::Arc::new(object_reader::ObjectReader::new(worktree.clone())),
             worktree,
             runtime: RuntimePaths { root: runtime },
+            coordination_lock_wait: COORDINATION_LOCK_WAIT,
         })
+    }
+
+    /// Overrides how long publication waits for the coordination lock before
+    /// reporting `RepositoryBusy`. Production uses `COORDINATION_LOCK_WAIT`;
+    /// tests use this to keep contended-lock cases short or to allow a slow
+    /// winner on a loaded runner.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_coordination_lock_wait(mut self, wait: std::time::Duration) -> Self {
+        self.coordination_lock_wait = wait;
+        self
     }
 
     pub fn worktree(&self) -> &Path {
@@ -2512,6 +2581,56 @@ impl Repository {
     /// unborn `HEAD`; it never substitutes CWD/runtime state.
     pub fn head(&self) -> Result<Option<GitCommitRef>, RepositoryError> {
         self.commit_optional("HEAD^{commit}")
+    }
+
+    /// The content of the single index entry for `path`, or `None` when the
+    /// path is not in the index. A conflicted path (several stages) is an error.
+    pub fn index_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        let mut command = self.command();
+        command.args(["--literal-pathspecs", "ls-files", "--stage", "-z", "--"]).arg(path);
+        let output = self.run(command)?.stdout;
+        let records = output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        match records.as_slice() {
+            [] => Ok(None),
+            [record] => {
+                let header = record
+                    .split(|byte| *byte == b'\t')
+                    .next()
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = header
+                    .split(|byte| *byte == b' ')
+                    .nth(1)
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+                Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
+            }
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// The content of `path` in `HEAD`, or `None` when `HEAD` has no such path
+    /// or the repository has no commit yet.
+    pub fn head_file_bytes(&self, path: &str) -> Result<Option<Vec<u8>>, RepositoryError> {
+        if self.head()?.is_none() {
+            return Ok(None);
+        }
+        let output = self.git_bytes(["ls-tree", "-z", "HEAD", "--", path])?;
+        let Some(record) = output.split(|byte| *byte == 0).find(|record| !record.is_empty()) else {
+            return Ok(None);
+        };
+        let header = record
+            .split(|byte| *byte == b'\t')
+            .next()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = header
+            .split(|byte| *byte == b' ')
+            .nth(2)
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let oid = std::str::from_utf8(oid).map_err(|_| RepositoryError::GitOperationFailed)?;
+        Ok(Some(self.git_bytes(["cat-file", "blob", oid])?))
     }
 
     /// Lists the newest commits reachable from `HEAD`, newest first.
@@ -2719,6 +2838,8 @@ impl Repository {
                 return Err(RepositoryError::UnsafeManagedPath);
             }
         }
+        self.objects()
+            .check_expansion(expected_head.as_str(), "")?;
         self.reject_final_loose_path_collisions(expected_head, changes)?;
 
         self.runtime.ensure_exists()?;
@@ -2841,6 +2962,8 @@ impl Repository {
         if &actual != expected_head {
             return Err(RepositoryError::StaleHead);
         }
+        self.objects()
+            .check_expansion(expected_head.as_str(), "")?;
         if store_root.algorithm() != graph.algorithm() {
             return Err(RepositoryError::Graph(GraphError::InvalidOidWidth {
                 expected: graph.algorithm().width(),
@@ -2995,6 +3118,10 @@ impl Repository {
             oid(candidate.as_str())?,
             oid(&self.git(["rev-parse", "--verify", &root_tree])?)?,
         ]);
+        self.objects().check_expansion(candidate.as_str(), "")?;
+        if let Some(base) = base {
+            self.objects().check_expansion(base.as_str(), "")?;
+        }
         let changes = match base {
             Some(base) => self.git_bytes_no_lazy_fetch([
                 "diff-tree",
@@ -3155,16 +3282,8 @@ impl Repository {
         let candidate_index = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!(
-                "index-candidate-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                    .as_nanos()
-            ));
-        fs::write(&candidate_index, base_index)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            .join(format!("index-candidate-{}", Uuid::new_v4()));
+        write_new_index_candidate(&candidate_index, base_index)?;
         let result = (|| {
             for path in paths {
                 let encoded = path
@@ -3195,6 +3314,9 @@ impl Repository {
                 candidate,
                 true,
             )?;
+            // Gate D boundary: the store worktree has been rewritten but the
+            // candidate index is not yet installed (ORNA-PUB-005/PUB-016).
+            crate::publication_crash_barrier("store-worktree");
             self.configure_store_tree_skip_worktree(&candidate_index)?;
             fs::File::open(&candidate_index)
                 .and_then(|file| file.sync_all())
@@ -3330,17 +3452,9 @@ impl Repository {
         let index = self.git_path("index")?;
         let base_index = fs::read(&index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let parent = index.parent().ok_or(RepositoryError::LocalStateUnavailable)?;
-        let candidate_index = parent.join(format!(
-            ".orna-index-recovery-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                .as_nanos()
-        ));
+        let candidate_index = parent.join(format!(".orna-index-recovery-{}", Uuid::new_v4()));
         let result = (|| {
-            fs::write(&candidate_index, &base_index)
-                .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            write_new_index_candidate(&candidate_index, &base_index)?;
             let mut update = self.command();
             update
                 .env("GIT_INDEX_FILE", &candidate_index)
@@ -3391,6 +3505,7 @@ impl Repository {
         &self,
         treeish: &str,
     ) -> Result<BTreeMap<String, String>, RepositoryError> {
+        self.objects().check_expansion(treeish, ".orna/store")?;
         let mut list = self.command();
         list.env("GIT_NO_LAZY_FETCH", "1").args([
             "ls-tree",
@@ -3533,6 +3648,17 @@ impl Repository {
             let skipped = skipped_paths.contains(relative);
             let is_payload = Self::is_store_payload_blob_path(relative);
             if unchanged && !skipped && !is_payload {
+                // Node metadata is not rewritten here, but an edit to it is still an external change
+                // and must be refused rather than left in place (ORNA-PUB-010).
+                let path = ManagedPath::new(relative)?;
+                let (target, _) = self.store_reconciliation_paths(&path, candidate)?;
+                if let Some(current) = self.read_managed_file(&target)? {
+                    let object = new_object.ok_or(RepositoryError::GitOperationFailed)?;
+                    let next = self.git_bytes_no_lazy_fetch(["cat-file", "blob", object])?;
+                    if current != next {
+                        return Err(RepositoryError::ManagedContentConflict);
+                    }
+                }
                 continue;
             }
 
@@ -3555,18 +3681,15 @@ impl Repository {
             // clearing those bits so reconciliation does not invent deletions.
             if unchanged {
                 let displaced = self.read_managed_file(&quarantine)?;
+                let next = new_object
+                    .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
+                    .transpose()?
+                    .ok_or(RepositoryError::GitOperationFailed)?;
+                if current.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
+                    return Err(RepositoryError::ManagedContentConflict);
+                }
                 if current.is_none() || displaced.is_some() {
-                    let next = new_object
-                        .map(|object| self.git_bytes_no_lazy_fetch(["cat-file", "blob", object]))
-                        .transpose()?
-                        .ok_or(RepositoryError::GitOperationFailed)?;
-                    if displaced
-                        .as_deref()
-                        .is_some_and(|bytes| bytes != next.as_slice())
-                        || current
-                            .as_deref()
-                            .is_some_and(|bytes| bytes != next.as_slice())
-                    {
+                    if displaced.as_deref().is_some_and(|bytes| bytes != next.as_slice()) {
                         return Err(RepositoryError::ManagedContentConflict);
                     }
                     if install {
@@ -3827,6 +3950,150 @@ impl Repository {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(_) => return Err(RepositoryError::LocalStateUnavailable),
         }
+        self.sweep_publication_pins_locked(&[])?;
+        Ok(())
+    }
+
+    /// Pins the objects an unfinished publication journal needs for recovery
+    /// (ORNA-GIT-010): its base index tree and its candidate commit. The pins
+    /// are private and owned by the journal. They are adopted before Git's
+    /// index lock is taken or the Prepared journal is written, and every pin
+    /// that no journal names is swept, so GC and repack cannot prune the
+    /// objects reconciliation reads.
+    fn adopt_publication_pins_locked(
+        &self,
+        journal: &PublicationJournal,
+    ) -> Result<(), RepositoryError> {
+        let pins = Self::publication_pins(journal);
+        let keep: Vec<String> = pins
+            .iter()
+            .map(|(reference, _)| reference.clone())
+            .collect();
+        self.sweep_publication_pins_locked(&keep)?;
+        for (reference, oid) in &pins {
+            self.pin_publication_object_locked(reference, oid)?;
+        }
+        Ok(())
+    }
+
+    /// The pin refs and the objects they keep for one journal.
+    fn publication_pins(journal: &PublicationJournal) -> Vec<(String, String)> {
+        let mut pins = Vec::new();
+        if let Some(tree) = journal.base_index_tree.as_ref() {
+            pins.push((
+                Self::publication_index_pin_ref(tree.as_str()),
+                tree.as_str().to_owned(),
+            ));
+        }
+        pins.push((
+            Self::publication_candidate_pin_ref(journal.new_head.as_str()),
+            journal.new_head.as_str().to_owned(),
+        ));
+        pins
+    }
+
+    /// Releases the pins of a failed publication attempt. A retained journal
+    /// keeps its own pins; with no journal every publication pin is swept.
+    /// Acquires the coordination lock, so callers must not hold it.
+    fn release_unjournaled_publication_pins(&self) -> Result<(), RepositoryError> {
+        let _coordination_lock = self.acquire_coordination_lock()?;
+        let keep: Vec<String> = match self.read_publication_journal_locked()? {
+            Some(journal) => Self::publication_pins(&journal)
+                .into_iter()
+                .map(|(reference, _)| reference)
+                .collect(),
+            None => Vec::new(),
+        };
+        self.sweep_publication_pins_locked(&keep)
+    }
+
+    fn publication_index_pin_ref(tree: &str) -> String {
+        format!("refs/orna/publication-indexes/{tree}")
+    }
+
+    fn publication_candidate_pin_ref(commit: &str) -> String {
+        format!("refs/orna/publication-candidates/{commit}")
+    }
+
+    /// Pins one object a journal names. An object Git no longer holds cannot
+    /// be kept alive, so it is left unpinned: the recovery path already
+    /// classifies a lost candidate or base tree (ORNA-GIT-010).
+    fn pin_publication_object_locked(
+        &self,
+        reference: &str,
+        oid: &str,
+    ) -> Result<(), RepositoryError> {
+        if !self.publication_object_present(oid)? {
+            return Ok(());
+        }
+        let zero = "0".repeat(oid.len());
+        let mut update = self.command();
+        update.args(["update-ref", "--no-deref", reference, oid, zero.as_str()]);
+        if self.run(update).is_ok() {
+            return Ok(());
+        }
+        // A GC that removed the object after the check above makes the create
+        // fail. That is the same absent-object case: leave it unpinned.
+        if !self.publication_object_present(oid)? {
+            return Ok(());
+        }
+        // Creation is refused when the pin already names this object. Accept
+        // only that exact pin; any other value is a conflicting journal pin.
+        let mut verify = self.command();
+        verify.args(["rev-parse", "--verify", "--quiet", reference]);
+        let output = verify
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        if output.status.success() && trim_output(&output.stdout) == oid {
+            Ok(())
+        } else {
+            Err(RepositoryError::InvalidPublicationJournal)
+        }
+    }
+
+    /// `git cat-file -e` exits 0 when the object exists and 1 when it is
+    /// absent. Any other status (a fatal repository error, a corrupt object
+    /// store) is an error: reading it as "absent" would skip the pin while
+    /// the journal naming the object is still written.
+    fn publication_object_present(&self, oid: &str) -> Result<bool, RepositoryError> {
+        let mut exists = self.command();
+        exists.args(["cat-file", "-e", oid]);
+        let output = exists
+            .output()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        match output.status.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(RepositoryError::GitOperationFailed),
+        }
+    }
+
+    /// Deletes every publication pin not named in `keep`. Callers hold the
+    /// coordination lock, so no publisher can sit between its pin and its
+    /// journal. With no journal no pin may survive; with a journal only its
+    /// own pins may (ORNA-GIT-010).
+    fn sweep_publication_pins_locked(&self, keep: &[String]) -> Result<(), RepositoryError> {
+        let mut list = self.command();
+        list.args([
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/orna/publication-indexes/",
+            "refs/orna/publication-candidates/",
+        ]);
+        let listing = self.run(list)?.stdout;
+        for line in listing
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            let reference =
+                std::str::from_utf8(line).map_err(|_| RepositoryError::GitOperationFailed)?;
+            if keep.iter().any(|kept| kept == reference) {
+                continue;
+            }
+            let mut delete = self.command();
+            delete.args(["update-ref", "-d", "--no-deref", reference]);
+            self.run(delete)?;
+        }
         Ok(())
     }
 
@@ -3991,6 +4258,10 @@ impl Repository {
         {
             return Err(RepositoryError::StaleCwd);
         }
+        self.objects().check_expansion(index_tree.as_str(), "")?;
+        if let Some(head) = cwd.head() {
+            self.objects().check_expansion(head.as_str(), "")?;
+        }
         let mut path_diff = self.command();
         match cwd.head() {
             Some(head) => path_diff
@@ -4128,7 +4399,7 @@ impl Repository {
             return Err(RepositoryError::InvalidCommitCandidate);
         }
         self.validate_format3_index_tree(&review.index_tree)
-            .map_err(|_| RepositoryError::InvalidCommitCandidate)?;
+            .map_err(commit_gate_refusal)?;
         let Some(old_head) = review.cwd.head().cloned() else {
             return self.commit_reviewed_root_candidate(
                 review,
@@ -4280,6 +4551,26 @@ impl Repository {
         command
     }
 
+    /// A Git command that records a private staged-identity carrier (the
+    /// unreachable commit `capture_staged_candidate` names for loading). A
+    /// carrier is never ref-advanced, so it is written on Orna's behalf and
+    /// never reads the ambient identity. A machine or CI runner without
+    /// `user.name`/`user.email` therefore builds it the same way. The identity
+    /// is fixed here and never written to Git config; timestamps remain Git's.
+    /// Publication candidates ref-advance the user's branch and keep
+    /// `command()`, so they record the configured identity (ORNA-PUB-010).
+    fn private_commit_command(&self) -> Command {
+        const NAME: &str = "Orna Internal";
+        const EMAIL: &str = "orna-internal@localhost.invalid";
+        let mut command = self.command();
+        command
+            .env("GIT_AUTHOR_NAME", NAME)
+            .env("GIT_AUTHOR_EMAIL", EMAIL)
+            .env("GIT_COMMITTER_NAME", NAME)
+            .env("GIT_COMMITTER_EMAIL", EMAIL);
+        command
+    }
+
     /// Requires the author and committer identity a reviewed commit records
     /// to be configured. 16-administration: "Default author information comes
     /// from configured Git identity; missing identity fails before creating a
@@ -4427,7 +4718,36 @@ impl Repository {
 
     /// The common PUB-1 ref/index/worktree machinery. A compact journal is
     /// refused: its retired writer has no completion path in this build.
+    /// Pins adopted by an attempt that no journal names are released before
+    /// the error is returned (ORNA-GIT-010).
     fn publish_candidate_impl_with_migration(
+        &self,
+        expected_index: &IndexGeneration,
+        candidate: &PrivateCommit,
+        journal: &mut PublicationJournal,
+        permit_legacy_migration: bool,
+        review: Option<&ReviewedCandidateReview>,
+        on_stage: impl FnMut(PublicationJournalStage),
+    ) -> Result<IndexGeneration, RepositoryError> {
+        let published = self.publish_candidate_body(
+            expected_index,
+            candidate,
+            journal,
+            permit_legacy_migration,
+            review,
+            on_stage,
+        );
+        if published.is_err() {
+            // The refusal is the caller's error. If the release itself fails,
+            // the pins remain for the next recovery to sweep.
+            let _ = self.release_unjournaled_publication_pins();
+        }
+        published
+    }
+
+    /// The body of [`Self::publish_candidate_impl_with_migration`]. It takes
+    /// the coordination lock itself and releases it before returning.
+    fn publish_candidate_body(
         &self,
         expected_index: &IndexGeneration,
         candidate: &PrivateCommit,
@@ -4453,7 +4773,7 @@ impl Repository {
         if journal.compact_manifest().is_some() {
             return Err(RepositoryError::RuntimeCompletionRequired);
         }
-        let _coordination_lock = self.acquire_coordination_lock()?;
+        let _coordination_lock = self.acquire_coordination_lock_for_publication()?;
         if let Some(review) = review { self.verify_reviewed_candidate_locked(review)?; }
         self.require_no_pending_checkout_recovery_locked()?;
         self.ensure_no_git_operation_in_progress()?;
@@ -4467,6 +4787,15 @@ impl Repository {
             // same recovery operation, not a second publisher. Any differing
             // journal remains fenced rather than replacing its evidence.
             Some(retained) if retained != *journal => {
+                // Ordering (ORNA-PUB-009 before recovery signal): a head that has
+                // already moved past this publisher's expected head is an ordinary
+                // lost CAS -> StaleHead (retriable). The retained batch is untouched.
+                // Only an unmoved head with a foreign retained journal means the
+                // earlier publication has not advanced the ref: PublicationPending
+                // (ORNA-PUB-006 recovery required).
+                if self.head()?.as_ref() != Some(journal.old_head()) {
+                    return Err(RepositoryError::StaleHead);
+                }
                 return Err(RepositoryError::PublicationPending);
             }
             retained => retained.is_some(),
@@ -4475,6 +4804,7 @@ impl Repository {
         self.ensure_atomic_index_install_supported()?;
         let index = self.git_path("index")?;
         let base_index = self.capture_index_for_expected(expected_index, &index)?;
+        self.adopt_publication_pins_locked(journal)?;
         let lock_binding = journal.lock_binding()?;
         // Own Git's writer lock before persisting a prepared intent so lock contention
         // cannot strand a timestamped journal that blocks a fresh retry. This closes the
@@ -4541,6 +4871,10 @@ impl Repository {
             }
             return Err(error);
         }
+        // Gate D boundary: the ref CAS has succeeded but the RefAdvanced
+        // journal stage is not yet durable. Recovery sees a Prepared journal
+        // whose HEAD already names the candidate (ORNA-PUB-009, ORNA-PUB-005).
+        crate::publication_crash_barrier("ref-cas-pre-journal");
 
         journal.advance(PublicationJournalStage::RefAdvanced)?;
         self.write_publication_journal_locked(journal)?;
@@ -4561,6 +4895,9 @@ impl Repository {
         for index in 0..journal.entries().len() {
             self.materialize_publication_entry_locked(journal, index)?;
         }
+        // Gate D boundary: every managed entry has been materialised but the
+        // WorktreeReconciled stage is not yet recorded (ORNA-PUB-016).
+        crate::publication_crash_barrier("worktree");
 
         journal.advance(PublicationJournalStage::WorktreeReconciled)?;
         self.write_publication_journal_locked(journal)?;
@@ -4606,9 +4943,11 @@ impl Repository {
         let _coordination_lock = self.acquire_coordination_lock()?;
         self.require_no_pending_checkout_recovery_locked()?;
         let Some(mut journal) = self.read_publication_journal_locked()? else {
+            self.sweep_publication_pins_locked(&[])?;
             self.reclaim_orphan_publication_index_lock()?;
             return Ok(None);
         };
+        self.adopt_publication_pins_locked(&journal)?;
         self.reclaim_abandoned_publication_index_lock(&journal)?;
         let base_tree = journal
             .base_index_tree()
@@ -4692,8 +5031,10 @@ impl Repository {
                 journal.advance(PublicationJournalStage::RefAdvanced)?;
                 self.write_publication_journal_locked(&journal)?;
             }
+            let mut store_verified = false;
             if journal.stage() == PublicationJournalStage::RefAdvanced {
                 self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                store_verified = true;
                 let current = IndexGeneration {
                     head: self.head()?,
                     tree: self.index_tree_from_file(&index)?,
@@ -4730,6 +5071,12 @@ impl Repository {
                 self.write_publication_journal_locked(&journal)?;
             }
             if journal.stage() == PublicationJournalStage::IndexReconciled {
+                // The store worktree was reconciled before IndexReconciled. An edit to a store path made since
+                // then differs from the recorded candidate state and must be preserved as a conflict, not
+                // overwritten by materialisation (recovery table row 6; ORNA-PUB-010).
+                if !store_verified {
+                    self.reconcile_store_worktree_transition(&expected_index, &candidate, false)?;
+                }
                 self.recover_publication_worktree_locked(&mut journal)?;
             }
             drop(git_lock);
@@ -5133,6 +5480,7 @@ impl Repository {
         &self,
         expected_head: &GitCommitRef,
     ) -> Result<Vec<Vec<Vec<u8>>>, RepositoryError> {
+        self.objects().check_expansion(expected_head.as_str(), "")?;
         let tracked = self.git_bytes([
             "ls-tree",
             "-r",
@@ -5493,7 +5841,9 @@ impl Repository {
         for encoded_path in paths {
             let path =
                 String::from_utf8(encoded_path).map_err(|_| RepositoryError::UnsafeManagedPath)?;
-            let path = ManagedPath::new(path)?;
+            // Worktree paths are local user data: untracked `Sub/.GIT/` is legal,
+            // so only the structural check applies here.
+            let path = ManagedPath::from_worktree_listing(&path)?;
             let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
             digest.update((encoded_path.len() as u64).to_be_bytes());
             digest.update(encoded_path);
@@ -5851,6 +6201,10 @@ impl Repository {
         current_head: Option<&GitCommitRef>,
         target: &GitCommitRef,
     ) -> Result<CheckoutGitSubplan, RepositoryError> {
+        self.objects().check_expansion(target.as_str(), "")?;
+        if let Some(current) = current_head {
+            self.objects().check_expansion(current.as_str(), "")?;
+        }
         let target_paths = match current_head {
             Some(current) => self.git_nul_paths(&[
                 "diff".into(),
@@ -5900,7 +6254,7 @@ impl Repository {
                 "--".into(),
             ],
         ] {
-            local_paths.extend(self.git_nul_paths(&arguments)?);
+            local_paths.extend(self.git_worktree_nul_paths(&arguments)?);
         }
         let affected_paths = target_paths
             .union(&local_paths)
@@ -6560,6 +6914,7 @@ impl Repository {
     ) -> Result<Vec<CommittedTreeEntry>, RepositoryError> {
         const MAX_ENTRY_BYTES: usize = 4 * 1024;
 
+        self.objects().check_expansion(treeish, "")?;
         let object_id_length = self.native_object_id_length()?;
         let mut command = self.command();
         command
@@ -7619,6 +7974,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(&self.worktree);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, &self.worktree);
         command
     }
 
@@ -7646,7 +8002,27 @@ impl Repository {
         command.args(args);
         Ok(self.run(command)?.stdout)
     }
+    /// Parses paths Git reports for a committed tree or diff. Each is a
+    /// committed name, so it passes [`ManagedPath::new`] in full.
     fn git_nul_paths(&self, args: &[String]) -> Result<HashSet<ManagedPath>, RepositoryError> {
+        self.git_nul_paths_with(args, |path| ManagedPath::new(path))
+    }
+
+    /// Parses paths Git reports for the local worktree, which include untracked
+    /// user directories such as `Sub/.GIT/`. Those are ordinary local data, so
+    /// they take only the structural check.
+    fn git_worktree_nul_paths(
+        &self,
+        args: &[String],
+    ) -> Result<HashSet<ManagedPath>, RepositoryError> {
+        self.git_nul_paths_with(args, ManagedPath::from_worktree_listing)
+    }
+
+    fn git_nul_paths_with(
+        &self,
+        args: &[String],
+        parse: impl Fn(&str) -> Result<ManagedPath, RepositoryError>,
+    ) -> Result<HashSet<ManagedPath>, RepositoryError> {
         let mut command = self.command();
         command.args(args);
         self.run(command)?
@@ -7654,9 +8030,9 @@ impl Repository {
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
             .map(|path| {
-                let path = String::from_utf8(path.to_vec())
+                let path = std::str::from_utf8(path)
                     .map_err(|_| RepositoryError::UnsafeManagedPath)?;
-                ManagedPath::new(path)
+                parse(path)
             })
             .collect()
     }
@@ -7900,6 +8276,7 @@ impl Repository {
         let mut command = Command::new("git");
         command.current_dir(directory).args(args);
         scrub_git_routing_environment(&mut command);
+        bind_git_discovery_to_worktree(&mut command, directory);
         let output = run_command(command)?;
         Ok(trim_output(&output.stdout))
     }
@@ -7909,7 +8286,13 @@ impl Repository {
 
     fn commit_optional(&self, expression: &str) -> Result<Option<GitCommitRef>, RepositoryError> {
         let mut command = self.command();
-        command.args(["rev-parse", "--verify", "--quiet", expression]);
+        command.args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            expression,
+        ]);
         let output = command
             .output()
             .map_err(|_| RepositoryError::GitUnavailable)?;
@@ -8078,19 +8461,52 @@ impl Repository {
     }
 
     fn acquire_coordination_lock(&self) -> Result<CoordinationLock, RepositoryError> {
+        let file = self.open_coordination_lock_file()?;
+        file.try_lock_exclusive()
+            .map_err(|_| RepositoryError::RepositoryBusy)?;
+        Ok(CoordinationLock { file })
+    }
+
+    /// Acquires the coordination lock for publication, waiting at most
+    /// `COORDINATION_LOCK_WAIT`. A publisher that loses a race queues briefly
+    /// behind the winner and then fails its compare-and-set (ORNA-PUB-009).
+    /// A held or hung lock, or a same-thread re-entry, is reported as
+    /// `RepositoryBusy` once the bound elapses; it never blocks indefinitely.
+    fn acquire_coordination_lock_for_publication(
+        &self,
+    ) -> Result<CoordinationLock, RepositoryError> {
+        let file = self.open_coordination_lock_file()?;
+        let deadline = std::time::Instant::now() + self.coordination_lock_wait;
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => return Ok(CoordinationLock { file }),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(RepositoryError::RepositoryBusy);
+                    }
+                    std::thread::sleep(COORDINATION_LOCK_POLL);
+                }
+                Err(_) => return Err(RepositoryError::LocalStateUnavailable),
+            }
+        }
+    }
+
+    fn open_coordination_lock_file(&self) -> Result<fs::File, RepositoryError> {
         let locks = self.runtime.locks();
         fs::create_dir_all(&locks).map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let path = locks.join("coordination.lock");
-        let file = fs::OpenOptions::new()
+        fs::OpenOptions::new()
             .create(true)
             .read(true)
             .write(true)
             .truncate(false)
             .open(&path)
-            .map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        file.try_lock_exclusive()
-            .map_err(|_| RepositoryError::RepositoryBusy)?;
-        Ok(CoordinationLock { file })
+            .map_err(|_| RepositoryError::LocalStateUnavailable)
     }
 
     /// Acquires the process-lifetime owner lock for this worktree's local
@@ -8299,15 +8715,8 @@ impl Repository {
         let candidate = index
             .parent()
             .ok_or(RepositoryError::LocalStateUnavailable)?
-            .join(format!(
-                "index-candidate-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_err(|_| RepositoryError::LocalStateUnavailable)?
-                    .as_nanos()
-            ));
-        fs::write(&candidate, &base_index).map_err(|_| RepositoryError::LocalStateUnavailable)?;
+            .join(format!("index-candidate-{}", Uuid::new_v4()));
+        write_new_index_candidate(&candidate, &base_index)?;
         let permissions = fs::metadata(&index)
             .map_err(|_| RepositoryError::LocalStateUnavailable)?
             .permissions();
@@ -8689,6 +9098,19 @@ fn persist_runtime_owner_state(
     fs::rename(&temporary, path).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     fs::File::open(parent)
         .and_then(|directory| directory.sync_all())
+        .map_err(|_| RepositoryError::LocalStateUnavailable)
+}
+
+/// Writes a brand-new index candidate. `create_new` refuses any existing file
+/// or symlink at the path, so a candidate is never written through a link or
+/// over an attacker-prepared name.
+fn write_new_index_candidate(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|_| RepositoryError::LocalStateUnavailable)?;
+    file.write_all(bytes)
         .map_err(|_| RepositoryError::LocalStateUnavailable)
 }
 
@@ -9708,6 +10130,36 @@ fn run_command(mut command: Command) -> Result<Output, RepositoryError> {
     }
 }
 
+/// Stops Git's repository discovery at the parent of a repository root so a
+/// corrupt root `.git` cannot fall through to an enclosing repository. Only a
+/// directory that carries its own `.git` entry is a root; a plain subdirectory
+/// of a worktree (for example `.orna/` or `nested/`) must still discover the
+/// enclosing repository, so it is left unbound. The path is canonicalized first
+/// so a symlinked root binds to the directory it really resolves to; a relative
+/// path cannot yield an empty or relative ceiling.
+pub(crate) fn bind_git_discovery_to_worktree(command: &mut Command, worktree: &std::path::Path) {
+    let resolved = canonical_or_absolute(worktree);
+    if resolved.join(".git").exists() {
+        bind_git_ceiling_above(command, &resolved);
+    }
+}
+
+/// Stops Git's discovery at the parent of `directory` unconditionally. Use this
+/// where the caller requires `directory` itself to be a repository root: a plain
+/// subdirectory then yields no repository instead of its enclosing one.
+pub(crate) fn bind_git_ceiling_above(command: &mut Command, directory: &std::path::Path) {
+    let resolved = canonical_or_absolute(directory);
+    if let Some(parent) = resolved.parent() {
+        command.env("GIT_CEILING_DIRECTORIES", parent);
+    }
+}
+
+fn canonical_or_absolute(path: &std::path::Path) -> std::path::PathBuf {
+    path.canonicalize()
+        .or_else(|_| std::path::absolute(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Prevent inherited Git routing from selecting a repository, worktree, or
 /// index other than the explicitly supplied command directory.
 pub(crate) fn scrub_git_routing_environment(command: &mut Command) {
@@ -9958,6 +10410,9 @@ pub enum RepositoryError {
     /// This profile implements atomic index replacement only on POSIX
     /// filesystems. Windows requires a separately validated replacement path.
     PlatformUnsupported,
+    /// A committed source tree exceeds the walk-size or depth limit before
+    /// its entries are expanded.
+    SourceTreeLimit,
 }
 
 impl fmt::Display for RepositoryError {
@@ -10036,6 +10491,7 @@ impl fmt::Display for RepositoryError {
             Self::PlatformUnsupported => {
                 f.write_str("atomic Git index replacement is unsupported on this platform")
             }
+            Self::SourceTreeLimit => f.write_str("source tree exceeds the walk limit"),
         }
     }
 }
@@ -10265,6 +10721,243 @@ mod tests {
         assert_eq!(recovered.runtime_intent_id(), Some([1; 16]));
         assert_eq!(recovered.logical_rekeys(), &[event]);
     }
+
+    /// Builds `parent/healthy` as a real repository and `parent/healthy/child`
+    /// with a corrupt `HEAD`, so discovery from `child` must not reach `healthy`.
+    #[cfg(unix)]
+    pub(crate) fn corrupt_child_under_healthy_parent(root: &Path) -> std::path::PathBuf {
+        let healthy = root.join("healthy");
+        fs::create_dir_all(&healthy).unwrap();
+        let init = Command::new("git")
+            .current_dir(&healthy)
+            .args(["init", "-q"])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let child = healthy.join("child");
+        fs::create_dir_all(child.join(".git")).unwrap();
+        fs::write(child.join(".git").join("HEAD"), b"garbage\n").unwrap();
+        child
+    }
+
+    /// Runs `rev-parse HEAD` in `directory` under the production discovery bind.
+    #[cfg(unix)]
+    fn head_probe_succeeds_bound(directory: &Path) -> bool {
+        let mut command = Command::new("git");
+        command.current_dir(directory).args(["rev-parse", "HEAD"]);
+        super::scrub_git_routing_environment(&mut command);
+        super::bind_git_discovery_to_worktree(&mut command, directory);
+        command
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_symlinked_worktree_does_not_fall_through_to_real_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        let healthy = child.parent().unwrap();
+        let init = Command::new("git")
+            .current_dir(healthy)
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "healthy",
+            ])
+            .status()
+            .unwrap();
+        assert!(init.success());
+        let plain = root.path().join("x");
+        fs::create_dir_all(&plain).unwrap();
+        let link = plain.join("L");
+        std::os::unix::fs::symlink(&child, &link).unwrap();
+        assert!(!head_probe_succeeds_bound(&link));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_discovery_relative_path_to_corrupt_child_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let _child = corrupt_child_under_healthy_parent(root.path());
+        let previous = env::current_dir().unwrap();
+        env::set_current_dir(root.path()).unwrap();
+        let relative = Path::new("healthy").join("child");
+        let ok = head_probe_succeeds_bound(&relative);
+        env::set_current_dir(previous).unwrap();
+        assert!(!ok, "relative corrupt child must not adopt healthy parent");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn git_at_corrupt_root_under_healthy_parent_fails_closed() {
+        let root = tempfile::tempdir().unwrap();
+        let child = corrupt_child_under_healthy_parent(root.path());
+        assert!(super::Repository::git_at(&child, ["rev-parse", "HEAD"]).is_err());
+    }
+
+    /// Replaces one length-prefixed string in an encoded journal with another,
+    /// keeping the surrounding wire format valid.
+    pub(crate) fn splice_length_prefixed(
+        bytes: &[u8],
+        old: &str,
+        new: &str,
+        length_prefix: fn(u32) -> [u8; 4],
+    ) -> Vec<u8> {
+        let mut needle = length_prefix(old.len() as u32).to_vec();
+        needle.extend_from_slice(old.as_bytes());
+        let mut replacement = length_prefix(new.len() as u32).to_vec();
+        replacement.extend_from_slice(new.as_bytes());
+        let at = bytes
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+            .expect("old path must be encoded in the journal");
+        let mut out = bytes[..at].to_vec();
+        out.extend_from_slice(&replacement);
+        out.extend_from_slice(&bytes[at + needle.len()..]);
+        out
+    }
+
+    #[test]
+    fn publication_journal_decode_refuses_hostile_managed_paths() {
+        let journal = PublicationJournal::new_with_runtime_intent(
+            GitCommitRef("a".repeat(40)),
+            GitCommitRef("b".repeat(40)),
+            super::IndexTreeRef::from_verified_tree("c".repeat(40), 40).unwrap(),
+            [1; 16],
+            vec![PublicationJournalEntry::new(
+                ManagedPath::new(".orna/database.orna").unwrap(),
+                None,
+                Some(b"committed".to_vec()),
+            )],
+        )
+        .unwrap();
+        let encoded = journal.encode().unwrap();
+        assert!(PublicationJournal::decode(&encoded, 40).is_ok());
+        for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
+            let spliced = splice_length_prefixed(
+                &encoded,
+                ".orna/database.orna",
+                hostile,
+                u32::to_le_bytes,
+            );
+            assert!(
+                PublicationJournal::decode(&spliced, 40).is_err(),
+                "journal path {hostile:?} must not decode"
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_journal_v1_legacy_bytes_decode_and_hostile_discard_paths_refuse() {
+        let mut bytes = super::CHECKOUT_JOURNAL_MAGIC.to_vec();
+        bytes.push(1);
+        bytes.extend_from_slice(&7_u64.to_be_bytes());
+        bytes.push(2);
+        super::put_string(&mut bytes, &"a".repeat(40)).unwrap();
+        bytes.extend_from_slice(&[9; 32]);
+        bytes.extend_from_slice(&1_u32.to_le_bytes());
+        super::put_string(&mut bytes, "generated/row.orna").unwrap();
+        assert!(super::CheckoutRecoveryJournal::decode(&bytes, 40).is_ok());
+        let hostile = splice_length_prefixed(
+            &bytes,
+            "generated/row.orna",
+            "../escape",
+            u32::to_le_bytes,
+        );
+        assert!(super::CheckoutRecoveryJournal::decode(&hostile, 40).is_err());
+    }
+
+    #[test]
+    fn publication_object_present_fails_closed_on_git_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(root.path()).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(root.path())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        let absent = "0123456789abcdef0123456789abcdef01234567";
+        assert!(repository.publication_object_present(&present).unwrap());
+        assert!(!repository.publication_object_present(absent).unwrap());
+
+        // A corrupt HEAD makes git exit 128. The object may still exist, so
+        // the answer is an error, never "absent" (which would skip the pin).
+        fs::write(root.path().join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
+
+    /// A child repository nested inside a parent repository must not let a
+    /// corrupt child HEAD fall through to the parent. Git would then report the
+    /// child's pinned object as missing, and the publication pin check would
+    /// skip the pin (ORNA-PUB-006). The probe must fail closed instead.
+    #[test]
+    fn publication_probe_does_not_fall_through_a_corrupt_child_head() {
+        let parent = tempfile::TempDir::new().unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(parent.path())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let child = parent.path().join("child");
+        fs::create_dir(&child).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&child)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&child).unwrap();
+        let mut hash = Command::new("git")
+            .args(["hash-object", "-w", "--stdin"])
+            .current_dir(&child)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(hash.stdin.as_mut().unwrap(), b"pinned").unwrap();
+        let present = String::from_utf8(hash.wait_with_output().unwrap().stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert!(repository.publication_object_present(&present).unwrap());
+
+        fs::write(child.join(".git/HEAD"), "garbage\n").unwrap();
+        assert!(matches!(
+            repository.publication_object_present(&present),
+            Err(RepositoryError::GitOperationFailed)
+        ));
+    }
     #[test]
     fn managed_path_rejects_tracked_runtime_cache_path() {
         assert!(matches!(
@@ -10398,6 +11091,31 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
+    #[test]
+    fn index_candidate_refuses_to_overwrite_an_existing_path() {
+        let root = tempfile::tempdir().unwrap();
+        let candidate = root.path().join("index-candidate-prepared");
+        fs::write(&candidate, b"attacker-owned").unwrap();
+
+        assert!(matches!(
+            super::write_new_index_candidate(&candidate, b"index-bytes"),
+            Err(RepositoryError::LocalStateUnavailable)
+        ));
+        assert_eq!(fs::read(&candidate).unwrap(), b"attacker-owned");
+    }
+
+    #[test]
+    fn commit_optional_treats_option_shaped_expressions_as_revisions() {
+        let root = repository_with_ignored_big_directory();
+        let repository = Repository::discover(root.path()).unwrap();
+        // Without `--end-of-options`, rev-parse would print this option's value
+        // and succeed; as a revision name it is simply absent.
+        assert!(matches!(
+            repository.commit_optional("--git-dir=/nonexistent"),
+            Ok(None)
+        ));
+    }
+
     fn repository_with_ignored_big_directory() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         git(root.path(), &["init", "-q"]);
@@ -10432,6 +11150,51 @@ mod tests {
             before == after,
             "git-ignored content must not enter the CWD observation"
         );
+    }
+
+    /// Opens a repository whose HEAD names a commit nesting one file
+    /// `depth` directories deep: a tree the committed walk refuses by depth.
+    fn repository_on_deep_head(depth: usize) -> (tempfile::TempDir, Repository, GitCommitRef) {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-q", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        let commit = crate::test_support::deep_nested_commit(root.path(), depth);
+        git(root.path(), &["update-ref", "HEAD", &commit]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let head = repository.head().unwrap().unwrap();
+        (root, repository, head)
+    }
+
+    /// G1: the private-commit read-tree of HEAD must be preceded by the
+    /// bounded expansion pre-pass, so a too-deep HEAD is refused.
+    #[test]
+    fn private_commit_refuses_a_head_tree_nested_beyond_the_walk_limit() {
+        let (_root, repository, head) = repository_on_deep_head(300);
+        let change = ManagedFileChange::new(
+            ManagedPath::new("src/x.txt").unwrap(),
+            Some(b"x\n".to_vec()),
+        );
+        assert!(matches!(
+            repository.build_private_commit(&head, &[change], "orna: test deep head"),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
+    }
+
+    /// G3: with a current head present, the target tree is still checked
+    /// before the diff against the current tree expands it.
+    #[test]
+    fn checkout_subplan_refuses_a_target_tree_nested_beyond_the_walk_limit() {
+        let (root, repository, deep) = repository_on_deep_head(300);
+        let shallow = git(
+            root.path(),
+            &["commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "shallow"],
+        );
+        git(root.path(), &["update-ref", "refs/heads/shallow", &shallow]);
+        let current = repository.resolve_snapshot(&shallow).unwrap();
+        assert!(matches!(
+            repository.checkout_git_subplan(Some(&current), &deep),
+            Err(RepositoryError::SourceTreeLimit)
+        ));
     }
 
     #[cfg(unix)]
@@ -11932,6 +12695,102 @@ mod tests {
         assert_eq!(repository.head().unwrap(), Some(candidate.commit().clone()));
     }
 
+    fn overwrite_keeping_mtime(path: &std::path::Path, bytes: &[u8]) {
+        let modified = fs::metadata(path).unwrap().modified().unwrap();
+        fs::write(path, bytes).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+    }
+
+    #[test]
+    fn reviewed_candidate_detects_same_size_same_mtime_edit_before_ref_advance() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// reviewed\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([40; 16]), super::Uuid::from_bytes([41; 16]), 21,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(22), vec![0x81, 0x00],
+        ).unwrap();
+        let head_before = repository.head().unwrap();
+
+        // Same length, restored mtime: only a content compare can see this edit.
+        overwrite_keeping_mtime(&root.path().join("main.orna"), b"module main;\n// edited!\n");
+        assert!(matches!(
+            repository.commit_reviewed_candidate(&review, "reviewed"),
+            Err(RepositoryError::StaleReviewedCandidate)
+        ));
+        assert_eq!(repository.head().unwrap(), head_before, "a stale review must not advance the ref");
+        assert_eq!(git(root.path(), &["for-each-ref", "refs/orna/"]), "");
+    }
+
+    #[test]
+    fn reviewed_candidate_detects_same_size_same_mtime_edit_after_ref_advance() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::write(root.path().join("main.orna"), "module main;\n").unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        git(root.path(), &["commit", "-m", "initial"]);
+
+        let staged = b"module main;\n// reviewed\n";
+        fs::write(root.path().join("main.orna"), staged).unwrap();
+        git(root.path(), &["add", "main.orna"]);
+        let repository = Repository::discover(root.path()).unwrap();
+        let review = repository.review_staged_candidate(
+            super::Uuid::from_bytes([42; 16]), super::Uuid::from_bytes([43; 16]), 23,
+            super::RepositoryFormat::Format3, RuntimeGeneration::new(24), vec![0x81, 0x00],
+        ).unwrap();
+        let head = review.cwd.head().unwrap().clone();
+        let path = ManagedPath::new("main.orna").unwrap();
+        let candidate = repository.build_private_commit(
+            &head, &[ManagedFileChange::new(path.clone(), Some(staged.to_vec()))], "reviewed",
+        ).unwrap();
+        let mut journal = PublicationJournal::new_with_runtime_intent(
+            head, candidate.commit().clone(), review.index_tree.clone(), [44; 16],
+            vec![PublicationJournalEntry::new(path, Some(staged.to_vec()), Some(staged.to_vec()))],
+        ).unwrap();
+        let root_path = root.path().join("main.orna");
+        let result = repository.publish_candidate_impl_with_migration(
+            &review.cwd.index, &candidate, &mut journal, false, Some(&review),
+            |stage| if stage == PublicationJournalStage::RefAdvanced {
+                overwrite_keeping_mtime(&root_path, b"module main;\n// edited!\n");
+            },
+        );
+        // The edit lands after RefAdvanced is durable. Reconciliation must refuse to
+        // materialise over bytes that match neither the batch nor the expected state
+        // (ORNA-PUB-007: recovery is required, the publication is not reported as complete).
+        assert!(
+            matches!(result, Err(RepositoryError::ManagedContentConflict)),
+            "post-advance same-size edit must fail with ManagedContentConflict, got {result:?}"
+        );
+        // ORNA-PUB-005: the ref names the candidate because it advanced before the edit.
+        assert!(repository.head().unwrap().as_ref() == Some(journal.new_head()), "ref must stay advanced");
+        // The journal is durable at IndexReconciled: the edit hook runs at RefAdvanced
+        // (lib.rs:4796), index reconciliation then succeeds and IndexReconciled is
+        // persisted (lib.rs:4807-4809), and the managed-file conflict is raised while
+        // materialising (lib.rs:4811). Recovery resumes from IndexReconciled.
+        assert_eq!(
+            repository.read_publication_journal().unwrap().unwrap().stage(),
+            PublicationJournalStage::IndexReconciled
+        );
+        // The user's edited bytes are retained, not overwritten by the batch.
+        assert_eq!(fs::read(root.path().join("main.orna")).unwrap(), b"module main;\n// edited!\n");
+    }
+
     #[test]
     fn reviewed_candidate_commit_preserves_unstaged_work_and_replays_result() {
         let root = tempfile::TempDir::new().unwrap();
@@ -12179,6 +13038,34 @@ mod tests {
         assert_eq!(repository.head().unwrap(), head_before);
     }
 
+    /// ORNA-PUB-010: an unchanged `.orna/store/data` node leaf that was edited in the worktree
+    /// is an external change and must refuse the reconcile rather than be left in place.
+    #[test]
+    fn reconcile_refuses_edited_unchanged_store_data_leaf() {
+        let root = tempfile::TempDir::new().unwrap();
+        git(root.path(), &["init", "-b", "main"]);
+        crate::test_support::configure_fixture_git_identity(root.path());
+        git(root.path(), &["config", "commit.gpgsign", "false"]);
+        fs::create_dir_all(root.path().join(".orna/store")).unwrap();
+        fs::write(root.path().join(".orna/store/data"), b"committed\n").unwrap();
+        git(root.path(), &["add", ".orna/store/data"]);
+        git(root.path(), &["commit", "-m", "base"]);
+
+        let repository = Repository::discover(root.path()).unwrap();
+        let expected = repository.index_generation().unwrap();
+        let candidate = super::PrivateCommit {
+            tree: expected.tree().unwrap().clone(),
+            commit: expected.head().unwrap().clone(),
+        };
+        fs::write(root.path().join(".orna/store/data"), b"edited\n").unwrap();
+
+        assert!(matches!(
+            repository.reconcile_store_worktree_transition(&expected, &candidate, false),
+            Err(RepositoryError::ManagedContentConflict)
+        ));
+        assert_eq!(fs::read(root.path().join(".orna/store/data")).unwrap(), b"edited\n");
+    }
+
      #[test]
     fn deletion_preserves_editor_race_after_final_check() {
         let root = tempfile::TempDir::new().unwrap();
@@ -12218,5 +13105,79 @@ mod tests {
             .materialize_managed_file(&path, Some(b"editor"), None)
             .unwrap();
         assert!(!target.exists());
+    }
+}
+
+#[cfg(test)]
+mod git_binding_tests {
+    use super::bind_git_discovery_to_worktree;
+    use std::process::Command;
+
+    #[test]
+    fn discovery_bind_makes_a_relative_ceiling_absolute() {
+        let root = tempfile::tempdir().unwrap();
+        let child = root.path().join("child");
+        std::fs::create_dir_all(child.join(".git")).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &child);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
+    }
+
+    #[test]
+    fn discovery_bind_leaves_a_plain_subdirectory_free_to_discover_its_repository() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join(".orna");
+        std::fs::create_dir_all(&plain).unwrap();
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &plain);
+        assert!(
+            command
+                .get_envs()
+                .all(|(name, _)| name != "GIT_CEILING_DIRECTORIES")
+        );
+    }
+
+    /// A relative worktree path must still bind to an absolute ceiling. The root
+    /// is created inside the process directory so its path can be given relative.
+    #[test]
+    fn discovery_bind_absolutizes_a_relative_worktree_path() {
+        let cwd = std::env::current_dir().unwrap();
+        let root = tempfile::Builder::new().tempdir_in(&cwd).unwrap();
+        std::fs::create_dir(root.path().join(".git")).unwrap();
+        let relative = std::path::PathBuf::from(root.path().file_name().unwrap());
+        let mut command = Command::new("git");
+        bind_git_discovery_to_worktree(&mut command, &relative);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert!(ceiling.is_absolute());
+        assert_eq!(ceiling, cwd.canonicalize().unwrap());
+    }
+
+    /// The unconditional ceiling binds a plain directory's parent, with no `.git`.
+    #[test]
+    fn unconditional_ceiling_binds_a_plain_directory_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let plain = root.path().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let mut command = Command::new("git");
+        super::bind_git_ceiling_above(&mut command, &plain);
+        let ceiling = command
+            .get_envs()
+            .find(|(name, _)| *name == "GIT_CEILING_DIRECTORIES")
+            .and_then(|(_, value)| value)
+            .map(std::path::PathBuf::from)
+            .expect("discovery ceiling is bound");
+        assert_eq!(ceiling, root.path().canonicalize().unwrap());
     }
 }

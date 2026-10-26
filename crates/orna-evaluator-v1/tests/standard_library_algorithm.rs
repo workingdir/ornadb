@@ -9,7 +9,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 
 #[test]
 fn pinned_collection_algorithms_execute_from_the_captured_orna_module() {
-    let sources = orna_standard::reference_standard_sources_v1()
+    let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
         .filter(|(path, _)| path == "std/collection.orna" || path == "std/algorithm.orna")
         .collect::<Vec<_>>();

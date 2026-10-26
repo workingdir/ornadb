@@ -1,9 +1,12 @@
 use super::*;
-use orna_project_v1::{admit_format3_row, ProjectLoader, StoredSchema};
-use orna_repository_v1::{KeyRange, OrpBlobBinding, Repository, RepositoryFormatContext};
+use orna_project_v1::{
+    admit_format3_row, blob_placeholder, committed_tables, evaluator_rows, has_text_primary_key,
+    holds_blob, restore_stored_blobs, runtime_key_from_evaluator, CommittedTable, ProjectLoader,
+    StoredSchema,
+};
+use orna_repository_v1::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
 use orna_syntax_v1::Expr;
-use orna_value_v1::decode_canonical_storage_value;
 
 /// Borrowed repository and runtime authority for one trusted local REPL input.
 pub struct ReplTransactionScope<'a> {
@@ -12,6 +15,54 @@ pub struct ReplTransactionScope<'a> {
     pub format_context: &'a RepositoryFormatContext,
     pub runtime_context: &'a RuntimeActivationContext,
     pub request: RequestIdentity,
+    #[cfg(feature = "test-support")]
+    dispatch_observer: Option<&'a dyn Fn()>,
+}
+
+impl<'a> ReplTransactionScope<'a> {
+    /// Builds the scope for one trusted REPL input.
+    pub fn new(
+        project: &'a LoadedProject,
+        repository: &'a Repository,
+        format_context: &'a RepositoryFormatContext,
+        runtime_context: &'a RuntimeActivationContext,
+        request: RequestIdentity,
+    ) -> Self {
+        Self {
+            project,
+            repository,
+            format_context,
+            runtime_context,
+            request,
+            #[cfg(feature = "test-support")]
+            dispatch_observer: None,
+        }
+    }
+
+    /// Installs a test-only observer that runs before each sys binding is called.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_dispatch_observer(mut self, observer: &'a dyn Fn()) -> Self {
+        self.dispatch_observer = Some(observer);
+        self
+    }
+}
+
+/// Failure from one evaluated REPL submission. `external_effects_possible`
+/// is true once any external sys binding was reached, so a failure after
+/// that point is not known to have left external state unchanged.
+pub struct ReplEvaluationFailure {
+    pub error: ApplicationError,
+    pub external_effects_possible: bool,
+}
+
+impl From<ApplicationError> for ReplEvaluationFailure {
+    fn from(error: ApplicationError) -> Self {
+        Self {
+            error,
+            external_effects_possible: false,
+        }
+    }
 }
 
 impl ApplicationAuthority {
@@ -24,7 +75,7 @@ impl ApplicationAuthority {
         staged: StagedReplActivation,
         scope: &ReplTransactionScope<'_>,
         bindings: &mut SysHostBindingRegistry,
-    ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ApplicationError> {
+    ) -> Result<(Option<CanonicalValue>, AdmittedReplSession, StagedActivation), ReplEvaluationFailure> {
         let (tables, table_ids, defaults, functions) = admitted_project_tables(self, scope)?;
         // The REPL host serves no publication relation, so its explain
         // catalogue pins the activation's project tables only.
@@ -36,7 +87,7 @@ impl ApplicationAuthority {
             ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
         })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
-        let captured_rows = committed_table_rows(scope, &tables, &table_ids)?;
+        let (captured_rows, committed) = committed_table_rows(scope, &tables, &table_ids)?;
         let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
         let ids_for_storage = table_ids.clone();
@@ -53,23 +104,44 @@ impl ApplicationAuthority {
             scope,
             next_row_ordinal: 0,
             explain_catalogue,
+            external_dispatched: false,
+        };
+        let outcome = session.evaluate_staged_with_effects(staged, &mut effects);
+        let external_effects_possible = effects.external_dispatched;
+        let failure = move |error: ApplicationError| ReplEvaluationFailure {
+            error,
+            external_effects_possible,
         };
         // Reserve before the evaluation outcome is inspected: an activation that fails
         // after allocating an automatic ID still hands that ID out, so it must never be
         // reused (ORNA-AUTOID-002). The gap it leaves is expected (ORNA-AUTOID-003).
-        let evaluation = session.evaluate_staged_with_effects(staged, &mut effects);
         reserve_automatic_ids(
             scope,
             &ids_for_storage,
             &watermarks,
             &effects.mutations.automatic_id_high_water(),
-        )?;
-        let (value, successor) = evaluation
-            .map_err(|error| ApplicationError::EffectRejected(error.code().to_owned()))?;
+        )
+        .map_err(&failure)?;
+        let (value, successor) = outcome
+            .map_err(|error| failure(ApplicationError::EffectRejected(error.code().to_owned())))?;
+        // A bound registry always reports external reach (see `may_reach_external_state`), so this declaration is currently always `ExternalPossible`. Persistence to the ledger is not wired (ornadb-rg5g).
+        let declared = repl_declared_effects(effects.bindings);
         let activation = effects
             .mutations
-            .into_staged_activation(value.clone().unwrap_or_else(CanonicalValue::unit), None)?;
-        let activation = normalize_repl_mutations(scope, &tables_for_storage, &ids_for_storage, activation)?;
+            .into_staged_activation(
+                value.clone().unwrap_or_else(CanonicalValue::unit),
+                None,
+                declared,
+            )
+            .map_err(|error| failure(error.into()))?;
+        let activation = normalize_repl_mutations(
+            scope,
+            &tables_for_storage,
+            &ids_for_storage,
+            &committed,
+            activation,
+        )
+            .map_err(|error| failure(error.into()))?;
         Ok((value, successor, activation))
     }
 }
@@ -130,43 +202,112 @@ fn reserve_automatic_ids(
     Ok(())
 }
 
+/// Projects an evaluator record onto the stored tuple laid out by
+/// `storage_order`. The committed descriptor directs the stored encoding of
+/// every non-Blob field (ORNA-FORMAT-004). A Blob field keeps its evaluator
+/// placeholder, which `restore_stored_blobs` replaces with a committed reference.
+fn lower_evaluator_row(
+    descriptor: &orna_value_v1::SchemaDescriptor,
+    schema: &TableSchema,
+    storage_order: &[String],
+    record: &[u8],
+) -> Result<Vec<u8>, ApplicationError> {
+    let decoded = CanonicalValue::decode(record).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let OvbRaw::Map(entries) = decoded.raw() else {
+        return Err(ApplicationError::InvalidTableMetadata);
+    };
+    let mut fields = BTreeMap::new();
+    for (name, field_value) in entries {
+        let OvbRaw::Text(name) = name else {
+            return Err(ApplicationError::InvalidTableMetadata);
+        };
+        fields.insert(name.as_str(), field_value);
+    }
+    let stored_schema = StoredSchema::new(descriptor).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let mut stored_values = Vec::with_capacity(storage_order.len());
+    for name in storage_order {
+        let field = stored_schema.field(name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let value = fields.get(name.as_str()).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let ty = schema.fields.get(name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        stored_values.push(if holds_blob(ty) {
+            (*value).clone()
+        } else {
+            stored_schema
+                .lower_field(field, value)
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?
+        });
+    }
+    CanonicalValue::new(OvbRaw::Array(stored_values))
+        .and_then(|row| row.encode())
+        .map_err(|_| ApplicationError::InvalidTableMetadata)
+}
+
+/// Projects the activation's evaluator-form mutations onto stored tuples in
+/// the runtime keyspace. A written row's Blob references are restored from
+/// the stored tuple it was read from: the row an earlier mutation of this
+/// activation left at its key, or else its committed row.
 fn normalize_repl_mutations(
     scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
+    committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
-    let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins) =
-        activation.into_parts();
+    let (
+        value,
+        mutations,
+        snapshot_generation,
+        source_row_schemas,
+        protected_field_pins,
+        effects,
+    ) = activation.into_parts();
     let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
     let mut descriptors_by_table = BTreeMap::<String, orna_value_v1::SchemaDescriptor>::new();
+    // The stored tuple this activation has left at each key so far; `None`
+    // marks a removed row, which then shadows the committed one.
+    let mut written = BTreeMap::<(String, Vec<u8>), Option<Vec<u8>>>::new();
     let mut normalized = Vec::with_capacity(mutations.len());
     for mutation in mutations {
         let table = mutation.table().to_owned();
         let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let committed_table = committed
+            .get(&table)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         // A row admitted through `admit_format3_row` (the Blob insert path)
-        // already carries its canonical store key and stored-field tuple, and
-        // its source-row provenance says so. Every other mutation, a plain
-        // insert included, still holds the evaluator's row map and is
-        // projected to the stored-field tuple here.
+        // already carries its runtime key and stored-field tuple, and its
+        // source-row provenance says so. Every other mutation, a plain insert
+        // included, still holds the evaluator's row map and is projected to
+        // the stored-field tuple here.
         if source_row_schemas
             .iter()
             .any(|source_row| source_row.mutation_id == mutation.id())
         {
+            written.insert(
+                (table, mutation.key().to_vec()),
+                mutation.value().map(<[u8]>::to_vec),
+            );
             normalized.push(mutation);
             continue;
         }
-        let text_primary_key = table_schema.admission.as_ref().is_some_and(|admission| {
-            matches!(admission.keys.as_slice(), [(_, Type::Text)])
-        });
-        let key = normalize_runtime_key(mutation.key(), text_primary_key)?;
+        let text_primary_key = has_text_primary_key(table_schema);
+        let key = runtime_key_from_evaluator(mutation.key(), text_primary_key)
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let rekey_to = mutation.rekey_to()
-            .map(|key| normalize_runtime_key(key, text_primary_key))
-            .transpose()?;
+            .map(|key| runtime_key_from_evaluator(key, text_primary_key))
+            .transpose()
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let mutation = mutation
             .with_reencoded_keys(key, rekey_to)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let source_key = (table.clone(), mutation.key().to_vec());
+        let source = match written.get(&source_key) {
+            Some(row) => row.clone(),
+            None => committed_table
+                .stored_row(mutation.key())
+                .map(<[u8]>::to_vec),
+        };
         let Some(row_value) = mutation.value().map(<[u8]>::to_vec) else {
+            written.insert(source_key, None);
             normalized.push(mutation);
             continue;
         };
@@ -177,28 +318,21 @@ fn normalize_repl_mutations(
                 .map_err(|_| ApplicationError::InvalidTableMetadata)?;
             descriptors_by_table.insert(table.clone(), schema.binding().descriptor().clone());
         }
-        let stored_schema = StoredSchema::new(&descriptors_by_table[&table])
+        let storage_order = &committed_table.storage_order;
+        let encoded = lower_evaluator_row(&descriptors_by_table[&table], table_schema, storage_order, &row_value)
+            .and_then(|stored| {
+                restore_stored_blobs(&stored, storage_order, table_schema, source.as_deref())
+                    .map_err(|_| ApplicationError::InvalidTableMetadata)
+            })
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let decoded = CanonicalValue::decode(&row_value).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let OvbRaw::Map(entries) = decoded.raw() else {
-            return Err(ApplicationError::InvalidTableMetadata);
-        };
-        let mut fields = BTreeMap::new();
-        for (name, field_value) in entries {
-            let OvbRaw::Text(name) = name else {
-                return Err(ApplicationError::InvalidTableMetadata);
-            };
-            fields.insert(name.as_str(), field_value);
+        // A rekey moves the stored tuple: its old key is freed for later
+        // mutations and its new key carries the restored references.
+        if let Some(new_key) = mutation.rekey_to() {
+            written.insert((table, new_key.to_vec()), Some(encoded.clone()));
+            written.insert(source_key, None);
+        } else {
+            written.insert(source_key, Some(encoded.clone()));
         }
-        // The evaluator's row map carries optional absence as `null` and
-        // records as name maps; the committed descriptor directs their
-        // stored encoding (ORNA-FORMAT-004).
-        let stored_values = stored_schema
-            .lower_stored_fields(&fields)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let encoded = CanonicalValue::new(OvbRaw::Array(stored_values))
-            .and_then(|row| row.encode())
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         normalized.push(mutation.with_reencoded_value(encoded).map_err(|_| ApplicationError::InvalidTableMetadata)?);
     }
     Ok(StagedActivation {
@@ -207,114 +341,39 @@ fn normalize_repl_mutations(
         snapshot_generation,
         source_row_schemas,
         protected_field_pins,
+        effects,
     })
 }
 
-fn normalize_runtime_key(key: &[u8], text_primary_key: bool) -> Result<Vec<u8>, ApplicationError> {
-    if !text_primary_key {
-        return Ok(key.to_vec());
-    }
-    let value = CanonicalValue::decode(key).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-    let OvbRaw::Text(text) = value.raw() else {
-        return Err(ApplicationError::InvalidTableMetadata);
-    };
-    Ok(text.as_bytes().to_vec())
-}
-
+/// Every admitted table at the REPL's source commit: the evaluator rows the
+/// effect handler consumes, and the committed stored tuples whose Blob
+/// references `normalize_repl_mutations` restores.
 fn committed_table_rows(
     scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
     table_ids: &BTreeMap<String, TableObjectId>,
-) -> Result<RuntimeTableRows, ApplicationError> {
-    let mut result = BTreeMap::new();
+) -> Result<(RuntimeTableRows, BTreeMap<String, CommittedTable>), ApplicationError> {
+    let mut rows = BTreeMap::new();
+    if tables.is_empty() {
+        return Ok((rows, BTreeMap::new()));
+    }
+    let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
+    let limits = ApplicationAuthority::committed_read_limits();
+    let committed = committed_tables(
+        scope.repository,
+        scope.format_context,
+        commit,
+        tables,
+        table_ids,
+        limits,
+    )
+    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
     for (table_name, table_schema) in tables {
-        let object_id = table_ids.get(table_name).copied().ok_or(ApplicationError::InvalidTableMetadata)?;
-        let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
-        let resolved_schema = ProjectLoader::default()
-            .resolve_committed_source_table_schema(scope.repository, commit, object_id)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let binding = resolved_schema.binding();
-        let row_map = scope.format_context.load_row_map(object_id.bytes())
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let graph = scope.format_context.open_native_graph(&row_map)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let read_scope = graph.open_read_scope().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let field_names = StoredSchema::new(binding.descriptor())
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?
-            .fields()
-            .iter()
-            .filter(|field| field.role() == 1)
-            .map(|field| (*field.id(), field.name().to_owned()))
-            .collect::<BTreeMap<_, _>>();
-        let admission = table_schema.admission.as_ref().ok_or(ApplicationError::InvalidTableMetadata)?;
-        let mut committed = BTreeMap::<Vec<u8>, Vec<u8>>::new();
-        let mut lower = None;
-        loop {
-            let range = KeyRange::new(lower.clone(), None, 64).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            let page = graph.range_rows(&range, &read_scope).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-            if page.is_empty() { break; }
-            let next_lower = page.last().map(|row| row.key().clone());
-            for row in page.into_iter().skip(usize::from(lower.is_some())) {
-                let decoded = graph.decode_admitted_row_fields(&row, binding, &read_scope)
-                    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                let OvbRaw::Array(stored_values) = decode_canonical_storage_value(decoded.canonical_fields())
-                    .map_err(|_| ApplicationError::InvalidTableMetadata)? else {
-                    return Err(ApplicationError::InvalidTableMetadata);
-                };
-                if stored_values.len() != decoded.fields().len() {
-                    return Err(ApplicationError::InvalidTableMetadata);
-                }
-                let canonical_key = row.key().canonical_bytes().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                let key_value = CanonicalValue::decode(&canonical_key).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                let key_bytes = key_value.encode().map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                let key_values = match (admission.keys.len(), key_value.raw()) {
-                    (1, _) => vec![key_value.raw().clone()],
-                    (_, OvbRaw::Array(values)) if values.len() == admission.keys.len() => values.clone(),
-                    _ => return Err(ApplicationError::InvalidTableMetadata),
-                };
-                let mut fields = Vec::with_capacity(admission.keys.len() + stored_values.len());
-                for ((name, _), value) in admission.keys.iter().zip(key_values) {
-                    fields.push((OvbRaw::Text(name.clone()), value));
-                }
-                for (field, value) in decoded.fields().iter().zip(stored_values) {
-                    let name = field_names.get(field.field_id()).ok_or(ApplicationError::InvalidTableMetadata)?;
-                    CanonicalValue::new(value.clone()).map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                    fields.push((OvbRaw::Text(name.clone()), value));
-                }
-                fields.sort_by(|(left, _), (right, _)| match (left, right) {
-                    (OvbRaw::Text(left), OvbRaw::Text(right)) => canonical_text_key_order(left, right),
-                    _ => std::cmp::Ordering::Equal,
-                });
-                let row_value = CanonicalValue::new(OvbRaw::Map(fields))
-                    .and_then(|value| value.encode())
-                    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-                if committed.insert(key_bytes, row_value).is_some() {
-                    return Err(ApplicationError::InvalidTableMetadata);
-                }
-            }
-            if next_lower == lower { break; }
-            lower = next_lower;
-        }
-        result.insert(table_name.clone(), committed.into_iter().collect());
+        let table = committed.get(table_name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let table_rows = evaluator_rows(table, table_schema).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        rows.insert(table_name.clone(), table_rows);
     }
-    Ok(result)
-}
-
-fn canonical_text_key_order(left: &str, right: &str) -> std::cmp::Ordering {
-    fn length_class(length: usize) -> u8 {
-        match length {
-            0..=23 => 0,
-            24..=255 => 1,
-            256..=65_535 => 2,
-            65_536..=4_294_967_295 => 3,
-            _ => 4,
-        }
-    }
-
-    length_class(left.len())
-        .cmp(&length_class(right.len()))
-        .then_with(|| left.len().cmp(&right.len()))
-        .then_with(|| left.as_bytes().cmp(right.as_bytes()))
+    Ok((rows, committed))
 }
 
 fn admitted_project_tables(
@@ -389,9 +448,32 @@ struct ReplTransactionEffectHandler<'a, 'scope> {
     scope: &'a ReplTransactionScope<'scope>,
     next_row_ordinal: u64,
     explain_catalogue: orna_evaluator_v1::ActivationExplainCatalogue,
+    external_dispatched: bool,
 }
 
 impl ReplTransactionEffectHandler<'_, '_> {
+    /// Records that a bound sys binding was reached. A call returning
+    /// `Ok(None)` declined the operation; any other outcome, including a
+    /// failure, may already have changed external state.
+    fn record_dispatch<T>(&mut self, result: &Result<Option<T>, EvaluationError>) {
+        if !matches!(result, Ok(None)) {
+            self.external_dispatched = true;
+        }
+    }
+
+    /// Runs the test-only dispatch observer, if one is installed, before a sys
+    /// binding is called. Without the `test-support` feature this does nothing.
+    fn observe_sys_dispatch(&self) {
+        #[cfg(feature = "test-support")]
+        {
+            if let Some(observer) = self.scope.dispatch_observer {
+                observer();
+            }
+        }
+        #[cfg(not(feature = "test-support"))]
+        let _ = self;
+    }
+
     fn handle_table_effect(
         &mut self,
         callee: &Expr,
@@ -525,7 +607,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
     }
 
     fn row_fields_for_admission(
-        &self,
+        &mut self,
         schema: &TableSchema,
         row: &CanonicalValue,
         prebound_blob_bindings: &mut BTreeMap<String, OrpBlobBinding>,
@@ -572,6 +654,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                             None => {
                                 let value_context = ContextValue::new(ValueFormat::Ovb2, blob.clone())
                                     .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                                self.external_dispatched = true;
                                 self.bindings.accept_captured_blob_for_row(&value_context)?
                             }
                         };
@@ -600,7 +683,10 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         callee: &Expr,
         arguments: &[CanonicalValue],
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle(self.bindings, callee, arguments)? {
+        self.observe_sys_dispatch();
+        let result = EffectHandler::handle(self.bindings, callee, arguments);
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -612,13 +698,15 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_with_budget(
+        self.observe_sys_dispatch();
+        let result = EffectHandler::handle_with_budget(
             self.bindings,
             callee,
             arguments,
             budget,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -631,14 +719,16 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_registered_with_budget(
+        self.observe_sys_dispatch();
+        let result = EffectHandler::handle_registered_with_budget(
             self.bindings,
             operation,
             callee,
             arguments,
             budget,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
@@ -652,18 +742,34 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        if let Some(value) = EffectHandler::handle_registered_with_cancellation_and_budget(
+        self.observe_sys_dispatch();
+        let result = EffectHandler::handle_registered_with_cancellation_and_budget(
             self.bindings,
             operation,
             callee,
             arguments,
             budget,
             cancellation,
-        )?
-        {
+        );
+        self.record_dispatch(&result);
+        if let Some(value) = result? {
             return Ok(Some(value));
         }
         self.handle_table_effect(callee, arguments)
+    }
+
+    fn admitted_relation_source(&self, name: &str) -> Option<String> {
+        EffectHandler::admitted_relation_source(&self.mutations, name)
+    }
+
+    fn scan_relation_page(
+        &mut self,
+        source: &str,
+        after: Option<&[u8]>,
+        limit: usize,
+        budget: &mut StepBudget,
+    ) -> Result<Option<RelationPage>, EvaluationError> {
+        EffectHandler::scan_relation_page(&mut self.mutations, source, after, limit, budget)
     }
 
     fn is_ovb2_binding(&self) -> bool {
@@ -760,6 +866,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"));
             }
             let value = in_profile_of(input_row, blob.clone())?;
+            self.external_dispatched = true;
             let binding = self.bindings.accept_captured_blob_for_row(&value)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
             blob_bindings.insert(field.clone(), binding);
@@ -769,7 +876,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
             else {
                 return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
             };
-            *sanitized = blob_placeholder(ty, original)?;
+            *sanitized = blob_placeholder(ty);
         }
         if blob_bindings.is_empty() {
             return Ok(None);
@@ -794,7 +901,10 @@ impl ReplTransactionEffectHandler<'_, '_> {
         arguments: &[ContextValue],
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
-            return Ovb2EffectHandler::handle(self.bindings, callee, arguments);
+            self.observe_sys_dispatch();
+            let result = Ovb2EffectHandler::handle(self.bindings, callee, arguments);
+            self.record_dispatch(&result);
+            return result;
         }
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
             return Ok(Some(value));
@@ -817,12 +927,15 @@ impl ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
-            return Ovb2EffectHandler::handle_with_budget(
+            self.observe_sys_dispatch();
+            let result = Ovb2EffectHandler::handle_with_budget(
                 self.bindings,
                 callee,
                 arguments,
                 budget,
             );
+            self.record_dispatch(&result);
+            return result;
         }
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
             return Ok(Some(value));
@@ -852,7 +965,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if operation == "sys.blob.capture_file" {
-            return Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
+            self.observe_sys_dispatch();
+            let result = Ovb2EffectHandler::handle_registered_with_cancellation_and_budget(
                 self.bindings,
                 operation,
                 callee,
@@ -860,6 +974,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 budget,
                 cancellation,
             );
+            self.record_dispatch(&result);
+            return result;
         }
 
         if let Some(value) = self.handle_contextual_blob_insert(callee, arguments)? {
@@ -995,20 +1111,6 @@ fn blob_value<'a>(ty: &Type, value: &'a OvbRaw) -> Option<Option<&'a OvbRaw>> {
     is_blob(ty).then_some(Some(value))
 }
 
-fn blob_placeholder(ty: &Type, _original: &OvbRaw) -> Result<OvbRaw, EvaluationError> {
-    let placeholder = OvbRaw::Bytes(Vec::new());
-    if matches!(ty, Type::Optional(_)) {
-        return Ok(OvbRaw::Tag(
-            60_013,
-            Box::new(OvbRaw::Array(vec![
-                OvbRaw::Int(BigInt::from(1)),
-                placeholder,
-            ])),
-        ));
-    }
-    Ok(placeholder)
-}
-
 fn restore_contextual_blob_values(
     schema: &TableSchema,
     output: &OvbRaw,
@@ -1037,5 +1139,29 @@ fn restore_contextual_blob_values(
         *value = original.clone();
     }
     Ok(OvbRaw::Map(restored))
+}
+
+/// The effect set declared for one REPL transaction. Every REPL evaluation runs
+/// under a bound registry. `may_reach_external_state` is currently constant `true`
+/// (environment reads are always external), so this always yields `ExternalPossible`.
+/// The declaration is truthful, but the REPL commit path does not yet persist it to
+/// the request ledger (tracked by ornadb-rg5g); this helper only maps the registry
+/// answer to the declared effect set.
+pub(crate) fn repl_declared_effects(bindings: &SysHostBindingRegistry) -> ActivationEffectReport {
+    crate::declared_effects(bindings.may_reach_external_state())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn repl_declared_effects_maps_bound_registry_to_external_possible() {
+        let bindings = SysHostBindingRegistry::default();
+        assert!(matches!(
+            repl_declared_effects(&bindings),
+            ActivationEffectReport::ExternalPossible
+        ));
+    }
 }
 
