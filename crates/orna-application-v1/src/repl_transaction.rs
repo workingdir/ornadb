@@ -1,6 +1,6 @@
 use super::*;
 use orna_project_v1::{
-    admit_format3_row, blob_placeholder, committed_tables, evaluator_rows, has_text_primary_key,
+    admit_format3_row, blob_placeholder, evaluator_rows, has_text_primary_key,
     holds_blob, restore_stored_blobs, runtime_key_from_evaluator, CommittedTable, ProjectLoader,
     StoredSchema,
 };
@@ -14,6 +14,9 @@ pub struct ReplTransactionScope<'a> {
     pub repository: &'a Repository,
     pub format_context: &'a RepositoryFormatContext,
     pub snapshot: &'a RuntimeTableActivationSnapshot,
+    /// Stored-field order of each admitted table at the committed `HEAD`, read
+    /// once by the caller alongside the rows that seeded `snapshot`.
+    pub committed_storage_orders: &'a BTreeMap<String, Vec<String>>,
     pub request: RequestIdentity,
     #[cfg(feature = "test-support")]
     dispatch_observer: Option<&'a dyn Fn()>,
@@ -26,6 +29,7 @@ impl<'a> ReplTransactionScope<'a> {
         repository: &'a Repository,
         format_context: &'a RepositoryFormatContext,
         snapshot: &'a RuntimeTableActivationSnapshot,
+        committed_storage_orders: &'a BTreeMap<String, Vec<String>>,
         request: RequestIdentity,
     ) -> Self {
         Self {
@@ -33,6 +37,7 @@ impl<'a> ReplTransactionScope<'a> {
             repository,
             format_context,
             snapshot,
+            committed_storage_orders,
             request,
             #[cfg(feature = "test-support")]
             dispatch_observer: None,
@@ -87,7 +92,7 @@ impl ApplicationAuthority {
             ApplicationError::Runtime("activation snapshot has no sys.Snapshot key".into())
         })?;
         // The effect handler consumes full row maps, so project the source-bound committed store into that form.
-        let (captured_rows, committed) = committed_table_rows(scope, &tables, &table_ids)?;
+        let (captured_rows, committed) = committed_table_rows(scope, &tables)?;
         let watermarks = automatic_id_watermarks(scope, &tables, &table_ids)?;
         let tables_for_storage = tables.clone();
         let ids_for_storage = table_ids.clone();
@@ -349,34 +354,33 @@ fn normalize_repl_mutations(
 /// handler consumes, and the stored tuples whose Blob references
 /// `normalize_repl_mutations` restores. The rows are the activation snapshot's
 /// (committed `HEAD` overlaid by uncommitted local rows), so the REPL reads
-/// the same relation the CWD does (ORNA-STATE-002).
+/// the same relation the CWD does (ORNA-STATE-002). The snapshot is the only
+/// row read: the committed storage orders come from the caller's single read.
 fn committed_table_rows(
     scope: &ReplTransactionScope<'_>,
     tables: &BTreeMap<String, orna_semantic_v1::TableSchema>,
-    table_ids: &BTreeMap<String, TableObjectId>,
 ) -> Result<(RuntimeTableRows, BTreeMap<String, CommittedTable>), ApplicationError> {
     let mut rows = BTreeMap::new();
-    if tables.is_empty() {
-        return Ok((rows, BTreeMap::new()));
-    }
-    let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
-    let limits = ApplicationAuthority::committed_read_limits();
-    let mut committed = committed_tables(
-        scope.repository,
-        scope.format_context,
-        commit,
-        tables,
-        table_ids,
-        limits,
-    )
-    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-    for (table_name, table) in &mut committed {
-        table.rows = scope.snapshot.table_rows().get(table_name).cloned().unwrap_or_default();
-    }
+    let mut committed = BTreeMap::new();
     for (table_name, table_schema) in tables {
-        let table = committed.get(table_name).ok_or(ApplicationError::InvalidTableMetadata)?;
-        let table_rows = evaluator_rows(table, table_schema).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let storage_order = scope
+            .committed_storage_orders
+            .get(table_name)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        let stored = scope
+            .snapshot
+            .table_rows()
+            .get(table_name)
+            .cloned()
+            .unwrap_or_default();
+        let table = CommittedTable {
+            storage_order: storage_order.clone(),
+            rows: stored,
+        };
+        let table_rows = evaluator_rows(&table, table_schema)
+            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         rows.insert(table_name.clone(), table_rows);
+        committed.insert(table_name.clone(), table);
     }
     Ok((rows, committed))
 }
