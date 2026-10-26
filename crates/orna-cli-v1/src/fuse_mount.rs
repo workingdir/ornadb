@@ -1031,8 +1031,14 @@ fn row_save_context(
         .binding
         .declaration_name()
         .ok_or_else(|| "committed table has no source declaration name".to_owned())?;
+    // Row mutations address the table by its qualified identity, the same
+    // key the admitted validator and the identity manifest use.
+    let qualified_name = match source.binding.module_name().unwrap_or_default() {
+        "" => declaration.to_owned(),
+        module => format!("{module}.{declaration}"),
+    };
     let table = RuntimeTableIdentity::new(
-        declaration,
+        &qualified_name,
         TableObjectId::new(*source.binding.relation_id()),
     )
     .map_err(|error| format!("committed table identity is invalid: {error:?}"))?;
@@ -2106,7 +2112,7 @@ impl WorkspaceFilesystem {
                     .resolve_committed_source_table_schema(repository, commit, table_id)
                     .map_err(|error| format!("committed table schema is unavailable: {error:?}"))?;
                 let runtime_table =
-                    RuntimeTableIdentity::new(pinned_schema.declaration_name(), table_id)
+                    RuntimeTableIdentity::new(&pinned_schema.qualified_name(), table_id)
                         .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
                 let runtime_field_layout = loader
                     .resolve_committed_source_table_schema(

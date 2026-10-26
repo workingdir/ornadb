@@ -962,6 +962,12 @@ impl Functions {
         self.iter().map(|(_, function)| function)
     }
 
+    /// Iterates the admitted module's own function bodies for mutation. The
+    /// shared standard layer is immutable and is never yielded.
+    pub fn local_values_mut(&mut self) -> impl Iterator<Item = &mut PureFunction> {
+        self.local.values_mut()
+    }
+
     /// Returns the function a name denotes: an exact function key, or an import
     /// alias (local or module-internal) whose target is a function. Entry points
     /// and reachability walks accept either spelling.

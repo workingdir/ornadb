@@ -16,7 +16,7 @@ fn relation_values_expose_count_and_first_members() {
     assert_eq!(
         module.symbols["note_count"].ty,
         Type::Function {
-            parameters: vec![Type::Relation(Box::new(Type::Named("Note".into())))],
+            parameters: vec![Type::Relation(Box::new(Type::Named("relation-members.Note".into())))],
             parameter_names: Some(vec!["rows".into()]),
             result: Box::new(Type::Int),
             default_parameters: Default::default(),
@@ -25,9 +25,9 @@ fn relation_values_expose_count_and_first_members() {
     assert_eq!(
         module.symbols["first_note"].ty,
         Type::Function {
-            parameters: vec![Type::Relation(Box::new(Type::Named("Note".into())))],
+            parameters: vec![Type::Relation(Box::new(Type::Named("relation-members.Note".into())))],
             parameter_names: Some(vec!["rows".into()]),
-            result: Box::new(Type::Optional(Box::new(Type::Named("Note".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named("relation-members.Note".into())))),
             default_parameters: Default::default(),
         }
     );
@@ -45,7 +45,7 @@ fn relation_values_expose_count_and_first_members() {
         Type::Function {
             parameters: Vec::new(),
             parameter_names: Some(Vec::new()),
-            result: Box::new(Type::Optional(Box::new(Type::Named("Note".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named("relation-members.Note".into())))),
             default_parameters: Default::default(),
         }
     );

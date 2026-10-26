@@ -63,7 +63,7 @@ fn explicit_imported_helper_assertion_keeps_transitive_dependencies_and_effects(
     let plan = consumer_plan(&analysis);
     assert_eq!(
         plan.dependencies,
-        BTreeSet::from(["User".to_owned(), "Account".to_owned()])
+        BTreeSet::from(["checks.User".to_owned(), "checks.Account".to_owned()])
     );
     assert_eq!(
         plan.effects,
@@ -89,7 +89,7 @@ fn aliased_imported_helper_assertion_keeps_transitive_dependencies() {
     let plan = consumer_plan(&analysis);
     assert_eq!(
         plan.dependencies,
-        BTreeSet::from(["User".to_owned(), "Account".to_owned()])
+        BTreeSet::from(["checks.User".to_owned(), "checks.Account".to_owned()])
     );
     assert_eq!(plan.effects.may_fail, true);
     assert_eq!(
@@ -111,7 +111,7 @@ fn wildcard_imported_helper_assertion_keeps_transitive_dependencies() {
     assert_database_helper_summary(&analysis);
     assert_eq!(
         consumer_plan(&analysis).dependencies,
-        BTreeSet::from(["User".to_owned(), "Account".to_owned()])
+        BTreeSet::from(["checks.User".to_owned(), "checks.Account".to_owned()])
     );
 }
 

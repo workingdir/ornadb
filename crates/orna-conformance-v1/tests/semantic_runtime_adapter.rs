@@ -1040,7 +1040,7 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
         .expect("runtime state");
     assert_eq!(state.committed_table_rows("Loan").await.unwrap().len(), 1);
     assert_eq!(
-        state.committed_table_rows("Reading").await.unwrap().len(),
+        state.committed_table_rows("sensors.Reading").await.unwrap().len(),
         2
     );
 
@@ -1153,7 +1153,7 @@ async fn project_stream_rolls_back_when_affected_module_assertion_fails() {
         .expect("runtime state");
     assert!(
         state
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("Reading rows")
             .is_empty(),
@@ -1310,7 +1310,7 @@ async fn project_stream_cancellation_before_first_poll_is_retained_without_failu
     );
     assert!(
         state
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("Reading rows")
             .is_empty()
@@ -1385,7 +1385,7 @@ async fn project_stream_cancellation_after_one_commit_retains_progress_without_f
     );
     assert_eq!(
         state
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("Reading rows")
             .len(),
@@ -2711,7 +2711,7 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         .await
         .expect("reopen first runtime");
     let rows = state
-        .committed_table_rows("Reading")
+        .committed_table_rows("sensors.Reading")
         .await
         .expect("first committed rows");
     assert_eq!(rows.len(), 2, "both zero-based list items must be delivered");
@@ -2780,7 +2780,7 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         .expect("reopen unchanged runtime");
     assert_eq!(
         state
-            .committed_table_rows("Reading")
+            .committed_table_rows("sensors.Reading")
             .await
             .expect("unchanged committed rows")
             .len(),
@@ -2807,7 +2807,7 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         .await
         .expect("reopen changed runtime");
     let changed_rows = state
-        .committed_table_rows("Reading")
+        .committed_table_rows("sensors.Reading")
         .await
         .expect("changed committed rows");
     assert_eq!(
@@ -2819,7 +2819,7 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         let key = Value::int(value.into()).encode().expect("encoded key");
         assert!(
             state
-                .committed_table_row("Reading", &key)
+                .committed_table_row("sensors.Reading", &key)
                 .await
                 .expect("changed list row")
                 .is_some(),
