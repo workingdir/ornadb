@@ -158,6 +158,13 @@ impl ServeApp {
                 .evaluate_staged(&base, &Environment::new())
                 .map_err(|_| "serve.evaluation_failed");
         }
+        let table_names = names.iter().map(String::as_str).collect::<Vec<_>>();
+        if legacy_bare_module_table(&state, &runtime, &table_names)
+            .map_err(|_| "serve.table_rows_unavailable")?
+            .is_some()
+        {
+            return Err("serve.table_rows_unavailable");
+        }
         let tables = match committed_table_identities(&repository, &commit, names.clone()) {
             Ok(tables) => tables,
             Err(_) => {
