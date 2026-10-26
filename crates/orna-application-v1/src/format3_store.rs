@@ -60,7 +60,9 @@ impl Format3TableSchemaError {
 ///
 /// A symbol is admitted when it is a table whose schema carries an admission
 /// policy. Each admitted table's relation id and storage descriptor are built
-/// in `database_id` from the committed object `identities`.
+/// in `database_id` from the committed object `identities`. A table with an
+/// automatic key is marked as such, and each carries the introduced values of
+/// its constant defaults (ORNA-FIELD-005).
 pub fn build_format3_store_relations(
     project: &LoadedProject,
     analysis: &Analysis,
@@ -72,14 +74,14 @@ pub fn build_format3_store_relations(
     for (namespace, module) in &analysis.modules {
         let module_name = namespace.display();
         for (name, symbol) in &module.symbols {
-            let admitted = symbol.kind == SymbolKind::Table
-                && symbol
-                    .table_schema
-                    .as_ref()
-                    .is_some_and(|schema| schema.admission.is_some());
-            if !admitted {
+            let Some(admission) = symbol
+                .table_schema
+                .as_ref()
+                .and_then(|schema| schema.admission.as_ref())
+                .filter(|_| symbol.kind == SymbolKind::Table)
+            else {
                 continue;
-            }
+            };
             let table = project
                 .source_table_schema_in_database(identities, database_id, &module_name, name)
                 .map_err(|error| Format3TableSchemaError {
@@ -87,10 +89,13 @@ pub fn build_format3_store_relations(
                     error,
                 })?;
             table_names.insert(*table.table_object_id(), name.clone());
-            relations.push(StagedRelation::new(
-                *table.table_object_id(),
-                table.descriptor().clone(),
-            ));
+            let relation = StagedRelation::new(*table.table_object_id(), table.descriptor().clone())
+                .with_introductions(project.constant_default_stored_values(&table));
+            relations.push(if admission.automatic_key {
+                relation.with_automatic_key()
+            } else {
+                relation
+            });
         }
     }
     Ok(StagedRelations {
