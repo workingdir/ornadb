@@ -1,0 +1,3 @@
+pub fn recorded_profile(storage: sys.Storage): sys.StorageProfile = storage.profile;
+pub fn same_recorded_profile(left: sys.Storage, right: sys.Storage): Bool =
+    left.profile == right.profile;

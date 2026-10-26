@@ -54,7 +54,7 @@ fn legacy_repository() -> (TempDir, String) {
     git(root, &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("main.orna"), LEGACY_SOURCE).unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
-    fs::write(root.join(LEGACY_FORMAT_METADATA), "format 1\n").unwrap();
+    fs::write(root.join(LEGACY_FORMAT_METADATA), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
     let head = commit(root, "legacy format 1 fixture");
     (directory, head)
 }
@@ -229,7 +229,7 @@ fn cli_reports_and_releases_a_readonly_view_of_each_format() {
     );
     assert_eq!(
         fs::read_to_string(legacy.path().join(LEGACY_FORMAT_METADATA)).unwrap(),
-        "format 1\n",
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
         "the legacy metadata file is preserved byte for byte"
     );
 }

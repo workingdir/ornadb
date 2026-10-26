@@ -1,8 +1,8 @@
 //! `orna push` publishes the ordinary branch ref together with the continuity
 //! refs an ordinary push synchronizes, and never exposes a private edit or
-//! capture pin (`ORNA-GIT-008`).
+//! capture pin or any other private Orna ref (`ORNA-GIT-008`).
 //!
-//! Every push here is the real `orna-cli-v1` binary against a real bare remote,
+//! Every push here is the real `orna` binary against a real bare remote,
 //! so this proves the verb's exit status and the refs that actually moved,
 //! rather than a library call.
 use std::{
@@ -13,7 +13,8 @@ use std::{
 
 use tempfile::TempDir;
 
-const ALLOCATOR_REF: &str = "refs/orna/allocator";
+/// One table's automatic-ID allocator watermark (`ORNA-AUTOID-004`).
+const ALLOCATOR_REF: &str = "refs/orna/ids/00112233445566778899aabbccddeeff";
 const CHECKPOINT_REF: &str = "refs/orna/checkpoints/0123456789abcdef";
 const PIN_REF: &str = "refs/orna/pins/0123456789abcdef/scratch/row-1";
 
@@ -45,10 +46,10 @@ fn git_status(directory: &Path, arguments: &[&str]) -> bool {
         .success()
 }
 
-/// Runs `orna-cli-v1 <arguments>` in `directory` with Git routing isolated, so
+/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
 /// the developer's own Git configuration cannot decide the outcome.
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -99,10 +100,14 @@ impl Fixture {
         git(&worktree, &["add", "main.orna"]);
         git(&worktree, &["commit", "-m", "initial"]);
         let initial = git(&worktree, &["rev-parse", "HEAD"]);
-        git(
+        // An allocator watermark is a blob holding the decimal high-water mark.
+        let watermark_file = root.path().join("watermark");
+        fs::write(&watermark_file, "1").unwrap();
+        let watermark = git(
             &worktree,
-            &["update-ref", ALLOCATOR_REF, &initial],
+            &["hash-object", "-w", "--no-filters", watermark_file.to_str().unwrap()],
         );
+        git(&worktree, &["update-ref", ALLOCATOR_REF, &watermark]);
         git(
             &worktree,
             &["update-ref", CHECKPOINT_REF, &initial],
@@ -145,6 +150,7 @@ impl Fixture {
 fn push_publishes_the_branch_and_never_exposes_private_pins() {
     let fixture = Fixture::new();
     let head = fixture.head();
+    let allocator = fixture.remote_ref(ALLOCATOR_REF);
     let checkpoint = fixture.remote_ref(CHECKPOINT_REF);
 
     let output = run(&fixture.worktree, &["push"]);
@@ -165,9 +171,15 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
         "the ordinary branch ref must advance on the remote"
     );
     assert_eq!(
-        fixture.remote_ref(ALLOCATOR_REF).as_deref(),
-        Some(head.as_str()),
-        "the allocator continuity ref must be published"
+        fixture.remote_ref(ALLOCATOR_REF),
+        allocator,
+        "the allocator keeps its own watermark; publishing a branch never moves it \
+         (ORNA-AUTOID-004)"
+    );
+    assert_eq!(
+        git(&fixture.worktree, &["rev-parse", ALLOCATOR_REF]),
+        allocator.unwrap(),
+        "a push never rewrites the local allocator ref"
     );
     assert_eq!(
         fixture.remote_ref(CHECKPOINT_REF),
@@ -178,6 +190,38 @@ fn push_publishes_the_branch_and_never_exposes_private_pins() {
         fixture.remote_ref(PIN_REF).is_none(),
         "an ordinary push must not expose a private edit or capture pin"
     );
+}
+
+#[test]
+fn push_keeps_private_review_and_migration_refs_local() {
+    let fixture = Fixture::new();
+    let head = fixture.head();
+    let private = [
+        "refs/orna/review-candidates/0123456789abcdef0123456789abcdef",
+        "refs/orna/migration-candidates/0123456789abcdef",
+    ];
+    for reference in private {
+        git(&fixture.worktree, &["update-ref", reference, &head]);
+    }
+
+    let output = run(&fixture.worktree, &["push"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "a private ref the remote never holds must not fail the push: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        fixture.remote_ref("refs/heads/main").as_deref(),
+        Some(head.as_str())
+    );
+    for reference in private {
+        assert!(
+            fixture.remote_ref(reference).is_none(),
+            "{reference} must stay local"
+        );
+    }
 }
 
 #[test]

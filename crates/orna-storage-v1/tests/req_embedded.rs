@@ -216,9 +216,31 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
         Some(b"Alice".to_vec()),
     )
     .unwrap();
-    let stale_context = secondary.begin_activation().await.unwrap();
+    let secondary_context = secondary.begin_activation().await.unwrap();
+    // ORNA-TURSO-005: a writer that does not own the worktree lock coordinates
+    // with the owner or fails, so the Secondary handle is refused with `LeaseHeld`.
     assert_eq!(
         secondary
+            .commit_table_activation(
+                stale_lease,
+                &secondary_context,
+                std::slice::from_ref(&mutation),
+                [17; 32],
+                &NoFault,
+            )
+            .await,
+        Err(RuntimeError::LeaseHeld)
+    );
+    assert_eq!(
+        secondary.committed_table_row("Contact", b"alice").await.unwrap(),
+        None
+    );
+
+    // ORNA-TURSO-006: the stale owner's lease is fenced by the replacement, so the
+    // replacement owner refuses writes carrying the stale lease with `OwnerLost`.
+    let stale_context = replacement.begin_activation().await.unwrap();
+    assert_eq!(
+        replacement
             .commit_table_activation(
                 stale_lease,
                 &stale_context,
@@ -228,6 +250,10 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
             )
             .await,
         Err(RuntimeError::OwnerLost)
+    );
+    assert_eq!(
+        replacement.committed_table_row("Contact", b"alice").await.unwrap(),
+        None
     );
     assert_eq!(
         secondary.committed_table_row("Contact", b"alice").await.unwrap(),

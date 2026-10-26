@@ -1,0 +1,9 @@
+pub table Song(id: Str) {
+    title: Str,
+    content: Blob,
+}
+
+pub fn import_song(id: Str, title: Str, root: Str, path: Str) {
+    let content = sys.blob.capture_file(root, path, max_bytes: 67108864);
+    Song.insert({ id: id, title: title, content: content });
+}

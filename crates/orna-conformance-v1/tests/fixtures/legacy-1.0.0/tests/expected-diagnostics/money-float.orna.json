@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/money-float.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5004",
+  "message_contains": "Money cannot be constructed from an inexact Float without explicit rounding",
+  "status": "expected-not-executed"
+}

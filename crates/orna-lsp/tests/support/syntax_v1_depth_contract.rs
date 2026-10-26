@@ -17,6 +17,9 @@ const TOKEN_TYPES: &[&str] = &[
     "interface",
     "function",
     "parameter",
+    "namespace",
+    "enumMember",
+    "property",
 ];
 
 /// Ranges shared by the real editor probes. The hint fixture is deliberately

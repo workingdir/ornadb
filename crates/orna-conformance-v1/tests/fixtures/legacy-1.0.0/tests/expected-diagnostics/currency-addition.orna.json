@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/currency-addition.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "E5003",
+  "message_contains": "cannot add different currencies without conversion",
+  "status": "expected-not-executed"
+}

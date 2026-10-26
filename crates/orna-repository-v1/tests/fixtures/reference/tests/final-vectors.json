@@ -1,0 +1,222 @@
+{
+  "version": "1.1.0",
+  "publication_revision": "final-2026-10-05",
+  "scope": "Golden canonical bytes from bounded reference model; not Orna production evidence.",
+  "values": [
+    {
+      "id": "ovb2-empty",
+      "value": {
+        "tag": 60110,
+        "value": [
+          {
+            "bytes_hex": ""
+          },
+          "application/octet-stream",
+          null
+        ]
+      },
+      "canonical_hex": "d9eace834078186170706c69636174696f6e2f6f637465742d73747265616df6"
+    },
+    {
+      "id": "ovb2-text",
+      "value": {
+        "tag": 60110,
+        "value": [
+          {
+            "bytes_hex": "616263"
+          },
+          "text/plain;charset=utf-8",
+          null
+        ]
+      },
+      "canonical_hex": "d9eace83436162637818746578742f706c61696e3b636861727365743d7574662d38f6"
+    },
+    {
+      "id": "sov3-text",
+      "value": {
+        "tag": 60112,
+        "value": [
+          3,
+          {
+            "bytes_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          },
+          "text/plain;charset=utf-8",
+          null
+        ]
+      },
+      "canonical_hex": "d9ead084035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6"
+    },
+    {
+      "id": "rov3-text",
+      "value": {
+        "tag": 60111,
+        "value": [
+          3,
+          {
+            "bytes_hex": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+          },
+          "text/plain;charset=utf-8",
+          null,
+          {
+            "bytes_hex": "7ff2f09742f2d47ff45fa4f97f7869e8ea79c5eb"
+          }
+        ]
+      },
+      "canonical_hex": "d9eacf85035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad7818746578742f706c61696e3b636861727365743d7574662d38f6547ff2f09742f2d47ff45fa4f97f7869e8ea79c5eb"
+    },
+    {
+      "id": "ovb2-js-module",
+      "value": {
+        "tag": 60110,
+        "value": [
+          {
+            "bytes_hex": "6578706f7274207b7d3b"
+          },
+          "text/javascript",
+          "mjs"
+        ]
+      },
+      "canonical_hex": "d9eace834a6578706f7274207b7d3b6f746578742f6a617661736372697074636d6a73"
+    }
+  ],
+  "native_graph": {
+    "algorithm": "sha1",
+    "blob_length": 3,
+    "blob_sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    "descriptor_oid": "7ff2f09742f2d47ff45fa4f97f7869e8ea79c5eb",
+    "objects": [
+      {
+        "oid": "1370e5336e716f1ac2abf252725533c6ce83d655",
+        "kind": "blob",
+        "bytes_hex": "850104000381830354f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f5820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+      },
+      {
+        "oid": "7013767e3f2daa62cdda3f971f92b38e871c84c9",
+        "kind": "tree",
+        "bytes_hex": "3430303030203933366538386132383633616662393937306635376439626232666262313831613630383362623700936e88a2863afb9970f57d9bb2fbb181a6083bb7"
+      },
+      {
+        "oid": "7ff2f09742f2d47ff45fa4f97f7869e8ea79c5eb",
+        "kind": "tree",
+        "bytes_hex": "313030363434206461746100fa62ea668ba5f6791575b44530c7c38884318de034303030302072656673007013767e3f2daa62cdda3f971f92b38e871c84c9"
+      },
+      {
+        "oid": "936e88a2863afb9970f57d9bb2fbb181a6083bb7",
+        "kind": "tree",
+        "bytes_hex": "3130303634342064617461001370e5336e716f1ac2abf252725533c6ce83d65534303030302072656673009ed066a347a722280469c485a7c8f29afb3a51e7"
+      },
+      {
+        "oid": "9ed066a347a722280469c485a7c8f29afb3a51e7",
+        "kind": "tree",
+        "bytes_hex": "313030363434206632626138663834616235633162636538346137623434316362313935396366633730393362376600f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f"
+      },
+      {
+        "oid": "f2ba8f84ab5c1bce84a7b441cb1959cfc7093b7f",
+        "kind": "blob",
+        "bytes_hex": "616263"
+      },
+      {
+        "oid": "fa62ea668ba5f6791575b44530c7c38884318de0",
+        "kind": "blob",
+        "bytes_hex": "850105035820ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad54936e88a2863afb9970f57d9bb2fbb181a6083bb7"
+      }
+    ]
+  },
+  "paths": [
+    {
+      "input": "",
+      "component": "~empty"
+    },
+    {
+      "input": ".",
+      "component": "%2E"
+    },
+    {
+      "input": "..",
+      "component": "%2E%2E"
+    },
+    {
+      "input": "london",
+      "component": "london"
+    },
+    {
+      "input": "a/b",
+      "component": "a%2Fb"
+    },
+    {
+      "input": "%64ata",
+      "component": "%2564ata"
+    },
+    {
+      "input": "data",
+      "component": "data"
+    },
+    {
+      "input": "~empty",
+      "component": "%7Eempty"
+    },
+    {
+      "input": "é",
+      "component": "%C3%A9"
+    },
+    {
+      "input": "é",
+      "component": "e%CC%81"
+    },
+    {
+      "input": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "component": "~key-6868369228ecdc2519fd815756a7d898a80d1f81ed5cd98cc91e749edc70252d"
+    }
+  ],
+  "media": [
+    {
+      "input": "audio/mpeg",
+      "hint": null,
+      "canonical_type": "audio/mpeg",
+      "canonical_hint": null,
+      "suffix": "mp3"
+    },
+    {
+      "input": "audio/mpeg",
+      "hint": "mp2",
+      "canonical_type": "audio/mpeg",
+      "canonical_hint": "mp2",
+      "suffix": "mp2"
+    },
+    {
+      "input": "application/javascript",
+      "hint": "mjs",
+      "canonical_type": "text/javascript",
+      "canonical_hint": "mjs",
+      "suffix": "mjs"
+    },
+    {
+      "input": "IMAGE/JPEG",
+      "hint": "JPEG",
+      "canonical_type": "image/jpeg",
+      "canonical_hint": "jpeg",
+      "suffix": "jpeg"
+    },
+    {
+      "input": "application/gzip",
+      "hint": null,
+      "canonical_type": "application/gzip",
+      "canonical_hint": null,
+      "suffix": "gz"
+    },
+    {
+      "input": "application/gzip",
+      "hint": "tar.gz",
+      "canonical_type": "application/gzip",
+      "canonical_hint": "tar.gz",
+      "suffix": "tar.gz"
+    },
+    {
+      "input": "application/x-example",
+      "hint": "xyz",
+      "canonical_type": "application/x-example",
+      "canonical_hint": "xyz",
+      "suffix": "xyz"
+    }
+  ]
+}

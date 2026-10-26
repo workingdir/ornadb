@@ -1,1 +1,1 @@
-std.collection.one([4])
+one([4])

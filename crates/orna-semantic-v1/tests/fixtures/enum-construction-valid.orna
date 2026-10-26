@@ -1,0 +1,43 @@
+pub fn count(result: SyncResult): Int =
+    case result {
+        SyncResult.ok { count }: count,
+        SyncResult.failed { reason: _, retryable: _ }: 0,
+    };
+
+pub fn made(): SyncResult = SyncResult.ok { count: 3 };
+
+pub fn failure(reason: Str): SyncResult = SyncResult.failed { reason: reason, retryable: true };
+
+pub fn counted(): Int = count(SyncResult.ok { count: 3 });
+
+pub fn low(): Level = Level.low;
+
+pub fn is_low(level: Level): Bool = level == Level.low;
+
+pub fn guarded(n: Int): Int =
+    case Level.low {
+        Level.low if n > 10: 1,
+        Level.low: 2,
+        Level.high: 3,
+    };
+
+pub fn reason(): Str {
+    let result = SyncResult.failed { reason: "offline", retryable: false };
+    case result {
+        SyncResult.ok { count: _ }: "ok",
+        SyncResult.failed { reason, retryable: _ }: reason,
+    }
+}
+
+pub table Task(id: Str) {
+    level: Level,
+}
+
+pub table Setting(level: Level) {
+    value: Int,
+}
+
+pub fn store() {
+    Task.insert({ id: "a", level: Level.high });
+    Setting.insert({ level: Level.low, value: 1 });
+}

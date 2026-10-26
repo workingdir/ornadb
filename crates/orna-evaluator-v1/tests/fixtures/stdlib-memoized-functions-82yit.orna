@@ -34,12 +34,12 @@ fn key_isolation_and_invalidation(): Bool {
     let (after_clear, recomputed_again) = std.memo.memoize(cleared, 1, key => key + 40);
     first == 4
         && second == 5
-        && std.collection.count(two_entries) == 2
+        && count(two_entries) == 2
         && std.memo.get(two_entries, 1) == Some(4)
         && std.memo.get(two_entries, 2) == Some(5)
-        && std.collection.count(without_first) == 1
+        && count(without_first) == 1
         && recomputed == 31
-        && std.collection.count(cleared) == 0
+        && count(cleared) == 0
         && recomputed_again == 41
-        && std.collection.count(after_clear) == 1
+        && count(after_clear) == 1
 }

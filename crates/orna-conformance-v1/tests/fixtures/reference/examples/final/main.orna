@@ -1,0 +1,12 @@
+pub table Music(id: Str) {
+    title: Str,
+    artist: Str,
+    content: Blob,
+    cover: Blob?,
+}
+
+pub fn rename(id: Str, title: Str) =
+    Music.update(id, { title: title });
+
+pub fn add(id: Str, title: Str, content: Blob) =
+    Music.insert({ id: id, title: title, artist: "Kieran", content: content, cover: null });

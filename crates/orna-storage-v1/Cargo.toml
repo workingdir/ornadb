@@ -4,7 +4,7 @@ version = "1.0.0"
 edition = "2024"
 rust-version = "1.95"
 license = "Apache-2.0"
-description = "Bounded loose-row projection and PUB-1 recovery model for Orna 1.0"
+description = "Format-3 publication coordinator and legacy compact readers for Orna"
 
 [dependencies]
 base64 = "0.22.1"
@@ -18,6 +18,7 @@ parquet = { version = "59.3.0", default-features = false, features = ["crc", "zs
 sha2 = "0.10.9"
 
 [dev-dependencies]
+orna-repository-v1 = { path = "../orna-repository-v1", features = ["legacy-fixture-writer"] }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 tempfile = "3.23.0"
 tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread"] }

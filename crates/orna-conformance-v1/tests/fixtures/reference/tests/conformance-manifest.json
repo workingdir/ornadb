@@ -1,12 +1,12 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "model": "ordinary valid, invalid and complete-project fixtures loaded by normal implementation test runners",
   "fixture_environment": {
-    "core": "Orna 1.0.0 intrinsic environment",
+    "core": "Orna 1.1.0 intrinsic environment",
     "complete_project": "examples/reference",
     "snippets": "Each snippet is parsed independently at its declared entry point; semantic support must be supplied explicitly before implementation execution."
   },
-  "execution_status": "syntax/reference models executed only as recorded in evidence; Orna implementation execution not performed",
+  "execution_status": "Authoring and scoped reference checks only. No Orna engine execution is claimed.",
   "fixtures": [
     {
       "id": "valid/affine-max.orna",
@@ -1779,7 +1779,7 @@
       "parse_as": "module_unit",
       "failing_phase": "parse",
       "diagnostic": "ORNA091-E-POSTFIX-QUESTION",
-      "message_contains": "postfix propagation `?` was removed; failures propagate automatically",
+      "message_contains": "remove postfix `?`; failure propagation is automatic",
       "expect": {
         "parse": "fail",
         "resolve": "not-run",
@@ -2416,12 +2416,120 @@
       "notes": "Every reachable module and loose row is loaded using the frozen 1.0 grammar, inferred signatures, nominal/currency model and assertion plans.",
       "scope": "Complete offline reference database; source parse and independent state model only until a full Orna implementation executes it.",
       "evidence_level": "planned implementation case; parsing check only where recorded"
+    },
+    {
+      "id": "valid/blob-column.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-column.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "valid/blob-range.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-range.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "valid/blob-writer.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-writer.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "valid/blob-import.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-import.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "valid/blob-nested.orna",
+      "kind": "valid",
+      "path": "examples/valid/blob-nested.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "valid/reviewed-commit.orna",
+      "kind": "valid",
+      "path": "examples/valid/reviewed-commit.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass",
+        "resolve": "pass",
+        "typecheck": "pass"
+      },
+      "environment": "Orna 1.1.0 core including api/sys.json; no std dependency",
+      "evidence_level": "authored implementation case; only bounded syntax where recorded"
+    },
+    {
+      "id": "final/main.orna",
+      "kind": "valid",
+      "path": "examples/final/main.orna",
+      "parse_as": "module_unit",
+      "expect": {
+        "parse": "pass"
+      },
+      "evidence_level": "Bounded syntax only; final row/header contexts require separate semantic admission."
+    },
+    {
+      "id": "final/data.orna",
+      "kind": "valid",
+      "path": "examples/final/data.orna",
+      "parse_as": "row_unit",
+      "expect": {
+        "parse": "pass"
+      },
+      "evidence_level": "Bounded syntax only; final row/header contexts require separate semantic admission."
+    },
+    {
+      "id": "final/database.orna",
+      "kind": "valid",
+      "path": "examples/final/database.orna",
+      "parse_as": "row_unit",
+      "expect": {
+        "parse": "pass"
+      },
+      "evidence_level": "Bounded syntax only; final row/header contexts require separate semantic admission."
     }
   ],
   "counts": {
-    "valid": 86,
+    "valid": 95,
     "invalid": 80,
     "project": 1,
-    "total": 167
+    "total": 176
   }
 }

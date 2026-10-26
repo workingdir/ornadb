@@ -1,0 +1,311 @@
+(* Orna 1.0.0 syntactic grammar. Lexical classification and contextual
+   restrictions are specified in the Lexical structure and Expressions chapters.
+   Entry points: module_unit, row_unit, repl_input. This grammar does not
+   substitute for resolution, type checking, effect checking or evaluation. *)
+
+module_unit       = { top_level_item } ;
+repl_input        = use_declaration
+                  | let_statement
+                  | function_declaration
+                  | expression
+                  ;
+row_unit          = record_expression , [ ";" ] ;
+
+top_level_item    = use_declaration
+                  | table_declaration
+                  | function_declaration
+                  | protocol_declaration
+                  | enum_declaration
+                  | dimension_declaration
+                  | unit_declaration
+                  | type_declaration
+                  | assertion_statement
+                  ;
+
+visibility        = [ "pub" ] ;
+
+use_declaration   = "use" , namespace_path , use_tail , ";" ;
+use_tail          = empty
+                  | "as" , ( identifier | "_" )
+                  | "." , "*"
+                  | "." , "{" , identifier , { "," , identifier } , [ "," ] , "}"
+                  ;
+namespace_path    = identifier , { "." , identifier } ;
+qualified_name    = identifier , { "." , contextual_name } ;
+qualified_variant = identifier , "." , contextual_name , { "." , contextual_name } ;
+
+(* Tables contain stored/computed fields and owner-local assertions. *)
+table_declaration = visibility , "table" , identifier ,
+                    [ "(" , key_parameters , ")" ] ,
+                    "{" , { table_member } , "}" ;
+table_member      = field_declaration | assertion_clause | nested_impl_declaration ;
+key_parameters    = key_parameter , { "," , key_parameter } , [ "," ] ;
+key_parameter     = identifier , ":" , type_expression , [ "=" , expression ] ;
+field_declaration = identifier , ":" , type_expression ,
+                    [ field_initializer ] , "," ;
+field_initializer = "=" , expression        (* insert-time stored default *)
+                  | "=>" , expression       (* computed field selector *)
+                  ;
+
+(* Type annotations are optional when inference has enough constraints. *)
+function_declaration = visibility , "fn" , identifier ,
+                       [ generic_parameters ] ,
+                       "(" , [ function_parameters ] , ")" ,
+                       [ ":" , type_expression ] ,
+                       ( "=" , expression , ";" | block_expression ) ;
+function_parameters = function_parameter , { "," , function_parameter } , [ "," ] ;
+function_parameter  = ( "self" | identifier ) ,
+                      [ ":" , type_expression ] , [ "=" , expression ] ;
+
+generic_parameters = "<" , generic_parameter , { "," , generic_parameter } , [ "," ] , ">" ;
+generic_parameter  = identifier , [ "impl" , protocol_bounds ] ;
+protocol_bounds    = qualified_protocol , { "+" , qualified_protocol } ;
+qualified_protocol = qualified_name , [ "<" , type_arguments , ">" ] ;
+
+(* Static protocols have instance functions and static properties. *)
+protocol_declaration = visibility , "protocol" , identifier , [ generic_parameters ] ,
+                       "{" , { protocol_member } , "}" ;
+protocol_member   = protocol_function | protocol_static_property ;
+protocol_function = "fn" , identifier , [ generic_parameters ] ,
+                    "(" , [ function_parameters ] , ")" ,
+                    [ ":" , type_expression ] , ";" ;
+protocol_static_property = "static" , identifier , ":" , type_expression , ";" ;
+
+(* `type` is the only user-defined type declaration family. *)
+type_declaration  = visibility , "type" , identifier , [ generic_parameters ] ,
+                    ( "=" , type_expression , ";"
+                    | "=" , type_expression , refinement_body
+                    | nominal_type_body
+                    ) ;
+refinement_body   = "{" , { assertion_clause | nested_impl_declaration } , "}" ;
+nominal_type_body = "{" , { nominal_type_member } , "}" ;
+nominal_type_member = nominal_field | assertion_clause | nested_impl_declaration ;
+nominal_field     = visibility , identifier , ":" , type_expression ,
+                    [ "=" , expression ] , "," ;
+nested_impl_declaration = "impl" , qualified_protocol ,
+                          "{" , { impl_member } , "}" ;
+impl_member       = impl_function | impl_static_property ;
+impl_function     = "fn" , identifier , [ generic_parameters ] ,
+                    "(" , [ function_parameters ] , ")" ,
+                    [ ":" , type_expression ] ,
+                    ( "=" , expression , ";" | block_expression ) ;
+impl_static_property = "static" , identifier , [ ":" , type_expression ] ,
+                       "=" , expression , ";" ;
+
+enum_declaration = visibility , "enum" , identifier , [ generic_parameters ] ,
+                   "{" , [ enum_variants ] , "}" ;
+enum_variants    = enum_variant , { "," , enum_variant } , [ "," ] ;
+enum_variant     = contextual_name , [ "{" , [ enum_payload_fields ] , "}" ] ;
+enum_payload_fields = enum_payload_field , { "," , enum_payload_field } , [ "," ] ;
+enum_payload_field  = identifier , ":" , type_expression ;
+
+dimension_declaration = visibility , "dim" , identifier ,
+                        [ "=" , dimension_expression ] , ";" ;
+dimension_expression  = dimension_term , { ( "*" | "/" ) , dimension_term } ;
+dimension_term        = qualified_name , [ "^" , signed_integer ] ;
+unit_declaration  = visibility , "unit" , identifier , ":" , qualified_name ,
+                    ( "base"
+                    | "=" , expression , [ "offset" , decimal_source_numeral ] , [ "affine" ]
+                    ) , ";" ;
+
+type_expression   = type_product ;
+type_product      = type_postfix , { ( "*" | "/" ) , type_postfix } ;
+type_postfix      = type_primary , { "?" } ;
+type_primary      = qualified_name , [ "<" , type_arguments , ">" ]
+                  | "[" , type_expression , "]"
+                  | "{" , [ type_fields ] , "}"
+                  | "(" , type_expression , ")"
+                  | tuple_type
+                  | function_type
+                  ;
+function_type     = "fn" , "(" , [ type_expression , { "," , type_expression } , [ "," ] ] , ")" , ":" , type_expression ;
+tuple_type        = "(" , ")"
+                  | "(" , type_expression , "," , [ type_expression , { "," , type_expression } , [ "," ] ] , ")" ;
+
+type_arguments    = type_expression , { "," , type_expression } ;
+type_fields       = type_field , { "," , type_field } , [ "," ] ;
+type_field        = contextual_name , ":" , type_expression ;
+
+(* A block is parsed item-by-item using ORNA-PARSE-002. *)
+block_expression  = "{" , { block_item } , [ expression ] , "}" ;
+block_item        = semicolon_statement | braced_control_statement ;
+semicolon_statement = let_statement
+                    | assignment_statement
+                    | assertion_statement
+                    | expression_statement
+                    | return_statement
+                    | break_statement
+                    | continue_statement
+                    ;
+braced_control_statement = ( if_expression | case_expression | for_expression | while_expression ) , [ ";" ]
+                          | loop_expression , ";"
+                          ;
+let_statement     = "let" , pattern , [ ":" , type_expression ] , "=" , expression , ";" ;
+assignment_statement = identifier , assignment_operator , expression , ";" ;
+assignment_operator  = "=" | "+=" | "-=" | "*=" | "/=" ;
+assertion_statement = "assert" , assertion_expression , ";" ;
+assertion_clause  = "assert" , assertion_expression , ";" ;
+assertion_expression = subjectless_predicate | expression ;
+subjectless_predicate = comparison_operator , expression ;
+comparison_operator = "<" | "<=" | ">" | ">=" | "==" | "!=" | "in" ;
+expression_statement = expression , ";" ;
+return_statement  = "return" , [ expression ] , ";" ;
+break_statement   = "break" , [ expression ] , ";" ;
+continue_statement = "continue" , ";" ;
+
+pattern           = "_"
+                  | literal_pattern
+                  | constructor_pattern
+                  | enum_record_pattern
+                  | qualified_variant
+                  | tuple_pattern
+                  | record_pattern
+                  | list_pattern
+                  | identifier
+                  ;
+constructor_pattern = qualified_name , "(" , [ pattern_list ] , ")" ;
+enum_record_pattern = qualified_variant , "{" , [ record_pattern_fields ] , "}" ;
+tuple_pattern      = "(" , ")" | "(" , pattern , "," , [ pattern_list ] , ")" ;
+record_pattern     = "{" , [ record_pattern_fields ] , "}" ;
+list_pattern       = "[" , [ pattern_list ] , "]" ;
+pattern_list       = pattern , { "," , pattern } , [ "," ] ;
+record_pattern_fields = record_pattern_field , { "," , record_pattern_field } , [ "," ] ;
+record_pattern_field  = contextual_name , [ ":" , pattern ] ;
+literal_pattern   = instant_literal | date_literal | float_literal | decimal_source_numeral | integer_literal | string_literal | "true" | "false" | "null" ;
+
+(* Anonymous functions have the lowest expression precedence. *)
+expression        = lambda_expression ;
+lambda_expression = lambda_parameters , "=>" , lambda_body
+                  | logical_or_expression
+                  ;
+lambda_parameters = identifier
+                  | "_"
+                  | "(" , [ lambda_parameter_list ] , ")"
+                  ;
+lambda_parameter_list = lambda_parameter , { "," , lambda_parameter } , [ "," ] ;
+lambda_parameter  = pattern , [ ":" , type_expression ] ;
+
+(* Direct braced lambda and case bodies are classified before full parsing.
+   `non_braced_expression` MUST NOT begin with `{`. *)
+lambda_body       = direct_record_body | block_expression | non_braced_expression ;
+case_body         = direct_record_body | block_expression | non_braced_expression ;
+direct_record_body = "{" , record_fields , "}" ;
+non_braced_expression = lambda_expression ;
+
+logical_or_expression  = logical_and_expression , { "||" , logical_and_expression } ;
+logical_and_expression = equality_expression , { "&&" , equality_expression } ;
+equality_expression    = comparison_expression ;
+comparison_expression  = coalesce_expression , [ comparison_operator , coalesce_expression ] ;
+coalesce_expression    = pipeline_expression , [ "??" , coalesce_expression ] ;
+
+(* `|` passes a successful value as argument one. `|?` invokes its stage only
+   for a failure and otherwise passes the successful value through unchanged. *)
+pipeline_expression = range_expression , { pipeline_operator , pipeline_stage } ;
+pipeline_operator = "|" | "|?" ;
+pipeline_stage    = postfix_expression ;
+
+range_expression = additive_expression , [ range_operator , [ additive_expression ] ]
+                 | range_operator , additive_expression
+                 ;
+range_operator    = ".." | "..=" ;
+
+additive_expression = multiplicative_expression , { ( "+" | "-" ) , multiplicative_expression } ;
+multiplicative_expression = power_expression , { ( "*" | "/" | "%" ) , power_expression } ;
+power_expression  = unary_expression , [ "^" , power_expression ] ;
+unary_expression  = { "!" | "-" | "+" } , postfix_expression ;
+
+postfix_expression = primary_expression , { postfix_operator } ;
+postfix_operator  = "." , contextual_name
+                  | "(" , [ argument_list ] , ")"
+                  | "[" , expression , "]"
+                  ;
+argument_list     = argument , { "," , argument } , [ "," ] ;
+argument          = [ contextual_name , ":" ] , expression ;
+
+primary_expression = repl_binding | literal
+                   | generic_call_expression
+                   | nominal_constructor
+                   | "self"
+                   | tuple_expression
+                   | qualified_name
+                   | record_expression
+                   | list_expression
+                   | if_expression
+                   | case_expression
+                   | for_expression
+                   | while_expression
+                   | loop_expression
+                   | "(" , expression , ")"
+                   ;
+generic_call_expression = qualified_name , "<" , type_arguments , ">" , "(" , [ argument_list ] , ")" ;
+nominal_constructor = qualified_name , "{" , [ record_fields ] , "}" ;
+tuple_expression = "(" , ")"
+                 | "(" , expression , "," , [ expression , { "," , expression } , [ "," ] ] , ")" ;
+
+(* A leading record literal in a condition/scrutinee must be parenthesised. *)
+if_expression     = "if" , expression , block_expression ,
+                    [ "else" , ( if_expression | block_expression ) ] ;
+case_expression   = "case" , expression , "{" , { case_arm } , "}" ;
+case_arm          = pattern , [ "if" , expression ] , ":" , case_body , [ "," ] ;
+for_expression    = "for" , pattern , "in" , expression , block_expression ;
+while_expression  = "while" , expression , block_expression ;
+loop_expression   = "loop" , block_expression ;
+
+record_expression = "{" , [ record_fields ] , "}" ;
+record_fields     = record_field , { "," , record_field } , [ "," ] ;
+record_field      = contextual_name , ":" , expression ;
+list_expression   = "[" , [ expression , { "," , expression } , [ "," ] ] , "]" ;
+
+literal           = instant_literal
+                  | date_literal
+                  | float_literal
+                  | decimal_source_numeral
+                  | integer_literal
+                  | string_literal
+                  | "true"
+                  | "false"
+                  | "null"
+                  ;
+
+contextual_name   = identifier | "as" | "assert" | "base" | "break" | "case" | "continue" | "dim" | "else" | "enum" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop" | "null" | "offset" | "affine" | "protocol" | "pub" | "return" | "self" | "static" | "table" | "true" | "type" | "unit" | "use" | "while" ;
+
+repl_binding      = "$_" | "$?" ;
+
+identifier        = identifier_start , { identifier_continue } ;
+identifier_start  = "_" | unicode_letter ;
+identifier_continue = identifier_start | unicode_digit ;
+
+integer_literal   = decimal_integer
+                  | "0x" , hex_digit , { [ "_" ] , hex_digit }
+                  | "0b" , binary_digit , { [ "_" ] , binary_digit }
+                  ;
+decimal_integer   = ascii_digit , { [ "_" ] , ascii_digit } ;
+decimal_source_numeral = decimal_integer , "." , decimal_integer , [ exponent ]
+                       | decimal_integer , exponent
+                       ;
+float_literal     = ( decimal_integer , "." , decimal_integer , [ exponent ]
+                  | decimal_integer , exponent
+                  | decimal_integer ) , "f"
+                  ;
+signed_integer    = [ "+" | "-" ] , integer_literal ;
+exponent          = ( "e" | "E" ) , [ "+" | "-" ] , decimal_integer ;
+
+string_literal    = '"' , { string_character | interpolation } , '"' ;
+interpolation     = "{" , expression , "}" ;
+string_character  = escape_sequence | ? any Unicode scalar except unescaped quote, backslash, or interpolation opener ? ;
+escape_sequence   = "\\" , ( '"' | "\\" | "n" | "r" | "t" | "0" | unicode_escape ) ;
+unicode_escape    = "u{" , hex_digit , { hex_digit } , "}" ;
+
+date_literal      = digit4 , "-" , digit2 , "-" , digit2 ;
+instant_literal   = date_literal , "T" , digit2 , ":" , digit2 , ":" , digit2 ,
+                    [ "." , ascii_digit , { ascii_digit } ] , ( "Z" | offset ) ;
+offset            = ( "+" | "-" ) , digit2 , ":" , digit2 ;
+
+empty              = ;
+unicode_letter     = ? Unicode 16.0.0 XID_Start character ? ;
+unicode_digit      = ? Unicode 16.0.0 XID_Continue character not already admitted as identifier_start ? ;
+ascii_digit        = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+hex_digit          = ? 0-9, a-f, A-F ? ;
+binary_digit       = "0" | "1" ;
+digit2             = ascii_digit , ascii_digit ;
+digit4             = digit2 , digit2 ;

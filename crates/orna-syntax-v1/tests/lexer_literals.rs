@@ -257,18 +257,22 @@ fn malformed_instant_offsets_are_one_full_span_diagnostic() {
     }
 }
 
+// `date_literal = digit4 "-" digit2 "-" digit2` uses ASCII digits, so a
+// non-ASCII character in a digit position is not lexically date-shaped: the
+// source is ordinary tokens on character boundaries, rejected by the parser.
+// This test previously required an invalid-date diagnostic for it.
 #[test]
-fn malformed_utf8_date_reports_character_boundary_span() {
+fn non_ascii_character_in_a_date_digit_position_is_not_a_date_literal() {
     let source = source(38);
-    let errors = lex(source).expect_err("a date containing a non-ASCII digit must be rejected");
-    let error = errors
-        .iter()
-        .find(|error| error.code == "ORNA-LEX-007")
-        .expect("expected invalid-date diagnostic");
-    assert_eq!(error.span.start, 0);
-    assert_eq!(error.span.end, source.len());
-    assert!(source.is_char_boundary(error.span.start));
-    assert!(source.is_char_boundary(error.span.end));
+    let tokens = lex(source).expect("the source lexes as ordinary tokens");
+    assert!(
+        tokens.iter().all(|token| token.kind != TokenKind::Date),
+        "{tokens:?}"
+    );
+    assert!(tokens.iter().all(|token| {
+        source.is_char_boundary(token.span.start) && source.is_char_boundary(token.span.end)
+    }));
+    assert!(!parse_expression(source).is_ok());
 }
 
 #[test]

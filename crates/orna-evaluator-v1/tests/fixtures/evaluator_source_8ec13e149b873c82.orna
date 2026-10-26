@@ -1,1 +1,1 @@
-[4, 5, 6] | std.collection.first()
+[4, 5, 6] | first()

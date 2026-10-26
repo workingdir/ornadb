@@ -1,0 +1,2 @@
+pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) =
+    energy * rate;

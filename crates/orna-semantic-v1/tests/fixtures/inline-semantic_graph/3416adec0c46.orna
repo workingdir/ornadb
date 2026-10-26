@@ -7,8 +7,8 @@
             pub fn named(rows: [Int]): Int = sum(rows: rows);
             pub fn pipeline(rows: [Int]): Int = rows | sum();
             pub fn pipeline_empty(): Int = [] | sum();
-            pub fn qualified(rows: [Int]): Int = std.collection.sum(rows: rows);
-            pub fn qualified_pipeline(rows: [Int]): Int = rows | std.collection.sum();
+            pub fn qualified(rows: [Int]): Int = sum(rows: rows);
+            pub fn qualified_pipeline(rows: [Int]): Int = rows | sum();
             pub fn reads(rows: [Int]): Int =
                 rows | map(transform: value => Reading.count() + value) | sum();
             assert every(Reading, reading =>

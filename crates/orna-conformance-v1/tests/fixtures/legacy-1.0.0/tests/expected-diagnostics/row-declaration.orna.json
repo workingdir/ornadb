@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/row-declaration.orna",
+  "failing_phase": "parse",
+  "primary_diagnostic": "E8001",
+  "message_contains": "row unit must contain one record expression",
+  "status": "expected-not-executed"
+}

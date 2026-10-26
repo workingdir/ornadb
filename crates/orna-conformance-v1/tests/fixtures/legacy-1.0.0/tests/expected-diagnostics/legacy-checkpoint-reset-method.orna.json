@@ -1,0 +1,8 @@
+{
+  "version": "1.0.0",
+  "fixture": "examples/invalid/legacy-checkpoint-reset-method.orna",
+  "failing_phase": "typecheck",
+  "primary_diagnostic": "ORNA100-E-SYS-ADMIN-METHOD",
+  "message_contains": "system rows are read-only; use `sys.admin.reset_checkpoint` with compare-and-set arguments",
+  "status": "expected-not-executed"
+}
