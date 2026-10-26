@@ -1,0 +1,1 @@
+pub fn before_change() = contacts.Contact.as_of(sys.snapshot("HEAD~3"));

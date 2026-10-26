@@ -22,9 +22,9 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EditorMount, mountinfo_contains, repository_with_music_row, require_fuse_or_skip,
-    run_orna_unmount, spawn_editor_mount, spawn_mount_process, start_editor_mount,
-    start_editor_mount_with_source, write_and_sync,
+    EditorMount, FOREIGN_OWNER, mountinfo_contains, repository_with_music_row,
+    require_fuse_or_skip, run_orna_unmount, spawn_editor_mount, spawn_mount_process,
+    start_editor_mount, start_editor_mount_with_source, write_and_sync,
 };
 
 #[tokio::test]
@@ -132,7 +132,9 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     );
 }
 
-/// ORNA-VFS-006: a writer without the selected worktree lease cannot submit an edit.
+/// ORNA-VFS-006, ORNA-TURSO-005: while another live writer owns the worktree,
+/// holding its runtime owner lock and writer lease, the mount is only a
+/// secondary participant and cannot submit an edit.
 #[tokio::test]
 async fn editor_saves_reject_a_foreign_writer_lease() {
     if !require_fuse_or_skip() {
@@ -159,14 +161,26 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
         "rejected save must preserve the durable row",
     );
 
-    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
-    let state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
+    // The fixture's foreign writer holds the owner lock and lease. Only that
+    // handle may read them; a fresh open is Secondary (ORNA-TURSO-005).
+    let (runtime_identity, _) = format3::cli_runtime_identity(&fixture.repository);
+    let foreign = fixture
+        ._foreign_writer
+        .as_ref()
+        .expect("the fixture keeps the live foreign writer");
     assert!(matches!(
-        state.acquire_lease(runtime_identity.repository_id).await,
+        foreign.acquire_lease(runtime_identity.repository_id).await,
         Err(orna_runtime_v1::RuntimeError::LeaseHeld),
     ));
+    assert_eq!(
+        foreign
+            .current_lease()
+            .await
+            .unwrap()
+            .map(|lease| lease.owner_id),
+        Some(FOREIGN_OWNER),
+        "the refused save must leave the live foreign writer's lease in place",
+    );
 }
 
 fn save_with_vim_in_place(path: &Path) {
@@ -399,7 +413,7 @@ async fn stale_persisted_temporary_scratch_is_skipped_at_mount_start() {
     // The target repository has no `london` row, so the copied record cannot resolve.
     let initial = "{ title: \"Other\", artist: \"Kieran\", }\n";
     let (target_directory, target_repository, _) =
-        repository_with_music_row("paris", 0x93, initial, false).await;
+        repository_with_music_row("paris", 0x93, initial).await;
     let target_store = target_repository
         .runtime_paths()
         .root()
@@ -475,7 +489,7 @@ fn editor_script(directory: &TempDir, document: &str) -> PathBuf {
 
 
 fn run_row_edit(repository_directory: &TempDir, editor: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .current_dir(repository_directory.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("EDITOR", editor)
@@ -570,6 +584,30 @@ else:
         String::from_utf8_lossy(&mmap_output.stdout).trim(),
         libc::ENODEV.to_string(),
         "writable shared mmap is unsupported"
+    );
+}
+
+/// ORNA-VFS-014 (W40-03): ownership and permission changes on an editable mount
+/// fail with EPERM. The adapter reports uid/gid 0 and permission bits are
+/// advisory. For a non-root caller the kernel owner check already refuses; for
+/// root the adapter's EPERM is the refusal, so the test covers both paths.
+#[tokio::test]
+async fn editor_mount_refuses_chmod_and_chown_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let chmod = std::fs::set_permissions(&fixture.data_path, std::fs::Permissions::from_mode(0o600));
+    assert_eq!(
+        chmod.expect_err("chmod on an editable mount must fail").raw_os_error(),
+        Some(libc::EPERM),
+        "chmod on an editable mount"
+    );
+    let chown = std::os::unix::fs::chown(&fixture.data_path, Some(0), Some(0));
+    assert_eq!(
+        chown.expect_err("chown on an editable mount must fail").raw_os_error(),
+        Some(libc::EPERM),
+        "chown on an editable mount"
     );
 }
 

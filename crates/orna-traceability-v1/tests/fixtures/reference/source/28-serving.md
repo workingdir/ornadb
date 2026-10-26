@@ -28,7 +28,7 @@ Multi-user authorisation is outside this profile; local trusted operation MUST N
 
 **ORNA-SERVE-007** Git transport MUST remain usable when the optional Git/database web frontend is absent.
 
-**ORNA-SERVE-008** The default frontend SHOULD be an ordinary Orna application, preferably `std.devtools`.
+**ORNA-SERVE-008** The default frontend SHOULD be an ordinary, removable devtools application. An upstream `std.devtools` package or a vendored `devtools` module is permitted; neither name is privileged. The minimal source-hosted profile and exact source/resource ownership are defined in [source-hosted applications](#source-apps).
 
 **ORNA-SERVE-009** When installed as `/`, the default frontend SHOULD lead with database tables and also expose files, commits, branches, functions, dependencies, storage and runtime state.
 
@@ -38,3 +38,6 @@ An Orna application is a reachable collection of functions, pages, tables and as
 
 Presentation trees are renderer-neutral. Terminal, web and future native clients render the same value tree and fall back to Inspect-compatible nodes when needed.
 
+## Source-hosted profile
+
+[Source-hosted applications](#source-apps) define the Orna-authored serving and browser-library boundary. The first devtools application is intentionally request/response and manually refreshed; it does not remove existing live-protocol requirements or imply that a first milestone satisfies full Server conformance. Git data/source histories are not replaced by a UI database. Broken optional code must remain recoverable through local core commands.

@@ -80,22 +80,22 @@ used by this ADR:
 
 | Source | Contract used here |
 | --- | --- |
-| [Current decisions and open questions](../../../spec/docs/02-status-decisions.md) | `CLIENT` runs in a sandboxed VM inside `orna`; CLIENT VM bytecode and sandbox implementation remain open. |
-| [Source, compiler pipeline, AST, and semantic IR](../../../spec/docs/25-source-compiler-ir.md) | Stable IDs, source/revision snapshots, CLIENT artifact checks, required capabilities/contracts, content hashes, and language/VM version checks. |
-| [Wire protocol and canonical typed values](../../../spec/docs/27-wire-protocol.md) | CLIENT artifact metadata, `FunctionId`/`FunctionRevisionId`, `RevisionPair`, canonical payloads, validation-before-execution, content-hash caching, bounded channels, and cancellation. |
-| [Principals, authentication, authorization, capabilities, and auditing](../../../spec/docs/35-security.md) | No ambient local authority for remote CLIENT code, local capability policy, trusted-kernel enforcement, and protected redacted audit. |
-| [System architecture](../../../spec/docs/04-system-architecture.md) | Process topology, trust boundaries, local runtime selection, failure isolation, and the rule that a database cannot force an arbitrary native library. |
-| [SERVER and CLIENT functions](../../../spec/docs/05-execution-locations.md) | CLIENT responsibilities, one execution domain per function, asynchronous CLIENT-to-SERVER resources, and external runtime contracts. |
-| [`sys.invoke` universal invocation system](../../../spec/docs/13-invocation-system.md) | Resolve/bind/authorise/execute ordering, authenticated request context, nested root invocation and trace, client artifact loading, cancellation, and event outcomes. |
-| [Testing and conformance strategy](../../../spec/docs/39-testing.md) | Hostile CLIENT artifact capability tests, invocation success/failure/cancel/deadline coverage, redaction, audit completeness, and runtime conformance. |
+| Current decisions and open questions | `CLIENT` runs in a sandboxed VM inside `orna`; CLIENT VM bytecode and sandbox implementation remain open. |
+| Source, compiler pipeline, AST, and semantic IR | Stable IDs, source/revision snapshots, CLIENT artifact checks, required capabilities/contracts, content hashes, and language/VM version checks. |
+| Wire protocol and canonical typed values | CLIENT artifact metadata, `FunctionId`/`FunctionRevisionId`, `RevisionPair`, canonical payloads, validation-before-execution, content-hash caching, bounded channels, and cancellation. |
+| Principals, authentication, authorization, capabilities, and auditing | No ambient local authority for remote CLIENT code, local capability policy, trusted-kernel enforcement, and protected redacted audit. |
+| System architecture | Process topology, trust boundaries, local runtime selection, failure isolation, and the rule that a database cannot force an arbitrary native library. |
+| SERVER and CLIENT functions | CLIENT responsibilities, one execution domain per function, asynchronous CLIENT-to-SERVER resources, and external runtime contracts. |
+| `sys.invoke` universal invocation system | Resolve/bind/authorise/execute ordering, authenticated request context, nested root invocation and trace, client artifact loading, cancellation, and event outcomes. |
+| Testing and conformance strategy | Hostile CLIENT artifact capability tests, invocation success/failure/cancel/deadline coverage, redaction, audit completeness, and runtime conformance. |
 
 Related accepted decisions are linked explicitly:
 
-- [Spec ADR 0004: Root invocation is planned by `sys.invoke`](../../../spec/adrs/0004-sys-invoke.md)
-- [Spec ADR 0006: Runtimes are explicitly installed client libraries](../../../spec/adrs/0006-runtimes-are-installed-libraries.md)
-- [Spec ADR 0009: Preserve source and a resolved semantic graph](../../../spec/adrs/0009-source-and-semantic-graph.md)
-- [Spec ADR 0014: Principals are first-class catalog data with kernel enforcement](../../../spec/adrs/0014-principals-are-first-class-and-dogfooded.md)
-- [Spec ADR 0020: A programmable CLIENT core](../../../spec/adrs/0020-client-control-flow.md)
+- Spec ADR 0004: Root invocation is planned by `sys.invoke`
+- Spec ADR 0006: Runtimes are explicitly installed client libraries
+- Spec ADR 0009: Preserve source and a resolved semantic graph
+- Spec ADR 0014: Principals are first-class catalog data with kernel enforcement
+- Spec ADR 0020: A programmable CLIENT core
 - [Work ADR 0060: CLIENT capability requirements and the local sandbox](0060-client-capability-requirements.md)
 - [Work ADR 0071: CLIENT resource lifecycle](0071-client-resource-lifecycle.md)
 - [Work ADR 0074: Runtime-only CLIENT resource executor seam](0074-client-resource-executor-seam.md)

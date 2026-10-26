@@ -475,6 +475,290 @@ fn managed_staging_preserves_unrelated_index_and_worktree_changes() {
 }
 
 #[test]
+fn managed_paths_refuse_git_metadata_at_any_depth_and_in_any_case() {
+    for hostile in [
+        "sub/.git/config",
+        "sub/.git/hooks/pre-commit",
+        "a/b/.git",
+        "SUB/.GIT/config",
+        ".GIT/config",
+        "a/.Git/x",
+        "nested/.gIt",
+        "sub/.git./config",
+        "sub/.git /config",
+        "sub/git~1/config",
+    ] {
+        assert!(
+            matches!(
+                ManagedPath::new(hostile),
+                Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+            ),
+            "{hostile} must be refused as git metadata"
+        );
+    }
+    assert!(ManagedPath::new("sub/.github/workflows/ci.yml").is_ok());
+    assert!(ManagedPath::new("docs/git-notes.md").is_ok());
+    assert!(ManagedPath::new("sub/.gitignore").is_ok());
+    assert!(ManagedPath::new("sub/foo.git/config").is_ok());
+}
+
+#[test]
+fn managed_paths_do_not_cap_length_because_git_stores_any_length() {
+    let long_component = "a".repeat(300);
+    assert!(ManagedPath::new(&long_component).is_ok());
+    assert!(ManagedPath::new(format!("docs/{long_component}.md")).is_ok());
+}
+
+#[test]
+fn managed_paths_refuse_traversal_absolute_nul_backslash_and_empty_components() {
+    for hostile in [
+        "..",
+        "../x",
+        "a/../b",
+        "/etc/passwd",
+        "..\\x",
+        "a\\..\\b",
+        "a\\b",
+        "a\0b",
+        "a//b",
+        "a/",
+        "sub/./",
+    ] {
+        assert!(
+            matches!(
+                ManagedPath::new(hostile),
+                Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+            ),
+            "{hostile:?} must be refused"
+        );
+    }
+    assert!(ManagedPath::new("./a/b").is_ok());
+}
+
+#[test]
+fn untracked_git_named_directory_changes_the_status_digest() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "first\n").unwrap();
+    let before = repo.worktree_state().unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "second\n").unwrap();
+    let after = repo.worktree_state().unwrap();
+    assert_ne!(before, after);
+}
+
+/// Runs Git with raw bytes on stdin, for objects Git's own tree writers refuse.
+fn git_raw(directory: &Path, arguments: &[&str], input: &[u8]) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("git")
+        .current_dir(directory)
+        .args(arguments)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "git {arguments:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// Encodes one raw tree object from `(mode, name, object id)` entries.
+fn raw_tree(entries: &[(&str, &str, &str)]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (mode, name, object_id) in entries {
+        bytes.extend_from_slice(format!("{mode} {name}\0").as_bytes());
+        bytes.extend(decode_oid(object_id));
+    }
+    bytes
+}
+
+/// Writes one raw tree object from `(mode, name, object id)` entries.
+fn raw_tree_object(root: &Path, entries: &[(&str, &str, &str)]) -> String {
+    git_raw(
+        root,
+        &["hash-object", "-t", "tree", "--literally", "-w", "--stdin"],
+        &raw_tree(entries),
+    )
+}
+
+/// Publishes a commit whose root tree is `tree` on `refs/heads/<branch>`.
+fn publish_raw_commit(root: &Path, tree: &str, branch: &str) {
+    let commit_body = format!(
+        "tree {tree}\nauthor Orna <orna@example.invalid> 1 +0000\n\
+         committer Orna <orna@example.invalid> 1 +0000\n\nraw\n"
+    );
+    let commit_id = git_raw(
+        root,
+        &["hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
+        commit_body.as_bytes(),
+    );
+    git(root, &["update-ref", &format!("refs/heads/{branch}"), &commit_id]);
+}
+
+/// Builds a root tree holding `sub/.git/config`, which Git's own writers refuse.
+fn hostile_nested_tree(root: &Path) -> String {
+    let blob = git_raw(root, &["hash-object", "-w", "--stdin"], b"[core]\n");
+    let gitdir = raw_tree_object(root, &[("100644", "config", &blob)]);
+    let sub = raw_tree_object(root, &[("40000", ".git", &gitdir)]);
+    raw_tree_object(root, &[("40000", "sub", &sub)])
+}
+
+#[test]
+fn committed_git_metadata_path_is_refused_on_load() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    publish_raw_commit(root.path(), &hostile_nested_tree(root.path()), "hostile");
+    let commit = repo.resolve_snapshot("hostile").unwrap();
+
+    assert!(matches!(
+        repo.list_committed_source_tree(&commit),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+}
+
+#[test]
+fn committed_git_metadata_path_is_refused_on_ls_tree_listing() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    publish_raw_commit(root.path(), &hostile_nested_tree(root.path()), "hostile");
+    let commit = repo.resolve_snapshot("hostile").unwrap();
+
+    assert!(matches!(
+        repo.list_committed_tree(&commit, 100),
+        Err(orna_repository_v1::RepositoryError::UnsafeManagedPath)
+    ));
+}
+
+#[test]
+fn committed_overlong_entries_list_without_a_path_limit() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let blob = git_raw(root.path(), &["hash-object", "-w", "--stdin"], b"long\n");
+    // A 303-byte name exceeds NAME_MAX. Sixteen 255-byte components under
+    // `deep/` make a 4108-byte path, past the old 4096-byte total cap, while
+    // each name stays within the object reader's per-entry bound. The 4108-byte
+    // record exceeds `list_tree_entries`' separate 4 KiB record bound, so the
+    // ls-tree listing is asserted on a tree that holds only the long name.
+    let long_component = format!("{}.md", "a".repeat(300));
+    let deep_component = "c".repeat(255);
+    let mut deep = raw_tree_object(root.path(), &[("100644", "leaf.txt", &blob)]);
+    for _ in 0..16 {
+        deep = raw_tree_object(root.path(), &[("40000", &deep_component, &deep)]);
+    }
+    let docs = raw_tree_object(root.path(), &[("100644", &long_component, &blob)]);
+    let tree = raw_tree_object(
+        root.path(),
+        &[("40000", "docs", &docs), ("40000", "deep", &deep)],
+    );
+    publish_raw_commit(root.path(), &tree, "overlong");
+    let commit = repo.resolve_snapshot("overlong").unwrap();
+
+    let listed = repo.list_committed_source_tree(&commit).unwrap();
+    let paths = listed
+        .iter()
+        .map(|entry| entry.path().as_path().to_path_buf())
+        .collect::<Vec<_>>();
+    let mut expected_deep = PathBuf::from("deep");
+    for _ in 0..16 {
+        expected_deep.push(&deep_component);
+    }
+    expected_deep.push("leaf.txt");
+    assert!(paths.contains(&expected_deep));
+    assert!(paths.contains(&PathBuf::from("docs").join(&long_component)));
+    let name_only = raw_tree_object(root.path(), &[("40000", "docs", &docs)]);
+    publish_raw_commit(root.path(), &name_only, "overlong-name");
+    let commit = repo.resolve_snapshot("overlong-name").unwrap();
+    let listed = repo.list_committed_tree(&commit, 100).unwrap();
+    let long_path = PathBuf::from("docs").join(&long_component);
+    assert!(
+        listed
+            .iter()
+            .any(|entry| entry.path().as_path() == long_path.as_path()),
+        "ls-tree lists a committed name longer than NAME_MAX"
+    );
+}
+
+#[test]
+fn checkout_plan_accepts_user_directories_named_like_git_metadata() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "user data\n").unwrap();
+    fs::create_dir_all(root.path().join(".GIT")).unwrap();
+    fs::write(root.path().join(".GIT/a"), "user data\n").unwrap();
+
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(25))
+        .unwrap();
+    assert!(plan.git().conflicting_paths().is_empty());
+    let affected = plan
+        .git()
+        .affected_paths()
+        .iter()
+        .map(|path| path.as_path().to_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(affected, [".GIT/a", "Sub/.GIT/notes"]);
+}
+
+#[test]
+fn force_checkout_keeps_user_directories_named_like_git_metadata() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    git(root.path(), &["branch", "experiment"]);
+    git(root.path(), &["switch", "experiment"]);
+    fs::write(root.path().join("ordinary.txt"), "target\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    git(root.path(), &["commit", "-m", "target change"]);
+    git(root.path(), &["switch", "main"]);
+
+    fs::write(root.path().join("ordinary.txt"), "staged discard\n").unwrap();
+    git(root.path(), &["add", "ordinary.txt"]);
+    fs::create_dir_all(root.path().join("Sub/.GIT")).unwrap();
+    fs::write(root.path().join("Sub/.GIT/notes"), "user data\n").unwrap();
+    fs::create_dir_all(root.path().join(".GIT")).unwrap();
+    fs::write(root.path().join(".GIT/a"), "user data\n").unwrap();
+    // Status observes the user directories as ordinary untracked data.
+    repo.worktree_state().unwrap();
+
+    let plan = repo
+        .plan_checkout("experiment", RuntimeGeneration::new(43))
+        .unwrap();
+    // Only the committed target path conflicts, so the leniently listed user
+    // names never reach `git restore`.
+    let ordinary = ManagedPath::new("ordinary.txt").unwrap();
+    assert_eq!(
+        plan.git().discardable_paths(),
+        std::slice::from_ref(&ordinary)
+    );
+    let token = plan.force_token();
+    let discard = repo
+        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .unwrap();
+    repo.persist_validated_checkout_discard(&discard).unwrap();
+    repo.execute_validated_force_checkout(&discard).unwrap();
+
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
+    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "target");
+    for user_file in ["Sub/.GIT/notes", ".GIT/a"] {
+        assert_eq!(
+            fs::read_to_string(root.path().join(user_file)).unwrap(),
+            "user data\n",
+            "{user_file} stays as the user wrote it"
+        );
+    }
+}
+
+#[test]
 fn managed_unstage_and_coordination_lock_preserve_unrelated_staging() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3199,6 +3483,49 @@ fn publication_journal_round_trips_atomically_and_advances_monotonically() {
 }
 
 #[test]
+fn published_branch_tip_keeps_the_configured_identity() {
+    let root = repository();
+    git(root.path(), &["config", "user.name", "Identity X"]);
+    git(
+        root.path(),
+        &["config", "user.email", "identity-x@example.invalid"],
+    );
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let bytes = b"identity row\n".to_vec();
+    let head_before = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let candidate = repo
+        .build_private_commit(
+            &head_before,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(bytes.clone()),
+            )],
+            "orna: publish identity row",
+        )
+        .unwrap();
+    let mut journal = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head_before.clone(),
+        candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [5; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed,
+            None,
+            Some(bytes),
+        )],
+    )
+    .unwrap();
+    repo.publish_candidate(&index_before, &candidate, &mut journal)
+        .unwrap();
+    repo.clear_publication_journal().unwrap();
+
+    let tip = git(root.path(), &["log", "-1", "--format=%an <%ae>"]);
+    assert_eq!(tip.trim(), "Identity X <identity-x@example.invalid>");
+}
+
+#[test]
 fn republish_after_edit_bumps_the_revision_and_serves_the_edited_bytes() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3402,6 +3729,174 @@ fn publication_refuses_to_replace_a_retained_journal() {
 }
 
 #[test]
+fn retained_journal_with_moved_head_is_stale_and_keeps_batch() {
+    // ORNA-PUB-009: a HEAD that moved past this publisher's expected head is a
+    // lost CAS and reports StaleHead, checked before the retained-journal
+    // pending outcome. ORNA-PUB-006: the retained batch is not released.
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let retained_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"retained row\n".to_vec()),
+            )],
+            "orna: retained publication",
+        )
+        .unwrap();
+    let retained = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        retained_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [71; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"retained row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    repo.write_publication_journal(&retained).unwrap();
+
+    let replacement_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"replacement row\n".to_vec()),
+            )],
+            "orna: replacement publication",
+        )
+        .unwrap();
+    let mut replacement = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        replacement_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [72; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"replacement row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    git(root.path(), &["commit", "--allow-empty", "-m", "moved head"]);
+    let moved_head = repo.head().unwrap();
+    assert_ne!(moved_head, Some(head));
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &replacement_candidate, &mut replacement),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), moved_head);
+    assert_eq!(repo.read_publication_journal().unwrap(), Some(retained));
+}
+
+#[test]
+fn crashed_publisher_after_ref_advance_recovers_despite_stale_retry() {
+    // ORNA-PUB-006: a publisher that dies after RefAdvanced leaves its journal
+    // retained and the ref moved. A later publisher prepared from the old head
+    // is refused with StaleHead, which must not mask recovery of that journal.
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let managed = ManagedPath::new("generated/row.orna").unwrap();
+    let head = repo.head().unwrap().unwrap();
+    let index_before = repo.index_generation().unwrap();
+    let crashed_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"crashed row\n".to_vec()),
+            )],
+            "orna: crashed publication",
+        )
+        .unwrap();
+    let mut crashed = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        crashed_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [73; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"crashed row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+    let stale_candidate = repo
+        .build_private_commit(
+            &head,
+            &[orna_repository_v1::ManagedFileChange::new(
+                managed.clone(),
+                Some(b"stale row\n".to_vec()),
+            )],
+            "orna: stale publication",
+        )
+        .unwrap();
+    let mut stale = orna_repository_v1::PublicationJournal::new_with_runtime_intent(
+        head.clone(),
+        stale_candidate.commit().clone(),
+        index_before.tree().unwrap().clone(),
+        [74; 16],
+        vec![orna_repository_v1::PublicationJournalEntry::new(
+            managed.clone(),
+            None,
+            Some(b"stale row\n".to_vec()),
+        )],
+    )
+    .unwrap();
+
+    // Simulated crash: unwinding right after the ref is durably advanced.
+    let crash = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        repo.publish_candidate_with_stage_hook(
+            &index_before,
+            &crashed_candidate,
+            &mut crashed,
+            |stage| {
+                if stage == orna_repository_v1::PublicationJournalStage::RefAdvanced {
+                    panic!("simulated publisher crash after ref advance");
+                }
+            },
+        )
+    }));
+    assert!(crash.is_err());
+    let advanced = repo.head().unwrap();
+    assert_eq!(advanced, Some(crashed_candidate.commit().clone()));
+    let retained = repo.read_publication_journal().unwrap();
+    assert_eq!(
+        retained.as_ref().map(|journal| journal.stage()),
+        Some(orna_repository_v1::PublicationJournalStage::RefAdvanced)
+    );
+
+    assert!(matches!(
+        repo.publish_candidate(&index_before, &stale_candidate, &mut stale),
+        Err(orna_repository_v1::RepositoryError::StaleHead)
+    ));
+    assert_eq!(repo.head().unwrap(), advanced);
+    assert_eq!(repo.read_publication_journal().unwrap(), retained);
+
+    // Recovery reconciles the ref-advanced journal and then stops at the
+    // runtime-completion boundary, which only the runtime owner may clear.
+    assert!(matches!(
+        repo.recover_publication(),
+        Err(orna_repository_v1::RepositoryError::RuntimeCompletionRequired)
+    ));
+    assert_eq!(repo.head().unwrap(), advanced);
+    assert_eq!(
+        repo.read_publication_journal()
+            .unwrap()
+            .map(|journal| journal.stage()),
+        Some(orna_repository_v1::PublicationJournalStage::WorktreeReconciled)
+    );
+}
+
+#[test]
 fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let root = repository();
     let repo = Repository::discover(root.path()).unwrap();
@@ -3537,7 +4032,9 @@ fn publication_pauses_for_an_existing_git_index_lock_before_ref_change() {
 fn publication_pauses_during_unfinished_merge_and_rebase() {
     for operation in ["merge", "rebase"] {
         let root = repository_with_v1_module_fixture();
-        let repo = Repository::discover(root.path()).unwrap();
+        let repo = Repository::discover(root.path())
+            .unwrap()
+            .with_coordination_lock_wait(std::time::Duration::from_millis(50));
         let head = repo.head().unwrap().unwrap();
         let index_before = repo.index_generation().unwrap();
         let managed = ManagedPath::new("generated/row.orna").unwrap();

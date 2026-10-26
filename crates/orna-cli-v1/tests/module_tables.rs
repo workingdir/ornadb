@@ -57,7 +57,7 @@ const CORSA: &str =
 const GOOGLE: &str = "pub fn sync() = 3;\n";
 
 fn orna(arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_orna-cli-v1"))
+    Command::new(env!("CARGO_BIN_EXE_orna"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .args(arguments)
         .output()
