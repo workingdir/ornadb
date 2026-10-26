@@ -4555,6 +4555,26 @@ impl Repository {
         command
     }
 
+    /// A Git command that records a private staged-identity carrier (the
+    /// unreachable commit `capture_staged_candidate` names for loading). A
+    /// carrier is never ref-advanced, so it is written on Orna's behalf and
+    /// never reads the ambient identity. A machine or CI runner without
+    /// `user.name`/`user.email` therefore builds it the same way. The identity
+    /// is fixed here and never written to Git config; timestamps remain Git's.
+    /// Publication candidates ref-advance the user's branch and keep
+    /// `command()`, so they record the configured identity (ORNA-PUB-010).
+    fn private_commit_command(&self) -> Command {
+        const NAME: &str = "Orna Internal";
+        const EMAIL: &str = "orna-internal@localhost.invalid";
+        let mut command = self.command();
+        command
+            .env("GIT_AUTHOR_NAME", NAME)
+            .env("GIT_AUTHOR_EMAIL", EMAIL)
+            .env("GIT_COMMITTER_NAME", NAME)
+            .env("GIT_COMMITTER_EMAIL", EMAIL);
+        command
+    }
+
     /// Requires the author and committer identity a reviewed commit records
     /// to be configured. 16-administration: "Default author information comes
     /// from configured Git identity; missing identity fails before creating a
