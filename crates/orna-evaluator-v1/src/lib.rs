@@ -3670,6 +3670,18 @@ impl Value {
         }
         CanonicalValue::new(self.raw()?).map_err(|_| error("ORNA-EVAL-VALUE"))
     }
+    /// Encoded canonical bytes of this value, equal to
+    /// `self.clone().canonical()?.encode()`, but borrowing `self` so the digest
+    /// fold does not clone every row.
+    fn canonical_bytes(&self) -> Result<Vec<u8>, EvaluationError> {
+        if let Self::Error(failure) = self {
+            return Err(failure.clone());
+        }
+        CanonicalValue::new(self.raw()?)
+            .map_err(|_| error("ORNA-EVAL-VALUE"))?
+            .encode()
+            .map_err(|_| error("ORNA-EVAL-VALUE"))
+    }
     /// REPL result boundary; see [`Value::canonical`]. A format-3 Blob is
     /// presented as its payload-free summary, so the result stays canonical
     /// without copying the reference's bytes or descriptor across the boundary.
@@ -3677,7 +3689,10 @@ impl Value {
         CanonicalValue::new(summarise_rov3_blobs(self.raw()?)?)
             .map_err(|_| error("ORNA-EVAL-VALUE"))
     }
-    fn raw(self) -> Result<Raw, EvaluationError> {
+    /// Canonical raw form of this value. It borrows the value, so the digest
+    /// fold can encode each relation row without first deep-copying it; only
+    /// the leaves and containers that the owned raw form needs are allocated.
+    fn raw(&self) -> Result<Raw, EvaluationError> {
         Ok(match self {
             Self::Function { .. } | Self::Closure(_) => {
                 return Err(error("ORNA-EVAL-UNSUPPORTED"));
@@ -3689,16 +3704,16 @@ impl Value {
             // They must not cross the successful canonical-value boundary,
             // but a containing value must preserve the original failure while
             // propagating to that boundary.
-            Self::Error(failure) => return Err(failure),
+            Self::Error(failure) => return Err(failure.clone()),
             Self::Null => Raw::Null,
             Self::Unit => Raw::Tag(60014, Box::new(Raw::Array(vec![]))),
-            Self::Bool(value) => Raw::Bool(value),
-            Self::Int(value) => Raw::Int(value),
+            Self::Bool(value) => Raw::Bool(*value),
+            Self::Int(value) => Raw::Int(value.clone()),
             Self::Decimal(value) => Raw::Tag(
                 60000,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(value.coefficient),
-                    Raw::Int(value.exponent10),
+                    Raw::Int(value.coefficient.clone()),
+                    Raw::Int(value.exponent10.clone()),
                 ])),
             ),
             Self::Money { amount, currency } => Raw::Tag(
@@ -3707,20 +3722,20 @@ impl Value {
                     Raw::Tag(
                         60000,
                         Box::new(Raw::Array(vec![
-                            Raw::Int(amount.coefficient),
-                            Raw::Int(amount.exponent10),
+                            Raw::Int(amount.coefficient.clone()),
+                            Raw::Int(amount.exponent10.clone()),
                         ])),
                     ),
-                    object_id_raw(currency),
+                    object_id_raw(*currency),
                 ])),
             ),
-            Self::Float(bits) => Raw::Float(bits),
-            Self::String(value) => Raw::Text(value),
-            Self::Blob(value) => Raw::Bytes(value),
-            Self::AnnotatedBlob(value) => value,
+            Self::Float(bits) => Raw::Float(*bits),
+            Self::String(value) => Raw::Text(value.clone()),
+            Self::Blob(value) => Raw::Bytes(value.clone()),
+            Self::AnnotatedBlob(value) => value.clone(),
             Self::ContextualBlob(value) => value.raw().clone(),
-            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value))),
-            Self::Uuid(value) => object_id_raw(value),
+            Self::Date(value) => Raw::Tag(60001, Box::new(Raw::Text(value.clone()))),
+            Self::Uuid(value) => object_id_raw(*value),
             Self::Digest(value) => Raw::Tag(
                 60025,
                 Box::new(Raw::Array(vec![
@@ -3736,8 +3751,8 @@ impl Value {
             } => Raw::Tag(
                 60002,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(unix_seconds.into()),
-                    Raw::Int(nanosecond.into()),
+                    Raw::Int((*unix_seconds).into()),
+                    Raw::Int((*nanosecond).into()),
                 ])),
             ),
             Self::Duration {
@@ -3746,8 +3761,8 @@ impl Value {
             } => Raw::Tag(
                 60005,
                 Box::new(Raw::Array(vec![
-                    Raw::Int(seconds),
-                    Raw::Int(nanosecond.into()),
+                    Raw::Int(seconds.clone()),
+                    Raw::Int((*nanosecond).into()),
                 ])),
             ),
             Self::Range {
@@ -3757,14 +3772,14 @@ impl Value {
             } => Raw::Tag(
                 60019,
                 Box::new(Raw::Array(vec![
-                    raw_option_value(lower)?,
-                    raw_option_value(upper)?,
-                    Raw::Bool(upper_inclusive),
+                    raw_option_value(lower.as_deref())?,
+                    raw_option_value(upper.as_deref())?,
+                    Raw::Bool(*upper_inclusive),
                 ])),
             ),
             Self::List(values) => Raw::Array(
                 values
-                    .into_iter()
+                    .iter()
                     .map(Value::raw)
                     .collect::<Result<_, _>>()?,
             ),
@@ -3774,10 +3789,7 @@ impl Value {
             Self::Tuple(values) => Raw::Tag(
                 60015,
                 Box::new(Raw::Array(
-                    values
-                        .into_iter()
-                        .map(Value::raw)
-                        .collect::<Result<_, _>>()?,
+                    values.iter().map(Value::raw).collect::<Result<_, _>>()?,
                 )),
             ),
             // The finite stream's source identity and digest remain in the
@@ -3794,8 +3806,8 @@ impl Value {
                 }
                 Raw::Array(
                     values
-                        .into_iter()
-                        .skip(position)
+                        .iter()
+                        .skip(*position)
                         .map(Value::raw)
                         .collect::<Result<_, _>>()?,
                 )
@@ -3805,7 +3817,7 @@ impl Value {
                 // Keep the comparator tied to that rule, including CBOR head
                 // length transitions and multi-byte Unicode field names.
                 let mut fields = values
-                    .into_iter()
+                    .iter()
                     .map(|(key, value)| {
                         if !key.nfc().eq(key.chars()) {
                             return Err(error("ORNA-EVAL-VALUE"));
@@ -3821,7 +3833,9 @@ impl Value {
                 Raw::Map(
                     fields
                         .into_iter()
-                        .map(|(_, key, value)| value.raw().map(|value| (Raw::Text(key), value)))
+                        .map(|(_, key, value)| {
+                            value.raw().map(|value| (Raw::Text(key.clone()), value))
+                        })
                         .collect::<Result<_, _>>()?,
                 )
             }
@@ -3829,7 +3843,7 @@ impl Value {
                 // The runtime value preserves declaration order. OVB requires
                 // canonical field-key order only at the serialization edge.
                 let mut encoded = fields
-                    .into_iter()
+                    .iter()
                     .map(|(key, value)| {
                         let encoded_key = CanonicalValue::new(key.clone())
                             .map_err(|_| error("ORNA-EVAL-VALUE"))?
@@ -3842,12 +3856,14 @@ impl Value {
                 Raw::Tag(
                     60009,
                     Box::new(Raw::Array(vec![
-                        type_id,
+                        type_id.clone(),
                         Raw::Array(
                             encoded
                                 .into_iter()
                                 .map(|(_, key, value)| {
-                                    value.raw().map(|value| Raw::Array(vec![key, value]))
+                                    value
+                                        .raw()
+                                        .map(|value| Raw::Array(vec![key.clone(), value]))
                                 })
                                 .collect::<Result<_, _>>()?,
                         ),
@@ -3861,17 +3877,18 @@ impl Value {
             } => Raw::Tag(
                 60008,
                 Box::new(Raw::Array(vec![
-                    type_id,
-                    variant_id,
+                    type_id.clone(),
+                    variant_id.clone(),
                     payload
-                        .map(|value| value.raw())
+                        .as_deref()
+                        .map(Value::raw)
                         .transpose()?
                         .unwrap_or(Raw::Null),
                 ])),
             ),
             Self::Option(value) => Raw::Tag(
                 60013,
-                Box::new(match value {
+                Box::new(match value.as_deref() {
                     Some(value) => Raw::Array(vec![Raw::Int(1.into()), value.raw()?]),
                     None => Raw::Array(vec![Raw::Int(0.into())]),
                 }),
@@ -11530,7 +11547,7 @@ impl Context<'_, '_> {
         let mut encoded_values = Vec::with_capacity(values.len());
         for value in values {
             self.step()?;
-            encoded_values.push(value.clone().raw()?);
+            encoded_values.push(value.raw()?);
             self.items(encoded_values.len())?;
         }
         let identity = Raw::Array(vec![
@@ -16009,10 +16026,7 @@ impl OutputDigest {
         if !self.valid {
             return;
         }
-        let encoded = value
-            .clone()
-            .canonical()
-            .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")));
+        let encoded = value.canonical_bytes();
         match encoded {
             Ok(encoded) => {
                 self.digest.update((encoded.len() as u64).to_be_bytes());
@@ -16106,7 +16120,7 @@ fn one_like(value: &Value) -> Result<Value, EvaluationError> {
         _ => Err(error("ORNA-EVAL-TYPE")),
     }
 }
-fn raw_option_value(value: Option<Box<Value>>) -> Result<Raw, EvaluationError> {
+fn raw_option_value(value: Option<&Value>) -> Result<Raw, EvaluationError> {
     let parts = match value {
         Some(value) => vec![Raw::Int(1.into()), value.raw()?],
         None => vec![Raw::Int(0.into())],
@@ -19977,5 +19991,106 @@ mod standard_layer_merge_tests {
         };
         assert_eq!(target.extend(other), Ok(()));
         assert!(target.local_aliases.contains_key("extra"));
+    }
+}
+
+/// Proof that folding a row into the materialization digest allocates a
+/// bounded amount per row. A thread-local counter only tallies allocations made
+/// by the test thread while `COUNTING` is set, so parallel tests do not skew it.
+#[cfg(test)]
+mod output_digest_allocation_proof {
+    use super::*;
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    thread_local! {
+        static COUNTING: Cell<bool> = const { Cell::new(false) };
+    }
+    static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountingAllocator;
+
+    unsafe impl GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            if COUNTING.with(Cell::get) {
+                ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+            }
+            unsafe { System.alloc(layout) }
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: CountingAllocator = CountingAllocator;
+
+    fn sample_row() -> Value {
+        Value::Record(BTreeMap::from([
+            ("object".to_owned(), Value::Blob(vec![7; 32])),
+            (
+                "name".to_owned(),
+                Value::String("materialized output row".repeat(4)),
+            ),
+            (
+                "items".to_owned(),
+                Value::List(List::from(
+                    (0..16)
+                        .map(|number| Value::Int(BigInt::from(number)))
+                        .collect::<Vec<_>>(),
+                )),
+            ),
+            ("valid".to_owned(), Value::Bool(true)),
+        ]))
+    }
+
+    /// Runs `work` with allocation counting enabled on this thread and returns
+    /// the number of heap allocations it performed.
+    fn count_allocations(work: impl FnOnce()) -> usize {
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        COUNTING.with(|counting| counting.set(true));
+        work();
+        COUNTING.with(|counting| counting.set(false));
+        ALLOCATIONS.load(Ordering::Relaxed) - before
+    }
+
+    #[test]
+    fn output_digest_row_allocations_are_counted() {
+        const ROWS: usize = 256;
+        let row = sample_row();
+        let expected_len = row
+            .canonical_bytes()
+            .expect("sample row is canonical")
+            .len();
+
+        // Before: the per-row fold cloned the value before canonicalising it.
+        let legacy = count_allocations(|| {
+            for _ in 0..ROWS {
+                let encoded = row
+                    .clone()
+                    .canonical()
+                    .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE")))
+                    .expect("legacy row encodes");
+                std::hint::black_box(encoded);
+            }
+        });
+
+        // After: the digest fold borrows the row.
+        let mut digest = OutputDigest::new();
+        let borrowing = count_allocations(|| {
+            for _ in 0..ROWS {
+                digest.push(&row);
+            }
+        });
+        eprintln!(
+            "OUTPUT_DIGEST_ALLOCATIONS rows={ROWS} legacy_total={legacy} legacy_per_row={} borrowing_total={borrowing} borrowing_per_row={}",
+            legacy / ROWS,
+            borrowing / ROWS
+        );
+        assert!(digest.valid);
+        assert_eq!(digest.bytes, expected_len * ROWS);
+        assert!(borrowing < legacy);
     }
 }
