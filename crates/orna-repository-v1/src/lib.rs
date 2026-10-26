@@ -5665,11 +5665,25 @@ impl Repository {
 
     fn index_generation_while_locked(&self) -> Result<IndexGeneration, RepositoryError> {
         // Observe a copy: `write-tree` on the live index contends with the
-        // `index.lock` the caller holds and fails with exit 128.
+        // `index.lock` the caller holds and fails with exit 128. With no index
+        // file there is nothing to contend with, so git derives the empty tree.
         let index = self.git_path("index")?;
+        let tree = if index.exists() {
+            self.index_tree_from_file(&index)?
+        } else {
+            let mut command = self.command();
+            command.args(["write-tree"]);
+            let output = command
+                .output()
+                .map_err(|_| RepositoryError::GitUnavailable)?;
+            if !output.status.success() {
+                return Err(RepositoryError::GitOperationFailed);
+            }
+            Some(self.index_tree_from_native_oid(trim_output(&output.stdout))?)
+        };
         Ok(IndexGeneration {
             head: self.head()?,
-            tree: self.index_tree_from_file(&index)?,
+            tree,
         })
     }
 
