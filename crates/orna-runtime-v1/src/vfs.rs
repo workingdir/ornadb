@@ -609,6 +609,7 @@ impl<S> RetainedInvalidDraft<S> {
 }
 
 struct DraftState<S> {
+    quota: Arc<DraftQuota>,
     baseline: Arc<VfsFileSnapshot<S>>,
     candidate: Option<DraftSpool>,
     revision: u64,
@@ -620,9 +621,35 @@ struct DraftState<S> {
 /// The retained rejected draft together with the identity of the rejection
 /// that recorded it. One rejection has one identity, so a repeated validation
 /// of the same revision is distinguishable from a fresh one (ORNA-VFS-009).
+/// The retained copy is charged to the draft quota for as long as it is held
+/// (profiles/vfs-1.md: rejected candidates are quota accounted).
 struct RetainedRejection<S> {
     id: [u8; 16],
+    charge: RetainedCharge,
     draft: RetainedInvalidDraft<S>,
+}
+
+/// Quota charge for the bytes of one retained rejected candidate. Dropping the
+/// retained copy (replacement, or the draft itself) releases the charge.
+struct RetainedCharge {
+    quota: Arc<DraftQuota>,
+    bytes: u64,
+}
+
+impl RetainedCharge {
+    fn reserve(quota: &Arc<DraftQuota>, bytes: u64) -> Result<Self, EditDraftError> {
+        quota.reserve(bytes)?;
+        Ok(Self {
+            quota: Arc::clone(quota),
+            bytes,
+        })
+    }
+}
+
+impl Drop for RetainedCharge {
+    fn drop(&mut self) {
+        self.quota.release(self.bytes);
+    }
 }
 
 impl<S> DraftState<S> {
@@ -661,7 +688,19 @@ impl<S> DraftState<S> {
         revision: u64,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, diagnostic)?;
+        let replacement = self.candidate_arc()?;
+        self.retain_rejection_with(revision, replacement, diagnostic)
+    }
+
+    /// As [`Self::retain_rejection`], for a caller that already holds the
+    /// candidate bytes of `revision`, so the spool is read once, not twice.
+    fn retain_rejection_with(
+        &mut self,
+        revision: u64,
+        replacement: Arc<[u8]>,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<(), EditDraftError> {
+        self.retain_draft(revision, replacement, diagnostic)?;
         self.last_rejection = Some((revision, diagnostic));
         Ok(())
     }
@@ -673,29 +712,56 @@ impl<S> DraftState<S> {
         revision: u64,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, diagnostic)
+        let replacement = self.candidate_arc()?;
+        self.retain_draft(revision, replacement, diagnostic)
     }
 
+    /// Keeps `replacement` as the retained copy of `revision`. A revision keeps
+    /// its identity and its existing copy and charge (the same revision has the
+    /// same bytes). A new revision reserves its bytes first; a refused
+    /// reservation (EDQUOT) leaves the previous retained copy in place.
     fn retain_draft(
         &mut self,
         revision: u64,
+        replacement: Arc<[u8]>,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        let replacement = self.candidate_arc()?;
-        let id = match self.retained_invalid.as_ref() {
-            Some(retained) if retained.draft.revision == revision => retained.id,
-            _ => *Uuid::new_v4().as_bytes(),
-        };
-        self.retained_invalid = Some(RetainedRejection {
-            id,
-            draft: RetainedInvalidDraft {
-                id,
-                baseline: self.baseline.pin.clone(),
-                revision,
-                replacement,
-                diagnostic,
+        let retained = match self.retained_invalid.take() {
+            Some(previous) if previous.draft.revision == revision => RetainedRejection {
+                id: previous.id,
+                charge: previous.charge,
+                draft: RetainedInvalidDraft {
+                    id: previous.id,
+                    baseline: self.baseline.pin.clone(),
+                    revision,
+                    replacement: previous.draft.replacement,
+                    diagnostic,
+                },
             },
-        });
+            previous => {
+                let charge = match RetainedCharge::reserve(&self.quota, replacement.len() as u64)
+                {
+                    Ok(charge) => charge,
+                    Err(error) => {
+                        self.retained_invalid = previous;
+                        return Err(error);
+                    }
+                };
+                let id = *Uuid::new_v4().as_bytes();
+                RetainedRejection {
+                    id,
+                    charge,
+                    draft: RetainedInvalidDraft {
+                        id,
+                        baseline: self.baseline.pin.clone(),
+                        revision,
+                        replacement,
+                        diagnostic,
+                    },
+                }
+            }
+        };
+        self.retained_invalid = Some(retained);
         Ok(())
     }
 }
@@ -768,12 +834,55 @@ impl DraftStorage {
         }
     }
 
+    /// Creates or reuses the private spool directory under the runtime root.
+    /// A pre-existing path is accepted only if it is a real directory (not a
+    /// symlink) owned by the same user this process creates files as; stale
+    /// spool files left by an earlier crash are removed.
     fn in_runtime_root(root: &Path) -> io::Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
         let directory = root.join(DRAFT_SPOOL_DIRECTORY);
-        let mut builder = fs::DirBuilder::new();
-        builder.recursive(true).mode(0o700);
-        builder.create(&directory)?;
+        match fs::DirBuilder::new().mode(0o700).create(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        let metadata = fs::symlink_metadata(&directory)?;
+        if !metadata.file_type().is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "draft spool path is not a real directory",
+            ));
+        }
+        let probe = directory.join(format!("orna-probe-{}", Uuid::new_v4().simple()));
+        let probe_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&probe)?;
+        let probe_owner = probe_file.metadata()?.uid();
+        drop(probe_file);
+        fs::remove_file(&probe)?;
+        if metadata.uid() != probe_owner {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "draft spool directory is owned by another user",
+            ));
+        }
         fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))?;
+        for entry in fs::read_dir(&directory)? {
+            let entry = entry?;
+            let stale = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.starts_with("orna-draft-"));
+            if stale && entry.file_type()?.is_file() {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error),
+                }
+            }
+        }
         Ok(Self::new(&directory, Arc::clone(&DEFAULT_DRAFT_QUOTA)))
     }
 }
@@ -1527,6 +1636,7 @@ impl<S> EditDraft<S> {
     ) -> Self {
         Self {
             state: Mutex::new(DraftState {
+                quota: Arc::clone(&storage.quota),
                 baseline: image,
                 candidate: None,
                 revision: 0,
@@ -1571,10 +1681,20 @@ impl<S> EditDraft<S> {
             .revision
             .checked_add(1)
             .ok_or(EditDraftError::RevisionExhausted)?;
-        // Bump before touching the spool: a failed pwrite may leave partial
-        // bytes, so the revision must not keep vouching for the old contents.
-        state.revision = next_revision;
-        state.ensure_spool(&self.storage)?.write_at(offset, bytes)
+        // A quota or offset refusal happens before any byte moves, so it
+        // changes nothing and keeps the revision. A backing failure can leave
+        // a partial pwrite, so it advances the revision rather than vouch for
+        // the old contents.
+        let result = state
+            .ensure_spool(&self.storage)
+            .and_then(|spool| spool.write_at(offset, bytes));
+        if !matches!(
+            result,
+            Err(EditDraftError::QuotaExceeded | EditDraftError::OffsetOverflow)
+        ) {
+            state.revision = next_revision;
+        }
+        result
     }
 
     /// Changes the candidate length. Extending creates zero-filled holes.
@@ -1594,8 +1714,13 @@ impl<S> EditDraft<S> {
             .revision
             .checked_add(1)
             .ok_or(EditDraftError::RevisionExhausted)?;
-        state.revision = next_revision;
-        state.ensure_spool(&self.storage)?.set_len(length)
+        let result = state
+            .ensure_spool(&self.storage)
+            .and_then(|spool| spool.set_len(length));
+        if result.is_ok() {
+            state.revision = next_revision;
+        }
+        result
     }
 
     pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
@@ -1666,7 +1791,7 @@ impl<S> EditDraft<S> {
             }
             ActivationDecision::Rejected(diagnostic) => {
                 state
-                    .retain_rejection(revision, diagnostic)
+                    .retain_rejection_with(revision, bytes, diagnostic)
                     .map_err(FsyncFailure::Backing)?;
                 Ok(FsyncOutcome::Rejected(diagnostic))
             }
@@ -4201,39 +4326,28 @@ mod tests {
         );
     }
 
-    /// Resident set size of this process in bytes (Linux `/proc/self/statm`).
-    fn resident_bytes() -> u64 {
-        let statm = std::fs::read_to_string("/proc/self/statm").expect("read statm");
-        let pages: u64 = statm
-            .split_whitespace()
-            .nth(1)
-            .expect("resident field")
-            .parse()
-            .expect("resident page count");
-        // statm counts pages; 4 KiB on every supported (x86_64) Linux target.
-        pages * 4096
-    }
-
+    /// A 256 MiB sparse write allocates only the blocks it touches. This reads
+    /// the spool file's own block count, not process RSS, so it cannot flake
+    /// on other tests in the binary.
     #[tokio::test]
-    async fn sparse_write_near_draft_bound_keeps_candidate_off_the_heap() {
+    async fn sparse_write_near_draft_bound_stays_sparse_on_disk() {
+        use std::os::unix::fs::{FileExt as _, MetadataExt as _};
         const BOUND: usize = 256 << 20;
-        const SLACK: u64 = 128 << 20;
-        let draft = EditDraft::open(fixture_image(), BOUND, DraftStorage::with_default_quota());
-        let before = resident_bytes();
+        let quota = Arc::new(DraftQuota::new(1 << 30));
+        let storage = DraftStorage::new(&std::env::temp_dir(), quota);
+        let draft = EditDraft::open(fixture_image(), BOUND, storage);
         draft.write_at(BOUND as u64 - 1, &[0x58]).await.unwrap();
-        let grown = resident_bytes().saturating_sub(before);
+        let state = draft.state.lock().await;
+        let spool = state.candidate.as_ref().expect("spool");
+        assert_eq!(spool.len, BOUND as u64);
+        let allocated = spool.file.metadata().unwrap().blocks() * 512;
         assert!(
-            grown < SLACK,
-            "a sparse 256 MiB candidate grew the resident set by {grown} bytes"
+            allocated < 1 << 20,
+            "a sparse 256 MiB candidate allocated {allocated} bytes on disk"
         );
-        let candidate = draft.candidate_bytes().await.unwrap();
-        assert_eq!(candidate.len(), BOUND);
-        assert_eq!(candidate[BOUND - 1], 0x58);
-        // Bytes before the write keep the baseline contents, as in the original path.
-        assert_eq!(
-            candidate[0],
-            include_bytes!("../tests/fixtures/publication-repository-main.orna")[0]
-        );
+        let mut last = [0u8; 1];
+        spool.file.read_exact_at(&mut last, BOUND as u64 - 1).unwrap();
+        assert_eq!(last, [0x58]);
     }
 
     #[tokio::test]
@@ -4251,6 +4365,77 @@ mod tests {
         first.truncate(0).await.unwrap();
         second.write_at(0, &[0x59]).await.unwrap();
         assert_eq!(second.candidate_bytes().await.unwrap()[0], 0x59);
+    }
+
+    /// Growth is what the quota refuses. The baseline is charged on the first
+    /// write; a growth larger than the remaining room returns EDQUOT and
+    /// changes nothing: no content, no revision, no charge.
+    #[tokio::test]
+    async fn growth_refused_by_quota_changes_nothing() {
+        let baseline_len = fixture_image().bytes.len() as u64;
+        let quota = Arc::new(DraftQuota::new(baseline_len + 16));
+        let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
+        let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
+        draft.write_at(0, &[0x58]).await.unwrap();
+        assert_eq!(quota.used.load(Ordering::Acquire), baseline_len);
+
+        let revision = draft.state.lock().await.revision;
+        let before = draft.candidate_bytes().await.unwrap();
+        assert_eq!(
+            draft.write_at(baseline_len, &[0x59; 32]).await,
+            Err(EditDraftError::QuotaExceeded)
+        );
+        assert_eq!(draft.state.lock().await.revision, revision);
+        assert_eq!(draft.candidate_bytes().await.unwrap(), before);
+        assert_eq!(quota.used.load(Ordering::Acquire), baseline_len);
+
+        // The room that remains is usable: a growth that fits is accepted.
+        draft.write_at(baseline_len, &[0x59; 16]).await.unwrap();
+        assert_eq!(quota.used.load(Ordering::Acquire), baseline_len + 16);
+    }
+
+    /// Several drafts edited at once stay within the 1 GiB default limit when
+    /// each grows to a 64 MiB compact file: 8 * 64 MiB = 512 MiB.
+    #[tokio::test]
+    async fn several_drafts_edit_within_the_default_limit() {
+        const BOUND: usize = 64 << 20;
+        let quota = Arc::new(DraftQuota::new(1 << 30));
+        let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
+        let mut drafts = Vec::new();
+        for index in 0..8u8 {
+            let draft = EditDraft::open(fixture_image(), BOUND, storage.clone());
+            draft.write_at(BOUND as u64 - 1, &[index + 1]).await.unwrap();
+            drafts.push(draft);
+        }
+        assert_eq!(quota.used.load(Ordering::Acquire), 8 * BOUND as u64);
+        drop(drafts);
+        assert_eq!(quota.used.load(Ordering::Acquire), 0);
+    }
+
+    /// A retained rejected draft is quota accounted (profiles/vfs-1.md): its
+    /// copy adds to the aggregate charge while held, and the charge is released
+    /// when the draft drops.
+    #[tokio::test]
+    async fn retained_rejected_draft_is_charged_and_released() {
+        let baseline_len = fixture_image().bytes.len() as u64;
+        let quota = Arc::new(DraftQuota::new(1 << 20));
+        let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
+        let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
+        draft.write_at(0, &[0x58]).await.unwrap();
+        let revision = draft.state.lock().await.revision;
+        let used_before = quota.used.load(Ordering::Acquire);
+        draft
+            .state
+            .lock()
+            .await
+            .retain_rejection(revision, rejected())
+            .unwrap();
+        assert_eq!(
+            quota.used.load(Ordering::Acquire) - used_before,
+            baseline_len
+        );
+        drop(draft);
+        assert_eq!(quota.used.load(Ordering::Acquire), 0);
     }
 
     #[tokio::test]
