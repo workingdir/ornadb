@@ -219,10 +219,7 @@ async fn read_handle_opened_before_temp_rename_keeps_old_bytes() {
 /// F2 finding (ornadb-5il1.466): a read handle opened before an owner-routed
 /// `orna edit`, then a temp created after that edit. 41-vfs.md:67-68: the temp's
 /// creation captures the row's current baseline, so its rename must succeed. The
-/// mount currently keeps the pre-edit baseline and refuses the rename with EAGAIN.
-/// This test asserts the spec outcome and stays ignored until that is fixed. The
 /// read handle opened before the owner edit keeps its generation (EDIT-1).
-#[ignore = "ornadb-5il1.466: stale mount baseline refuses a post-edit temp with EAGAIN (41-vfs.md:67-68)"]
 #[tokio::test]
 async fn read_handle_across_owner_edit_temp_created_after_it_renames_f2() {
     if !require_fuse_or_skip() {
