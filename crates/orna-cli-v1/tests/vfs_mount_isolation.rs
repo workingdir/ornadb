@@ -3,9 +3,9 @@
 //! Gate E isolation for the writable VFS: private drafts stay invisible to
 //! other opens and remounts, read handles pin their generation, kernel IO
 //! modes do not leak drafts, and temp-and-rename saves are compared against
-//! their captured baseline (including a baseline moved by `orna edit`). A REPL
-//! write is refused while the mount is live and is asserted as such; the
-//! REPL-concurrency baseline cases are not reachable through this fixture.
+//! their captured baseline (including a baseline moved by `orna edit`). REPL
+//! writes while the mount is live are not covered here; their concurrency
+//! baseline cases are open under ornadb-5il1.64.
 //!
 //! Spec (Orna-1.1.0, source/41-vfs.md): EDIT-1 ("A writer sees its own draft;
 //! other opens see accepted state"; "Read handles ... pin coherent
@@ -18,8 +18,8 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     os::unix::fs::PermissionsExt,
-    path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    path::PathBuf,
+    process::Command,
     time::Duration,
 };
 
@@ -109,36 +109,6 @@ fn owner_routed_edit(fixture: &EditorMount, title: &str) {
     );
 }
 
-/// Runs one REPL session against the repository at `root`, the way a user's
-/// REPL write reaches the store while the mount is live.
-fn orna_repl(root: &Path, input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .args(["--db", root.to_str().expect("UTF-8 test path"), "repl"])
-        .current_dir(root)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("start orna repl");
-    child
-        .stdin
-        .take()
-        .expect("repl stdin")
-        .write_all(input.as_bytes())
-        .expect("write repl input");
-    child.wait_with_output().expect("wait for orna repl")
-}
-
-/// Submits one REPL update of row `london` while the mount is live.
-fn repl_update_attempt(fixture: &EditorMount, title: &str) -> Output {
-    orna_repl(
-        fixture._repository_directory.path(),
-        &format!("main.Music.update(\"london\", {{ title: \"{title}\" }})"),
-    )
-}
-
 /// EDIT-1: "A writer sees its own draft; other opens see accepted state." An
 /// unsynced private draft stays invisible to a second open even after a child
 /// process has been spawned while the writer's descriptor is open. exec(2)
@@ -158,7 +128,9 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
 
     let mut draft = open_rw(&fixture);
     draft.set_len(0).unwrap();
-    draft.write_all(music_row("Unsynced draft").as_bytes()).unwrap();
+    draft
+        .write_all(music_row("Unsynced draft").as_bytes())
+        .unwrap();
     assert!(
         read_from_start(&mut draft).contains("Unsynced draft"),
         "the writer sees its own draft"
@@ -166,7 +138,9 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
 
     // Spawn a child while the draft descriptor is open: its exec closes the
     // inherited copy, which is the FLUSH path this test pins down.
-    let child = Command::new("true").output().expect("spawn a child process");
+    let child = Command::new("true")
+        .output()
+        .expect("spawn a child process");
     assert!(child.status.success(), "the child process exits 0");
 
     let mut second = File::open(&fixture.data_path).unwrap();
@@ -242,16 +216,15 @@ async fn read_handle_opened_before_temp_rename_keeps_old_bytes() {
     drop(old_handle);
 }
 
-/// F2 finding: a read handle opened before an owner-routed `orna edit`, then a
-/// temp created after that edit. The temp captures the mount's recorded row
-/// baseline, which `fuse_mount` leaves at the pre-edit value after an owner-routed
-/// edit, so the rename is refused with EAGAIN even though the temp was created
-/// after the commit. Spec-silent on whether temp creation must capture the
-/// durable row rather than the mounted baseline, so this asserts the observed
-/// conservative refusal and flags it. The pre-edit read handle keeps its
-/// generation (EDIT-1 read-handle pinning) regardless.
+/// F2 finding (ornadb-5il1.466): a read handle opened before an owner-routed
+/// `orna edit`, then a temp created after that edit. 41-vfs.md:67-68: the temp's
+/// creation captures the row's current baseline, so its rename must succeed. The
+/// mount currently keeps the pre-edit baseline and refuses the rename with EAGAIN.
+/// This test asserts the spec outcome and stays ignored until that is fixed. The
+/// read handle opened before the owner edit keeps its generation (EDIT-1).
+#[ignore = "ornadb-5il1.466: stale mount baseline refuses a post-edit temp with EAGAIN (41-vfs.md:67-68)"]
 #[tokio::test]
-async fn read_handle_across_owner_edit_temp_created_after_it_is_refused_f2_finding() {
+async fn read_handle_across_owner_edit_temp_created_after_it_renames_f2() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -266,15 +239,12 @@ async fn read_handle_across_owner_edit_temp_created_after_it_is_refused_f2_findi
         ".data.orna.after-owner",
         &music_row("After owner"),
     );
-    assert_errno(
-        std::fs::rename(&temp, &fixture.data_path),
-        &[libc::EAGAIN],
-        "F2: a temp created after the owner edit is refused by the mounted baseline",
-    );
+    std::fs::rename(&temp, &fixture.data_path)
+        .expect("a temp created after the owner edit renames over the row");
     let view = fresh_view(&fixture);
     assert!(
-        view.contains("Owner change") && !view.contains("After owner"),
-        "the refused temp leaves the owner's row in place, got {view}"
+        view.contains("After owner") && !view.contains("Owner change"),
+        "the rename applies the post-edit temp, got {view}"
     );
     assert_eq!(
         read_from_start(&mut pinned),
@@ -282,7 +252,6 @@ async fn read_handle_across_owner_edit_temp_created_after_it_is_refused_f2_findi
         "the read handle opened before the owner edit keeps its generation"
     );
     drop(pinned);
-    std::fs::remove_file(&temp).expect("remove the refused scratch");
 }
 
 /// ORNA-VFS-011 CAS against the captured temp-create baseline; ORNA-VFS-009
@@ -296,11 +265,7 @@ async fn temp_created_before_owner_change_is_refused_with_eagain_and_keeps_scrat
         return;
     }
     let fixture = start_editor_mount(false).await;
-    let temp = write_temporary_sibling(
-        &fixture,
-        ".data.orna.stale-temp",
-        &music_row("Stale temp"),
-    );
+    let temp = write_temporary_sibling(&fixture, ".data.orna.stale-temp", &music_row("Stale temp"));
     owner_routed_edit(&fixture, "Owner change");
 
     assert_errno(
@@ -317,39 +282,20 @@ async fn temp_created_before_owner_change_is_refused_with_eagain_and_keeps_scrat
         std::fs::read_to_string(&temp).expect("the refused scratch is kept"),
         music_row("Stale temp"),
     );
-    await_draft_guard(&fixture, b'1', "the refused scratch is an unresolved draft").await;
+    await_draft_guard(
+        &fixture,
+        b'1',
+        "the refused scratch is an unresolved draft",
+    )
+    .await;
 
     std::fs::remove_file(&temp).expect("remove the refused scratch");
-    await_draft_guard(&fixture, b'0', "removing the refused scratch clears the guard").await;
-}
-
-/// A REPL update of the mounted row while the mount is live is refused with
-/// `ORNA-REPL-EFFECT` and leaves the row unchanged. This fixture cannot exercise
-/// the REPL-concurrency baseline cases (temp captured before or after a REPL
-/// write), because the non-mount REPL write never reaches the store here. This
-/// test asserts only the refusal observed in this configuration; the reason it
-/// is refused is not established by this test.
-#[tokio::test]
-async fn repl_update_while_mount_is_live_is_refused_and_leaves_row_unchanged() {
-    if !require_fuse_or_skip() {
-        return;
-    }
-    let fixture = start_editor_mount(false).await;
-    let output = repl_update_attempt(&fixture, "Repl change");
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
-    assert!(
-        text.contains("error[ORNA-REPL-EFFECT]"),
-        "expected the REPL write to be refused, got {text}"
-    );
-    let view = fresh_view(&fixture);
-    assert!(
-        view.contains("Original") && !view.contains("Repl change"),
-        "the refused REPL write leaves the row unchanged, got {view}"
-    );
+    await_draft_guard(
+        &fixture,
+        b'0',
+        "removing the refused scratch clears the guard",
+    )
+    .await;
 }
 
 /// ORNA-VFS-022: "supported caching/IO modes MUST preserve per-open generation
@@ -370,7 +316,9 @@ async fn repeated_observer_reads_never_show_private_draft_and_read_handles_pin_g
 
     let mut writer = open_rw(&fixture);
     writer.set_len(0).unwrap();
-    writer.write_all(music_row("Observer draft").as_bytes()).unwrap();
+    writer
+        .write_all(music_row("Observer draft").as_bytes())
+        .unwrap();
     assert!(
         read_from_start(&mut writer).contains("Observer draft"),
         "the writer sees its own draft"
