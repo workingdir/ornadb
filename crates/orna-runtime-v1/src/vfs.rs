@@ -3928,6 +3928,37 @@ mod tests {
         assert_ne!(draft.candidate_bytes().await.as_ref(), original.as_slice());
     }
 
+    /// Resident set size of this process in bytes (Linux `/proc/self/statm`).
+    fn resident_bytes() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("read statm");
+        let pages: u64 = statm
+            .split_whitespace()
+            .nth(1)
+            .expect("resident field")
+            .parse()
+            .expect("resident page count");
+        // statm counts pages; 4 KiB on every supported (x86_64) Linux target.
+        pages * 4096
+    }
+
+    #[tokio::test]
+    async fn sparse_write_near_draft_bound_keeps_candidate_off_the_heap() {
+        const BOUND: usize = 256 << 20;
+        const SLACK: u64 = 128 << 20;
+        let draft = EditDraft::open(fixture_image(), BOUND);
+        let before = resident_bytes();
+        draft.write_at(BOUND as u64 - 1, &[0x58]).await.unwrap();
+        let grown = resident_bytes().saturating_sub(before);
+        assert!(
+            grown < SLACK,
+            "a sparse 256 MiB candidate grew the resident set by {grown} bytes"
+        );
+        let candidate = draft.candidate_bytes().await;
+        assert_eq!(candidate.len(), BOUND);
+        assert_eq!(candidate[BOUND - 1], 0x58);
+        assert_eq!(candidate[0], 0);
+    }
+
     #[tokio::test]
     async fn stat_reports_accepted_size_pin_and_generation_and_hides_unlinked() {
         let image = fixture_image();
