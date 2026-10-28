@@ -421,7 +421,7 @@ async fn stale_refusal_resolved_by_later_peer_accept_leaves_guard_clear_on_drop(
 }
 
 /// ORNA-VFS-009, EDIT-1 step 5: a dirty valid draft that unmount retention keeps
-/// is recovery data only. The durable row is read before retention, because
+/// is recovery data only. The accepted view is read before retention, because
 /// retention quiesces the mount and later opens are refused. Closing the
 /// retained handle leaves the candidate in recovery storage: retention cleared
 /// the unresolved handle, so the close path has no candidate to commit.
@@ -433,9 +433,14 @@ async fn retained_dirty_draft_is_not_accepted_by_close() {
     let fixture = start_editor_mount(false).await;
     let mut file = open_rw(&fixture);
     replace_draft(&mut file, &row("Retained unsynced"));
+    // A close-time FLUSH (EDIT-1 step 5) may accept the dirty candidate at any
+    // time, including the close a child spawned by another test in this process
+    // performs at exec (ornadb-rw8g). Before retention the view is therefore one
+    // complete candidate and nothing else.
+    let before_retention = fresh_view(&fixture);
     assert!(
-        fresh_view(&fixture).contains("Original"),
-        "the durable row is unchanged before retention",
+        before_retention.contains("Original") || before_retention.contains("Retained unsynced"),
+        "the accepted view is one complete candidate before retention: {before_retention:?}",
     );
     retain_drafts(&fixture).expect("a valid dirty draft is retained");
     assert!(
