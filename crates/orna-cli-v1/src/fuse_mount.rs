@@ -2292,6 +2292,8 @@ struct DraftState {
     dirty_handles: HashSet<u64>,
     /// Write-open Blob handles, keyed by handle number.
     blob_handles: HashMap<u64, BlobHandle>,
+    /// Pid that opened each writable handle; a FLUSH from another process is not the writer's close.
+    writer_owners: HashMap<u64, u32>,
 }
 
 impl DraftState {
@@ -3581,7 +3583,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
     }
 
-    fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
+    fn open(&self, request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
         // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
         // without truncating or replacing the blob. EPERM is the unsupported-mutation
@@ -3767,6 +3769,9 @@ impl Filesystem for WorkspaceFilesystem {
             if truncate_size.is_some() {
                 draft_state.pending_truncates.remove(&inode.0);
             }
+            if write_mode {
+                draft_state.writer_owners.insert(handle, request.pid());
+            }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
@@ -3790,11 +3795,14 @@ impl Filesystem for WorkspaceFilesystem {
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
+        if write_mode {
+            draft_state.writer_owners.insert(handle, request.pid());
+        }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
     fn create(
         &self,
-        _request: &Request,
+        request: &Request,
         parent: INodeNo,
         name: &OsStr,
         _mode: u32,
@@ -3806,7 +3814,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
-        let draft_state = self
+        let mut draft_state = self
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3905,6 +3913,7 @@ impl Filesystem for WorkspaceFilesystem {
             (attr, save, target, scratch, blob_field)
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        draft_state.writer_owners.insert(handle, request.pid());
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4547,7 +4556,7 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn flush(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         handle: fuser::FileHandle,
         _lock_owner: fuser::LockOwner,
@@ -4564,8 +4573,24 @@ impl Filesystem for WorkspaceFilesystem {
             reply.ok();
             return;
         }
+        // The kernel issues FLUSH when an inherited copy of this descriptor is
+        // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
+        // While quiescing, a FLUSH on a dirty handle fails with EBUSY from any
+        // process, so the close reports that the draft was not accepted.
         if draft_state.quiescing {
             reply.error(Errno::EBUSY);
+            return;
+        }
+        // PR policy (not EDIT-1 step 5 text): a FLUSH from a process other than the
+        // one that opened the handle acknowledges without accepting the draft; the
+        // opener's own close is the close-time commit. The opener pid is recorded at
+        // open, so a later writer cannot move the gate to itself.
+        if draft_state
+            .writer_owners
+            .get(&handle.0)
+            .is_some_and(|writer| *writer != request.pid())
+        {
+            reply.ok();
             return;
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
@@ -4623,6 +4648,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .track_blob_release(generation);
         }
         draft_state.dirty_handles.remove(&handle.0);
+        draft_state.writer_owners.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
@@ -4639,7 +4665,7 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn setattr(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -4691,6 +4717,8 @@ impl Filesystem for WorkspaceFilesystem {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .nodes
                         .contains_key(&inode.0);
+                // Keep the pid recorded at open(); or_insert covers handles without one.
+                draft_state.writer_owners.entry(handle.0).or_insert(request.pid());
                 if is_tracked {
                     draft_state.unresolved_handles.insert(handle.0, inode.0);
                     if is_scratch {
