@@ -628,6 +628,27 @@ const VIEW_CHECK_TICKS: u32 = 8;
 #[cfg(target_os = "linux")]
 const VIEW_DETACHED: &str = "its view was unmounted";
 
+/// Unmounts a quiesced live mount, retrying while the kernel reports it busy.
+///
+/// A file closed just before unmount can still be held by its pending FUSE
+/// release, so `fusermount -u` may fail with EBUSY for a short moment. The
+/// mount is quiesced and kept attached meanwhile; a retry only repeats the
+/// same unmount request.
+#[cfg(target_os = "linux")]
+fn unmount_with_busy_retry(mountpoint: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
+    loop {
+        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        std::thread::sleep(SIGNAL_UNMOUNT_RETRY);
+    }
+}
+
 /// Unmounts a live FUSE session after a termination signal.
 ///
 /// The session keeps serving requests while this retries, so a transient holder
@@ -942,7 +963,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     let unmount_error = if dead {
                         crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
                     } else {
-                        crate::fuse_mount::unmount_mountpoint(&mountpoint)
+                        unmount_with_busy_retry(&mountpoint)
                     }
                     .err();
                     let remaining = mounted_mount_for_path(&mountpoint)?;
