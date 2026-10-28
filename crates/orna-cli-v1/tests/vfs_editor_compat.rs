@@ -65,11 +65,15 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(std::fs::read_to_string(&data_path).unwrap().contains("In place"));
 
 
+    // 41-vfs.md Temporary-save replacement: an unknown sibling is private scratch. Its creation is
+    // accepted, but it only becomes a row save through a rename onto data.orna, so the row is untouched.
     let arbitrary = row_directory.join("unrelated");
+    File::create(&arbitrary).expect("an unknown sibling is accepted as private scratch");
     assert!(
-        File::create(&arbitrary).is_err(),
-        "an arbitrary sibling create must not become a row-save candidate",
+        std::fs::read_to_string(&data_path).unwrap().contains("In place"),
+        "creating an unrelated scratch must not change the row",
     );
+    std::fs::remove_file(&arbitrary).expect("remove the unrelated scratch");
 
     let stale_temporary = row_directory.join(".data.orna.stale-tmp");
     let mut stale_file = OpenOptions::new()

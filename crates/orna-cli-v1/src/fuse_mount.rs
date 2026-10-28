@@ -2720,22 +2720,12 @@ impl WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft)
             }
-            Some(OpenFile::Temporary(save, target, scratch, field)) => {
-                // A Blob node's write-open accepts its candidate on fsync (EDIT-1 step 2). A
-                // scratch node only persists to the scratch store; its accept is its rename.
-                let is_blob_candidate = {
-                    let state = self
-                        .state
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    matches!(
-                        state.nodes.get(&inode.0).map(|node| &node.kind),
-                        Some(NodeKind::Blob { .. })
-                    )
-                };
-                if let (true, Some(field)) = (is_blob_candidate, field.as_ref()) {
-                    return self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, field);
-                }
+            Some(OpenFile::Temporary(save, target, scratch, Some(field)))
+                if draft_state.blob_handles.contains_key(&handle) =>
+            {
+                self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
+            }
+            Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 let state = self
                     .state
                     .lock()
