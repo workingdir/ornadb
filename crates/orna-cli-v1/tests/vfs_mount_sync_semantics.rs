@@ -538,8 +538,12 @@ async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_
     );
 }
 
-/// ORNA-VFS-008: writes after a successful sync form a new candidate; only the
-/// next sync acknowledges them.
+/// ORNA-VFS-008: writes after a successful sync form a new candidate; the next
+/// sync acknowledges it. A close-time flush may accept a dirty candidate at any
+/// time (EDIT-1 step 5). The kernel sends it for every close of the open file
+/// description, including the close a child spawned by another test in this
+/// process performs when it execs, so before the next sync the accepted view is
+/// either candidate and nothing else.
 #[tokio::test]
 async fn writes_after_sync_start_a_new_candidate_until_the_next_sync() {
     if !require_fuse_or_skip() {
@@ -555,13 +559,11 @@ async fn writes_after_sync_start_a_new_candidate_until_the_next_sync() {
         read_own_draft(&mut file).contains("After second"),
         "the writing handle sees its own new candidate",
     );
-    let accepted = fresh_view(&fixture);
-    assert!(accepted.contains("After first"));
+    let before_sync = fresh_view(&fixture);
     assert!(
-        !accepted.contains("After second"),
-        "an unsynced write after a sync is not acknowledged",
+        before_sync.contains("After first") || before_sync.contains("After second"),
+        "the accepted view is one complete candidate: {before_sync:?}",
     );
-    assert_view_contains(&fixture, "After first");
 
     file.sync_all()
         .expect("second sync acknowledges the new candidate");
