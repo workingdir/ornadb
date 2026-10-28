@@ -1972,15 +1972,35 @@ pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
     }
 }
 
-/// The unresolved drafts of a live mount, one `path<TAB>state` line each, for
-/// an unmount refusal that names what blocks it (W15-03).
-pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
-    const NAME: &str = "user.orna.unresolved-draft-list";
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])?;
+/// One unresolved draft of a mount, as the draft-list xattrs report it.
+struct UnresolvedDraft {
+    path: String,
+    /// The `sys.*` Orna cause, or empty when the profile names none.
+    code: &'static str,
+    /// The retained draft id, or empty when no candidate was kept.
+    draft: String,
+    detail: String,
+}
+
+/// Reads one draft-list xattr of a live mount as UTF-8 text.
+fn read_draft_xattr(mountpoint: &Path, name: &str) -> Result<String, rustix::io::Errno> {
+    let length = rustix::fs::getxattr(mountpoint, name, &mut [])?;
     let mut value = vec![0_u8; length];
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)?;
+    let length = rustix::fs::getxattr(mountpoint, name, &mut value)?;
     value.truncate(length);
     String::from_utf8(value).map_err(|_| rustix::io::Errno::IO)
+}
+
+/// The unresolved drafts of a live mount, one `path<TAB>detail` line each, for
+/// an unmount refusal that names what blocks it (W15-03).
+pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-list")
+}
+
+/// The unresolved drafts of a live mount, one `path<TAB>code<TAB>draft<TAB>detail`
+/// line each, for `mount status`.
+pub(super) fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-fields")
 }
 
 /// Why stop-time draft retention did not finish (ORNA-VFS-024).
@@ -2745,12 +2765,9 @@ impl WorkspaceFilesystem {
         failure
     }
 
-    /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, for an
-    /// unmount refusal and `mount status`. `code` is the `sys.*` Orna cause and
-    /// `draft` the retained draft id; each is empty when the draft has none (a
-    /// cause the profile does not name, or a candidate that was not retained).
-    fn unresolved_draft_report(&self) -> String {
-        const LISTED: usize = 64;
+    /// The unresolved drafts of this mount, one per path. Both draft-list xattrs
+    /// render these, so the unmount refusal and `mount status` name the same drafts.
+    fn unresolved_drafts(&self) -> Vec<UnresolvedDraft> {
         fn orna_cause_code(cause: &'static str) -> &'static str {
             if cause.starts_with("sys.") { cause } else { "" }
         }
@@ -2804,17 +2821,56 @@ impl WorkspaceFilesystem {
                 ("", String::new(), format!("truncate to {size} bytes not synced"))
             });
         }
-        let mut lines = unresolved
-            .iter()
-            .map(|(inode, (code, draft, detail))| {
-                format!("{}\t{code}\t{draft}\t{detail}", state.display_path(*inode))
-            })
-            .collect::<Vec<_>>();
+        let mut drafts = Vec::with_capacity(unresolved.len());
+        for (inode, (code, draft, detail)) in unresolved {
+            drafts.push(UnresolvedDraft {
+                path: state.display_path(inode),
+                code,
+                draft,
+                detail,
+            });
+        }
+        drafts
+    }
+
+    /// One `path<TAB>detail` line per unresolved draft, for an unmount refusal.
+    fn unresolved_draft_report(&self) -> String {
+        self.render_unresolved_drafts(
+            |draft| format!("{}\t{}", draft.path, draft.detail),
+            |more| format!("…\t{more} more unresolved drafts"),
+        )
+    }
+
+    /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, for
+    /// `mount status`. `code` is the `sys.*` Orna cause and `draft` the retained
+    /// draft id; each is empty when the draft has none (a cause the profile does
+    /// not name, or a candidate that was not retained).
+    fn unresolved_draft_fields(&self) -> String {
+        self.render_unresolved_drafts(
+            |draft| {
+                format!(
+                    "{}\t{}\t{}\t{}",
+                    draft.path, draft.code, draft.draft, draft.detail
+                )
+            },
+            |more| format!("…\t\t\t{more} more unresolved drafts"),
+        )
+    }
+
+    /// Renders the drafts as sorted lines, listing at most 64 and counting the rest
+    /// on one final line that `omitted` formats.
+    fn render_unresolved_drafts(
+        &self,
+        line: impl Fn(&UnresolvedDraft) -> String,
+        omitted: impl Fn(usize) -> String,
+    ) -> String {
+        const LISTED: usize = 64;
+        let mut lines: Vec<String> = self.unresolved_drafts().iter().map(line).collect();
         lines.sort();
         if lines.len() > LISTED {
             let more = lines.len() - LISTED;
             lines.truncate(LISTED);
-            lines.push(format!("…\t\t\t{more} more unresolved drafts"));
+            lines.push(omitted(more));
         }
         lines.join("\n")
     }
@@ -2970,6 +3026,7 @@ impl Filesystem for WorkspaceFilesystem {
                 }
             }
             Some("user.orna.unresolved-draft-list") => self.unresolved_draft_report().into_bytes(),
+            Some("user.orna.unresolved-draft-fields") => self.unresolved_draft_fields().into_bytes(),
             _ => {
                 reply.error(Errno::ENODATA);
                 return;
