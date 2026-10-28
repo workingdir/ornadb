@@ -179,6 +179,20 @@ async fn commit_capture_inner(
         crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
     }
 }
+/// Source row id for a fixture ordinal. Ordinals below 256 keep the encoding
+/// every existing caller was written against: byte 0 is `1`, every other byte
+/// is the ordinal, so their ids are unchanged. Ordinal bits 8..14 sit above a
+/// marker bit in byte 0; ids from 256 never equal an id below 256.
+pub fn source_row_id_for_ordinal(ordinal: u16) -> [u8; 16] {
+    assert!(
+        ordinal < 0x8000,
+        "fixture ordinal {ordinal} exceeds the 15-bit source id encoding"
+    );
+    let mut id = [ordinal as u8; 16];
+    id[0] = 1 | (((ordinal >> 8) as u8) << 1);
+    id
+}
+
 /// One source row's named Blob captures and whether publication inserts or replaces it.
 ///
 /// `source_row` is the row's complete source document. Format 3 keeps rows
@@ -257,10 +271,7 @@ pub async fn commit_source_captures_for_table(
                 .expect("accept the captured Blob for this row");
             blob_fields.push(((*field_name).to_owned(), blob_binding));
         }
-        // Keep source ids non-zero while preserving every 16-bit fixture ordinal.
-        let mut source_row_id = [capture.ordinal as u8; 16];
-        source_row_id[0] = 0x80 | (capture.ordinal >> 8) as u8;
-        source_row_id[1] = capture.ordinal as u8;
+        let source_row_id = source_row_id_for_ordinal(capture.ordinal);
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
@@ -443,10 +454,7 @@ pub async fn commit_source_replacement_through_save_admission(
             .expect("accept the captured Blob for this row");
         blob_fields.push(((*field_name).to_owned(), blob_binding));
     }
-    // Keep source ids non-zero while preserving every 16-bit fixture ordinal.
-    let mut source_row_id = [capture.ordinal as u8; 16];
-    source_row_id[0] = 0x80 | (capture.ordinal >> 8) as u8;
-    source_row_id[1] = capture.ordinal as u8;
+    let source_row_id = source_row_id_for_ordinal(capture.ordinal);
     let admitted = admit_source_row_with_owner_fields(
         &project,
         &logical_path,
