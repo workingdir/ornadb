@@ -4367,16 +4367,22 @@ impl Filesystem for WorkspaceFilesystem {
         }
         // The kernel issues FLUSH when an inherited copy of this descriptor is
         // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
+        // While quiescing, a FLUSH on a dirty handle fails with EBUSY from any
+        // process, so the close reports that the draft was not accepted.
+        if draft_state.quiescing {
+            reply.error(Errno::EBUSY);
+            return;
+        }
         // PR policy (not EDIT-1 step 5 text): a FLUSH from a process other than the
         // one that opened the handle acknowledges without accepting the draft; the
         // opener's own close is the close-time commit. The opener pid is recorded at
         // open, so a later writer cannot move the gate to itself.
-        if draft_state.writer_owners.get(&handle.0).is_some_and(|writer| *writer != request.pid()) {
+        if draft_state
+            .writer_owners
+            .get(&handle.0)
+            .is_some_and(|writer| *writer != request.pid())
+        {
             reply.ok();
-            return;
-        }
-        if draft_state.quiescing {
-            reply.error(Errno::EBUSY);
             return;
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
@@ -4451,7 +4457,7 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn setattr(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -4503,6 +4509,8 @@ impl Filesystem for WorkspaceFilesystem {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .nodes
                         .contains_key(&inode.0);
+                // Keep the pid recorded at open(); or_insert covers handles without one.
+                draft_state.writer_owners.entry(handle.0).or_insert(request.pid());
                 if is_tracked {
                     draft_state.unresolved_handles.insert(handle.0, inode.0);
                     if is_scratch {
