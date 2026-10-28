@@ -1029,7 +1029,7 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
         .iter()
         .zip(&blob_fields)
         .zip(&documents)
-        .zip(0xa0_u8..)
+        .zip(0xa0_u16..)
         .map(|(((&(key, _, _), fields), document), ordinal)| media_commit::SourceCaptureRow {
             key,
             blob_fields: fields,
