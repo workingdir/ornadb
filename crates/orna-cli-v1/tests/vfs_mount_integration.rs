@@ -2102,6 +2102,202 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     assert!(!mountinfo_contains(&mountpoint));
     assert!(repository.mount_status().unwrap().is_empty());
 }
+
+/// A stat without a handle reports the size of the open writer's candidate (profiles/vfs-1 stat clause).
+#[tokio::test]
+async fn cwd_mount_stat_while_open_reports_writer_size() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x94,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    let candidate = "{ title: \"writer candidate is longer than the accepted row\", }\n";
+    let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
+    document.write_all(candidate.as_bytes()).unwrap();
+    // Entry and attribute TTLs are zero, so this path stat reaches the mount without a handle.
+    assert_eq!(
+        std::fs::metadata(&data_path).unwrap().len(),
+        candidate.len() as u64
+    );
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+
+/// A path truncate after an unsynced draft was released retains the truncated latest candidate, not the accepted baseline.
+#[tokio::test]
+async fn cwd_mount_truncate_after_close_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(false).await;
+}
+
+#[tokio::test]
+async fn cwd_mount_truncate_after_release_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(true).await;
+}
+
+async fn truncate_after_close_keeps_unsynced_writes(release_barrier: bool) {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x95,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    // Released without fsync: the candidate is retained as a draft and not accepted.
+    let candidate = "{ title: \"unsynced writes kept\", }\n";
+    let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
+    document.write_all(candidate.as_bytes()).unwrap();
+    drop(document);
+    if release_barrier {
+        // RELEASE is delivered asynchronously; let the closed writer's candidate be
+        // retained before the path truncate, so the truncate meets the released draft.
+        thread::sleep(Duration::from_millis(500));
+    }
+    let truncated = Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], 13)"])
+        .arg(&data_path)
+        .output()
+        .expect("run path-based truncate");
+    assert!(
+        truncated.status.success(),
+        "path-based truncate failed: {}",
+        String::from_utf8_lossy(&truncated.stderr)
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run pending path-truncate unmount");
+    assert!(!refused.status.success(), "pending path truncate was discarded");
+    assert!(mountinfo_contains(&mountpoint));
+    // Records are written only when the mount process stops (ORNA-VFS-024), so stop it and inspect the store.
+    let signal = Command::new("kill")
+        .args(["-TERM", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to mount child");
+    assert!(signal.success(), "kill -TERM failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stop_stderr = take_child_stderr(&mut mounted.child);
+    assert!(!status.success(), "mount stopped with unresolved drafts must exit non-zero");
+    assert!(
+        stop_stderr.contains("sys.vfs.draft_retained") && stop_stderr.contains("Music/london/data.orna"),
+        "stop reports the retained draft: {stop_stderr}"
+    );
+
+    // The truncate applies to the unsynced candidate: its first 13 bytes are retained.
+    let records_of = || -> Vec<String> {
+        let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+        match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.expect("list retained draft").path())
+                .filter(|path| path.is_file())
+                .map(|path| String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("list retained drafts: {error}"),
+        }
+    };
+    let records = records_of();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\nbytes 13\n") && record.ends_with("{ title: \"uns")),
+        "truncated unsynced candidate was not retained: {records:?}"
+    );
+}
+
 #[tokio::test]
 /// ORNA-VFS-024: a rejected Document draft survives close and still blocks unmount until accepted.
 async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
