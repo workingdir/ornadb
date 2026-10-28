@@ -2015,6 +2015,8 @@ struct DraftState {
     quiescing: bool,
     /// Handles whose latest write has not been accepted (per-handle dirty bit).
     dirty_handles: HashSet<u64>,
+    /// Write-open Blob handles, keyed by handle number.
+    blob_handles: HashMap<u64, BlobHandle>,
 }
 
 impl DraftState {
@@ -2036,6 +2038,13 @@ impl DraftState {
             }
         }
     }
+}
+
+/// A write-open Blob handle's candidate generation and the row baseline it captured at open
+/// (ORNA-VFS-011). The baseline advances to the accepted row after each accept (41-vfs.md EDIT-1 step 3).
+struct BlobHandle {
+    generation: u64,
+    baseline: Option<Vec<u8>>,
 }
 
 /// Decides the acknowledgement for a commit that found no candidate. A clean
@@ -2417,8 +2426,9 @@ impl WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft)
             }
-            Some(OpenFile::Temporary(save, target, scratch, Some(field))) => self
-                .commit_blob_candidate(draft_state, inode.0, &save, &target, &scratch, &field),
+            Some(OpenFile::Temporary(save, target, scratch, Some(field))) => {
+                self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
+            }
             Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 let state = self
                     .state
@@ -2444,26 +2454,37 @@ impl WorkspaceFilesystem {
     }
 
     /// Accepts a Blob write-open's candidate as the row's replacement (41-vfs.md EDIT-1).
-    /// The generation an earlier accept superseded no longer accepts candidates.
+    /// The baseline is the one captured when the handle opened (ORNA-VFS-011), so an accept by a
+    /// sibling handle since then fails the row CAS and the candidate is refused. After an accept,
+    /// the handle's next candidate starts from the accepted bytes (EDIT-1 step 3).
     fn commit_blob_candidate(
         &self,
         draft_state: &mut DraftState,
-        inode: u64,
+        handle: u64,
         save: &Arc<RowSaveContext>,
         target: &Arc<ManagedFile<RowMapSnapshot>>,
         scratch: &Arc<TemporarySave<RowMapSnapshot>>,
         field: &BlobField,
     ) -> Result<(), DocumentCommitError> {
+        let Some(blob) = draft_state.blob_handles.get(&handle) else {
+            return Err(DocumentCommitError::Failed(
+                "open Blob candidate has no captured baseline".to_owned(),
+            ));
+        };
+        let inode = blob.generation;
+        let baseline = blob.baseline.clone();
         let parent = {
             let state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.superseded_blobs.contains(&inode) {
-                return Err(DocumentCommitError::NoCandidate);
-            }
             match state.nodes.get(&inode) {
-                Some(node) if matches!(node.kind, NodeKind::Blob { candidate: Some(_), .. }) => {
+                Some(node)
+                    if matches!(
+                        node.kind,
+                        NodeKind::Blob { candidate: Some(_), .. } | NodeKind::BlobBytes(_)
+                    ) =>
+                {
                     node.parent
                 }
                 // The node is gone, so there is no candidate left to accept.
@@ -2475,24 +2496,71 @@ impl WorkspaceFilesystem {
                 }
             }
         };
-        let baseline = save
-            .expected_baseline_row
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
         if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
             draft_state.rejected_scratch.insert(inode, error.cause());
             return Err(error);
         }
         let bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
-        self.state
+        let generation = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .replace_blob_generation(parent, OsStr::new(&field.file_name), inode, bytes)
+            .replace_blob_generation(parent, OsStr::new(&field.file_name), inode, Arc::clone(&bytes))
             .map_err(DocumentCommitError::Failed)?;
         // The accepted candidate is no longer draft state (same as an accepted rename).
         draft_state.retained_scratch.remove(&inode);
         draft_state.rejected_scratch.remove(&inode);
+        // The next candidate starts from the accepted bytes, and its baseline is the accepted row.
+        let accepted_baseline = save
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let next_target = save
+            .temporary_target(Some(field))
+            .map_err(DocumentCommitError::Failed)?;
+        let next_scratch = Arc::new(
+            save.writer
+                .runtime
+                .block_on(next_target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
+        );
+        if !bytes.is_empty() {
+            save.writer
+                .runtime
+                .block_on(next_scratch.write_at(0, &bytes))
+                .map_err(|error| {
+                    DocumentCommitError::Failed(format!(
+                        "next Blob candidate could not be seeded: {error:?}"
+                    ))
+                })?;
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.track_blob_open(generation);
+            state.track_blob_release(inode);
+        }
+        self.open_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                handle,
+                OpenFile::Temporary(
+                    Arc::clone(save),
+                    next_target,
+                    next_scratch,
+                    Some(field.clone()),
+                ),
+            );
+        draft_state.blob_handles.insert(
+            handle,
+            BlobHandle {
+                generation,
+                baseline: accepted_baseline,
+            },
+        );
         Ok(())
     }
 
@@ -3086,6 +3154,10 @@ impl Filesystem for WorkspaceFilesystem {
                     } else {
                         read_blob_bytes(&graph, &reference)
                     };
+                    if matches!(&initial, Ok(bytes) if bytes.len() > DRAFT_FILE_BOUND_BYTES) {
+                        reply.error(Errno::EDQUOT);
+                        return;
+                    }
                     let seeded = initial.and_then(|initial| {
                         let target = save.temporary_target(Some(&field))?;
                         let scratch = Arc::new(
@@ -3105,7 +3177,6 @@ impl Filesystem for WorkspaceFilesystem {
                     });
                     match seeded {
                         Ok((target, scratch)) => {
-                            state.track_blob_open(inode.0);
                             (save, target, Some(scratch), Some(field))
                         }
                         Err(error) => {
@@ -3165,6 +3236,25 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(draft_errno(&result));
                     return;
                 }
+            }
+            if blob_field.is_some() {
+                // The handle holds its generation and the row baseline it captured at open (ORNA-VFS-011).
+                let baseline = save
+                    .expected_baseline_row
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                self.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .track_blob_open(inode.0);
+                draft_state.blob_handles.insert(
+                    handle,
+                    BlobHandle {
+                        generation: inode.0,
+                        baseline,
+                    },
+                );
             }
             self.open_files
                 .lock()
@@ -3941,10 +4031,14 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
         if matches!(released, Some(OpenFile::Temporary(_, _, _, Some(_)))) {
+            let generation = draft_state
+                .blob_handles
+                .remove(&handle.0)
+                .map_or(inode.0, |blob| blob.generation);
             self.state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .track_blob_release(inode.0);
+                .track_blob_release(generation);
         }
         draft_state.dirty_handles.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
