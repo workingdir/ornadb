@@ -2904,3 +2904,179 @@ async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_by
 
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): a write-mode open of a projected Blob opens a private candidate;
+/// write and fsync are accepted and the committed bytes read back.
+async fn cwd_mount_blob_write_open_accepts_write_and_fsync() {
+    let original = lcg_bytes(0x5a5a_1111_2222_3333, 96 * 1024);
+    let replacement = lcg_bytes(0x9999_8888_7777_6666, 96 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("write-mode open of a projected Blob must succeed");
+    handle
+        .write_all(&replacement)
+        .expect("write through the Blob candidate must succeed");
+    handle
+        .sync_all()
+        .expect("fsync of the Blob candidate must succeed");
+    drop(handle);
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): O_TRUNC on a projected Blob truncates the private candidate, so the
+/// file reads as empty before any write and zero-length Blob content is legal.
+async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
+    let original = lcg_bytes(0x0bad_f00d_dead_beef, 64 * 1024);
+    let replacement = lcg_bytes(0x1357_9bdf_2468_ace0, 8 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&blob_path)
+        .expect("O_TRUNC write-mode open of a projected Blob must succeed");
+    assert_eq!(
+        handle.metadata().unwrap().len(),
+        0,
+        "O_TRUNC must truncate the Blob candidate before any write"
+    );
+    handle.write_all(&replacement).unwrap();
+    handle.sync_all().unwrap();
+    drop(handle);
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-011 / EDIT-1 step 1: the expected baseline is captured when a write-open handle opens.
+/// A sibling handle that accepts first changes the row, so the older handle's fsync must be refused
+/// and the accepted bytes must stay on disk (no last-writer-wins overwrite).
+async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
+    let original = lcg_bytes(0x7777_1111_2222_3333, 32 * 1024);
+    let first = lcg_bytes(0x1111_0000_aaaa_bbbb, 32 * 1024);
+    let second = lcg_bytes(0x2222_0000_cccc_dddd, 32 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut older = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("first write-mode open must succeed");
+    let mut newer = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("second write-mode open must succeed");
+
+    newer.write_all(&first).unwrap();
+    newer.sync_all().expect("the first accept must succeed");
+    drop(newer);
+
+    older.write_all(&second).unwrap();
+    assert!(
+        older.sync_all().is_err(),
+        "a stale-baseline sibling fsync must be refused, not overwrite the accepted row"
+    );
+    drop(older);
+
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        first,
+        "the accepted bytes must remain the row content after the refused sibling"
+    );
+    // The refused candidate stays a retained draft, so unmount names it and is refused.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(row.repository_directory.path())
+        .arg("unmount")
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run orna unmount");
+    assert!(!refused.status.success(), "a retained stale blob draft must refuse unmount");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("sys.vfs.stale_edit"),
+        "unmount must name the retained stale candidate: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    drop(row);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1 step 3, profiles/vfs-1.md): after a sync is accepted on a handle, a
+/// later write on the same handle begins a new candidate from the accepted bytes and its fsync is
+/// accepted too.
+async fn cwd_mount_blob_write_after_accept_on_same_handle_begins_new_candidate() {
+    let original = lcg_bytes(0x3333_4444_5555_6666, 32 * 1024);
+    let first = lcg_bytes(0x4444_5555_6666_7777, 32 * 1024);
+    let second = lcg_bytes(0x5555_6666_7777_8888, 32 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("write-mode open of a projected Blob must succeed");
+    handle.write_all(&first).unwrap();
+    handle.sync_all().expect("the first accept must succeed");
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    handle.write_all(&second).unwrap();
+    handle
+        .sync_all()
+        .expect("a write after accept on the same handle must begin a new candidate");
+    drop(handle);
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), second);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): a read-write open of a projected Blob sees the captured bytes and
+/// its own writes coherently through the same candidate.
+async fn cwd_mount_blob_read_write_open_is_coherent() {
+    let original = lcg_bytes(0x2468_ace0_1357_9bdf, 64 * 1024);
+    let patch = lcg_bytes(0x1111_2222_3333_4444, 4 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&blob_path)
+        .expect("read-write open of a projected Blob must succeed");
+    let mut head = vec![0u8; 4 * 1024];
+    handle.read_exact(&mut head).unwrap();
+    assert_eq!(head.as_slice(), &original[..4 * 1024]);
+
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    handle.write_all(&patch).unwrap();
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut readback = vec![0u8; 4 * 1024];
+    handle.read_exact(&mut readback).unwrap();
+    assert_eq!(readback, patch, "a read after a write on one handle must see the write");
+    handle.sync_all().unwrap();
+    drop(handle);
+
+    let committed = std::fs::read(&blob_path).unwrap();
+    assert_eq!(&committed[..4 * 1024], patch.as_slice());
+    assert_eq!(&committed[4 * 1024..], &original[4 * 1024..]);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
