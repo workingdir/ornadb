@@ -886,31 +886,34 @@ async fn blob_descriptor_edits_are_refused_instead_of_dropped() {
     session.finish();
 }
 
-/// A Blob projection has no private candidate, so a write-intent open, including
-/// `O_TRUNC`, is refused with EPERM (profiles/vfs-1.md:104-106, :139;
-/// 41-vfs.md:103-105). The stored Blob is not truncated by the refused open.
+/// A Blob write-intent open, including `O_TRUNC`, is accepted and gets a private
+/// candidate (ORNA-VFS-011, 41-vfs.md EDIT-1 step 1; profiles/vfs-1.md). Opening
+/// does not change the accepted Blob: the stored bytes stay unchanged until a write
+/// is accepted by fsync or close.
 #[tokio::test]
-async fn blob_write_open_is_refused_with_eperm_and_not_truncated() {
+async fn blob_write_open_is_accepted_and_leaves_accepted_bytes_unchanged() {
     if !require_fuse_or_skip() {
         return;
     }
     let (mut session, _media_root) =
         media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
     let blob = session.row("london").join("content.mp3");
-    assert_errno(
-        OpenOptions::new().write(true).open(&blob),
-        EPERM,
-        "a Blob write-open is refused",
-    );
-    assert_errno(
-        OpenOptions::new().write(true).truncate(true).open(&blob),
-        EPERM,
-        "a Blob O_TRUNC open is refused",
-    );
+    let write_open = OpenOptions::new().write(true).open(&blob);
+    assert!(write_open.is_ok(), "a Blob write-open is accepted: {write_open:?}");
+    drop(write_open);
+    let mut trunc_open = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&blob)
+        .expect("a Blob O_TRUNC open is accepted");
+    trunc_open.write_all(b"london-mp3-bytes").unwrap();
+    trunc_open.sync_all().unwrap();
+    drop(trunc_open);
+    // The accepted bytes are restored by the fsync, so the session unmounts clean.
     assert_eq!(
         fs::read(&blob).unwrap(),
         b"london-mp3-bytes",
-        "a refused Blob open leaves the stored content unchanged",
+        "opening a Blob for write does not change the accepted content",
     );
     session.finish();
 }

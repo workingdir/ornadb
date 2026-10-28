@@ -1640,7 +1640,7 @@ impl WorkspaceFilesystem {
                 .ok_or_else(|| "edit target disappeared".to_owned())?;
             match &node.kind {
                 NodeKind::Document { save, bytes } => (Arc::clone(save), bytes.clone(), None),
-                NodeKind::Blob { graph, reference } => {
+                NodeKind::Blob { graph, reference, .. } => {
                     let parent = node.parent;
                     let graph = Arc::clone(graph);
                     let reference = reference.clone();
@@ -1668,16 +1668,7 @@ impl WorkspaceFilesystem {
                         .find(|field| field.file_name == file_name)
                         .cloned()
                         .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
-                    let scope = graph
-                        .open_read_scope()
-                        .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
-                    let length = usize::try_from(reference.content_identity().length())
-                        .map_err(|_| "Blob length is not addressable".to_owned())?;
-                    let initial = graph
-                        .read_blob_range(&reference, 0..length as u64, &scope)
-                        .map_err(|error| format!("Blob content could not be read: {error:?}"))?
-                        .bytes()
-                        .to_vec();
+                    let initial = read_blob_bytes(&graph, &reference)?;
                     let expected = save
                         .expected_baseline_row
                         .lock()
@@ -2024,6 +2015,8 @@ struct DraftState {
     quiescing: bool,
     /// Handles whose latest write has not been accepted (per-handle dirty bit).
     dirty_handles: HashSet<u64>,
+    /// Write-open Blob handles, keyed by handle number.
+    blob_handles: HashMap<u64, BlobHandle>,
 }
 
 impl DraftState {
@@ -2045,6 +2038,13 @@ impl DraftState {
             }
         }
     }
+}
+
+/// A write-open Blob handle's candidate generation and the row baseline it captured at open
+/// (ORNA-VFS-011). The baseline advances to the accepted row after each accept (41-vfs.md EDIT-1 step 3).
+struct BlobHandle {
+    generation: u64,
+    baseline: Option<Vec<u8>>,
 }
 
 /// Decides the acknowledgement for a commit that found no candidate. A clean
@@ -2426,6 +2426,9 @@ impl WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft)
             }
+            Some(OpenFile::Temporary(save, target, scratch, Some(field))) => {
+                self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
+            }
             Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 let state = self
                     .state
@@ -2448,6 +2451,117 @@ impl WorkspaceFilesystem {
                 "file handle is not open".to_owned(),
             )),
         }
+    }
+
+    /// Accepts a Blob write-open's candidate as the row's replacement (41-vfs.md EDIT-1).
+    /// The baseline is the one captured when the handle opened (ORNA-VFS-011), so an accept by a
+    /// sibling handle since then fails the row CAS and the candidate is refused. After an accept,
+    /// the handle's next candidate starts from the accepted bytes (EDIT-1 step 3).
+    fn commit_blob_candidate(
+        &self,
+        draft_state: &mut DraftState,
+        handle: u64,
+        save: &Arc<RowSaveContext>,
+        target: &Arc<ManagedFile<RowMapSnapshot>>,
+        scratch: &Arc<TemporarySave<RowMapSnapshot>>,
+        field: &BlobField,
+    ) -> Result<(), DocumentCommitError> {
+        let Some(blob) = draft_state.blob_handles.get(&handle) else {
+            return Err(DocumentCommitError::Failed(
+                "open Blob candidate has no captured baseline".to_owned(),
+            ));
+        };
+        let inode = blob.generation;
+        let baseline = blob.baseline.clone();
+        let parent = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match state.nodes.get(&inode) {
+                Some(node)
+                    if matches!(
+                        node.kind,
+                        NodeKind::Blob { candidate: Some(_), .. } | NodeKind::BlobBytes(_)
+                    ) =>
+                {
+                    node.parent
+                }
+                // The node is gone, so there is no candidate left to accept.
+                None => return Ok(()),
+                Some(_) => {
+                    return Err(DocumentCommitError::Failed(
+                        "open Blob candidate node is unavailable".to_owned(),
+                    ))
+                }
+            }
+        };
+        if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
+            draft_state.rejected_scratch.insert(inode, error.cause());
+            return Err(error);
+        }
+        let bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
+        let generation = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .replace_blob_generation(parent, OsStr::new(&field.file_name), inode, Arc::clone(&bytes))
+            .map_err(DocumentCommitError::Failed)?;
+        // The accepted candidate is no longer draft state (same as an accepted rename).
+        draft_state.retained_scratch.remove(&inode);
+        draft_state.rejected_scratch.remove(&inode);
+        // The next candidate starts from the accepted bytes, and its baseline is the accepted row.
+        let accepted_baseline = save
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let next_target = save
+            .temporary_target(Some(field))
+            .map_err(DocumentCommitError::Failed)?;
+        let next_scratch = Arc::new(
+            save.writer
+                .runtime
+                .block_on(next_target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
+        );
+        if !bytes.is_empty() {
+            save.writer
+                .runtime
+                .block_on(next_scratch.write_at(0, &bytes))
+                .map_err(|error| {
+                    DocumentCommitError::Failed(format!(
+                        "next Blob candidate could not be seeded: {error:?}"
+                    ))
+                })?;
+        }
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.track_blob_open(generation);
+            state.track_blob_release(inode);
+        }
+        self.open_files
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                handle,
+                OpenFile::Temporary(
+                    Arc::clone(save),
+                    next_target,
+                    next_scratch,
+                    Some(field.clone()),
+                ),
+            );
+        draft_state.blob_handles.insert(
+            handle,
+            BlobHandle {
+                generation,
+                baseline: accepted_baseline,
+            },
+        );
+        Ok(())
     }
 
     /// Keeps the candidate of a document released while dirty (EDIT-1 step 5).
@@ -2906,14 +3020,14 @@ impl Filesystem for WorkspaceFilesystem {
         handle: Option<fuser::FileHandle>,
         reply: ReplyAttr,
     ) {
-        let candidate_size = handle.and_then(|handle| {
+        let open_len = |handle: u64| {
             let open_file = self
                 .open_files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&handle.0)
+                .get(&handle)
                 .cloned()?;
-            let bytes = match open_file {
+            let bytes = match &open_file {
                 OpenFile::Document(save, draft) => {
                     save.writer.runtime.block_on(draft.candidate_bytes())
                 }
@@ -2922,7 +3036,34 @@ impl Filesystem for WorkspaceFilesystem {
                 }
             };
             Some(u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-        });
+        };
+        let candidate_size = match handle {
+            Some(handle) => open_len(handle.0),
+            // fstat without a handle reaches here; an open Blob candidate is the file.
+            None => {
+                let handles: Vec<u64> = self
+                    .draft_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .unresolved_handles
+                    .iter()
+                    .filter(|(_, dirty_inode)| **dirty_inode == inode.0)
+                    .map(|(handle, _)| *handle)
+                    .collect();
+                handles
+                    .into_iter()
+                    .find(|handle| {
+                        self.open_files
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .get(handle)
+                            .is_some_and(|open| {
+                                matches!(open, OpenFile::Temporary(_, _, _, Some(_)))
+                            })
+                    })
+                    .and_then(open_len)
+            }
+        };
         let state = self
             .state
             .lock()
@@ -2999,6 +3140,52 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(Arc::clone(scratch)),
                     blob_field.clone(),
                 ),
+                Some(NodeKind::Blob {
+                    graph,
+                    reference,
+                    candidate: Some(candidate),
+                }) if write_mode => {
+                    let graph = Arc::clone(graph);
+                    let reference = reference.clone();
+                    let save = Arc::clone(&candidate.save);
+                    let field = candidate.field.clone();
+                    let initial = if flags.0 & libc::O_TRUNC != 0 {
+                        Ok(Vec::new())
+                    } else {
+                        read_blob_bytes(&graph, &reference)
+                    };
+                    if matches!(&initial, Ok(bytes) if bytes.len() > DRAFT_FILE_BOUND_BYTES) {
+                        reply.error(Errno::EDQUOT);
+                        return;
+                    }
+                    let seeded = initial.and_then(|initial| {
+                        let target = save.temporary_target(Some(&field))?;
+                        let scratch = Arc::new(
+                            save.writer
+                                .runtime
+                                .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
+                        );
+                        if !initial.is_empty() {
+                            save.writer
+                                .runtime
+                                .block_on(scratch.write_at(0, &initial))
+                                .map_err(|error| {
+                                    format!("Blob candidate could not be seeded: {error:?}")
+                                })?;
+                        }
+                        Ok((target, scratch))
+                    });
+                    match seeded {
+                        Ok((target, scratch)) => {
+                            (save, target, Some(scratch), Some(field))
+                        }
+                        Err(error) => {
+                            eprintln!("mounted Blob candidate could not be opened: {error}");
+                            reply.error(Errno::EIO);
+                            return;
+                        }
+                    }
+                }
                 Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => {
                     if write_mode {
                         reply.error(Errno::EPERM);
@@ -3049,6 +3236,25 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(draft_errno(&result));
                     return;
                 }
+            }
+            if blob_field.is_some() {
+                // The handle holds its generation and the row baseline it captured at open (ORNA-VFS-011).
+                let baseline = save
+                    .expected_baseline_row
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                self.state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .track_blob_open(inode.0);
+                draft_state.blob_handles.insert(
+                    handle,
+                    BlobHandle {
+                        generation: inode.0,
+                        baseline,
+                    },
+                );
             }
             self.open_files
                 .lock()
@@ -3596,7 +3802,7 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.data(&bytes[start..end]);
                     return;
                 }
-                NodeKind::Blob { graph, reference } => Some((
+                NodeKind::Blob { graph, reference, .. } => Some((
                     Arc::clone(graph),
                     reference.clone(),
                     reference.content_identity().length(),
@@ -3824,6 +4030,16 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&handle.0);
+        if matches!(released, Some(OpenFile::Temporary(_, _, _, Some(_)))) {
+            let generation = draft_state
+                .blob_handles
+                .remove(&handle.0)
+                .map_or(inode.0, |blob| blob.generation);
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .track_blob_release(generation);
+        }
         draft_state.dirty_handles.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
@@ -4808,17 +5024,22 @@ impl FsBuilder {
         .map_err(|error| format!("committed row projection is invalid: {error:?}"))?;
         let mut files = Vec::with_capacity(projection.files().len() + 1);
         let document_bytes = projection.document_text().as_bytes().to_vec();
-        let document = match &self.writer {
-            Some(writer) => NodeKind::Document {
-                save: row_save_context(
-                    writer,
-                    source,
-                    key,
-                    Arc::clone(&self.table_object_ids),
-                    &document_bytes,
-                    blob_fields,
-                    refreshed_baseline,
-                )?,
+        let candidate_fields = blob_fields.clone();
+        let document_save = match &self.writer {
+            Some(writer) => Some(row_save_context(
+                writer,
+                source,
+                key,
+                Arc::clone(&self.table_object_ids),
+                &document_bytes,
+                blob_fields,
+                refreshed_baseline,
+            )?),
+            None => None,
+        };
+        let document = match &document_save {
+            Some(save) => NodeKind::Document {
+                save: Arc::clone(save),
                 bytes: document_bytes,
             },
             None => NodeKind::Bytes(document_bytes),
@@ -4829,11 +5050,23 @@ impl FsBuilder {
                 .iter()
                 .find_map(|(name, reference)| (name == file.name()).then_some(reference))
                 .ok_or_else(|| "projected Blob has no admitted file reference".to_owned())?;
+            let candidate = match &document_save {
+                Some(save) => Some(BlobCandidate {
+                    save: Arc::clone(save),
+                    field: candidate_fields
+                        .iter()
+                        .find(|field| field.file_name == file.name())
+                        .cloned()
+                        .ok_or_else(|| "projected Blob has no admitted field".to_owned())?,
+                }),
+                None => None,
+            };
             files.push((
                 file.name().to_owned(),
                 NodeKind::Blob {
                     graph: Arc::clone(&source.graph),
                     reference: reference.clone(),
+                    candidate,
                 },
             ));
         }
@@ -5075,6 +5308,30 @@ impl FsBuilder {
     }
 }
 
+/// A projected Blob's writable identity: the row save that accepts its candidate and the
+/// admitted field it replaces (41-vfs.md EDIT-1).
+struct BlobCandidate {
+    save: Arc<RowSaveContext>,
+    field: BlobField,
+}
+
+/// Reads a whole admitted Blob's bytes through a fresh read scope.
+fn read_blob_bytes(
+    graph: &NativeGraphContext,
+    reference: &AdmittedBlobReference,
+) -> Result<Vec<u8>, String> {
+    let scope = graph
+        .open_read_scope()
+        .map_err(|error| format!("Blob read scope could not be opened: {error:?}"))?;
+    let length = usize::try_from(reference.content_identity().length())
+        .map_err(|_| "Blob length is not addressable".to_owned())?;
+    Ok(graph
+        .read_blob_range(reference, 0..length as u64, &scope)
+        .map_err(|error| format!("Blob content could not be read: {error:?}"))?
+        .bytes()
+        .to_vec())
+}
+
 struct FsNode {
     parent: u64,
     kind: NodeKind,
@@ -5102,6 +5359,9 @@ enum NodeKind {
     Blob {
         graph: Arc<NativeGraphContext>,
         reference: AdmittedBlobReference,
+        /// The row's save context and this file's field; `None` on read-only mounts, where
+        /// write-intent opens are refused (41-vfs.md EDIT-1 candidates require a writer).
+        candidate: Option<BlobCandidate>,
     },
     BlobBytes(Arc<[u8]>),
 }
