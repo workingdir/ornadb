@@ -3133,7 +3133,7 @@ async fn cwd_mount_unlink_mkdir_and_document_rename_fail_eperm_without_row_chang
 }
 
 #[tokio::test]
-/// profiles/vfs-1.md "Host and selectors": chmod cannot change database authority, and this mount refuses it with EPERM (41-vfs.md:103-105) rather than applying a mode; the row keeps its content and permissions.
+/// profiles/vfs-1.md "Editable candidate and syscall rules": chmod cannot change database authority. This mount refuses it with EPERM; the spec does not name chmod, so EPERM is a conservative choice. The row keeps its content and permissions.
 async fn cwd_mount_chmod_of_document_fails_eperm_without_row_change() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
@@ -3153,7 +3153,7 @@ async fn cwd_mount_chmod_of_document_fails_eperm_without_row_change() {
 }
 
 #[tokio::test]
-/// ORNA-VFS-012: renaming a Blob's suffix (content.mp3 -> content.wav) does not transcode bytes or rename the field. The mount refuses the suffix change and refuses creating a temporary sibling in the row directory, both with EPERM; the Blob keeps its bytes.
+/// ORNA-VFS-012: renaming a Blob's suffix (content.mp3 -> content.wav) does not transcode bytes or rename the field. The mount refuses the suffix change with EPERM; the spec does not name a suffix rename, so this refusal is a conservative choice. The Blob keeps its bytes.
 async fn cwd_mount_blob_suffix_rename_is_refused_without_transcoding() {
     let original = lcg_bytes(0x5151_0000_0000_0001, 64 * 1024 + 3);
     let Some(mut row) = mount_captured_blob(&original).await else {
@@ -3166,13 +3166,30 @@ async fn cwd_mount_blob_suffix_rename_is_refused_without_transcoding() {
         .expect_err("renaming a Blob to another suffix is refused");
     assert_eq!(renamed.raw_os_error(), Some(EPERM));
     assert_eq!(std::fs::read(&blob_path).unwrap(), original, "the Blob keeps its bytes");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+#[ignore = "ornadb-5il1.463"]
+/// ORNA-VFS-012 / 41-vfs.md "Temporary-save replacement" (lines 64-72) and profiles/vfs-1.md:98: an unknown file inside a Blob-field row directory is private editor scratch. Creating `.content.wav.replace` there MUST succeed, and fsync persists scratch only. Currently refused with EPERM (see ornadb-5il1.463).
+async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
+    let original = lcg_bytes(0x5151_0000_0000_0002, 64 * 1024 + 3);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let blob_path = row_path.join("content.mp3");
 
     let scratch = row_path.join(".content.wav.replace");
-    let create_error = std::fs::write(&scratch, b"replacement")
-        .expect_err("creating a temporary sibling in a row directory is refused");
-    assert_eq!(create_error.raw_os_error(), Some(EPERM));
-    assert!(!scratch.exists(), "the refused save leaves no scratch file");
-    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "the Blob keeps its bytes");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("creating scratch inside a Blob-field row directory is supported");
+    file.write_all(b"replacement").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "scratch does not change the Blob");
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
 
@@ -3245,7 +3262,7 @@ async fn mount_table_rows(
 }
 
 #[tokio::test]
-/// ORNA-VFS-016 / profiles/vfs-1.md "Row/key directory mapping": Str case is preserved without folding, so `abc` and `ABC` are distinct row directories, each resolving to its own document with no alias entry.
+/// ORNA-VFS-016 (case-folding half only) / profiles/vfs-1.md "Row/key directory mapping": Str case is preserved without folding, so `abc` and `ABC` are distinct row directories, each resolving to its own document with no alias entry. The reversible-escaping half of ORNA-VFS-016 is not exercised here.
 async fn mount_case_distinct_keys_project_to_distinct_rows() {
     let rows: Vec<(&str, &str)> = vec![
         ("abc", "{ title: \"lower\", }\n"),
@@ -3275,7 +3292,7 @@ async fn mount_case_distinct_keys_project_to_distinct_rows() {
 }
 
 #[tokio::test]
-/// ORNA-VFS-010 / ORNA-VFS-018: a Str far above the 64 KiB inline bound saves through the document and round-trips byte-for-byte; the document read reflects the accepted row, and the row stores the full text.
+/// A Str far above the 64 KiB inline bound saves through the document; the stored row holds the full text and the document read contains it. This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
 async fn cwd_mount_large_str_round_trips_through_document() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
