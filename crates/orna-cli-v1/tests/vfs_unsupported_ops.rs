@@ -360,49 +360,50 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
     );
     assert!(!symlink_path.exists(), "refused symlink must not create a target");
 
-    // mknod: device nodes are unsupported (ORNA-VFS-014) and must fail with EPERM.
-    let device_path = std::ffi::CString::new(row_directory.join("device-node").as_os_str().as_encoded_bytes())
-        .expect("device path has no NUL");
-    // SAFETY: the path is a valid NUL-terminated string; mknod only reads it.
-    let result = unsafe { libc::mknod(device_path.as_ptr(), libc::S_IFCHR | 0o600, libc::makedev(1, 3)) };
-    assert_eq!(result, -1, "device-node creation must be refused");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM),
-        "device node must be EPERM"
+    // The crate forbids `unsafe_code`, so the mknod, setxattr and removexattr
+    // syscalls are driven through their standard binaries. Each must exit
+    // non-zero with the EPERM strerror (ORNA-VFS-014, profiles/vfs-1.md:138-140).
+    let device_path = row_directory.join("device-node");
+    assert_errno_eperm(
+        std::process::Command::new("mknod")
+            .arg(&device_path)
+            .args(["c", "1", "3"])
+            .output()
+            .expect("mknod binary runs"),
+        "device node",
     );
+    assert!(!device_path.exists(), "refused device node must not be created");
 
     // xattr: no application record is written through extended attributes, so
     // setxattr and removexattr on a row document are unsupported mutations (EPERM).
-    let document_path = std::ffi::CString::new(document.as_os_str().as_encoded_bytes())
-        .expect("document path has no NUL");
-    let attribute = std::ffi::CString::new("user.orna.probe").expect("attribute name has no NUL");
-    let value = b"1";
-    // SAFETY: all pointers reference live buffers for the duration of each call.
-    let result = unsafe {
-        libc::setxattr(
-            document_path.as_ptr(),
-            attribute.as_ptr(),
-            value.as_ptr().cast(),
-            value.len(),
-            0,
-        )
-    };
-    assert_eq!(result, -1, "setxattr must be refused");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM),
-        "setxattr must be EPERM"
+    assert_errno_eperm(
+        std::process::Command::new("setfattr")
+            .args(["-n", "user.orna.probe", "-v", "1"])
+            .arg(&document)
+            .output()
+            .expect("setfattr binary runs"),
+        "setxattr",
     );
-    // SAFETY: the path and attribute name are valid NUL-terminated strings.
-    let result = unsafe { libc::removexattr(document_path.as_ptr(), attribute.as_ptr()) };
-    assert_eq!(result, -1, "removexattr must be refused");
-    assert_eq!(
-        std::io::Error::last_os_error().raw_os_error(),
-        Some(libc::EPERM),
-        "removexattr must be EPERM, not the fuser default ENOSYS"
+    assert_errno_eperm(
+        std::process::Command::new("setfattr")
+            .args(["-x", "user.orna.probe"])
+            .arg(&document)
+            .output()
+            .expect("setfattr binary runs"),
+        "removexattr",
     );
 }
+
+/// Asserts a command failed with the EPERM strerror, the errno the VFS-1 table
+/// specifies for an unsupported mutation.
+fn assert_errno_eperm(output: std::process::Output, operation: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{operation} must be refused");
+    assert!(
+        stderr.contains("Operation not permitted"),
+        "{operation} must be EPERM (\"Operation not permitted\"), got: {stderr}"
+    );
+ }
 
 #[cfg(target_os = "linux")]
 #[tokio::test]
