@@ -407,6 +407,33 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
             .any(|draft| draft.contains("Stale mount save")),
         "the stale candidate is retained in recovery storage"
     );
+    // ORNA-VFS-011/024, profiles/vfs-1.md: `mount status` lists the writable
+    // `--cwd` mount and the rejected draft with its exact Orna cause and draft id.
+    let status = mount_status(session.repository_directory.path());
+    assert!(
+        status.lines().any(|line| line.ends_with(" writable")),
+        "the writable --cwd mount is listed: {status}"
+    );
+    let listing = status
+        .lines()
+        .find(|line| line.starts_with("  unresolved draft Music/london/data.orna code sys.vfs.stale_edit draft "))
+        .unwrap_or_else(|| panic!("the rejected draft lists its cause and draft id: {status}"));
+    let draft_id = listing
+        .strip_prefix("  unresolved draft Music/london/data.orna code sys.vfs.stale_edit draft ")
+        .and_then(|rest| rest.split_once(": "))
+        .map(|(id, _)| id)
+        .unwrap_or_default();
+    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {listing}");
+    let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
+    assert_success(&json, "orna mount status --json");
+    let json = String::from_utf8_lossy(&json.stdout);
+    assert!(
+        json.contains("\"writable\":true,\"read_only\":false")
+            && json.contains(&format!(
+                "{{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"{draft_id}\""
+            )),
+        "the JSON status carries the writable mount and the draft code and id: {json}"
+    );
 
     let refused = session.unmount();
     let refusal = format!(
