@@ -3279,6 +3279,8 @@ async fn cwd_mount_blob_read_write_open_is_coherent() {
 
 /// POSIX `EPERM` (Linux errno 1): the documented refusal for unsupported VFS mutations (41-vfs.md:103-105).
 const EPERM: i32 = 1;
+/// POSIX `EAGAIN` (Linux errno 11): a stale-baseline CAS refusal for a Blob replacement (ORNA-VFS-009).
+const EAGAIN: i32 = 11;
 
 #[tokio::test]
 /// ORNA-VFS-014: symlinks and hard links are unsupported in VFS-1 and fail explicitly with EPERM; the row directory gains no entry and the stored row is unchanged.
@@ -3366,27 +3368,56 @@ async fn cwd_mount_blob_suffix_rename_is_refused_without_transcoding() {
 }
 
 #[tokio::test]
-#[ignore = "ornadb-5il1.463"]
-/// ORNA-VFS-012 / 41-vfs.md "Temporary-save replacement" (lines 64-72) and profiles/vfs-1.md:98: an unknown file inside a Blob-field row directory is private editor scratch. Creating `.content.wav.replace` there MUST succeed, and fsync persists scratch only. Currently refused with EPERM (see ornadb-5il1.463).
+/// ORNA-VFS-011/012 and 41-vfs.md "Temporary-save replacement" (lines 64-72), profiles/vfs-1.md:98: an unknown file inside a Blob-field row directory is private editor scratch. Its creation captures the row baseline and its fsync persists scratch only. Renaming scratch onto the Blob admits one replacement through that baseline; scratch whose baseline went stale is refused with EAGAIN and keeps its bytes (ORNA-VFS-009).
 async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     let original = lcg_bytes(0x5151_0000_0000_0002, 64 * 1024 + 3);
+    let second = lcg_bytes(0x5151_0000_0000_0003, 16 * 1024 + 7);
+    let replacement = lcg_bytes(0x5151_0000_0000_0004, 8 * 1024 + 1);
     let Some(mut row) = mount_captured_blob(&original).await else {
         return;
     };
     let row_path = row.mounted.mountpoint.join("Music/london");
     let blob_path = row_path.join("content.mp3");
 
-    let scratch = row_path.join(".content.wav.replace");
+    // Captures the original row baseline; it becomes stale once the Blob is replaced below.
+    let stale = row_path.join(".content.wav.replace");
+    create_scratch(&stale, b"stale candidate");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "scratch does not change the Blob");
+
+    // A Blob-bound scratch accepts its own rename and replaces the Blob.
+    let bound = row_path.join(".content.mp3.replace");
+    create_scratch(&bound, &second);
+    std::fs::rename(&bound, &blob_path).expect("renaming bound scratch over the Blob is accepted");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), second);
+
+    // The earlier scratch kept the original baseline, so its rename is a stale CAS refusal.
+    let refused = std::fs::rename(&stale, &blob_path)
+        .expect_err("a scratch with a stale baseline must not replace the Blob");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN));
+    assert!(stale.exists(), "the refused scratch remains recoverable");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), second, "the accepted Blob is unchanged");
+
+    // An unbound scratch, created after the accepted replacement, commits to the Blob its rename names.
+    let unbound = row_path.join(".clip.wav.replace");
+    create_scratch(&unbound, &replacement);
+    std::fs::rename(&unbound, &blob_path).expect("renaming unbound scratch over the Blob is accepted");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    assert!(!unbound.exists(), "the accepted scratch is consumed by its rename");
+
+    // A retained stale candidate blocks unmount until removed (sys.vfs.stale_edit); remove it so the mount drains.
+    std::fs::remove_file(&stale).expect("removing the refused stale scratch");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+/// Creates an editor scratch file with `bytes` and syncs it; the create itself must be supported.
+fn create_scratch(path: &Path, bytes: &[u8]) {
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&scratch)
+        .open(path)
         .expect("creating scratch inside a Blob-field row directory is supported");
-    file.write_all(b"replacement").unwrap();
+    file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
-    drop(file);
-    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "scratch does not change the Blob");
-    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
 
 /// Mounted table directory for a commit with several rows, one commit per row.

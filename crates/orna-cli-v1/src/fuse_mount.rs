@@ -2720,10 +2720,22 @@ impl WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft)
             }
-            Some(OpenFile::Temporary(save, target, scratch, Some(field))) => {
-                self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
-            }
-            Some(OpenFile::Temporary(save, _, scratch, _)) => {
+            Some(OpenFile::Temporary(save, target, scratch, field)) => {
+                // A Blob node's write-open accepts its candidate on fsync (EDIT-1 step 2). A
+                // scratch node only persists to the scratch store; its accept is its rename.
+                let is_blob_candidate = {
+                    let state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    matches!(
+                        state.nodes.get(&inode.0).map(|node| &node.kind),
+                        Some(NodeKind::Blob { .. })
+                    )
+                };
+                if let (true, Some(field)) = (is_blob_candidate, field.as_ref()) {
+                    return self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, field);
+                }
                 let state = self
                     .state
                     .lock()
@@ -3848,20 +3860,16 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let blob_field = if is_editor_temporary_name(name) {
-                None
-            } else {
-                save.blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .find(|field| is_replacement_scratch_for(name, &field.file_name))
-                    .cloned()
-            };
-            if !is_editor_temporary_name(name) && blob_field.is_none() {
-                reply.error(Errno::EPERM);
-                return;
-            }
+            // Any unknown file in a row directory is private editor scratch (41-vfs.md
+            // Temporary-save replacement). A name bound to a Blob field is a Blob scratch;
+            // any other name is an unbound scratch that targets the row until renamed.
+            let blob_field = save
+                .blob_fields
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|field| is_replacement_scratch_for(name, &field.file_name))
+                .cloned();
             let baseline = save
                 .expected_baseline_row
                 .lock()
@@ -3997,13 +4005,30 @@ impl Filesystem for WorkspaceFilesystem {
                 baseline.clone(),
                 Arc::clone(identity),
             );
-            let expected_name = blob_field
-                .as_ref()
-                .map_or("data.orna", |field| field.file_name.as_str());
-            if newname.to_str() != Some(expected_name) {
-                reply.error(Errno::EPERM);
-                return;
-            }
+            // An unbound scratch commits to the destination its rename names: the row document
+            // or the Blob field of that name. A Blob-bound scratch must rename to its own field.
+            let blob_field = match blob_field.clone() {
+                Some(field) if newname.to_str() == Some(field.file_name.as_str()) => Some(field),
+                Some(_) => {
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+                None if newname.to_str() == Some("data.orna") => None,
+                None => {
+                    let field = save
+                        .blob_fields
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .find(|field| newname.to_str() == Some(field.file_name.as_str()))
+                        .cloned();
+                    let Some(field) = field else {
+                        reply.error(Errno::EPERM);
+                        return;
+                    };
+                    Some(field)
+                }
+            };
             let destination_inode = match state.lookup_child(newparent.0, newname) {
                 Ok(Some(inode)) => inode,
                 Ok(None) | Err(_) => {
@@ -6541,17 +6566,6 @@ fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, Str
     Ok(output)
 }
 
-fn is_replacement_scratch_name(name: &str) -> bool {
-    is_replacement_scratch_for(name, "data.orna")
-}
-
-fn is_editor_temporary_name(name: &str) -> bool {
-    is_replacement_scratch_name(name)
-        || name.strip_prefix("tmp").is_some_and(|suffix| {
-            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
-}
-
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix('.')
@@ -6665,8 +6679,8 @@ mod tests {
 
     use super::{
         Expr, FsBuilder, NodeKind, ROOT_INODE, RowProjectionSource, StoredFieldShape,
-        is_editor_temporary_name, is_replacement_scratch_for, is_replacement_scratch_name,
-        key_directory, parse_row, runtime_row_baseline_from_rows, runtime_table_key_bytes,
+        is_replacement_scratch_for, key_directory, parse_row, runtime_row_baseline_from_rows,
+        runtime_table_key_bytes,
         select_runtime_row_fields, source_without_fields,
     };
     use super::{EDITABLE_OPEN_FLAGS, EDITOR_INIT_CAPABILITIES, ROW_PAGE_LIMIT, WorkspaceFilesystem};
@@ -6904,17 +6918,12 @@ mod tests {
     }
 
     #[test]
-    fn only_replacement_shaped_sibling_names_are_candidates() {
-        assert!(is_replacement_scratch_name(".data.orna.tmp"));
-        assert!(is_replacement_scratch_name(".data.orna.12345"));
-        assert!(!is_replacement_scratch_name("unrelated"));
-        assert!(!is_replacement_scratch_name("backup"));
-        assert!(!is_replacement_scratch_name(".data.orna."));
-        assert!(is_editor_temporary_name("tmpldofdR"));
-        assert!(is_editor_temporary_name("tmpBX4D0m"));
-        assert!(!is_editor_temporary_name("tmp"));
-        assert!(!is_editor_temporary_name("tmpabcde"));
-        assert!(!is_editor_temporary_name("unrelated"));
+    fn only_replacement_shaped_sibling_names_are_bound_to_their_blob() {
+        assert!(is_replacement_scratch_for(".content.mp3.replace", "content.mp3"));
+        assert!(is_replacement_scratch_for(".content.mp3.12345", "content.mp3"));
+        assert!(!is_replacement_scratch_for("content.mp3.replace", "content.mp3"));
+        assert!(!is_replacement_scratch_for(".content.wav.replace", "content.mp3"));
+        assert!(!is_replacement_scratch_for(".content.mp3.", "content.mp3"));
     }
 
     #[test]
