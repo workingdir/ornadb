@@ -600,6 +600,135 @@ async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_
     );
 }
 
+/// EDIT-1 step 5 with the PR owner rule: the opening writer's own close commits
+/// its dirty candidate when no child has closed an inherited copy first.
+#[tokio::test]
+async fn writer_close_commits_dirty_candidate_without_a_prior_child_close() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Solo writer"));
+    drop(file);
+    assert_view_contains(&fixture, "Solo writer");
+}
+
+/// PR owner rule (not EDIT-1 step 5 text): an exec'd child closes its CLOEXEC
+/// copy of the parent's dirty candidate. That FLUSH comes from the child, not the
+/// opener, so it must not accept; the parent's own close then commits.
+#[tokio::test]
+async fn child_exec_close_does_not_accept_parent_dirty_candidate_and_parent_close_commits() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let before = fresh_view(&fixture);
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Parent dirty"));
+    let shared = file.try_clone().expect("dup for the exec'd child");
+    let status = std::process::Command::new("/bin/true")
+        .status()
+        .expect("run child that execs and closes the inherited descriptor");
+    assert!(status.success(), "exec'd child must succeed");
+    assert_eq!(
+        fresh_view(&fixture),
+        before,
+        "a child's exec-close must not accept the parent's dirty candidate"
+    );
+    drop(file);
+    assert_view_contains(&fixture, "Parent dirty");
+    drop(shared);
+}
+
+/// PR owner rule: a child that writes through an inherited descriptor and closes
+/// it does not become the owner. Its close acknowledges without accepting; the
+/// parent's own close (here its dup, then the original) commits the candidate.
+#[tokio::test]
+async fn child_write_through_inherited_handle_does_not_take_close_ownership() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let before = fresh_view(&fixture);
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &row("Writer one"));
+    file.seek(SeekFrom::Start(0)).expect("seek to start");
+    let shared = file.try_clone().expect("dup for the child's stdout");
+    let child_document = row("Writer two");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .args(["-c", "printf '%s' \"$ORNA_CHILD_DOCUMENT\""])
+        .env("ORNA_CHILD_DOCUMENT", &child_document)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(shared));
+    let status = command.status().expect("run child writing through the inherited handle");
+    assert!(status.success(), "child write through the inherited handle must succeed");
+    assert_eq!(
+        fresh_view(&fixture),
+        before,
+        "the child's close must not accept the candidate it wrote"
+    );
+    // The Command still owns the dup, so dropping it is the parent's own close.
+    drop(command);
+    drop(file);
+    assert_view_contains(&fixture, "Writer two");
+}
+
+/// PR owner rule for truncate-only candidates: an O_TRUNC open is owned by its
+/// opener, so an exec'd child's close of the inherited copy must not accept it.
+#[tokio::test]
+async fn child_exec_close_does_not_accept_parent_o_trunc_candidate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let before = fresh_view(&fixture);
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&fixture.data_path)
+        .expect("open with O_TRUNC");
+    let shared = file.try_clone().expect("dup for the exec'd child");
+    let status = std::process::Command::new("/bin/true")
+        .status()
+        .expect("run child that execs and closes the inherited descriptor");
+    assert!(status.success(), "exec'd child must succeed");
+    assert_eq!(
+        fresh_view(&fixture),
+        before,
+        "a child's exec-close must not accept the parent's O_TRUNC candidate"
+    );
+    drop(shared);
+    drop(file);
+}
+
+/// PR owner rule for truncate-only candidates: a size change through a handle
+/// (ftruncate) is owned by the handle's opener, so an exec'd child's close must
+/// not accept it.
+#[tokio::test]
+async fn child_exec_close_does_not_accept_parent_ftruncate_candidate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let before = fresh_view(&fixture);
+    let file = open_rw(&fixture);
+    file.set_len(0).expect("ftruncate candidate");
+    let shared = file.try_clone().expect("dup for the exec'd child");
+    let status = std::process::Command::new("/bin/true")
+        .status()
+        .expect("run child that execs and closes the inherited descriptor");
+    assert!(status.success(), "exec'd child must succeed");
+    assert_eq!(
+        fresh_view(&fixture),
+        before,
+        "a child's exec-close must not accept the parent's ftruncate candidate"
+    );
+    drop(shared);
+    drop(file);
+}
+
 /// ORNA-VFS-008: writes after a successful sync form a new candidate; the next
 /// sync acknowledges it. A close-time flush may accept a dirty candidate at any
 /// time (EDIT-1 step 5). The kernel sends it for every close of the open file
