@@ -2167,6 +2167,8 @@ struct DraftState {
     dirty_handles: HashSet<u64>,
     /// Write-open Blob handles, keyed by handle number.
     blob_handles: HashMap<u64, BlobHandle>,
+    /// Lock owner that wrote each open handle's candidate; a FLUSH from another owner is not the writer's close.
+    writer_owners: HashMap<u64, u64>,
 }
 
 impl DraftState {
@@ -4215,7 +4217,7 @@ impl Filesystem for WorkspaceFilesystem {
         data: &[u8],
         _write_flags: fuser::WriteFlags,
         _flags: fuser::OpenFlags,
-        _lock_owner: Option<fuser::LockOwner>,
+        lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
         let mut draft_state = self
@@ -4247,6 +4249,9 @@ impl Filesystem for WorkspaceFilesystem {
         let writes_candidate = !data.is_empty() && is_tracked;
         if writes_candidate {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
+            if let Some(owner) = lock_owner {
+                draft_state.writer_owners.insert(handle.0, owner.0);
+            }
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
@@ -4345,7 +4350,7 @@ impl Filesystem for WorkspaceFilesystem {
         _request: &Request,
         inode: INodeNo,
         handle: fuser::FileHandle,
-        _lock_owner: fuser::LockOwner,
+        lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
         // Close-time flush (EDIT-1 step 5) attempts the same commit as fsync, but
@@ -4356,6 +4361,14 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !draft_state.unresolved_handles.contains_key(&handle.0) {
+            reply.ok();
+            return;
+        }
+        // The kernel issues FLUSH when an inherited copy of this descriptor is
+        // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
+        // Only the writer's own close is the EDIT-1 step 5 close-time commit, so a
+        // FLUSH from a different owner acknowledges without accepting the draft.
+        if draft_state.writer_owners.get(&handle.0).is_some_and(|writer| *writer != lock_owner.0) {
             reply.ok();
             return;
         }
@@ -4418,6 +4431,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .track_blob_release(generation);
         }
         draft_state.dirty_handles.remove(&handle.0);
+        draft_state.writer_owners.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
