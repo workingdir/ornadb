@@ -14,6 +14,12 @@ use std::{
 use tempfile::TempDir;
 
 #[allow(dead_code)]
+#[path = "support/format3.rs"]
+mod format3;
+#[allow(dead_code)]
+#[path = "support/media_commit.rs"]
+mod media_commit;
+#[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
