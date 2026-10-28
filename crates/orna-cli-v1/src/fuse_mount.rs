@@ -3850,9 +3850,9 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            // Any unknown file in a row directory is private editor scratch (41-vfs.md
-            // Temporary-save replacement). A name bound to a Blob field is a Blob scratch;
-            // any other name is an unbound scratch that targets the row until renamed.
+            // Unknown files inside a row directory are private editor scratch (41-vfs.md
+            // Temporary-save replacement) only within the editor namespace: a replacement name of
+            // a Blob field binds to that field, and editor temp names stay unbound until renamed.
             let blob_field = save
                 .blob_fields
                 .lock()
@@ -3860,6 +3860,10 @@ impl Filesystem for WorkspaceFilesystem {
                 .iter()
                 .find(|field| is_replacement_scratch_for(name, &field.file_name))
                 .cloned();
+            if blob_field.is_none() && !is_editor_temporary_name(name) {
+                reply.error(Errno::EPERM);
+                return;
+            }
             let baseline = save
                 .expected_baseline_row
                 .lock()
@@ -6554,6 +6558,27 @@ fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, Str
         output.replace_range(range, "");
     }
     Ok(output)
+}
+
+fn is_editor_temporary_name(name: &str) -> bool {
+    is_replacement_scratch_for(name, "data.orna")
+        || is_hidden_replacement_shaped(name)
+        || name.strip_prefix("tmp").is_some_and(|suffix| {
+            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
+}
+
+/// `.<stem>.replace` or `.<stem>.<digits>`: the hidden editor replacement shape for any target name.
+fn is_hidden_replacement_shaped(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix('.') else {
+        return false;
+    };
+    let Some((stem, extension)) = rest.rsplit_once('.') else {
+        return false;
+    };
+    !stem.is_empty()
+        && (extension == "replace"
+            || (!extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_digit())))
 }
 
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
