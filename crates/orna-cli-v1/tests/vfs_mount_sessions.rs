@@ -410,11 +410,17 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
         "the stale candidate is retained in recovery storage"
     );
     // ORNA-VFS-011/024, profiles/vfs-1.md: `mount status` lists the writable
-    // `--cwd` mount and the rejected draft with its exact Orna cause and draft id.
+    // `--cwd` mount (its mountpoint, view and writable mode) and the rejected draft
+    // with its exact Orna cause and draft id.
     let status = mount_status(session.repository_directory.path());
+    let mountpoint = fs::canonicalize(session.mountpoint()).expect("canonical mountpoint");
+    let mount_row = status
+        .lines()
+        .find(|line| line.starts_with(&format!("{} snapshot ", mountpoint.display())))
+        .unwrap_or_else(|| panic!("the writable mount row names its mountpoint: {status}"));
     assert!(
-        status.lines().any(|line| line.ends_with(" writable")),
-        "the writable --cwd mount is listed: {status}"
+        mount_row.contains(" view ") && mount_row.ends_with(" writable"),
+        "the mount row names its view and writable mode: {mount_row}"
     );
     let listing = status
         .lines()
@@ -426,6 +432,15 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
         .map(|(id, _)| id)
         .unwrap_or_default();
     assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {listing}");
+    // The fields xattr carries the same draft line that `mount status` prints.
+    let mut fields = [0_u8; 1024];
+    let length = rustix::fs::getxattr(&mountpoint, "user.orna.unresolved-draft-fields", &mut fields)
+        .expect("read the draft fields xattr");
+    let fields = String::from_utf8_lossy(&fields[..length]).into_owned();
+    assert!(
+        fields.contains(&format!("Music/london/data.orna\tsys.vfs.stale_edit\t{draft_id}\t")),
+        "the fields xattr carries the code and draft id: {fields}"
+    );
     let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
     assert_success(&json, "orna mount status --json");
     let json = String::from_utf8_lossy(&json.stdout);

@@ -1263,8 +1263,8 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
     } else {
         for status in &statuses {
             writeln!(out, "{}", human_row(status)).map_err(|_| stdout_error())?;
-            let (drafts, draft_error) = status_drafts(status);
-            for draft in &drafts {
+            let listing = status_drafts(status);
+            for draft in &listing.drafts {
                 writeln!(
                     out,
                     "  unresolved draft {} code {} draft {}: {}",
@@ -1275,7 +1275,14 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
                 )
                 .map_err(|_| stdout_error())?;
             }
-            if let Some(error) = draft_error {
+            if listing.fallback {
+                writeln!(
+                    out,
+                    "  note: this mount's daemon predates the sys.* code and draft id fields; the code and draft columns are empty"
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if let Some(error) = listing.error {
                 writeln!(out, "  drafts could not be listed: {error}").map_err(|_| stdout_error())?;
             }
         }
@@ -1296,7 +1303,7 @@ fn human_row(status: &MountStatus) -> String {
 }
 
 fn status_json(status: &MountStatus) -> String {
-    let (drafts, draft_error) = status_drafts(status);
+    let listing = status_drafts(status);
     mount_row_json(
         status.mountpoint(),
         &status.snapshot_hex(),
@@ -1304,8 +1311,8 @@ fn status_json(status: &MountStatus) -> String {
         status.repository_format_number(),
         status.is_legacy_format(),
         status.is_writable(),
-        &drafts,
-        draft_error.as_deref(),
+        &listing.drafts,
+        listing.error.as_deref(),
     )
 }
 
@@ -1358,16 +1365,61 @@ fn parse_draft_list(list: &str) -> Vec<DraftEntry> {
 }
 
 /// The unresolved drafts of a writable mount, with their exact Orna cause codes
-/// and retained draft ids. A writable mount whose drafts cannot be listed reports
-/// the reason instead of failing the whole status.
+/// and retained draft ids, and how they were listed. A writable mount whose drafts
+/// cannot be listed reports the reason instead of failing the whole status.
+#[derive(Debug, Default)]
+struct DraftListing {
+    drafts: Vec<DraftEntry>,
+    /// The daemon predates the code and draft fields, so the drafts came from the
+    /// two-column list xattr and their `code` and `draft` are empty.
+    fallback: bool,
+    /// Why the drafts could not be listed.
+    error: Option<String>,
+}
+
 #[cfg(target_os = "linux")]
-fn status_drafts(status: &MountStatus) -> (Vec<DraftEntry>, Option<String>) {
+fn status_drafts(status: &MountStatus) -> DraftListing {
     if !status.is_writable() {
-        return (Vec::new(), None);
+        return DraftListing::default();
     }
-    match crate::fuse_mount::unresolved_draft_fields(status.mountpoint()) {
-        Ok(fields) => (parse_draft_list(&fields), None),
-        Err(error) => (Vec::new(), Some(draft_listing_failure(error))),
+    draft_listing(
+        crate::fuse_mount::unresolved_draft_fields(status.mountpoint()),
+        || crate::fuse_mount::unresolved_draft_list(status.mountpoint()),
+    )
+}
+
+/// Chooses the draft listing from the fields xattr. A daemon that does not serve
+/// it answers ENODATA; its two-column list xattr is then the fallback, not a failure.
+#[cfg(target_os = "linux")]
+fn draft_listing(
+    fields: Result<String, rustix::io::Errno>,
+    list: impl FnOnce() -> Result<String, rustix::io::Errno>,
+) -> DraftListing {
+    match fields {
+        Ok(fields) => DraftListing {
+            drafts: parse_draft_list(&fields),
+            ..DraftListing::default()
+        },
+        Err(rustix::io::Errno::NODATA) => match list() {
+            Ok(list) => DraftListing {
+                drafts: parse_draft_list(&list),
+                fallback: true,
+                error: None,
+            },
+            Err(error) => DraftListing::failed(error),
+        },
+        Err(error) => DraftListing::failed(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DraftListing {
+    fn failed(error: rustix::io::Errno) -> Self {
+        Self {
+            drafts: Vec::new(),
+            fallback: false,
+            error: Some(draft_listing_failure(error)),
+        }
     }
 }
 
@@ -1384,11 +1436,13 @@ fn draft_listing_failure(error: rustix::io::Errno) -> String {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn status_drafts(status: &MountStatus) -> (Vec<DraftEntry>, Option<String>) {
-    if status.is_writable() {
-        (Vec::new(), Some("live draft listing requires Linux FUSE".to_owned()))
-    } else {
-        (Vec::new(), None)
+fn status_drafts(status: &MountStatus) -> DraftListing {
+    if !status.is_writable() {
+        return DraftListing::default();
+    }
+    DraftListing {
+        error: Some("live draft listing requires Linux FUSE".to_owned()),
+        ..DraftListing::default()
     }
 }
 
@@ -1568,6 +1622,35 @@ mod tests {
     fn escape_json_leaves_ordinary_paths_unchanged() {
         assert_eq!(escape_json("/mnt/library"), "/mnt/library");
         assert_eq!(escape_json("tab\there"), "tab\\there");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn draft_listing_falls_back_to_the_list_xattr_when_fields_are_unserved() {
+        use super::draft_listing;
+        use rustix::io::Errno;
+
+        let fallback = draft_listing(Err(Errno::NODATA), || {
+            Ok("Music/london/data.orna\tstale edit\n".to_owned())
+        });
+        assert!(fallback.fallback, "an older daemon's list is the fallback");
+        assert_eq!(fallback.error, None);
+        assert_eq!(fallback.drafts.len(), 1);
+        assert_eq!(fallback.drafts[0].code, None);
+        assert_eq!(fallback.drafts[0].draft, None);
+        assert_eq!(fallback.drafts[0].detail, "stale edit");
+
+        let fields = draft_listing(
+            Ok("Music/london/data.orna\tsys.vfs.stale_edit\tdraft-1\tstale edit\n".to_owned()),
+            || panic!("the fields xattr is read without the fallback"),
+        );
+        assert!(!fields.fallback);
+        assert_eq!(fields.drafts[0].code.as_deref(), Some("sys.vfs.stale_edit"));
+        assert_eq!(fields.drafts[0].draft.as_deref(), Some("draft-1"));
+
+        let gone = draft_listing(Err(Errno::NODATA), || Err(Errno::NOTCONN));
+        assert!(!gone.fallback);
+        assert!(gone.error.as_deref().is_some_and(|error| error.contains("stale mount record")));
     }
 
     #[cfg(target_os = "linux")]
