@@ -428,6 +428,58 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
     }
 }
 
+/// Record limit of recovery storage (ORNA-VFS-009). Past this many `.draft`
+/// records the store refuses a new candidate, which the mount reports as a
+/// capacity failure.
+pub const RETAINED_DRAFT_LIMIT: usize = 256;
+
+/// Prefix of the placeholder records `fill_retained_draft_store` writes, so
+/// `clear_retained_draft_store_filler` never removes a real candidate record.
+const RETAINED_DRAFT_FILLER_PREFIX: &str = "test-filler-";
+
+fn retained_draft_store(repository: &Repository) -> PathBuf {
+    repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1")
+}
+
+/// Fills recovery storage to `RETAINED_DRAFT_LIMIT` records, so the next
+/// candidate it is asked to keep is refused for capacity. Pair with
+/// `clear_retained_draft_store_filler`.
+pub fn fill_retained_draft_store(repository: &Repository) {
+    let directory = retained_draft_store(repository);
+    std::fs::create_dir_all(&directory).expect("create the recovery store");
+    let records = std::fs::read_dir(&directory)
+        .expect("list the recovery store")
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".draft"))
+        .count();
+    for index in records..RETAINED_DRAFT_LIMIT {
+        std::fs::write(
+            directory.join(format!("{RETAINED_DRAFT_FILLER_PREFIX}{index}.draft")),
+            b"placeholder\n",
+        )
+        .expect("fill the recovery store");
+    }
+}
+
+/// Removes the placeholder records `fill_retained_draft_store` wrote, so the
+/// store has room again.
+pub fn clear_retained_draft_store_filler(repository: &Repository) {
+    let directory = retained_draft_store(repository);
+    for entry in std::fs::read_dir(&directory).expect("list the recovery store") {
+        let path = entry.expect("list the recovery store").path();
+        let placeholder = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(RETAINED_DRAFT_FILLER_PREFIX));
+        if placeholder {
+            std::fs::remove_file(&path).expect("clear the placeholder record");
+        }
+    }
+}
+
 /// Mounts a repository whose `Music/london` row is `Original`. With
 /// `foreign_owner`, a live foreign writer owns the worktree for the fixture's
 /// lifetime, so the mount runs as a secondary participant.

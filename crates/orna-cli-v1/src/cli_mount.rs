@@ -616,6 +616,10 @@ const SIGNAL_UNMOUNT_GRACE: std::time::Duration = std::time::Duration::from_secs
 #[cfg(target_os = "linux")]
 const SIGNAL_UNMOUNT_RETRY: std::time::Duration = std::time::Duration::from_millis(20);
 
+/// Minimum gap between repeated draft-retention failure lines while a stop waits.
+#[cfg(target_os = "linux")]
+const RETENTION_LOG_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The join loop re-checks the registered view every this many 25 ms ticks.
 #[cfg(target_os = "linux")]
 const VIEW_CHECK_TICKS: u32 = 8;
@@ -623,6 +627,27 @@ const VIEW_CHECK_TICKS: u32 = 8;
 /// Stop cause when the registered view disappears under a serving mount.
 #[cfg(target_os = "linux")]
 const VIEW_DETACHED: &str = "its view was unmounted";
+
+/// Unmounts a quiesced live mount, retrying while the kernel reports it busy.
+///
+/// A file closed just before unmount can still be held by its pending FUSE
+/// release, so `fusermount -u` may fail with EBUSY for a short moment. The
+/// mount is quiesced and kept attached meanwhile; a retry only repeats the
+/// same unmount request.
+#[cfg(target_os = "linux")]
+fn unmount_with_busy_retry(mountpoint: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + SIGNAL_UNMOUNT_GRACE;
+    loop {
+        let error = match crate::fuse_mount::unmount_mountpoint(mountpoint) {
+            Ok(()) => return Ok(()),
+            Err(error) => error,
+        };
+        if std::time::Instant::now() >= deadline {
+            return Err(error);
+        }
+        std::thread::sleep(SIGNAL_UNMOUNT_RETRY);
+    }
+}
 
 /// Unmounts a live FUSE session after a termination signal.
 ///
@@ -732,10 +757,65 @@ impl MountSignalHandler {
                     // Only the live Orna mount can retain its drafts; a mount
                     // that is already gone is ending normally.
                     if orna_mount_is_listed(&mountpoint, &source) {
-                        match crate::fuse_mount::retain_drafts_for_shutdown(&mountpoint) {
-                            Ok(true) => end = MountEnd::DraftsRetained,
-                            Ok(false) => {}
-                            Err(error) => retention_error = Some(error),
+                        // Stop does not unmount until every unresolved draft is kept
+                        // (ORNA-VFS-024). A failed retention resumes the mount and is
+                        // retried. The first stop signal starts that wait; a second one
+                        // abandons it, and the drafts not yet kept are reported as lost.
+                        let mut last_logged: Option<std::time::Instant> = None;
+                        let mut abandon: Option<String> = None;
+                        loop {
+                            match crate::fuse_mount::retain_drafts_for_shutdown(&mountpoint) {
+                                Ok(true) => {
+                                    end = MountEnd::DraftsRetained;
+                                    break;
+                                }
+                                Ok(false) => break,
+                                Err(crate::fuse_mount::DraftRetentionStop::Retention(error)) => {
+                                    if last_logged.is_none_or(|at| at.elapsed() >= RETENTION_LOG_INTERVAL) {
+                                        let unresolved = crate::fuse_mount::unresolved_draft_list(&mountpoint)
+                                            .map_or(0, |list| list.lines().filter(|line| !line.is_empty()).count());
+                                        eprintln!(
+                                            "{error}; {unresolved} unresolved draft(s) not retained; retrying draft retention before unmount (a second stop signal abandons the wait)"
+                                        );
+                                        last_logged = Some(std::time::Instant::now());
+                                    }
+                                    if let Err(resume) = crate::fuse_mount::cancel_unmount(&mountpoint) {
+                                        eprintln!("{resume}");
+                                    }
+                                    let second = tokio::select! {
+                                        () = tokio::time::sleep(SIGNAL_UNMOUNT_RETRY) => None,
+                                        Some(()) = interrupt.recv() => Some("SIGINT"),
+                                        Some(()) = terminate.recv() => Some("SIGTERM"),
+                                        Some(()) = hangup.recv() => Some("SIGHUP"),
+                                    };
+                                    if let Some(second) = second {
+                                        abandon = Some(format!("{second} repeated while draft retention was failing"));
+                                        break;
+                                    }
+                                }
+                                Err(crate::fuse_mount::DraftRetentionStop::Mount(error)) => {
+                                    retention_error = Some(error);
+                                    break;
+                                }
+                            }
+                        }
+                        if abandon.is_none()
+                            && retention_error.is_some()
+                            && crate::fuse_mount::has_unresolved_drafts(&mountpoint).unwrap_or(true)
+                        {
+                            abandon = Some("the mount could not be quiesced to keep its drafts".to_owned());
+                        }
+                        if let Some(reason) = abandon {
+                            let lost = crate::fuse_mount::unresolved_draft_list(&mountpoint)
+                                .unwrap_or_else(|error| format!("could not list unresolved drafts: {error}"));
+                            eprintln!("stop abandoned ({reason}); these unretained drafts will be lost:");
+                            for line in lost.lines().filter(|line| !line.is_empty()) {
+                                eprintln!("  {line}");
+                            }
+                            // The mount is deliberately left up and the session is never joined:
+                            // unmount refuses unresolved drafts (ORNA-VFS-024).
+                            std::mem::forget(session.take().expect("live FUSE session is retained"));
+                            return Err(format!("unretained drafts will be lost: stop abandoned ({reason})"));
                         }
                     }
                     let live = session.as_ref().expect("live FUSE session is retained");
@@ -883,7 +963,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                     let unmount_error = if dead {
                         crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
                     } else {
-                        crate::fuse_mount::unmount_mountpoint(&mountpoint)
+                        unmount_with_busy_retry(&mountpoint)
                     }
                     .err();
                     let remaining = mounted_mount_for_path(&mountpoint)?;
