@@ -486,7 +486,17 @@ async fn stale_save_status_json_flags_the_fields_source() {
         return;
     }
     let session = stale_save_session().await;
-    let draft_id = listed_draft_id(&mount_status(session.repository_directory.path()));
+    let draft_id = {
+        let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
+        assert_success(&json, "orna mount status --json");
+        let json = String::from_utf8_lossy(&json.stdout).into_owned();
+        let after = json
+            .split_once("\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"")
+            .map(|(_, rest)| rest.to_owned())
+            .unwrap_or_else(|| panic!("the JSON status lists the london draft code: {json}"));
+        after.split('"').next().unwrap_or_default().to_owned()
+    };
+    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is in the JSON");
     let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
     assert_success(&json, "orna mount status --json");
     let json = String::from_utf8_lossy(&json.stdout);
