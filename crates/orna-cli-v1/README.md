@@ -112,11 +112,20 @@ one resolved commit. `orna mount status`
 reports attached views in human or `--json` form. Host FUSE mounts are supported
 on Linux only.
 
+`orna mount status` prints one line per attached view: `MOUNTPOINT snapshot S view V
+format F legacy L writable` or `... read-only`. Each unresolved draft of a writable
+mount follows its view line as `  unresolved draft PATH code CODE draft ID: DETAIL`,
+where `CODE` is the exact `sys.*` Orna cause (`-` when the draft has none, such as a
+backing I/O or unsynced write) and `ID` the retained draft id (`-` when no candidate
+was retained). A writable mount whose drafts cannot be listed prints
+`  drafts could not be listed: REASON`.
+
 `orna mount status --json` emits one object per attached view with the keys
 `mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
-`unresolved_drafts` (an array of `{"path","detail"}` for each unresolved draft of a
-writable mount), and `draft_error` (a string when drafts could not be listed, else
-`null`). `read_only` is always the negation of `writable`.
+`unresolved_drafts` (an array of `{"path","code","draft","detail"}` for each
+unresolved draft of a writable mount; `code` and `draft` are strings or `null`, as
+in the human form), and `draft_error` (a string when drafts could not be listed,
+else `null`). `read_only` is always the negation of `writable`.
 
 ## Boundary
 
