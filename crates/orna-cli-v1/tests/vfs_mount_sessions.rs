@@ -384,16 +384,10 @@ async fn rows_first_opened_after_a_save_stay_readable_and_editable() {
     }
 }
 
-/// W15-03, ORNA-VFS-009/011/024: a save against a row another writer changed
-/// is stale; the candidate is retained, the mount then shows the current row,
-/// unmount names the unresolved draft, and a save against the current row
-/// resolves it.
-#[tokio::test]
-async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
-    if !require_fuse_or_skip() {
-        return;
-    }
-    let mut session = Session::start(&[("london", "London"), ("paris", "Paris")]).await;
+/// Starts a session whose london row another writer changed, then saves it stale
+/// through the mount: the candidate is retained as an unresolved draft.
+async fn stale_save_session() -> Session {
+    let session = Session::start(&[("london", "London"), ("paris", "Paris")]).await;
     assert!(session.read("london").contains("London"));
     session.edit_elsewhere("london", &music_row("Edited elsewhere"));
 
@@ -409,9 +403,33 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
             .any(|draft| draft.contains("Stale mount save")),
         "the stale candidate is retained in recovery storage"
     );
-    // ORNA-VFS-011/024, profiles/vfs-1.md: `mount status` lists the writable
-    // `--cwd` mount (its mountpoint, view and writable mode) and the rejected draft
-    // with its exact Orna cause and draft id.
+    session
+}
+
+/// The draft id `mount status` lists for the rejected london draft.
+fn listed_draft_id(status: &str) -> String {
+    let prefix = "  unresolved draft Music/london/data.orna code sys.vfs.stale_edit draft ";
+    let listing = status
+        .lines()
+        .find(|line| line.starts_with(prefix))
+        .unwrap_or_else(|| panic!("the rejected draft lists its cause and draft id: {status}"));
+    let id = listing
+        .strip_prefix(prefix)
+        .and_then(|rest| rest.split_once(": "))
+        .map(|(id, _)| id)
+        .unwrap_or_default();
+    assert!(!id.is_empty() && id != "-", "a retained draft id is listed: {listing}");
+    id.to_owned()
+}
+
+/// ORNA-VFS-011/024, profiles/vfs-1.md: `mount status` lists the writable `--cwd`
+/// mount with its mountpoint, view and writable mode.
+#[tokio::test]
+async fn stale_save_lists_the_mount_row_as_writable() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let session = stale_save_session().await;
     let status = mount_status(session.repository_directory.path());
     let mountpoint = fs::canonicalize(session.mountpoint()).expect("canonical mountpoint");
     let mount_row = status
@@ -422,35 +440,78 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
         mount_row.contains(" view ") && mount_row.ends_with(" writable"),
         "the mount row names its view and writable mode: {mount_row}"
     );
-    let listing = status
-        .lines()
-        .find(|line| line.starts_with("  unresolved draft Music/london/data.orna code sys.vfs.stale_edit draft "))
-        .unwrap_or_else(|| panic!("the rejected draft lists its cause and draft id: {status}"));
-    let draft_id = listing
-        .strip_prefix("  unresolved draft Music/london/data.orna code sys.vfs.stale_edit draft ")
-        .and_then(|rest| rest.split_once(": "))
-        .map(|(id, _)| id)
-        .unwrap_or_default();
-    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {listing}");
-    // The fields xattr carries the same draft line that `mount status` prints.
-    let mut fields = [0_u8; 1024];
-    let length = rustix::fs::getxattr(&mountpoint, "user.orna.unresolved-draft-fields", &mut fields)
+}
+
+/// ORNA-VFS-011/024: `mount status` names the rejected draft with its exact Orna
+/// cause and retained draft id.
+#[tokio::test]
+async fn stale_save_status_names_the_draft_code_and_id() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let session = stale_save_session().await;
+    let status = mount_status(session.repository_directory.path());
+    assert!(!listed_draft_id(&status).is_empty());
+}
+
+/// ORNA-VFS-011/024: the `user.orna.unresolved-draft-fields` xattr carries the
+/// draft's code and id. The buffer is sized by a probe, not a fixed length.
+#[tokio::test]
+async fn stale_save_fields_xattr_carries_code_and_draft_id() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let session = stale_save_session().await;
+    let mountpoint = fs::canonicalize(session.mountpoint()).expect("canonical mountpoint");
+    let name = "user.orna.unresolved-draft-fields";
+    let length = rustix::fs::getxattr(&mountpoint, name, &mut [])
+        .expect("probe the draft fields xattr size");
+    let mut fields = vec![0_u8; length];
+    let length = rustix::fs::getxattr(&mountpoint, name, &mut fields)
         .expect("read the draft fields xattr");
     let fields = String::from_utf8_lossy(&fields[..length]).into_owned();
-    assert!(
-        fields.contains(&format!("Music/london/data.orna\tsys.vfs.stale_edit\t{draft_id}\t")),
-        "the fields xattr carries the code and draft id: {fields}"
-    );
+    let line = fields
+        .lines()
+        .find(|line| line.starts_with("Music/london/data.orna\tsys.vfs.stale_edit\t"))
+        .unwrap_or_else(|| panic!("the fields xattr carries the code: {fields}"));
+    let draft_id = line.split('\t').nth(2).unwrap_or_default();
+    assert!(!draft_id.is_empty() && draft_id != "-", "a draft id is carried: {line}");
+}
+
+/// ORNA-VFS-011/024: `mount status --json` carries the writable mount, the draft
+/// code and id, the xattr source that listed them, and the omitted count.
+#[tokio::test]
+async fn stale_save_status_json_flags_the_fields_source() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let session = stale_save_session().await;
+    let draft_id = listed_draft_id(&mount_status(session.repository_directory.path()));
     let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
     assert_success(&json, "orna mount status --json");
     let json = String::from_utf8_lossy(&json.stdout);
     assert!(
-        json.contains("\"writable\":true,\"read_only\":false")
-            && json.contains(&format!(
-                "{{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"{draft_id}\""
-            )),
-        "the JSON status carries the writable mount and the draft code and id: {json}"
+        json.contains("\"writable\":true,\"read_only\":false,\"draft_source\":\"fields\",\"drafts_truncated\":false,\"drafts_omitted\":0"),
+        "the JSON status flags the fields source and no omitted drafts: {json}"
     );
+    assert!(
+        json.contains(&format!(
+            "{{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"{draft_id}\""
+        )),
+        "the JSON status carries the draft code and id: {json}"
+    );
+}
+
+/// W15-03, ORNA-VFS-009/011/024: a save against a row another writer changed
+/// is stale; the candidate is retained, the mount then shows the current row,
+/// unmount names the unresolved draft, and a save against the current row
+/// resolves it.
+#[tokio::test]
+async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = stale_save_session().await;
 
     let refused = session.unmount();
     let refusal = format!(
