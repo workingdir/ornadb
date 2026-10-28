@@ -1439,6 +1439,23 @@ impl RowSaveContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row);
     }
+
+    /// The baseline a new temporary captures (41-vfs.md Temporary-save
+    /// replacement, ORNA-VFS-011): the row's current durable image, so a temp
+    /// created after another writer's commit renames over that row. A row
+    /// another writer deleted keeps the recorded baseline, which refuses it.
+    fn temporary_baseline(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let recorded = self
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(table) = self.source.runtime_table.as_ref() else {
+            return Ok(recorded);
+        };
+        Ok(self.writer.live_row(table, key)?.or(recorded))
+    }
+
     fn temporary_target(
         &self,
         blob_field: Option<&BlobField>,
@@ -3862,12 +3879,11 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EPERM);
                 return;
             }
-            let baseline = save
-                .expected_baseline_row
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             let Ok(key) = runtime_table_key_bytes(&save.key) else {
+                reply.error(Errno::EIO);
+                return;
+            };
+            let Ok(baseline) = save.temporary_baseline(&key) else {
                 reply.error(Errno::EIO);
                 return;
             };
