@@ -1365,8 +1365,8 @@ fn status_drafts(status: &MountStatus) -> (Vec<DraftEntry>, Option<String>) {
     if !status.is_writable() {
         return (Vec::new(), None);
     }
-    match crate::fuse_mount::unresolved_draft_list(status.mountpoint()) {
-        Ok(list) => (parse_draft_list(&list), None),
+    match crate::fuse_mount::unresolved_draft_fields(status.mountpoint()) {
+        Ok(fields) => (parse_draft_list(&fields), None),
         Err(error) => (Vec::new(), Some(draft_listing_failure(error))),
     }
 }
@@ -1523,7 +1523,7 @@ mod tests {
         assert_eq!(drafts[2].path, "…");
         assert_eq!(drafts[2].detail, "2 more unresolved drafts");
 
-        // A mount that predates the code and draft fields reports `path<TAB>detail`.
+        // The unmount-refusal list reports `path<TAB>detail`, with no code or draft fields.
         let legacy = parse_draft_list("Music/london/data.orna\tnot accepted (sys.vfs.stale_edit)");
         assert_eq!(legacy[0].path, "Music/london/data.orna");
         assert_eq!(legacy[0].code, None);
