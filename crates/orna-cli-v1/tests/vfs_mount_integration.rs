@@ -2169,6 +2169,15 @@ async fn cwd_mount_stat_while_open_reports_writer_size() {
 /// A path truncate after an unsynced draft was released retains the truncated latest candidate, not the accepted baseline.
 #[tokio::test]
 async fn cwd_mount_truncate_after_close_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(false).await;
+}
+
+#[tokio::test]
+async fn cwd_mount_truncate_after_release_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(true).await;
+}
+
+async fn truncate_after_close_keeps_unsynced_writes(release_barrier: bool) {
     if !fuse_test_available() {
         return;
     }
@@ -2220,6 +2229,11 @@ async fn cwd_mount_truncate_after_close_keeps_unsynced_writes() {
     let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
     document.write_all(candidate.as_bytes()).unwrap();
     drop(document);
+    if release_barrier {
+        // RELEASE is delivered asynchronously; let the closed writer's candidate be
+        // retained before the path truncate, so the truncate meets the released draft.
+        thread::sleep(Duration::from_millis(500));
+    }
     let truncated = Command::new("python3")
         .args(["-c", "import os, sys; os.truncate(sys.argv[1], 13)"])
         .arg(&data_path)
