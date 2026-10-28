@@ -377,19 +377,21 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
     // xattr: no application record is written through extended attributes, so
     // setxattr and removexattr on a row document are unsupported mutations (EPERM).
     assert_errno_eperm(
-        std::process::Command::new("setfattr")
-            .args(["-n", "user.orna.probe", "-v", "1"])
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import os, sys; os.setxattr(sys.argv[1], 'user.orna.probe', b'1')")
             .arg(&document)
             .output()
-            .expect("setfattr binary runs"),
+            .expect("python3 is available on Linux"),
         "setxattr",
     );
     assert_errno_eperm(
-        std::process::Command::new("setfattr")
-            .args(["-x", "user.orna.probe"])
+        std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import os, sys; os.removexattr(sys.argv[1], 'user.orna.probe')")
             .arg(&document)
             .output()
-            .expect("setfattr binary runs"),
+            .expect("python3 is available on Linux"),
         "removexattr",
     );
 }
