@@ -3482,7 +3482,7 @@ impl Filesystem for WorkspaceFilesystem {
         };
         let candidate_size = match handle {
             Some(handle) => open_len(handle.0),
-            // fstat without a handle reaches here; an open Blob candidate is the file.
+            // fstat without a handle reaches here; an open Document or Blob candidate is the file.
             None => {
                 let handles: Vec<u64> = self
                     .draft_state
@@ -3501,7 +3501,10 @@ impl Filesystem for WorkspaceFilesystem {
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .get(handle)
                             .is_some_and(|open| {
-                                matches!(open, OpenFile::Temporary(_, _, _, Some(_)))
+                                matches!(
+                                    open,
+                                    OpenFile::Document(..) | OpenFile::Temporary(_, _, _, Some(_))
+                                )
                             })
                     })
                     .and_then(open_len)
