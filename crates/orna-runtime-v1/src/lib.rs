@@ -7690,6 +7690,31 @@ impl RuntimeState {
             .transpose()
     }
 
+    /// Reads the live row `key` of one admitted table identity: the row an
+    /// activation admitted under `table` observes with no committed base. A
+    /// point lookup, so it never loads the rest of the relation.
+    pub async fn admitted_table_row(
+        &self,
+        table: &RuntimeTableIdentity,
+        key: &[u8],
+    ) -> Result<Option<Vec<u8>>, RuntimeError> {
+        validate_table_identity(table.table(), key)?;
+        let storage = table_storage_key(table.table(), Some(table.object_id()));
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT row_value FROM table_row WHERE table_id = ?1 AND row_key = ?2",
+                params![storage, key.to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        rows.next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+            .map(|row| row.get(0).map_err(|_| RuntimeError::RecoveryInvalid))
+            .transpose()
+    }
+
     /// Whether `table_row` holds any row under the storage name `table`. The
     /// CLI uses this to refuse a store whose module tables still carry rows
     /// under their bare names, which the qualified module table would not see.
