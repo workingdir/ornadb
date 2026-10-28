@@ -6509,6 +6509,46 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 #[cfg(test)]
 mod tests {
     #[test]
+    fn candidate_read_is_chunked_and_stops_at_candidate_end() {
+        use super::{CANDIDATE_CHUNK_BYTES, read_candidate_range};
+        let total = CANDIDATE_CHUNK_BYTES * 2 + 5;
+        let bytes: Vec<u8> = (0..total).map(|index| (index % 251) as u8).collect();
+        let mut requests = Vec::new();
+        let read = read_candidate_range(
+            |offset, length| {
+                requests.push(length);
+                let start = (offset as usize).min(bytes.len());
+                let end = (start + length).min(bytes.len());
+                Ok::<_, ()>(bytes[start..end].to_vec())
+            },
+            CANDIDATE_CHUNK_BYTES as u64 / 2,
+            (total + 10) as u32,
+        )
+        .unwrap();
+        assert_eq!(read, bytes[CANDIDATE_CHUNK_BYTES / 2..].to_vec());
+        assert!(requests.iter().all(|length| *length <= CANDIDATE_CHUNK_BYTES));
+        assert!(requests.len() >= 3);
+    }
+
+    #[test]
+    fn candidate_read_propagates_backing_errors() {
+        use super::read_candidate_range;
+        let failed = read_candidate_range(|_, _| Err::<Vec<u8>, _>("backing"), 0, 8);
+        assert_eq!(failed, Err("backing"));
+    }
+
+    #[test]
+    fn truncated_and_stashed_ranges_clamp_to_candidate_size() {
+        use super::{stashed_range, truncated_range};
+        let baseline: &[u8] = b"abcdef";
+        assert_eq!(truncated_range(baseline, 4, 0, 10), b"abcd".to_vec());
+        assert_eq!(truncated_range(baseline, 8, 4, 10), vec![b'e', b'f', 0, 0]);
+        assert_eq!(truncated_range(baseline, 4, 6, 10), Vec::<u8>::new());
+        assert_eq!(stashed_range(baseline, 2, 3), b"cde".to_vec());
+        assert_eq!(stashed_range(baseline, 9, 3), Vec::<u8>::new());
+    }
+
+    #[test]
     fn quota_exceeded_maps_to_edquot_and_backing_io_to_eio() {
         use orna_runtime_v1::vfs::EditDraftError;
         assert_eq!(
