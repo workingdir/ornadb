@@ -669,6 +669,25 @@ impl<S> DraftState<S> {
         }
     }
 
+    /// Reads `[offset, offset + length)` of the candidate, clamped to its
+    /// length. Holds at most `length` bytes.
+    fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
+        match &self.candidate {
+            Some(spool) => spool
+                .read_range(offset, length)
+                .map_err(|_| EditDraftError::BackingIo),
+            None => {
+                let bytes = &self.baseline.bytes;
+                let start = usize::try_from(offset).unwrap_or(usize::MAX);
+                if start >= bytes.len() {
+                    return Ok(Vec::new());
+                }
+                let end = start.saturating_add(length).min(bytes.len());
+                Ok(bytes[start..end].to_vec())
+            }
+        }
+    }
+
     /// Returns the private spool, creating it from the baseline on first use.
     fn ensure_spool(
         &mut self,
@@ -890,6 +909,11 @@ impl DraftStorage {
 /// Subdirectory of the runtime root that holds private EDIT-1 candidate spools.
 const DRAFT_SPOOL_DIRECTORY: &str = "vfs-draft-spool-v1";
 
+/// Largest slice of a candidate that a live-mount read, copy or digest holds in
+/// memory at once. Candidates stream through this bound, so memory does not
+/// grow with candidate size.
+pub const CANDIDATE_CHUNK_BYTES: usize = 1 << 20;
+
 /// Logical bytes of one EDIT-1 candidate, held in an unlinked private file in
 /// the storage directory. Holes are sparse and cost no RAM; every logical byte
 /// is charged to the quota until the spool drops.
@@ -969,6 +993,19 @@ impl DraftSpool {
         let mut bytes = vec![0; length];
         self.file.read_exact_at(&mut bytes, 0)?;
         Ok(Arc::from(bytes))
+    }
+
+    /// Reads `[offset, offset + length)` clamped to the spool length. Holds at
+    /// most `length` bytes.
+    fn read_range(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        let end = offset.saturating_add(length as u64).min(self.len);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let size = usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
+        let mut bytes = vec![0; size];
+        self.file.read_exact_at(&mut bytes, offset)?;
+        Ok(bytes)
     }
 }
 
@@ -1480,9 +1517,21 @@ impl<S> TemporarySave<S> {
         }
         state.draft.truncate(length).await
     }
-
+    /// Whole-value copy for commit only. Live-mount reads, writes and retention
+    /// use [`Self::read_range`].
     pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
         self.state.lock().await.draft.candidate_bytes().await
+    }
+
+    /// The candidate's length in bytes.
+    pub async fn candidate_len(&self) -> u64 {
+        self.state.lock().await.draft.candidate_len().await
+    }
+
+    /// Reads `[offset, offset + length)` of the candidate; see
+    /// [`EditDraft::read_range`].
+    pub async fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
+        self.state.lock().await.draft.read_range(offset, length).await
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
@@ -1722,10 +1771,23 @@ impl<S> EditDraft<S> {
         }
         result
     }
-
+    /// Whole-value copy for commit and activation only, which own the value.
+    /// Live-mount reads, writes and retention use [`Self::read_range`].
     pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
         let state = self.state.lock().await;
         state.candidate_arc()
+    }
+
+    /// The candidate's length in bytes.
+    pub async fn candidate_len(&self) -> u64 {
+        self.state.lock().await.candidate_len()
+    }
+
+    /// Reads `[offset, offset + length)` of the candidate, clamped to its
+    /// length. Live-mount paths pass a chunk-sized `length`, at most
+    /// [`CANDIDATE_CHUNK_BYTES`], so no whole copy is made.
+    pub async fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
+        self.state.lock().await.read_range(offset, length)
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
