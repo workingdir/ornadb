@@ -7171,7 +7171,16 @@ mod hardening_tests {
         assert!(largest_read.get() <= super::CANDIDATE_CHUNK_BYTES);
         // The digest pass and the write pass each read the whole candidate once.
         assert_eq!(total_read.get(), 2 * LEN);
-        assert!(std::fs::metadata(&retained.record).unwrap().len() >= LEN);
+        let record_bytes = std::fs::read(&retained.record).unwrap();
+        let marker = format!("bytes {LEN}\n\n");
+        let start = record_bytes
+            .windows(marker.len())
+            .position(|window| window == marker.as_bytes())
+            .expect("record header carries the candidate length")
+            + marker.len();
+        let body = &record_bytes[start..];
+        assert_eq!(body.len() as u64, LEN);
+        assert!(body.iter().enumerate().all(|(index, byte)| *byte == (index as u64 % 251) as u8));
     }
 
     #[test]
