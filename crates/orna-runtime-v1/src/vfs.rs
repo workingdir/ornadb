@@ -618,13 +618,12 @@ impl<S> DraftState<S> {
     }
 
     /// Materialises the whole candidate. Only retention and activation need
-    /// this; ranged reads and writes stay on the spool.
-    fn candidate_arc(&self) -> Arc<[u8]> {
+    /// this; ranged reads and writes stay on the spool. A spool read failure is
+    /// a typed backing error, never a panic.
+    fn candidate_arc(&self) -> Result<Arc<[u8]>, EditDraftError> {
         match &self.candidate {
-            Some(spool) => spool
-                .read_all()
-                .expect("private draft spool is readable while its handle is open"),
-            None => Arc::clone(&self.baseline.bytes),
+            Some(spool) => spool.read_all().map_err(|_| EditDraftError::BackingIo),
+            None => Ok(Arc::clone(&self.baseline.bytes)),
         }
     }
 
@@ -643,20 +642,34 @@ impl<S> DraftState<S> {
     }
 
     /// Records one terminal rejection of `revision`, issuing a fresh identity
-    /// unless the same revision was already retained.
-    fn retain_rejection(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
+    /// unless the same revision was already retained. The rejection is cached
+    /// only once its bytes are retained, so a failed retention stays retryable.
+    fn retain_rejection(
+        &mut self,
+        revision: u64,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<(), EditDraftError> {
+        self.retain_draft(revision, diagnostic)?;
         self.last_rejection = Some((revision, diagnostic));
-        self.retain_draft(revision, diagnostic);
+        Ok(())
     }
 
     /// Retains a stale compare-and-swap candidate without caching the outcome.
     /// A caller may retry these same bytes against a newly captured baseline.
-    fn retain_retryable_conflict(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
-        self.retain_draft(revision, diagnostic);
+    fn retain_retryable_conflict(
+        &mut self,
+        revision: u64,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<(), EditDraftError> {
+        self.retain_draft(revision, diagnostic)
     }
 
-    fn retain_draft(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
-        let replacement = self.candidate_arc();
+    fn retain_draft(
+        &mut self,
+        revision: u64,
+        diagnostic: SafeDiagnostic,
+    ) -> Result<(), EditDraftError> {
+        let replacement = self.candidate_arc()?;
         let id = match self.retained_invalid.as_ref() {
             Some(retained) if retained.draft.revision == revision => retained.id,
             _ => *Uuid::new_v4().as_bytes(),
@@ -671,6 +684,7 @@ impl<S> DraftState<S> {
                 diagnostic,
             },
         });
+        Ok(())
     }
 }
 
@@ -1009,7 +1023,9 @@ impl<S> ManagedFile<S> {
             let diagnostic = stale_baseline_diagnostic();
             let mut draft = scratch_state.draft.state.lock().await;
             let revision = draft.revision;
-            draft.retain_rejection(revision, diagnostic);
+            draft
+                .retain_rejection(revision, diagnostic)
+                .map_err(TemporaryRenameError::Backing)?;
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         // Serialize commits in this repository epoch and retain the lock over
@@ -1021,7 +1037,7 @@ impl<S> ManagedFile<S> {
             .ok_or(TemporaryRenameError::GenerationExhausted)?;
 
         match scratch_state.draft.fsync_with(activate).await {
-            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Err(error) => Err(rename_failure(error)),
             Ok(FsyncOutcome::Rejected(diagnostic)) => {
                 Ok(TemporaryRenameOutcome::Rejected { diagnostic })
             }
@@ -1111,7 +1127,9 @@ impl<S> ManagedFile<S> {
             };
         if !reads_baseline {
             let diagnostic = stale_baseline_diagnostic();
-            retain_rejected_draft(&baseline.draft, diagnostic).await;
+            retain_rejected_draft(&baseline.draft, diagnostic)
+                .await
+                .map_err(TemporaryRenameError::Backing)?;
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
@@ -1119,7 +1137,7 @@ impl<S> ManagedFile<S> {
             .checked_add(1)
             .ok_or(TemporaryRenameError::GenerationExhausted)?;
         match baseline.draft.fsync_with(activate).await {
-            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Err(error) => Err(rename_failure(error)),
             Ok(FsyncOutcome::Rejected(diagnostic)) => {
                 Ok(TemporaryRenameOutcome::Rejected { diagnostic })
             }
@@ -1176,7 +1194,8 @@ impl<S> ManagedFile<S> {
                 .state
                 .lock()
                 .await
-                .retain_rejection(revision, diagnostic);
+                .retain_rejection(revision, diagnostic)
+                .map_err(TemporaryRenameError::Backing)?;
             return Ok(TemporaryRenameOutcome::Stale { diagnostic });
         }
         let mut cache_generation = self.cache_epoch.generation.lock().await;
@@ -1185,7 +1204,7 @@ impl<S> ManagedFile<S> {
             .ok_or(TemporaryRenameError::GenerationExhausted)?;
 
         match draft.fsync_with(activate).await {
-            Err(error) => Err(TemporaryRenameError::Activation(error)),
+            Err(error) => Err(rename_failure(error)),
             Ok(FsyncOutcome::Rejected(diagnostic)) => {
                 Ok(TemporaryRenameOutcome::Rejected { diagnostic })
             }
@@ -1296,7 +1315,7 @@ impl<S> TemporarySave<S> {
         state.draft.truncate(length).await
     }
 
-    pub async fn candidate_bytes(&self) -> Arc<[u8]> {
+    pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
         self.state.lock().await.draft.candidate_bytes().await
     }
 
@@ -1306,7 +1325,7 @@ impl<S> TemporarySave<S> {
 
     /// Persists only the private scratch sequence. This callback does not call
     /// the row activation boundary and is skipped for an already-synced seq.
-    pub async fn fsync_scratch_with<F, Fut, E>(&self, persist: F) -> Result<u64, E>
+    pub async fn fsync_scratch_with<F, Fut, E>(&self, persist: F) -> Result<u64, FsyncFailure<E>>
     where
         F: FnOnce(u64, Arc<[u8]>) -> Fut,
         Fut: Future<Output = Result<(), E>>,
@@ -1322,10 +1341,12 @@ impl<S> TemporarySave<S> {
             if state.synced_revision == Some(revision) {
                 return Ok(revision);
             }
-            let bytes = draft.candidate_arc();
+            let bytes = draft.candidate_arc().map_err(FsyncFailure::Backing)?;
             (revision, bytes)
         };
-        persist(revision, bytes).await?;
+        persist(revision, bytes)
+            .await
+            .map_err(FsyncFailure::Activation)?;
         self.state.lock().await.synced_revision = Some(revision);
         Ok(revision)
     }
@@ -1391,10 +1412,13 @@ pub const fn vfs_stale_failure_code(code: DiagnosticCode) -> Option<&'static str
 /// [`DraftState::retain_rejection`] is the one authority for a retained
 /// rejection, so this route and the direct draft routes cannot disagree about
 /// a draft's retained identity.
-async fn retain_rejected_draft<S>(draft: &EditDraft<S>, diagnostic: SafeDiagnostic) {
+async fn retain_rejected_draft<S>(
+    draft: &EditDraft<S>,
+    diagnostic: SafeDiagnostic,
+) -> Result<(), EditDraftError> {
     let mut draft_state = draft.state.lock().await;
     let revision = draft_state.revision;
-    draft_state.retain_rejection(revision, diagnostic);
+    draft_state.retain_rejection(revision, diagnostic)
 }
 
 pub enum TemporaryRenameOutcome<S> {
@@ -1416,7 +1440,25 @@ pub enum TemporaryRenameError<E> {
     WrongRepositoryScope,
     GenerationExhausted,
     Activation(E),
+    /// The private candidate spool could not be read or written.
+    Backing(EditDraftError),
     NoCandidate,
+}
+
+/// Why a validated activation through a draft did not produce a decision.
+#[derive(Debug)]
+pub enum FsyncFailure<E> {
+    /// The private candidate spool could not be read.
+    Backing(EditDraftError),
+    /// The activation callback itself failed.
+    Activation(E),
+}
+
+fn rename_failure<E>(failure: FsyncFailure<E>) -> TemporaryRenameError<E> {
+    match failure {
+        FsyncFailure::Backing(error) => TemporaryRenameError::Backing(error),
+        FsyncFailure::Activation(error) => TemporaryRenameError::Activation(error),
+    }
 }
 
 impl<S> EditDraft<S> {
@@ -1503,7 +1545,7 @@ impl<S> EditDraft<S> {
         state.ensure_spool(&self.quota)?.set_len(length)
     }
 
-    pub async fn candidate_bytes(&self) -> Arc<[u8]> {
+    pub async fn candidate_bytes(&self) -> Result<Arc<[u8]>, EditDraftError> {
         let state = self.state.lock().await;
         state.candidate_arc()
     }
@@ -1520,7 +1562,10 @@ impl<S> EditDraft<S> {
     /// Calls the validated activation adapter exactly once for a changed
     /// revision. A failed callback leaves the draft retryable; a validation
     /// rejection is cached and retained until the draft changes or is dropped.
-    pub async fn fsync_with<F, Fut, E>(&self, activate: F) -> Result<FsyncOutcome<S>, E>
+    pub async fn fsync_with<F, Fut, E>(
+        &self,
+        activate: F,
+    ) -> Result<FsyncOutcome<S>, FsyncFailure<E>>
     where
         S: Send + Sync + 'static,
         F: FnOnce(ActivationCandidate<S>) -> Fut,
@@ -1547,14 +1592,17 @@ impl<S> EditDraft<S> {
         }
 
         let revision = state.revision;
-        let bytes = state.candidate_arc();
+        let bytes = state.candidate_arc().map_err(FsyncFailure::Backing)?;
         let candidate = ActivationCandidate {
             baseline: state.baseline.pin.clone(),
             revision,
             replacement: Arc::clone(&bytes),
             removal: false,
         };
-        match activate(candidate).await? {
+        let decision = activate(candidate)
+            .await
+            .map_err(FsyncFailure::Activation)?;
+        match decision {
             ActivationDecision::Accepted(pin) => {
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
                 state.candidate = None;
@@ -1564,7 +1612,9 @@ impl<S> EditDraft<S> {
                 Ok(FsyncOutcome::Accepted(SnapshotReadHandle::open(image)))
             }
             ActivationDecision::Rejected(diagnostic) => {
-                state.retain_rejection(revision, diagnostic);
+                state
+                    .retain_rejection(revision, diagnostic)
+                    .map_err(FsyncFailure::Backing)?;
                 Ok(FsyncOutcome::Rejected(diagnostic))
             }
         }
@@ -2897,6 +2947,8 @@ pub enum VfsSaveError<E> {
     AdmissionLookup(RuntimeQueryError),
     /// Repository capture failed before the shared row-transaction boundary.
     BlobCapture(VfsBlobReplacementError),
+    /// The private candidate spool could not be read; the draft is kept.
+    Backing(EditDraftError),
     Activation(E),
 }
 
@@ -3022,7 +3074,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             let diagnostic = stale_baseline_diagnostic();
             let generation = *self.cache_epoch.generation.lock().await;
             let revision = draft_state.revision;
-            draft_state.retain_rejection(revision, diagnostic);
+            draft_state
+                .retain_rejection(revision, diagnostic)
+                .map_err(VfsSaveError::Backing)?;
             return Err(VfsSaveError::Stale {
                 generation,
                 diagnostic,
@@ -3055,7 +3109,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         }
         // One shared image of the candidate bytes is handed to the caller and
         // published on acceptance, so no second copy is made at either end.
-        let candidate_bytes = draft_state.candidate_arc();
+        let candidate_bytes = draft_state
+            .candidate_arc()
+            .map_err(VfsSaveError::Backing)?;
         drop(draft_state);
         drop(destination);
 
@@ -3077,7 +3133,8 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 .state
                 .lock()
                 .await
-                .retain_retryable_conflict(revision, diagnostic);
+                .retain_retryable_conflict(revision, diagnostic)
+                .map_err(VfsSaveError::Backing)?;
             return Err(VfsSaveError::Stale {
                 generation: *self.cache_epoch.generation.lock().await,
                 diagnostic,
@@ -3116,7 +3173,8 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                     .state
                     .lock()
                     .await
-                    .retain_rejection(revision, diagnostic);
+                    .retain_rejection(revision, diagnostic)
+                    .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Rejected {
                     generation: *cache_generation,
                     diagnostic,
@@ -4084,7 +4142,10 @@ mod tests {
 
         assert_eq!(handle.read_at(0, original.len()), original);
         assert_eq!(*cursor.pin().snapshot(), 7);
-        assert_ne!(draft.candidate_bytes().await.as_ref(), original.as_slice());
+        assert_ne!(
+            draft.candidate_bytes().await.unwrap().as_ref(),
+            original.as_slice()
+        );
     }
 
     /// Resident set size of this process in bytes (Linux `/proc/self/statm`).
@@ -4112,7 +4173,7 @@ mod tests {
             grown < SLACK,
             "a sparse 256 MiB candidate grew the resident set by {grown} bytes"
         );
-        let candidate = draft.candidate_bytes().await;
+        let candidate = draft.candidate_bytes().await.unwrap();
         assert_eq!(candidate.len(), BOUND);
         assert_eq!(candidate[BOUND - 1], 0x58);
         // Bytes before the write keep the baseline contents, as in the original path.
@@ -4135,7 +4196,7 @@ mod tests {
         );
         first.truncate(0).await.unwrap();
         second.write_at(0, &[0x59]).await.unwrap();
-        assert_eq!(second.candidate_bytes().await[0], 0x59);
+        assert_eq!(second.candidate_bytes().await.unwrap()[0], 0x59);
     }
 
     #[tokio::test]
@@ -4282,7 +4343,7 @@ mod tests {
         // A backup file is private scratch seeded with the accepted row bytes.
         // Fsyncing it persists only that scratch and cannot admit a row.
         let backup = target.begin_temporary_backup(1 << 20).await;
-        assert_eq!(backup.candidate_bytes().await.as_ref(), row_text);
+        assert_eq!(backup.candidate_bytes().await.unwrap().as_ref(), row_text);
         let backup_syncs = Arc::new(AtomicUsize::new(0));
         let backup_syncs_by_route = Arc::clone(&backup_syncs);
         let backup_revision = backup
@@ -5167,7 +5228,7 @@ mod tests {
         };
         assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
         assert_eq!(
-            identical_scratch.candidate_bytes().await.as_ref(),
+            identical_scratch.candidate_bytes().await.unwrap().as_ref(),
             accepted_for_admit
         );
         assert_eq!(state.pending().await.unwrap().len(), 1);
@@ -5214,7 +5275,7 @@ mod tests {
         };
         assert_eq!(diagnostic.code, DiagnosticCode::StaleBaseline);
         assert_eq!(
-            stale_scratch.candidate_bytes().await.as_ref(),
+            stale_scratch.candidate_bytes().await.unwrap().as_ref(),
             stale_fixture
         );
         assert_eq!(state.pending().await.unwrap().len(), 1);
@@ -5339,17 +5400,17 @@ mod tests {
         let mut sparse_hole = vec![0; 10];
         sparse_hole[8..10].copy_from_slice(&[0xa5, 0x5a]);
         assert_eq!(
-            scratch.candidate_bytes().await.as_ref(),
+            scratch.candidate_bytes().await.unwrap().as_ref(),
             sparse_hole.as_slice()
         );
         scratch.truncate(16).await.unwrap();
         sparse_hole.resize(16, 0);
         assert_eq!(
-            scratch.candidate_bytes().await.as_ref(),
+            scratch.candidate_bytes().await.unwrap().as_ref(),
             sparse_hole.as_slice()
         );
         scratch.truncate(5).await.unwrap();
-        assert_eq!(scratch.candidate_bytes().await.as_ref(), &[0; 5]);
+        assert_eq!(scratch.candidate_bytes().await.unwrap().as_ref(), &[0; 5]);
         scratch.truncate(0).await.unwrap();
         let mut replacement_bytes = PIXEL.to_vec();
         replacement_bytes.resize(PIXEL.len() + 4, 0);
@@ -5359,7 +5420,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            scratch.candidate_bytes().await.as_ref(),
+            scratch.candidate_bytes().await.unwrap().as_ref(),
             replacement_bytes.as_slice()
         );
         let scratch_for_persist = &scratch;
@@ -5370,7 +5431,7 @@ mod tests {
                 async move {
                     assert_eq!(bytes.as_ref(), expected_bytes);
                     assert_eq!(
-                        scratch_for_persist.candidate_bytes().await.as_ref(),
+                        scratch_for_persist.candidate_bytes().await.unwrap().as_ref(),
                         expected_bytes
                     );
                     Ok::<_, ()>(())
@@ -5435,7 +5496,7 @@ mod tests {
             ))
         ));
         assert_eq!(
-            scratch.candidate_bytes().await.as_ref(),
+            scratch.candidate_bytes().await.unwrap().as_ref(),
             replacement_bytes.as_slice()
         );
         let rejected_rows = state
@@ -5589,7 +5650,7 @@ mod tests {
                         PIXEL
                     );
                     assert_eq!(
-                        scratch_for_admit.candidate_bytes().await.as_ref(),
+                        scratch_for_admit.candidate_bytes().await.unwrap().as_ref(),
                         replacement_for_admit.as_slice()
                     );
                     assert_eq!(
