@@ -3434,7 +3434,7 @@ async fn mount_table_rows(
                 key: *key,
                 blob_fields: &[],
                 source_row: *source_row,
-                ordinal: 0x92 + index as u8,
+                ordinal: 0x92 + index as u16,
                 insert_only: true,
             }],
         )
