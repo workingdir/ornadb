@@ -117,19 +117,23 @@ format F legacy L writable` or `... read-only`. Each unresolved draft of a writa
 mount follows its view line as `  unresolved draft PATH code CODE draft ID: DETAIL`,
 where `CODE` is the exact `sys.*` Orna cause (`-` when the draft has none, such as a
 backing I/O or unsynced write) and `ID` the retained draft id (`-` when no candidate
-was retained). A writable mount whose drafts cannot be listed prints
-`  drafts could not be listed: REASON`. A daemon that predates the code and draft
-fields (its `user.orna.unresolved-draft-fields` xattr is unserved, ENODATA) is listed
-from the two-column draft list instead: each draft keeps its path and detail, its
-`code` and `draft` columns print `-`, and a `  note:` line says so. Only a failure to
-read that list too is reported as `drafts could not be listed`.
+was retained). The line form is this implementation's choice; the spec fixes only
+the codes and the draft ids (41-vfs.md:106). A writable mount whose drafts cannot be
+listed prints `  drafts could not be listed: REASON`. The daemon lists at most 64
+drafts within 32 KiB; when it has more, a `  note:` line gives the count it left out.
+A daemon that predates the code and draft fields (its `user.orna.unresolved-draft-fields`
+xattr is unserved, ENODATA) is listed from the two-column draft list instead: each draft
+keeps its path and detail, its `code` and `draft` columns print `-`, and a `  note:` line
+says so. Only a failure to read that list too is reported as `drafts could not be listed`.
 
 `orna mount status --json` emits one object per attached view with the keys
 `mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
-`unresolved_drafts` (an array of `{"path","code","draft","detail"}` for each
-unresolved draft of a writable mount; `code` and `draft` are strings or `null`, as
-in the human form), and `draft_error` (a string when drafts could not be listed,
-else `null`). `read_only` is always the negation of `writable`.
+`draft_source` (`"fields"`, or `"list"` for the fallback above, or `null` when no draft
+list was read), `drafts_truncated` and `drafts_omitted` (how many drafts the daemon did
+not list), `unresolved_drafts` (an array of `{"path","code","draft","detail"}` for each
+listed unresolved draft of a writable mount; `code` and `draft` are strings or `null`),
+and `draft_error` (a string when drafts could not be listed, else `null`). `read_only`
+is always the negation of `writable`.
 
 ## Boundary
 
