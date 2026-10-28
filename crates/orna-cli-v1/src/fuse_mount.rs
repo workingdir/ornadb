@@ -627,7 +627,10 @@ impl MountWriter {
             project: Arc::new(project),
             runtime_commit,
             mount_snapshot: OnceLock::new(),
-            cache: Arc::new(VfsRepositoryCache::new()),
+            cache: Arc::new(
+                VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
+                    .map_err(|error| format!("draft spool unavailable: {error}"))?,
+            ),
             scratch_store,
             retained_drafts: VfsRetainedDraftStore::new(repository.runtime_paths().root()),
             owner_id,
@@ -6111,6 +6114,23 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quota_exceeded_maps_to_edquot_and_backing_io_to_eio() {
+        use orna_runtime_v1::vfs::EditDraftError;
+        assert_eq!(
+            super::draft_errno(&Err(EditDraftError::QuotaExceeded)).code(),
+            122
+        );
+        assert_eq!(
+            super::draft_errno(&Err(EditDraftError::FileTooLarge)).code(),
+            122
+        );
+        assert_eq!(
+            super::draft_errno(&Err(EditDraftError::BackingIo)).code(),
+            5
+        );
+    }
+
     use std::ffi::OsStr;
 
     use super::{
