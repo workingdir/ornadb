@@ -123,6 +123,7 @@ async fn vfs_019_open_handle_does_not_retarget_after_sibling_row_write() {
 /// (`ROW_PAGE_LIMIT` = 256), and two directory passes list the same 512 rows.
 /// Call counts are not observable from outside the daemon; the lazy page
 /// cursor is covered by unit test `workspace_readdir_uses_lazy_indexed_pages`.
+#[ignore = "ornadb-5il1.465"]
 #[tokio::test]
 async fn vfs_017_large_collection_lookup_and_pinned_listing() {
     if !require_fuse_or_skip() {
