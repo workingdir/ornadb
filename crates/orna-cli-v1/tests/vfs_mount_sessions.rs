@@ -45,14 +45,16 @@ mod media_commit;
 mod editor_mount;
 
 use editor_mount::{
-    MountedProcess, mountinfo_contains, repository_with_music_rows, require_fuse_or_skip,
-    retained_drafts, spawn_mount_process, start_mount_process, wait_for_mount, write_and_sync,
+    MountedProcess, clear_retained_draft_store_filler, fill_retained_draft_store,
+    mountinfo_contains, repository_with_music_rows, require_fuse_or_skip, retained_drafts,
+    spawn_mount_process, start_mount_process, wait_for_mount, write_and_sync,
 };
 
 const EIO: i32 = 5;
 const EAGAIN: i32 = 11;
 const EINVAL: i32 = 22;
 const EPERM: i32 = 1;
+const EDQUOT: i32 = 122;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -581,6 +583,156 @@ async fn sigterm_retains_unresolved_drafts_instead_of_discarding_them() {
     );
     assert!(session.read("london").contains("London"));
     fs::remove_file(&scratch).expect("remove the restored scratch");
+    session.finish();
+}
+
+/// ORNA-VFS-024, profiles/vfs-1 errno table: SIGTERM while recovery storage is
+/// full does not unmount over a draft that is still unkept. The mount stays up
+/// and names the full store; once storage has room the stop completes and keeps
+/// the draft.
+#[tokio::test]
+async fn full_recovery_store_keeps_mount_up_on_sigterm_until_the_draft_is_kept() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    fill_retained_draft_store(&session.repository);
+    assert_errno(
+        write_and_sync(
+            &session.document("london"),
+            "{ title: \"Blocked stop\", artist: 123, }\n",
+        ),
+        EDQUOT,
+        "a refused save that a full recovery store cannot keep fails with EDQUOT",
+    );
+    await_draft_guard(&session.mountpoint(), b'1', "the unkept draft holds the guard");
+
+    signal(session.mounted.pid(), "TERM");
+    assert!(
+        session.mounted.wait_for_exit(Duration::from_secs(2)).is_none(),
+        "SIGTERM keeps the mount running while its draft cannot be kept: {}",
+        session.mounted.stderr_text(),
+    );
+    assert!(
+        mountinfo_contains(&session.mountpoint()),
+        "SIGTERM does not unmount over an unkept draft",
+    );
+    assert!(
+        session.mounted.stderr_text().contains("already holds 256 drafts"),
+        "the stop names the full recovery store: {}",
+        session.mounted.stderr_text(),
+    );
+
+    clear_retained_draft_store_filler(&session.repository);
+    let status = session
+        .mounted
+        .wait_for_exit(Duration::from_secs(20))
+        .expect("the stop completes once the draft can be kept");
+    let stderr = session.mounted.stderr_text();
+    assert!(
+        !mountinfo_contains(&session.mountpoint()),
+        "the stop unmounts once the draft is kept: {stderr}"
+    );
+    assert!(
+        !status.success(),
+        "a stop with an unresolved draft does not report success: {stderr}"
+    );
+    assert!(
+        retained_drafts(&session.repository)
+            .iter()
+            .any(|draft| draft.contains("Blocked stop")),
+        "the refused candidate is retained in recovery storage"
+    );
+}
+
+/// ORNA-VFS-024, profiles/vfs-1 errno table: while a full recovery store keeps
+/// SIGTERM waiting on an unkept draft, a second stop signal ends the wait. The
+/// mount is not unmounted over the unkept draft; the stop names the draft that
+/// will be lost and exits non-zero.
+#[tokio::test]
+async fn full_recovery_store_second_stop_signal_ends_the_wait_and_names_lost_drafts() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    fill_retained_draft_store(&session.repository);
+    assert_errno(
+        write_and_sync(
+            &session.document("london"),
+            "{ title: \"Escaped stop\", artist: 123, }\n",
+        ),
+        EDQUOT,
+        "a refused save that a full recovery store cannot keep fails with EDQUOT",
+    );
+    await_draft_guard(&session.mountpoint(), b'1', "the unkept draft holds the guard");
+
+    signal(session.mounted.pid(), "TERM");
+    assert!(
+        session.mounted.wait_for_exit(Duration::from_secs(1)).is_none(),
+        "the first SIGTERM waits on the unkept draft: {}",
+        session.mounted.stderr_text(),
+    );
+    signal(session.mounted.pid(), "TERM");
+    let status = session
+        .mounted
+        .wait_for_exit(Duration::from_secs(5))
+        .expect("a second stop signal ends the wait");
+    let stderr = session.mounted.stderr_text();
+    assert!(!status.success(), "the escaped stop is not a success: {stderr}");
+    assert!(
+        stderr.contains("will be lost"),
+        "the escaped stop names the drafts that will be lost: {stderr}"
+    );
+    assert!(
+        stderr.contains("london"),
+        "the escaped stop lists the unretained draft path: {stderr}"
+    );
+    clear_retained_draft_store_filler(&session.repository);
+}
+
+/// ORNA-VFS-009, profiles/vfs-1 errno table: a temp-file rename whose refused
+/// candidate a full recovery store cannot keep fails with EDQUOT, and so does
+/// removing that scratch. The scratch stays in place until storage has room.
+#[tokio::test]
+async fn full_recovery_store_replies_quota_to_refused_rename_and_removal() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    let scratch = session.row("london").join(".data.orna.quota");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("create a temp file");
+    file.write_all(b"{ title: \"Quota scratch\", artist: 123, }\n")
+        .unwrap();
+    file.sync_all().expect("fsync persists the scratch");
+    drop(file);
+    fill_retained_draft_store(&session.repository);
+
+    assert_errno(
+        fs::rename(&scratch, session.document("london")),
+        EDQUOT,
+        "a refused rename whose candidate a full recovery store cannot keep fails with EDQUOT",
+    );
+    assert!(scratch.exists(), "a refused rename keeps the scratch");
+    assert_errno(
+        fs::remove_file(&scratch),
+        EDQUOT,
+        "removing a refused scratch a full recovery store cannot keep fails with EDQUOT",
+    );
+    assert!(scratch.exists(), "a scratch that could not be kept is not removed");
+
+    clear_retained_draft_store_filler(&session.repository);
+    fs::remove_file(&scratch).expect("the refused scratch is removed once it can be kept");
+    assert!(
+        retained_drafts(&session.repository)
+            .iter()
+            .any(|draft| draft.contains("Quota scratch")),
+        "the removed scratch candidate is retained in recovery storage",
+    );
+    await_draft_guard(&session.mountpoint(), b'0', "no draft remains unresolved");
     session.finish();
 }
 
