@@ -2641,9 +2641,15 @@ impl WorkspaceFilesystem {
         }
     }
 
-    /// One `path<TAB>state` line per unresolved draft, for an unmount refusal.
+    /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, for an
+    /// unmount refusal and `mount status`. `code` is the `sys.*` Orna cause and
+    /// `draft` the retained draft id; each is empty when the draft has none (a
+    /// cause the profile does not name, or a candidate that was not retained).
     fn unresolved_draft_report(&self) -> String {
         const LISTED: usize = 64;
+        fn orna_cause_code(cause: &'static str) -> &'static str {
+            if cause.starts_with("sys.") { cause } else { "" }
+        }
         let draft_state = self
             .draft_state
             .lock()
@@ -2652,46 +2658,59 @@ impl WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut unresolved = BTreeMap::new();
+        // inode -> (Orna cause code, draft id, detail)
+        let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
         for (inode, refusal) in &draft_state.rejected_documents {
-            let detail = match &refusal.draft {
-                Some(draft) => format!(
-                    "not accepted ({}); the file shows the current row; candidate retained as draft {draft}",
-                    refusal.cause
+            let (draft, detail) = match &refusal.draft {
+                Some(draft) => (
+                    draft.clone(),
+                    format!(
+                        "not accepted ({}); the file shows the current row; candidate retained as draft {draft}",
+                        refusal.cause
+                    ),
                 ),
-                None => format!("not accepted ({}); candidate not retained", refusal.cause),
+                None => (
+                    String::new(),
+                    format!("not accepted ({}); candidate not retained", refusal.cause),
+                ),
             };
-            unresolved.insert(*inode, detail);
+            unresolved.insert(*inode, (orna_cause_code(refusal.cause), draft, detail));
         }
         for (inode, cause) in &draft_state.rejected_scratch {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| format!("scratch rename refused ({cause})"));
+            unresolved.entry(*inode).or_insert_with(|| {
+                (
+                    orna_cause_code(cause),
+                    String::new(),
+                    format!("scratch rename refused ({cause})"),
+                )
+            });
         }
         for inode in &draft_state.retained_scratch {
             unresolved
                 .entry(*inode)
-                .or_insert_with(|| "scratch file not renamed".to_owned());
+                .or_insert_with(|| ("", String::new(), "scratch file not renamed".to_owned()));
         }
         for inode in draft_state.unresolved_handles.values() {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| "unsynced writes in an open file".to_owned());
+            unresolved.entry(*inode).or_insert_with(|| {
+                ("", String::new(), "unsynced writes in an open file".to_owned())
+            });
         }
         for (inode, size) in &draft_state.pending_truncates {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| format!("truncate to {size} bytes not synced"));
+            unresolved.entry(*inode).or_insert_with(|| {
+                ("", String::new(), format!("truncate to {size} bytes not synced"))
+            });
         }
         let mut lines = unresolved
             .iter()
-            .map(|(inode, detail)| format!("{}\t{detail}", state.display_path(*inode)))
+            .map(|(inode, (code, draft, detail))| {
+                format!("{}\t{code}\t{draft}\t{detail}", state.display_path(*inode))
+            })
             .collect::<Vec<_>>();
         lines.sort();
         if lines.len() > LISTED {
             let more = lines.len() - LISTED;
             lines.truncate(LISTED);
-            lines.push(format!("…\t{more} more unresolved drafts"));
+            lines.push(format!("…\t\t\t{more} more unresolved drafts"));
         }
         lines.join("\n")
     }

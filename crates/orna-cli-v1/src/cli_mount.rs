@@ -999,9 +999,8 @@ fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
     let mut stderr = io::stderr().lock();
     match crate::fuse_mount::unresolved_draft_list(mountpoint) {
         Ok(list) => {
-            for line in list.lines() {
-                let (path, state) = line.split_once('\t').unwrap_or((line, "unresolved"));
-                let _ = writeln!(stderr, "unresolved draft: {path}: {state}");
+            for draft in parse_draft_list(&list) {
+                let _ = writeln!(stderr, "unresolved draft: {}: {}", draft.path, draft.detail);
             }
         }
         Err(error) => {
@@ -1184,6 +1183,21 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
     } else {
         for status in &statuses {
             writeln!(out, "{}", human_row(status)).map_err(|_| stdout_error())?;
+            let (drafts, draft_error) = status_drafts(status);
+            for draft in &drafts {
+                writeln!(
+                    out,
+                    "  unresolved draft {} code {} draft {}: {}",
+                    draft.path,
+                    draft.code.as_deref().unwrap_or("-"),
+                    draft.draft.as_deref().unwrap_or("-"),
+                    draft.detail,
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if let Some(error) = draft_error {
+                writeln!(out, "  drafts could not be listed: {error}").map_err(|_| stdout_error())?;
+            }
         }
     }
     Ok(())
@@ -1192,9 +1206,10 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
 fn human_row(status: &MountStatus) -> String {
     let access = if status.is_writable() { "writable" } else { "read-only" };
     format!(
-        "{} snapshot {} format {} legacy {} {access}",
+        "{} snapshot {} view {} format {} legacy {} {access}",
         status.mountpoint().display(),
         status.snapshot_hex(),
+        status.view_hex(),
         status.repository_format_number(),
         status.is_legacy_format(),
     )
@@ -1214,23 +1229,64 @@ fn status_json(status: &MountStatus) -> String {
     )
 }
 
-/// The unresolved drafts of a writable mount, as `(path, detail)` pairs. The
-/// detail carries the exact Orna cause code and any retained draft id. A
-/// writable mount whose drafts cannot be listed reports the reason instead of
-/// failing the whole status.
+/// One unresolved draft of a writable mount, as `mount status` reports it. `code`
+/// is the exact `sys.*` Orna cause and `draft` the retained draft id. Each is
+/// `None` when the draft has none: a backing I/O or unsynced-write state that the
+/// profile names no code for, or a candidate that recovery storage did not retain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DraftEntry {
+    path: String,
+    code: Option<String>,
+    draft: Option<String>,
+    detail: String,
+}
+
+/// Parses the `path<TAB>code<TAB>draft<TAB>detail` lines of an unresolved draft
+/// list. A line with only `path<TAB>detail` comes from a mount that predates the
+/// code and draft fields, so both are absent.
 #[cfg(target_os = "linux")]
-fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
+fn parse_draft_list(list: &str) -> Vec<DraftEntry> {
+    fn non_empty(field: &str) -> Option<String> {
+        (!field.is_empty()).then(|| field.to_owned())
+    }
+    list.lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let fields: Vec<&str> = line.splitn(4, '\t').collect();
+            match fields[..] {
+                [path, code, draft, detail] => DraftEntry {
+                    path: path.to_owned(),
+                    code: non_empty(code),
+                    draft: non_empty(draft),
+                    detail: detail.to_owned(),
+                },
+                [path, detail] => DraftEntry {
+                    path: path.to_owned(),
+                    code: None,
+                    draft: None,
+                    detail: detail.to_owned(),
+                },
+                _ => DraftEntry {
+                    path: line.to_owned(),
+                    code: None,
+                    draft: None,
+                    detail: "unresolved".to_owned(),
+                },
+            }
+        })
+        .collect()
+}
+
+/// The unresolved drafts of a writable mount, with their exact Orna cause codes
+/// and retained draft ids. A writable mount whose drafts cannot be listed reports
+/// the reason instead of failing the whole status.
+#[cfg(target_os = "linux")]
+fn status_drafts(status: &MountStatus) -> (Vec<DraftEntry>, Option<String>) {
     if !status.is_writable() {
         return (Vec::new(), None);
     }
     match crate::fuse_mount::unresolved_draft_list(status.mountpoint()) {
-        Ok(list) => (
-            list.lines()
-                .filter_map(|line| line.split_once('\t'))
-                .map(|(path, detail)| (path.to_owned(), detail.to_owned()))
-                .collect(),
-            None,
-        ),
+        Ok(list) => (parse_draft_list(&list), None),
         Err(error) => (Vec::new(), Some(draft_listing_failure(error))),
     }
 }
@@ -1248,7 +1304,7 @@ fn draft_listing_failure(error: rustix::io::Errno) -> String {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
+fn status_drafts(status: &MountStatus) -> (Vec<DraftEntry>, Option<String>) {
     if status.is_writable() {
         (Vec::new(), Some("live draft listing requires Linux FUSE".to_owned()))
     } else {
@@ -1266,24 +1322,23 @@ fn mount_row_json(
     format: u8,
     legacy: bool,
     writable: bool,
-    drafts: &[(String, String)],
+    drafts: &[DraftEntry],
     draft_error: Option<&str>,
 ) -> String {
     let drafts = drafts
         .iter()
-        .map(|(path, detail)| {
+        .map(|draft| {
             format!(
-                "{{\"path\":\"{}\",\"detail\":\"{}\"}}",
-                escape_json(path),
-                escape_json(detail)
+                "{{\"path\":\"{}\",\"code\":{},\"draft\":{},\"detail\":\"{}\"}}",
+                escape_json(&draft.path),
+                optional_json(draft.code.as_deref()),
+                optional_json(draft.draft.as_deref()),
+                escape_json(&draft.detail)
             )
         })
         .collect::<Vec<_>>()
         .join(",");
-    let draft_error = match draft_error {
-        Some(error) => format!("\"{}\"", escape_json(error)),
-        None => "null".to_owned(),
-    };
+    let draft_error = optional_json(draft_error);
     format!(
         "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"unresolved_drafts\":[{}],\"draft_error\":{}}}",
         escape_json(&mountpoint.to_string_lossy()),
@@ -1316,9 +1371,17 @@ fn escape_json(value: &str) -> String {
     escaped
 }
 
+/// JSON for an optional string: the escaped string, or `null`.
+fn optional_json(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", escape_json(value)),
+        None => "null".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape_json, mount_row_json};
+    use super::{escape_json, mount_row_json, DraftEntry};
     use std::path::Path;
 
     #[test]
@@ -1332,16 +1395,60 @@ mod tests {
 
     #[test]
     fn mount_row_json_formats_writable_and_draft_fields() {
-        let drafts = vec![(
-            "Music/london/data.orna".to_owned(),
-            "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
-        )];
+        let drafts = vec![DraftEntry {
+            path: "Music/london/data.orna".to_owned(),
+            code: Some("sys.vfs.stale_edit".to_owned()),
+            draft: Some("d1".to_owned()),
+            detail: "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
+        }];
         let object =
             mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &drafts, None);
         assert!(object.contains("\"writable\":true,\"read_only\":false"), "{object}");
-        assert!(object.contains("sys.vfs.stale_edit"), "{object}");
-        assert!(object.contains("candidate retained as draft d1"), "{object}");
+        assert!(
+            object.contains("\"unresolved_drafts\":[{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"d1\",\"detail\":\"not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1\"}]"),
+            "{object}"
+        );
         assert!(object.contains("\"draft_error\":null"), "{object}");
+
+        let uncoded = vec![DraftEntry {
+            path: "scratch.tmp".to_owned(),
+            code: None,
+            draft: None,
+            detail: "scratch file not renamed".to_owned(),
+        }];
+        let object =
+            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &uncoded, None);
+        assert!(
+            object.contains("{\"path\":\"scratch.tmp\",\"code\":null,\"draft\":null,\"detail\":\"scratch file not renamed\"}"),
+            "{object}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn draft_list_lines_carry_the_code_and_draft_id() {
+        use super::parse_draft_list;
+
+        let list = "Music/london/data.orna\tsys.vfs.stale_edit\td1\tnot accepted (sys.vfs.stale_edit); candidate retained as draft d1\nscratch.tmp\t\t\tscratch file not renamed\n…\t\t\t2 more unresolved drafts";
+        let drafts = parse_draft_list(list);
+        assert_eq!(drafts.len(), 3);
+        assert_eq!(drafts[0].path, "Music/london/data.orna");
+        assert_eq!(drafts[0].code.as_deref(), Some("sys.vfs.stale_edit"));
+        assert_eq!(drafts[0].draft.as_deref(), Some("d1"));
+        assert_eq!(drafts[0].detail, "not accepted (sys.vfs.stale_edit); candidate retained as draft d1");
+        assert_eq!(drafts[1].path, "scratch.tmp");
+        assert_eq!(drafts[1].code, None);
+        assert_eq!(drafts[1].draft, None);
+        assert_eq!(drafts[1].detail, "scratch file not renamed");
+        assert_eq!(drafts[2].path, "…");
+        assert_eq!(drafts[2].detail, "2 more unresolved drafts");
+
+        // A mount that predates the code and draft fields reports `path<TAB>detail`.
+        let legacy = parse_draft_list("Music/london/data.orna\tnot accepted (sys.vfs.stale_edit)");
+        assert_eq!(legacy[0].path, "Music/london/data.orna");
+        assert_eq!(legacy[0].code, None);
+        assert_eq!(legacy[0].draft, None);
+        assert_eq!(legacy[0].detail, "not accepted (sys.vfs.stale_edit)");
     }
 
     #[test]
