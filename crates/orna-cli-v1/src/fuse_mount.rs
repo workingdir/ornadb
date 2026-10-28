@@ -2158,6 +2158,16 @@ struct WorkspaceFilesystem {
     next_handle: AtomicU64,
 }
 
+/// The errno a retention refusal reports when several refusals meet: a full
+/// store (EDQUOT) wins over other storage failures (EIO).
+fn worst_retention_errno(current: Option<Errno>, next: Errno) -> Option<Errno> {
+    Some(if current == Some(Errno::EDQUOT) || next == Errno::EDQUOT {
+        Errno::EDQUOT
+    } else {
+        Errno::EIO
+    })
+}
+
 impl WorkspaceFilesystem {
     fn from_snapshot(
         repository: &Repository,
@@ -2789,8 +2799,8 @@ impl WorkspaceFilesystem {
     /// mount restores. Every kept draft is reported with
     /// `sys.vfs.draft_retained`. A candidate that recovery storage refuses keeps
     /// its bytes as an unresolved refusal, so a later attempt retries it.
-    /// Returns whether every document draft was retained.
-    fn retain_all_drafts(&self, draft_state: &mut DraftState) -> bool {
+    /// Returns the errno of the refusal that kept a draft, or `None` when every draft was retained.
+    fn retain_all_drafts(&self, draft_state: &mut DraftState) -> Option<Errno> {
         let open_files = self
             .open_files
             .lock()
@@ -2819,6 +2829,7 @@ impl WorkspaceFilesystem {
             }
         }
         let mut unresolved = HashMap::new();
+        let mut refused: Option<Errno> = None;
         for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
             match (refusal.draft, refusal.unretained) {
                 (_, Some((save, bytes))) => {
@@ -2845,6 +2856,7 @@ impl WorkspaceFilesystem {
                     ));
                 }
                 Err(error) => {
+                    refused = worst_retention_errno(refused, error.errno);
                     reports.insert(format!(
                         "draft for {path} ({cause}) could not be retained: {error}"
                     ));
@@ -2887,6 +2899,7 @@ impl WorkspaceFilesystem {
                     ));
                 }
                 Err(error) => {
+                    refused = worst_retention_errno(refused, Errno::EIO);
                     reports.insert(format!("scratch {path} could not be kept: {error}"));
                     unkept_scratch.insert(inode);
                 }
@@ -2903,9 +2916,8 @@ impl WorkspaceFilesystem {
         draft_state
             .rejected_scratch
             .retain(|inode, _| unkept_scratch.contains(inode));
-        let all_retained = unresolved.is_empty() && unkept_scratch.is_empty();
         draft_state.rejected_documents = unresolved;
-        all_retained
+        refused
     }
 }
 
@@ -3009,10 +3021,9 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
             draft_state.quiescing = true;
-            if self.retain_all_drafts(&mut draft_state) {
-                reply.ok();
-            } else {
-                reply.error(Errno::EIO);
+            match self.retain_all_drafts(&mut draft_state) {
+                None => reply.ok(),
+                Some(errno) => reply.error(errno),
             }
         } else if value == b"1" {
             if draft_state.has_unresolved_drafts() {
