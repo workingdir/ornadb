@@ -866,20 +866,12 @@ impl MountWriter {
             .ok_or_else(|| format!("runtime table {} was not admitted", table.table()))
     }
 
-    /// The CWD row the runtime holds for `key` now, read in its own activation
-    /// snapshot rather than the one captured at mount time. A stale save uses
+    /// The CWD row the runtime holds for `key` now, read as one point lookup
+    /// rather than from the snapshot captured at mount time. A stale save uses
     /// it to show and save against the row another writer accepted.
     fn live_row(&self, table: &RuntimeTableIdentity, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        let snapshot = self
-            .runtime
-            .block_on(
-                self.state
-                    .begin_admitted_table_activation(std::slice::from_ref(table)),
-            )
-            .map_err(|error| format!("mounted editor CWD row could not be read: {error:?}"))?;
-        snapshot
-            .query_exact(table.table(), key)
-            .map(|row| row.map(<[u8]>::to_vec))
+        self.runtime
+            .block_on(self.state.admitted_table_row(table, key))
             .map_err(|error| format!("mounted editor CWD row could not be read: {error:?}"))
     }
 
@@ -1260,7 +1252,8 @@ fn row_save_context(
         .flatten()
         .map(|row| row.to_vec());
     // A row this view already accepted keeps that baseline across the processes
-    // that save through it; the live durable row is only the first baseline.
+    // that save through it; the live durable row is only the first baseline. A
+    // temporary is the exception: its baseline is re-read when it is created.
     let expected_baseline_row = match (
         refreshed_baseline,
         &writer.row_baselines,
@@ -1439,6 +1432,23 @@ impl RowSaveContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row);
     }
+
+    /// The baseline a new temporary captures (41-vfs.md Temporary-save
+    /// replacement, ORNA-VFS-011): the row's current durable image, so a temp
+    /// created after another writer's commit renames over that row. A row
+    /// another writer deleted keeps the recorded baseline, which refuses it.
+    fn temporary_baseline(&self, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
+        let recorded = self
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(table) = self.source.runtime_table.as_ref() else {
+            return Ok(recorded);
+        };
+        Ok(self.writer.live_row(table, key)?.or(recorded))
+    }
+
     fn temporary_target(
         &self,
         blob_field: Option<&BlobField>,
@@ -3864,12 +3874,11 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EPERM);
                 return;
             }
-            let baseline = save
-                .expected_baseline_row
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
             let Ok(key) = runtime_table_key_bytes(&save.key) else {
+                reply.error(Errno::EIO);
+                return;
+            };
+            let Ok(baseline) = save.temporary_baseline(&key) else {
                 reply.error(Errno::EIO);
                 return;
             };
