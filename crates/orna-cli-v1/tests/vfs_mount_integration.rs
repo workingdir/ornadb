@@ -2102,6 +2102,202 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
     assert!(!mountinfo_contains(&mountpoint));
     assert!(repository.mount_status().unwrap().is_empty());
 }
+
+/// A stat without a handle reports the size of the open writer's candidate (profiles/vfs-1 stat clause).
+#[tokio::test]
+async fn cwd_mount_stat_while_open_reports_writer_size() {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x94,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    let candidate = "{ title: \"writer candidate is longer than the accepted row\", }\n";
+    let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
+    document.write_all(candidate.as_bytes()).unwrap();
+    // Entry and attribute TTLs are zero, so this path stat reaches the mount without a handle.
+    assert_eq!(
+        std::fs::metadata(&data_path).unwrap().len(),
+        candidate.len() as u64
+    );
+    drop(document);
+    run_unmount_from(repository_directory.path(), Path::new("."), &mountpoint);
+    assert!(!mountinfo_contains(&mountpoint));
+    assert!(repository.mount_status().unwrap().is_empty());
+}
+
+/// A path truncate after an unsynced draft was released retains the truncated latest candidate, not the accepted baseline.
+#[tokio::test]
+async fn cwd_mount_truncate_after_close_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(false).await;
+}
+
+#[tokio::test]
+async fn cwd_mount_truncate_after_release_keeps_unsynced_writes() {
+    truncate_after_close_keeps_unsynced_writes(true).await;
+}
+
+async fn truncate_after_close_keeps_unsynced_writes(release_barrier: bool) {
+    if !fuse_test_available() {
+        return;
+    }
+    let initial = "{ title: \"before\", }\n";
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x95,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return;
+    }
+
+    // Released without fsync: the candidate is retained as a draft and not accepted.
+    let candidate = "{ title: \"unsynced writes kept\", }\n";
+    let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
+    document.write_all(candidate.as_bytes()).unwrap();
+    drop(document);
+    if release_barrier {
+        // RELEASE is delivered asynchronously; let the closed writer's candidate be
+        // retained before the path truncate, so the truncate meets the released draft.
+        thread::sleep(Duration::from_millis(500));
+    }
+    let truncated = Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], 13)"])
+        .arg(&data_path)
+        .output()
+        .expect("run path-based truncate");
+    assert!(
+        truncated.status.success(),
+        "path-based truncate failed: {}",
+        String::from_utf8_lossy(&truncated.stderr)
+    );
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&mountpoint)
+        .output()
+        .expect("run pending path-truncate unmount");
+    assert!(!refused.status.success(), "pending path truncate was discarded");
+    assert!(mountinfo_contains(&mountpoint));
+    // Records are written only when the mount process stops (ORNA-VFS-024), so stop it and inspect the store.
+    let signal = Command::new("kill")
+        .args(["-TERM", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to mount child");
+    assert!(signal.success(), "kill -TERM failed");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = mounted.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    let stop_stderr = take_child_stderr(&mut mounted.child);
+    assert!(!status.success(), "mount stopped with unresolved drafts must exit non-zero");
+    assert!(
+        stop_stderr.contains("sys.vfs.draft_retained") && stop_stderr.contains("Music/london/data.orna"),
+        "stop reports the retained draft: {stop_stderr}"
+    );
+
+    // The truncate applies to the unsynced candidate: its first 13 bytes are retained.
+    let records_of = || -> Vec<String> {
+        let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+        match std::fs::read_dir(&directory) {
+            Ok(entries) => entries
+                .map(|entry| entry.expect("list retained draft").path())
+                .filter(|path| path.is_file())
+                .map(|path| String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned())
+                .collect(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => panic!("list retained drafts: {error}"),
+        }
+    };
+    let records = records_of();
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\nbytes 13\n") && record.ends_with("{ title: \"uns")),
+        "truncated unsynced candidate was not retained: {records:?}"
+    );
+}
+
 #[tokio::test]
 /// ORNA-VFS-024: a rejected Document draft survives close and still blocks unmount until accepted.
 async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
@@ -3079,4 +3275,236 @@ async fn cwd_mount_blob_read_write_open_is_coherent() {
     assert_eq!(&committed[..4 * 1024], patch.as_slice());
     assert_eq!(&committed[4 * 1024..], &original[4 * 1024..]);
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+/// POSIX `EPERM` (Linux errno 1): the documented refusal for unsupported VFS mutations (41-vfs.md:103-105).
+const EPERM: i32 = 1;
+
+#[tokio::test]
+/// ORNA-VFS-014: symlinks and hard links are unsupported in VFS-1 and fail explicitly with EPERM; the row directory gains no entry and the stored row is unchanged.
+async fn cwd_mount_symlink_and_hard_link_fail_eperm_without_row_change() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let row_path = row.row_path.clone();
+    let symlink_error = std::os::unix::fs::symlink("data.orna", row_path.join("alias"))
+        .expect_err("a symlink in a row directory is refused");
+    assert_eq!(symlink_error.raw_os_error(), Some(EPERM));
+    let link_error = std::fs::hard_link(row_path.join("data.orna"), row_path.join("twin"))
+        .expect_err("a hard link to data.orna is refused");
+    assert_eq!(link_error.raw_os_error(), Some(EPERM));
+    let mut names: Vec<String> = std::fs::read_dir(&row_path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["data.orna"], "refused links leave no directory entry");
+    row.unmount();
+    assert_title(&row.stored_row().await, "before");
+}
+
+#[tokio::test]
+/// ORNA-VFS-013 / profiles/vfs-1.md "Editable candidate and syscall rules": unlinking data.orna, creating a directory in a row, and renaming data.orna fail with EPERM and keep the row.
+async fn cwd_mount_unlink_mkdir_and_document_rename_fail_eperm_without_row_change() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let row_path = row.row_path.clone();
+    let unlink_error = std::fs::remove_file(row_path.join("data.orna"))
+        .expect_err("data.orna cannot be unlinked");
+    assert_eq!(unlink_error.raw_os_error(), Some(EPERM));
+    let mkdir_error = std::fs::create_dir(row_path.join("nested"))
+        .expect_err("plain mkdir does not invent schema or key semantics");
+    assert_eq!(mkdir_error.raw_os_error(), Some(EPERM));
+    let rename_error = std::fs::rename(row_path.join("data.orna"), row_path.join("renamed.orna"))
+        .expect_err("data.orna cannot be renamed to another name");
+    assert_eq!(rename_error.raw_os_error(), Some(EPERM));
+    let document = std::fs::read_to_string(row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains("title: \"before\""),
+        "the mounted document still shows the accepted row: {document}"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "before");
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md "Editable candidate and syscall rules": chmod cannot change database authority. This mount refuses it with EPERM; the spec does not name chmod, so EPERM is a conservative choice. The row keeps its content and permissions.
+async fn cwd_mount_chmod_of_document_fails_eperm_without_row_change() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let document = row.row_path.join("data.orna");
+    let mode_before = std::fs::metadata(&document).unwrap().permissions().mode() & 0o777;
+    let chmod_error = std::fs::set_permissions(&document, std::fs::Permissions::from_mode(0o644))
+        .expect_err("chmod of a database-backed document is refused");
+    assert_eq!(chmod_error.raw_os_error(), Some(EPERM));
+    assert_eq!(
+        std::fs::metadata(&document).unwrap().permissions().mode() & 0o777,
+        mode_before,
+        "a refused chmod leaves the mode unchanged"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "before");
+}
+
+#[tokio::test]
+/// ORNA-VFS-012: renaming a Blob's suffix (content.mp3 -> content.wav) does not transcode bytes or rename the field. The mount refuses the suffix change with EPERM; the spec does not name a suffix rename, so this refusal is a conservative choice. The Blob keeps its bytes.
+async fn cwd_mount_blob_suffix_rename_is_refused_without_transcoding() {
+    let original = lcg_bytes(0x5151_0000_0000_0001, 64 * 1024 + 3);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let blob_path = row_path.join("content.mp3");
+
+    let renamed = std::fs::rename(&blob_path, row_path.join("content.wav"))
+        .expect_err("renaming a Blob to another suffix is refused");
+    assert_eq!(renamed.raw_os_error(), Some(EPERM));
+    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "the Blob keeps its bytes");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+#[ignore = "ornadb-5il1.463"]
+/// ORNA-VFS-012 / 41-vfs.md "Temporary-save replacement" (lines 64-72) and profiles/vfs-1.md:98: an unknown file inside a Blob-field row directory is private editor scratch. Creating `.content.wav.replace` there MUST succeed, and fsync persists scratch only. Currently refused with EPERM (see ornadb-5il1.463).
+async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
+    let original = lcg_bytes(0x5151_0000_0000_0002, 64 * 1024 + 3);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let blob_path = row_path.join("content.mp3");
+
+    let scratch = row_path.join(".content.wav.replace");
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("creating scratch inside a Blob-field row directory is supported");
+    file.write_all(b"replacement").unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "scratch does not change the Blob");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+/// Mounted table directory for a commit with several rows, one commit per row.
+struct MountedTableRows {
+    mounted: MountedProcess,
+    repository_directory: TempDir,
+    _mount_parent: TempDir,
+}
+
+/// Commits each `(key, source)` row in its own commit against the same table, then mounts the
+/// repository with `--cwd`. Returns `None` when FUSE is opted out.
+async fn mount_table_rows(
+    source: &str,
+    table: &str,
+    rows: &[(&str, &str)],
+) -> Option<MountedTableRows> {
+    if !fuse_test_available() {
+        return None;
+    }
+    let (repository_directory, repository, relation_id, _format_context) =
+        format3::format3_repository_with_context(source, table);
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    for (index, (key, source_row)) in rows.iter().enumerate() {
+        let state = RuntimeState::open(&repository, runtime_identity, digest)
+            .await
+            .unwrap();
+        let writer = state
+            .acquire_lease(runtime_identity.repository_id)
+            .await
+            .unwrap();
+        let context = format3::format3_context_for_snapshot(
+            &repository,
+            repository.head().unwrap().unwrap().as_str(),
+        );
+        media_commit::commit_source_captures_for_table(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            relation_id,
+            &context,
+            table,
+            &[media_commit::SourceCaptureRow {
+                key: *key,
+                blob_fields: &[],
+                source_row: *source_row,
+                ordinal: 0x92 + index as u8,
+                insert_only: true,
+            }],
+        )
+        .await;
+        drop(state);
+    }
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let table_path = mountpoint.join(table);
+    if !wait_for_mount_paths(&mut mounted, &[table_path.as_path()]) {
+        return None;
+    }
+    Some(MountedTableRows {
+        mounted,
+        repository_directory,
+        _mount_parent: mount_parent,
+    })
+}
+
+#[tokio::test]
+/// ORNA-VFS-016 (case-folding half only) / profiles/vfs-1.md "Row/key directory mapping": Str case is preserved without folding, so `abc` and `ABC` are distinct row directories, each resolving to its own document with no alias entry. The reversible-escaping half of ORNA-VFS-016 is not exercised here.
+async fn mount_case_distinct_keys_project_to_distinct_rows() {
+    let rows: Vec<(&str, &str)> = vec![
+        ("abc", "{ title: \"lower\", }\n"),
+        ("ABC", "{ title: \"upper\", }\n"),
+    ];
+    let Some(mut mounted) =
+        mount_table_rows("pub table Music(id: Str) { title: Str, }\n", "Music", &rows).await
+    else {
+        return;
+    };
+    let table_path = mounted.mounted.mountpoint.join("Music");
+    let mut names: Vec<String> = std::fs::read_dir(&table_path)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["ABC", "abc"], "case-distinct keys keep their own directories");
+    for (name, title) in [("abc", "lower"), ("ABC", "upper")] {
+        let document = std::fs::read_to_string(table_path.join(name).join("data.orna"))
+            .unwrap_or_else(|error| panic!("read the row at {name}: {error}"));
+        assert!(
+            document.contains(&format!("title: \"{title}\"")),
+            "{name} resolves to its own row: {document}"
+        );
+    }
+    unmount_and_reap(mounted.repository_directory.path(), &mut mounted.mounted);
+}
+
+#[tokio::test]
+/// A Str far above the 64 KiB inline bound saves through the document; the stored row holds the full text and the document read contains it. This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
+async fn cwd_mount_large_str_round_trips_through_document() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let large: String = (0..300_000u32)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{large}\", }}")),
+        "large Str save",
+    );
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains(&large),
+        "the document read returns the full large Str"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, &large);
 }
