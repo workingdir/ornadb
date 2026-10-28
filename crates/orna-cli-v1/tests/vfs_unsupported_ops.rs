@@ -339,6 +339,69 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
         "cross-directory rename must be EPERM"
     );
     assert!(document.exists() && !moved_target.exists(), "refused rename must not move data.orna");
+
+    // hard link: VFS-1 has no hard links (ORNA-VFS-014) and must fail with EPERM.
+    let hard_link = row_directory.join("hard-link.orna");
+    assert_eq!(
+        errno(std::fs::hard_link(&document, &hard_link).expect_err("hard link must be refused")),
+        Some(libc::EPERM),
+        "hard link must be EPERM"
+    );
+    assert!(!hard_link.exists(), "refused hard link must not create a target");
+
+    // symlink: VFS-1 has no symlinks (ORNA-VFS-014) and must fail with EPERM.
+    let symlink_path = row_directory.join("symbolic-link.orna");
+    assert_eq!(
+        errno(
+            std::os::unix::fs::symlink(&document, &symlink_path).expect_err("symlink must be refused")
+        ),
+        Some(libc::EPERM),
+        "symlink must be EPERM"
+    );
+    assert!(!symlink_path.exists(), "refused symlink must not create a target");
+
+    // mknod: device nodes are unsupported (ORNA-VFS-014) and must fail with EPERM.
+    let device_path = std::ffi::CString::new(row_directory.join("device-node").as_os_str().as_encoded_bytes())
+        .expect("device path has no NUL");
+    // SAFETY: the path is a valid NUL-terminated string; mknod only reads it.
+    let result = unsafe { libc::mknod(device_path.as_ptr(), libc::S_IFCHR | 0o600, libc::makedev(1, 3)) };
+    assert_eq!(result, -1, "device-node creation must be refused");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM),
+        "device node must be EPERM"
+    );
+
+    // xattr: no application record is written through extended attributes, so
+    // setxattr and removexattr on a row document are unsupported mutations (EPERM).
+    let document_path = std::ffi::CString::new(document.as_os_str().as_encoded_bytes())
+        .expect("document path has no NUL");
+    let attribute = std::ffi::CString::new("user.orna.probe").expect("attribute name has no NUL");
+    let value = b"1";
+    // SAFETY: all pointers reference live buffers for the duration of each call.
+    let result = unsafe {
+        libc::setxattr(
+            document_path.as_ptr(),
+            attribute.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    assert_eq!(result, -1, "setxattr must be refused");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM),
+        "setxattr must be EPERM"
+    );
+    // SAFETY: the path and attribute name are valid NUL-terminated strings.
+    let result = unsafe { libc::removexattr(document_path.as_ptr(), attribute.as_ptr()) };
+    assert_eq!(result, -1, "removexattr must be refused");
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::EPERM),
+        "removexattr must be EPERM, not the fuser default ENOSYS"
+    );
 }
 
 #[cfg(target_os = "linux")]
