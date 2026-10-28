@@ -3273,3 +3273,25 @@ async fn mount_case_distinct_keys_project_to_distinct_rows() {
     }
     unmount_and_reap(mounted.repository_directory.path(), &mut mounted.mounted);
 }
+
+#[tokio::test]
+/// ORNA-VFS-010 / ORNA-VFS-018: a Str far above the 64 KiB inline bound saves through the document and round-trips byte-for-byte; the document read reflects the accepted row, and the row stores the full text.
+async fn cwd_mount_large_str_round_trips_through_document() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let large: String = (0..300_000u32)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{large}\", }}")),
+        "large Str save",
+    );
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains(&large),
+        "the document read returns the full large Str"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, &large);
+}
