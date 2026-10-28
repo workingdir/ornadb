@@ -22682,7 +22682,7 @@ mod tests {
             ))
         ));
         assert_eq!(
-            redirected_draft.candidate_bytes().await.as_ref(),
+            redirected_draft.candidate_bytes().await.unwrap().as_ref(),
             accepted_row.as_slice()
         );
         assert_eq!(
