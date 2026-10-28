@@ -118,7 +118,11 @@ mount follows its view line as `  unresolved draft PATH code CODE draft ID: DETA
 where `CODE` is the exact `sys.*` Orna cause (`-` when the draft has none, such as a
 backing I/O or unsynced write) and `ID` the retained draft id (`-` when no candidate
 was retained). A writable mount whose drafts cannot be listed prints
-`  drafts could not be listed: REASON`.
+`  drafts could not be listed: REASON`. A daemon that predates the code and draft
+fields (its `user.orna.unresolved-draft-fields` xattr is unserved, ENODATA) is listed
+from the two-column draft list instead: each draft keeps its path and detail, its
+`code` and `draft` columns print `-`, and a `  note:` line says so. Only a failure to
+read that list too is reported as `drafts could not be listed`.
 
 `orna mount status --json` emits one object per attached view with the keys
 `mountpoint`, `snapshot`, `view`, `format`, `legacy`, `writable`, `read_only`,
