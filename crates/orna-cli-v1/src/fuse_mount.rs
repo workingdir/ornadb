@@ -866,20 +866,12 @@ impl MountWriter {
             .ok_or_else(|| format!("runtime table {} was not admitted", table.table()))
     }
 
-    /// The CWD row the runtime holds for `key` now, read in its own activation
-    /// snapshot rather than the one captured at mount time. A stale save uses
+    /// The CWD row the runtime holds for `key` now, read as one point lookup
+    /// rather than from the snapshot captured at mount time. A stale save uses
     /// it to show and save against the row another writer accepted.
     fn live_row(&self, table: &RuntimeTableIdentity, key: &[u8]) -> Result<Option<Vec<u8>>, String> {
-        let snapshot = self
-            .runtime
-            .block_on(
-                self.state
-                    .begin_admitted_table_activation(std::slice::from_ref(table)),
-            )
-            .map_err(|error| format!("mounted editor CWD row could not be read: {error:?}"))?;
-        snapshot
-            .query_exact(table.table(), key)
-            .map(|row| row.map(<[u8]>::to_vec))
+        self.runtime
+            .block_on(self.state.admitted_table_row(table, key))
             .map_err(|error| format!("mounted editor CWD row could not be read: {error:?}"))
     }
 
@@ -1260,7 +1252,8 @@ fn row_save_context(
         .flatten()
         .map(|row| row.to_vec());
     // A row this view already accepted keeps that baseline across the processes
-    // that save through it; the live durable row is only the first baseline.
+    // that save through it; the live durable row is only the first baseline. A
+    // temporary is the exception: its baseline is re-read when it is created.
     let expected_baseline_row = match (
         refreshed_baseline,
         &writer.row_baselines,

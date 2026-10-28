@@ -4,7 +4,8 @@
 //! other opens and remounts, read handles pin their generation, kernel IO
 //! modes do not leak drafts, and temp-and-rename saves are compared against
 //! their captured baseline (including a baseline moved by `orna edit`). REPL
-//! writes while the mount is live are not covered here; their concurrency
+//! writes while the mount is live are not covered here: a live mount holds the
+//! writer lease, so an owner REPL write is refused. The other concurrency
 //! baseline cases are open under ornadb-5il1.64.
 //!
 //! Spec (Orna-1.1.0, source/41-vfs.md): EDIT-1 ("A writer sees its own draft;
@@ -293,6 +294,43 @@ async fn temp_created_before_owner_change_is_refused_with_eagain_and_keeps_scrat
         "removing the refused scratch clears the guard",
     )
     .await;
+}
+
+/// Two temporaries for one row each capture the baseline current at their own
+/// creation: one created before an owner commit is refused with EAGAIN, and one
+/// created after that commit renames over the owner's row. The refused scratch
+/// does not block the later temporary.
+#[tokio::test]
+async fn two_temporaries_for_one_row_capture_their_own_baselines() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let stale = write_temporary_sibling(
+        &fixture,
+        ".data.orna.stale-temp",
+        &music_row("Stale temp"),
+    );
+    owner_routed_edit(&fixture, "Owner change");
+    assert_errno(
+        std::fs::rename(&stale, &fixture.data_path),
+        &[libc::EAGAIN],
+        "a temp created before the owner change must be refused",
+    );
+
+    let fresh = write_temporary_sibling(
+        &fixture,
+        ".data.orna.fresh-temp",
+        &music_row("Fresh temp"),
+    );
+    std::fs::rename(&fresh, &fixture.data_path)
+        .expect("a temp created after the owner change renames over the owner's row");
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Fresh temp") && !view.contains("Owner change"),
+        "the later temp replaces the owner's row, got {view}"
+    );
+    std::fs::remove_file(&stale).expect("remove the refused scratch");
 }
 
 /// ORNA-VFS-022: "supported caching/IO modes MUST preserve per-open generation
