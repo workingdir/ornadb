@@ -4899,6 +4899,9 @@ impl RuntimeState {
             Err(_) => return Err(RuntimeError::StorageUnavailable),
         };
         let graph_repository_id = current_graph_repository_id(repository, identity.database_id)?;
+        let vfs_repository_cache =
+            vfs::VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
+                .map_err(|_| RuntimeError::StorageUnavailable)?;
         Self::open_path_with_graph_repository_id(
             &repository.runtime_paths().state_db(),
             identity,
@@ -4910,6 +4913,7 @@ impl RuntimeState {
                     .compact_runtime_receipt_public_key(),
             ),
             writer_authority,
+            vfs_repository_cache,
         )
         .await
     }
@@ -4928,6 +4932,7 @@ impl RuntimeState {
             None,
             public_key_path,
             WriterAuthority::Unmanaged,
+            vfs::VfsRepositoryCache::new(),
         )
         .await
     }
@@ -4938,6 +4943,7 @@ impl RuntimeState {
         graph_repository_id: Option<[u8; 32]>,
         public_key_path: Option<PathBuf>,
         writer_authority: WriterAuthority,
+        vfs_repository_cache: vfs::VfsRepositoryCache,
     ) -> Result<Self, RuntimeError> {
         validate_identity(identity)?;
         validate_digest(initial_digest)?;
@@ -4974,7 +4980,7 @@ impl RuntimeState {
             compact_receipt_signing_key,
             system_dispatch,
             system_provider_roles,
-            vfs_repository_cache: vfs::VfsRepositoryCache::new(),
+            vfs_repository_cache,
             writer_authority,
         };
         state.migrate_observation_projection_schema().await?;
@@ -22481,6 +22487,7 @@ mod tests {
             Some(graph_repository_id),
             Some(repo.runtime_paths().compact_runtime_receipt_public_key()),
             WriterAuthority::Unmanaged,
+            vfs::VfsRepositoryCache::in_runtime_root(repo.runtime_paths().root()).unwrap(),
         )
         .await
         .unwrap()
