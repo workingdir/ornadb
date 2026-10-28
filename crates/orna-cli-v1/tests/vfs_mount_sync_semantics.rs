@@ -20,9 +20,13 @@ mod media_commit;
 
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{EditorMount, require_fuse_or_skip, retained_drafts, start_editor_mount};
+use editor_mount::{
+    EditorMount, clear_retained_draft_store_filler, fill_retained_draft_store,
+    require_fuse_or_skip, retained_drafts, start_editor_mount,
+};
 
 const EINVAL: i32 = 22;
+const EDQUOT: i32 = 122;
 
 fn row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -140,6 +144,18 @@ fn block_retained_store(fixture: &EditorMount) -> PathBuf {
         .join("vfs-retained-drafts-v1");
     std::fs::write(&blocker, b"not a directory").expect("block the recovery store");
     blocker
+}
+
+/// The mount's unresolved-draft report: one `path<TAB>state` line per draft.
+fn unresolved_draft_list(fixture: &EditorMount) -> String {
+    let mut value = vec![0_u8; 16 * 1024];
+    let length = rustix::fs::getxattr(
+        mount_root(fixture).as_path(),
+        "user.orna.unresolved-draft-list",
+        &mut value[..],
+    )
+    .expect("read the unresolved draft list");
+    String::from_utf8_lossy(&value[..length]).into_owned()
 }
 
 /// ORNA-VFS-008/EDIT-1: fsync acknowledges a valid draft; a rejected draft
@@ -467,6 +483,47 @@ async fn refused_retention_keeps_candidate_until_a_retry_succeeds() {
             .iter()
             .any(|draft| draft.contains("Retained valid")),
         "the retried candidate is kept in recovery storage",
+    );
+    drop(file);
+}
+
+/// ORNA-VFS-009, profiles/vfs-1 errno table: when recovery storage is at its
+/// record limit, a refused fsync replies EDQUOT rather than EINVAL. The draft
+/// stays unresolved and listed as not retained until storage has room.
+#[tokio::test]
+async fn full_recovery_store_replies_quota_to_refused_fsync_and_keeps_draft_listed() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &invalid_row("Full store draft"));
+    fill_retained_draft_store(&fixture.repository);
+    assert_errno(
+        file.sync_all(),
+        EDQUOT,
+        "a refused draft that a full recovery store cannot keep fails with EDQUOT",
+    );
+    await_draft_guard(&fixture, b'1', "the unkept draft holds the draft guard").await;
+    let list = unresolved_draft_list(&fixture);
+    assert!(
+        list.contains("Music/london/data.orna\tnot accepted (")
+            && list.contains("candidate not retained"),
+        "the unkept draft is listed as not retained: {list:?}",
+    );
+    assert!(
+        !retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Full store draft")),
+        "a full recovery store keeps none of the refused draft",
+    );
+    clear_retained_draft_store_filler(&fixture.repository);
+    retain_drafts(&fixture).expect("a retry keeps the draft once storage has room");
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Full store draft")),
+        "the retried draft is kept in recovery storage",
     );
     drop(file);
 }
