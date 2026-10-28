@@ -2167,8 +2167,8 @@ struct DraftState {
     dirty_handles: HashSet<u64>,
     /// Write-open Blob handles, keyed by handle number.
     blob_handles: HashMap<u64, BlobHandle>,
-    /// Lock owner that wrote each open handle's candidate; a FLUSH from another owner is not the writer's close.
-    writer_owners: HashMap<u64, u64>,
+    /// Pid that opened each writable handle; a FLUSH from another process is not the writer's close.
+    writer_owners: HashMap<u64, u32>,
 }
 
 impl DraftState {
@@ -3393,7 +3393,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
     }
 
-    fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
+    fn open(&self, request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
         // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
         // without truncating or replacing the blob. EPERM is the unsupported-mutation
@@ -3523,6 +3523,9 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        if write_mode {
+            draft_state.writer_owners.insert(handle, request.pid());
+        }
         let pending_truncate = draft_state.pending_truncates.get(&inode.0).copied();
         let truncate_size = if flags.0 & libc::O_TRUNC != 0 {
             Some(0)
@@ -3606,7 +3609,7 @@ impl Filesystem for WorkspaceFilesystem {
     }
     fn create(
         &self,
-        _request: &Request,
+        request: &Request,
         parent: INodeNo,
         name: &OsStr,
         _mode: u32,
@@ -3618,7 +3621,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
-        let draft_state = self
+        let mut draft_state = self
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3717,6 +3720,7 @@ impl Filesystem for WorkspaceFilesystem {
             (attr, save, target, scratch, blob_field)
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        draft_state.writer_owners.insert(handle, request.pid());
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4217,7 +4221,7 @@ impl Filesystem for WorkspaceFilesystem {
         data: &[u8],
         _write_flags: fuser::WriteFlags,
         _flags: fuser::OpenFlags,
-        lock_owner: Option<fuser::LockOwner>,
+        _lock_owner: Option<fuser::LockOwner>,
         reply: ReplyWrite,
     ) {
         let mut draft_state = self
@@ -4249,9 +4253,6 @@ impl Filesystem for WorkspaceFilesystem {
         let writes_candidate = !data.is_empty() && is_tracked;
         if writes_candidate {
             draft_state.unresolved_handles.insert(handle.0, inode.0);
-            if let Some(owner) = lock_owner {
-                draft_state.writer_owners.insert(handle.0, owner.0);
-            }
             draft_state.candidate_written(handle.0, inode.0);
             if is_scratch {
                 draft_state.retained_scratch.insert(inode.0);
@@ -4347,10 +4348,10 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn flush(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         handle: fuser::FileHandle,
-        lock_owner: fuser::LockOwner,
+        _lock_owner: fuser::LockOwner,
         reply: ReplyEmpty,
     ) {
         // Close-time flush (EDIT-1 step 5) attempts the same commit as fsync, but
@@ -4366,9 +4367,11 @@ impl Filesystem for WorkspaceFilesystem {
         }
         // The kernel issues FLUSH when an inherited copy of this descriptor is
         // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
-        // Only the writer's own close is the EDIT-1 step 5 close-time commit, so a
-        // FLUSH from a different owner acknowledges without accepting the draft.
-        if draft_state.writer_owners.get(&handle.0).is_some_and(|writer| *writer != lock_owner.0) {
+        // PR policy (not EDIT-1 step 5 text): a FLUSH from a process other than the
+        // one that opened the handle acknowledges without accepting the draft; the
+        // opener's own close is the close-time commit. The opener pid is recorded at
+        // open, so a later writer cannot move the gate to itself.
+        if draft_state.writer_owners.get(&handle.0).is_some_and(|writer| *writer != request.pid()) {
             reply.ok();
             return;
         }
