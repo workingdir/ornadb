@@ -517,7 +517,7 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
         std::fs::hard_link(&fixture.data_path, &hard_link)
             .expect_err("hard links are unsupported")
             .raw_os_error(),
-        Some(libc::EOPNOTSUPP),
+        Some(libc::EPERM),
     );
 
     let symbolic_link = fixture.row_directory.join("symbolic-link");
@@ -525,7 +525,7 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
         std::os::unix::fs::symlink("data.orna", &symbolic_link)
             .expect_err("symbolic links are unsupported")
             .raw_os_error(),
-        Some(libc::EOPNOTSUPP),
+        Some(libc::EPERM),
     );
 
     let fifo = fixture.row_directory.join("fifo");
@@ -541,8 +541,8 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
     );
     let fifo_error = String::from_utf8_lossy(&fifo_output.stderr);
     assert!(
-        fifo_error.contains("Operation not supported"),
-        "FIFO mknod should reach the unsupported FUSE operation, got: {fifo_error}"
+        fifo_error.contains("Operation not permitted"),
+        "FIFO mknod must be refused with EPERM, got: {fifo_error}"
     );
 
     let device_node = fixture.row_directory.join("device-node");
@@ -555,8 +555,7 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
     assert!(!device_output.status.success(), "device nodes are unsupported");
     let device_error = String::from_utf8_lossy(&device_output.stderr);
     assert!(
-        device_error.contains("Operation not supported")
-            || device_error.contains("Operation not permitted"),
+        device_error.contains("Operation not permitted"),
         "unexpected device-node mknod error: {device_error}"
     );
 
