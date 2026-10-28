@@ -347,9 +347,9 @@ impl MountView {
         self.context.is_legacy_format()
     }
 
-    /// An `--at` view is always read-only.
+    /// Whether the view refuses mutations. Only a `--cwd` view is writable.
     pub const fn is_read_only(&self) -> bool {
-        true
+        !self.writable
     }
 
     /// The canonical Git commit resolved for this view's historical snapshot.

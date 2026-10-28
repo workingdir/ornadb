@@ -1079,9 +1079,12 @@ fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
     let mut stderr = io::stderr().lock();
     match crate::fuse_mount::unresolved_draft_list(mountpoint) {
         Ok(list) => {
-            for line in list.lines() {
-                let (path, state) = line.split_once('\t').unwrap_or((line, "unresolved"));
-                let _ = writeln!(stderr, "unresolved draft: {path}: {state}");
+            let parsed = parse_draft_list(&list);
+            for draft in &parsed.drafts {
+                let _ = writeln!(stderr, "unresolved draft: {}: {}", draft.path, draft.detail);
+            }
+            if parsed.omitted > 0 {
+                let _ = writeln!(stderr, "unresolved drafts not listed: {}", parsed.omitted);
             }
         }
         Err(error) => {
@@ -1264,6 +1267,36 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
     } else {
         for status in &statuses {
             writeln!(out, "{}", human_row(status)).map_err(|_| stdout_error())?;
+            let listing = status_drafts(status);
+            for draft in &listing.drafts {
+                writeln!(
+                    out,
+                    "  unresolved draft {} code {} draft {}: {}",
+                    draft.path,
+                    draft.code.as_deref().unwrap_or("-"),
+                    draft.draft.as_deref().unwrap_or("-"),
+                    draft.detail,
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if listing.omitted > 0 {
+                writeln!(
+                    out,
+                    "  note: {} more unresolved draft(s) not listed; the daemon bounds its draft list",
+                    listing.omitted
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if listing.source == Some(DraftSource::List) {
+                writeln!(
+                    out,
+                    "  note: this mount's daemon predates the sys.* code and draft id fields; the code and draft columns are empty"
+                )
+                .map_err(|_| stdout_error())?;
+            }
+            if let Some(error) = listing.error {
+                writeln!(out, "  drafts could not be listed: {error}").map_err(|_| stdout_error())?;
+            }
         }
     }
     Ok(())
@@ -1272,16 +1305,17 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
 fn human_row(status: &MountStatus) -> String {
     let access = if status.is_writable() { "writable" } else { "read-only" };
     format!(
-        "{} snapshot {} format {} legacy {} {access}",
+        "{} snapshot {} view {} format {} legacy {} {access}",
         status.mountpoint().display(),
         status.snapshot_hex(),
+        status.view_hex(),
         status.repository_format_number(),
         status.is_legacy_format(),
     )
 }
 
 fn status_json(status: &MountStatus) -> String {
-    let (drafts, draft_error) = status_drafts(status);
+    let listing = status_drafts(status);
     mount_row_json(
         status.mountpoint(),
         &status.snapshot_hex(),
@@ -1289,29 +1323,149 @@ fn status_json(status: &MountStatus) -> String {
         status.repository_format_number(),
         status.is_legacy_format(),
         status.is_writable(),
-        &drafts,
-        draft_error.as_deref(),
+        &listing,
     )
 }
 
-/// The unresolved drafts of a writable mount, as `(path, detail)` pairs. The
-/// detail carries the exact Orna cause code and any retained draft id. A
-/// writable mount whose drafts cannot be listed reports the reason instead of
-/// failing the whole status.
+/// One unresolved draft of a writable mount, as `mount status` reports it. `code`
+/// is the exact `sys.*` Orna cause and `draft` the retained draft id. Each is
+/// `None` when the draft has none: a backing I/O or unsynced-write state that the
+/// profile names no code for, or a candidate that recovery storage did not retain.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DraftEntry {
+    path: String,
+    code: Option<String>,
+    draft: Option<String>,
+    detail: String,
+}
+
+/// The lines of an unresolved draft list, and how many drafts the daemon left out
+/// of it because its size budget was full.
 #[cfg(target_os = "linux")]
-fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
-    if !status.is_writable() {
-        return (Vec::new(), None);
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ParsedDrafts {
+    drafts: Vec<DraftEntry>,
+    omitted: u64,
+}
+
+/// Parses the `path<TAB>code<TAB>draft<TAB>detail` lines of an unresolved draft
+/// list. A line with only `path<TAB>detail` comes from a mount that predates the
+/// code and draft fields, so both are absent. The `\tomitted\tN` line counts the
+/// drafts the daemon did not list; its empty path means it is never a draft.
+#[cfg(target_os = "linux")]
+fn parse_draft_list(list: &str) -> ParsedDrafts {
+    fn non_empty(field: &str) -> Option<String> {
+        (!field.is_empty()).then(|| field.to_owned())
     }
-    match crate::fuse_mount::unresolved_draft_list(status.mountpoint()) {
-        Ok(list) => (
-            list.lines()
-                .filter_map(|line| line.split_once('\t'))
-                .map(|(path, detail)| (path.to_owned(), detail.to_owned()))
-                .collect(),
-            None,
-        ),
-        Err(error) => (Vec::new(), Some(draft_listing_failure(error))),
+    let mut parsed = ParsedDrafts::default();
+    for line in list.lines().filter(|line| !line.is_empty()) {
+        if let Some(count) = line.strip_prefix("\tomitted\t") {
+            parsed.omitted += count.parse::<u64>().unwrap_or(0);
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(4, '\t').collect();
+        parsed.drafts.push(match fields[..] {
+            [path, code, draft, detail] => DraftEntry {
+                path: path.to_owned(),
+                code: non_empty(code),
+                draft: non_empty(draft),
+                detail: detail.to_owned(),
+            },
+            [path, detail] => DraftEntry {
+                path: path.to_owned(),
+                code: None,
+                draft: None,
+                detail: detail.to_owned(),
+            },
+            _ => DraftEntry {
+                path: line.to_owned(),
+                code: None,
+                draft: None,
+                detail: "unresolved".to_owned(),
+            },
+        });
+    }
+    parsed
+}
+
+/// The unresolved drafts of a writable mount, with their exact Orna cause codes
+/// and retained draft ids, and how they were listed. A writable mount whose drafts
+/// cannot be listed reports the reason instead of failing the whole status.
+#[derive(Debug, Default)]
+struct DraftListing {
+    drafts: Vec<DraftEntry>,
+    /// Drafts the daemon did not list because its list was full.
+    omitted: u64,
+    /// The xattr the drafts came from; `None` when they could not be listed.
+    source: Option<DraftSource>,
+    /// Why the drafts could not be listed.
+    error: Option<String>,
+}
+
+/// Which draft-list xattr a listing came from. `List` is the two-column fallback of
+/// a daemon that predates the code and draft fields, so its codes and draft ids are
+/// absent.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DraftSource {
+    Fields,
+    List,
+}
+
+impl DraftSource {
+    fn json_name(self) -> &'static str {
+        match self {
+            Self::Fields => "fields",
+            Self::List => "list",
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn status_drafts(status: &MountStatus) -> DraftListing {
+    if !status.is_writable() {
+        return DraftListing::default();
+    }
+    draft_listing(
+        crate::fuse_mount::unresolved_draft_fields(status.mountpoint()),
+        || crate::fuse_mount::unresolved_draft_list(status.mountpoint()),
+    )
+}
+
+/// Chooses the draft listing from the fields xattr. A daemon that does not serve
+/// it answers ENODATA; its two-column list xattr is then the fallback, not a failure.
+#[cfg(target_os = "linux")]
+fn draft_listing(
+    fields: Result<String, rustix::io::Errno>,
+    list: impl FnOnce() -> Result<String, rustix::io::Errno>,
+) -> DraftListing {
+    match fields {
+        Ok(fields) => DraftListing::listed(&fields, DraftSource::Fields),
+        Err(rustix::io::Errno::NODATA) => match list() {
+            Ok(list) => DraftListing::listed(&list, DraftSource::List),
+            Err(error) => DraftListing::failed(error),
+        },
+        Err(error) => DraftListing::failed(error),
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl DraftListing {
+    fn listed(list: &str, source: DraftSource) -> Self {
+        let parsed = parse_draft_list(list);
+        Self {
+            drafts: parsed.drafts,
+            omitted: parsed.omitted,
+            source: Some(source),
+            error: None,
+        }
+    }
+
+    fn failed(error: rustix::io::Errno) -> Self {
+        Self {
+            error: Some(draft_listing_failure(error)),
+            ..Self::default()
+        }
     }
 }
 
@@ -1328,17 +1482,21 @@ fn draft_listing_failure(error: rustix::io::Errno) -> String {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn status_drafts(status: &MountStatus) -> (Vec<(String, String)>, Option<String>) {
-    if status.is_writable() {
-        (Vec::new(), Some("live draft listing requires Linux FUSE".to_owned()))
-    } else {
-        (Vec::new(), None)
+fn status_drafts(status: &MountStatus) -> DraftListing {
+    if !status.is_writable() {
+        return DraftListing::default();
+    }
+    DraftListing {
+        error: Some("live draft listing requires Linux FUSE".to_owned()),
+        ..DraftListing::default()
     }
 }
 
 /// One status object with the documented keys. The mountpoint is JSON-escaped
 /// so a path containing a quote, backslash or control character cannot produce
-/// invalid output.
+/// invalid output. `draft_source` names the xattr the drafts came from (`fields`,
+/// or `list` for a daemon without the code and draft fields), or is `null` when
+/// there is no listing. `drafts_omitted` counts drafts the daemon did not list.
 fn mount_row_json(
     mountpoint: &Path,
     snapshot_hex: &str,
@@ -1346,26 +1504,29 @@ fn mount_row_json(
     format: u8,
     legacy: bool,
     writable: bool,
-    drafts: &[(String, String)],
-    draft_error: Option<&str>,
+    listing: &DraftListing,
 ) -> String {
-    let drafts = drafts
+    let drafts = listing
+        .drafts
         .iter()
-        .map(|(path, detail)| {
+        .map(|draft| {
             format!(
-                "{{\"path\":\"{}\",\"detail\":\"{}\"}}",
-                escape_json(path),
-                escape_json(detail)
+                "{{\"path\":\"{}\",\"code\":{},\"draft\":{},\"detail\":\"{}\"}}",
+                escape_json(&draft.path),
+                optional_json(draft.code.as_deref()),
+                optional_json(draft.draft.as_deref()),
+                escape_json(&draft.detail)
             )
         })
         .collect::<Vec<_>>()
         .join(",");
-    let draft_error = match draft_error {
-        Some(error) => format!("\"{}\"", escape_json(error)),
+    let draft_source = match listing.source {
+        Some(source) => format!("\"{}\"", source.json_name()),
         None => "null".to_owned(),
     };
+    let draft_error = optional_json(listing.error.as_deref());
     format!(
-        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"unresolved_drafts\":[{}],\"draft_error\":{}}}",
+        "{{\"mountpoint\":\"{}\",\"snapshot\":\"{}\",\"view\":\"{}\",\"format\":{},\"legacy\":{},\"writable\":{},\"read_only\":{},\"draft_source\":{},\"drafts_truncated\":{},\"drafts_omitted\":{},\"unresolved_drafts\":[{}],\"draft_error\":{}}}",
         escape_json(&mountpoint.to_string_lossy()),
         snapshot_hex,
         view_hex,
@@ -1373,6 +1534,9 @@ fn mount_row_json(
         legacy,
         writable,
         !writable,
+        draft_source,
+        listing.omitted > 0,
+        listing.omitted,
         drafts,
         draft_error,
     )
@@ -1396,37 +1560,128 @@ fn escape_json(value: &str) -> String {
     escaped
 }
 
+/// JSON for an optional string: the escaped string, or `null`.
+fn optional_json(value: Option<&str>) -> String {
+    match value {
+        Some(value) => format!("\"{}\"", escape_json(value)),
+        None => "null".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{escape_json, mount_row_json};
+    use super::{escape_json, mount_row_json, DraftEntry, DraftListing, DraftSource};
     use std::path::Path;
 
     #[test]
     fn status_json_has_exactly_the_documented_keys() {
-        let object = mount_row_json(Path::new("/mnt/old"), "aa", "bb", 1, true, false, &[], None);
+        let object = mount_row_json(
+            Path::new("/mnt/old"),
+            "aa",
+            "bb",
+            1,
+            true,
+            false,
+            &DraftListing::default(),
+        );
         assert_eq!(
             object,
-            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"writable\":false,\"read_only\":true,\"unresolved_drafts\":[],\"draft_error\":null}"
+            "{\"mountpoint\":\"/mnt/old\",\"snapshot\":\"aa\",\"view\":\"bb\",\"format\":1,\"legacy\":true,\"writable\":false,\"read_only\":true,\"draft_source\":null,\"drafts_truncated\":false,\"drafts_omitted\":0,\"unresolved_drafts\":[],\"draft_error\":null}"
         );
     }
 
     #[test]
     fn mount_row_json_formats_writable_and_draft_fields() {
-        let drafts = vec![(
-            "Music/london/data.orna".to_owned(),
-            "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
-        )];
+        let listing = DraftListing {
+            drafts: vec![DraftEntry {
+                path: "Music/london/data.orna".to_owned(),
+                code: Some("sys.vfs.stale_edit".to_owned()),
+                draft: Some("d1".to_owned()),
+                detail: "not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1".to_owned(),
+            }],
+            source: Some(DraftSource::Fields),
+            ..DraftListing::default()
+        };
         let object =
-            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &drafts, None);
-        assert!(object.contains("\"writable\":true,\"read_only\":false"), "{object}");
-        assert!(object.contains("sys.vfs.stale_edit"), "{object}");
-        assert!(object.contains("candidate retained as draft d1"), "{object}");
+            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &listing);
+        assert!(
+            object.contains("\"writable\":true,\"read_only\":false,\"draft_source\":\"fields\",\"drafts_truncated\":false,\"drafts_omitted\":0"),
+            "{object}"
+        );
+        assert!(
+            object.contains("\"unresolved_drafts\":[{\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"d1\",\"detail\":\"not accepted (sys.vfs.stale_edit); the file shows the current row; candidate retained as draft d1\"}]"),
+            "{object}"
+        );
         assert!(object.contains("\"draft_error\":null"), "{object}");
     }
 
     #[test]
+    fn list_fallback_and_omitted_drafts_are_flagged_in_json() {
+        let listing = DraftListing {
+            drafts: vec![DraftEntry {
+                path: "scratch.tmp".to_owned(),
+                code: None,
+                draft: None,
+                detail: "scratch file not renamed".to_owned(),
+            }],
+            omitted: 3,
+            source: Some(DraftSource::List),
+            error: None,
+        };
+        let object =
+            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &listing);
+        assert!(
+            object.contains("\"draft_source\":\"list\",\"drafts_truncated\":true,\"drafts_omitted\":3"),
+            "{object}"
+        );
+        assert!(
+            object.contains("{\"path\":\"scratch.tmp\",\"code\":null,\"draft\":null,\"detail\":\"scratch file not renamed\"}"),
+            "{object}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn draft_list_lines_carry_the_code_and_draft_id() {
+        use super::parse_draft_list;
+
+        let list = "Music/london/data.orna\tsys.vfs.stale_edit\td1\tnot accepted (sys.vfs.stale_edit); candidate retained as draft d1\nscratch.tmp\t\t\tscratch file not renamed\n\tomitted\t2";
+        let parsed = parse_draft_list(list);
+        assert_eq!(parsed.omitted, 2);
+        assert_eq!(parsed.drafts.len(), 2, "the omitted marker is not a draft");
+        assert_eq!(parsed.drafts[0].path, "Music/london/data.orna");
+        assert_eq!(parsed.drafts[0].code.as_deref(), Some("sys.vfs.stale_edit"));
+        assert_eq!(parsed.drafts[0].draft.as_deref(), Some("d1"));
+        assert_eq!(
+            parsed.drafts[0].detail,
+            "not accepted (sys.vfs.stale_edit); candidate retained as draft d1"
+        );
+        assert_eq!(parsed.drafts[1].path, "scratch.tmp");
+        assert_eq!(parsed.drafts[1].code, None);
+        assert_eq!(parsed.drafts[1].draft, None);
+        assert_eq!(parsed.drafts[1].detail, "scratch file not renamed");
+        assert_eq!(parse_draft_list("x\t\t\tdetail").omitted, 0);
+
+        // The unmount-refusal list reports `path<TAB>detail`, with no code or draft fields.
+        let legacy =
+            parse_draft_list("Music/london/data.orna\tnot accepted (sys.vfs.stale_edit)").drafts;
+        assert_eq!(legacy[0].path, "Music/london/data.orna");
+        assert_eq!(legacy[0].code, None);
+        assert_eq!(legacy[0].draft, None);
+        assert_eq!(legacy[0].detail, "not accepted (sys.vfs.stale_edit)");
+    }
+
+    #[test]
     fn status_json_escapes_a_hostile_mountpoint() {
-        let object = mount_row_json(Path::new("/mnt/a\"b\\c"), "aa", "bb", 3, false, false, &[], None);
+        let object = mount_row_json(
+            Path::new("/mnt/a\"b\\c"),
+            "aa",
+            "bb",
+            3,
+            false,
+            false,
+            &DraftListing::default(),
+        );
         assert!(object.contains("\\\""), "quote is escaped: {object}");
         assert!(object.contains("\\\\"), "backslash is escaped: {object}");
         assert!(
@@ -1449,10 +1704,20 @@ mod tests {
         assert!(live.starts_with("could not list Orna mount drafts"), "{live}");
         assert!(!live.contains("stale"), "{live}");
 
-        let stale_json = mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &[], Some(&stale));
+        let stale_listing = DraftListing {
+            error: Some(stale.clone()),
+            ..DraftListing::default()
+        };
+        let stale_json =
+            mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &stale_listing);
         assert!(stale_json.contains("\"draft_error\":\"stale mount record"), "{stale_json}");
         assert!(stale_json.contains("\"writable\":true"), "{stale_json}");
-        let live_json = mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &[], Some(&live));
+        let live_listing = DraftListing {
+            error: Some(live.clone()),
+            ..DraftListing::default()
+        };
+        let live_json =
+            mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &live_listing);
         assert!(live_json.contains("could not list Orna mount drafts"), "{live_json}");
         assert!(!live_json.contains("stale"), "{live_json}");
     }
@@ -1461,6 +1726,35 @@ mod tests {
     fn escape_json_leaves_ordinary_paths_unchanged() {
         assert_eq!(escape_json("/mnt/library"), "/mnt/library");
         assert_eq!(escape_json("tab\there"), "tab\\there");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn draft_listing_falls_back_to_the_list_xattr_when_fields_are_unserved() {
+        use super::{draft_listing, DraftSource};
+        use rustix::io::Errno;
+
+        let fallback = draft_listing(Err(Errno::NODATA), || {
+            Ok("Music/london/data.orna\tstale edit\n".to_owned())
+        });
+        assert_eq!(fallback.source, Some(DraftSource::List), "an older daemon's list is the fallback");
+        assert_eq!(fallback.error, None);
+        assert_eq!(fallback.drafts.len(), 1);
+        assert_eq!(fallback.drafts[0].code, None);
+        assert_eq!(fallback.drafts[0].draft, None);
+        assert_eq!(fallback.drafts[0].detail, "stale edit");
+
+        let fields = draft_listing(
+            Ok("Music/london/data.orna\tsys.vfs.stale_edit\tdraft-1\tstale edit\n".to_owned()),
+            || panic!("the fields xattr is read without the fallback"),
+        );
+        assert_eq!(fields.source, Some(DraftSource::Fields));
+        assert_eq!(fields.drafts[0].code.as_deref(), Some("sys.vfs.stale_edit"));
+        assert_eq!(fields.drafts[0].draft.as_deref(), Some("draft-1"));
+
+        let gone = draft_listing(Err(Errno::NODATA), || Err(Errno::NOTCONN));
+        assert_eq!(gone.source, None);
+        assert!(gone.error.as_deref().is_some_and(|error| error.contains("stale mount record")));
     }
 
     #[cfg(target_os = "linux")]
