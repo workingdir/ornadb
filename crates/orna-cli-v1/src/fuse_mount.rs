@@ -66,6 +66,14 @@ fn refused_mutation_errno() -> Errno {
     Errno::EPERM
 }
 
+/// Errno for an operation outside the VFS-1 contract (ORNA-VFS-014;
+/// 34-system-reference.md `sys.vfs.unsupported`). The stable cause is logged to
+/// the mount's stderr; the refusal is the table errno, never a fabricated success.
+fn refuse_unsupported(operation: &str) -> Errno {
+    eprintln!("{operation}: unsupported in VFS-1 (sys.vfs.unsupported)");
+    refused_mutation_errno()
+}
+
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
@@ -3003,7 +3011,7 @@ impl Filesystem for WorkspaceFilesystem {
             Some("user.orna.unmount-quiesce") if inode.0 == ROOT_INODE => false,
             Some("user.orna.retain-drafts") if inode.0 == ROOT_INODE => true,
             _ => {
-                reply.error(Errno::ENODATA);
+                reply.error(refuse_unsupported("setxattr"));
                 return;
             }
         };
@@ -3062,6 +3070,11 @@ impl Filesystem for WorkspaceFilesystem {
         }
         Ok(())
     }
+
+    fn removexattr(&self, _request: &Request, _inode: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        reply.error(refuse_unsupported(&format!("removexattr {name:?}")));
+    }
+
     fn mknod(
         &self,
         _request: &Request,
@@ -3072,7 +3085,7 @@ impl Filesystem for WorkspaceFilesystem {
         _rdev: u32,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EOPNOTSUPP);
+        reply.error(refuse_unsupported("mknod"));
     }
 
     fn symlink(
@@ -3083,7 +3096,7 @@ impl Filesystem for WorkspaceFilesystem {
         _target: &Path,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EOPNOTSUPP);
+        reply.error(refuse_unsupported("symlink"));
     }
 
     fn link(
@@ -3094,7 +3107,7 @@ impl Filesystem for WorkspaceFilesystem {
         _new_name: &OsStr,
         reply: ReplyEntry,
     ) {
-        reply.error(Errno::EOPNOTSUPP);
+        reply.error(refuse_unsupported("link"));
     }
 
     fn mkdir(
@@ -3107,11 +3120,11 @@ impl Filesystem for WorkspaceFilesystem {
         reply: ReplyEntry,
     ) {
         // Plain mkdir does not invent schema or key semantics (profiles/vfs-1.md:110-113).
-        reply.error(refused_mutation_errno());
+        reply.error(refuse_unsupported("mkdir"));
     }
 
     fn rmdir(&self, _request: &Request, _parent: INodeNo, _name: &OsStr, reply: ReplyEmpty) {
-        reply.error(refused_mutation_errno());
+        reply.error(refuse_unsupported("rmdir"));
     }
 
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
@@ -3546,11 +3559,11 @@ impl Filesystem for WorkspaceFilesystem {
         reply: ReplyEmpty,
     ) {
         if flags != RenameFlags::empty() {
-            reply.error(Errno::EPERM);
+            reply.error(refuse_unsupported("rename flags"));
             return;
         }
         if parent != newparent {
-            reply.error(Errno::EPERM);
+            reply.error(refuse_unsupported("cross-directory rename"));
             return;
         }
         let mut draft_state = self
