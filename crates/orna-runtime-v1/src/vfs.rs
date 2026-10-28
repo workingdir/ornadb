@@ -8,8 +8,14 @@
 use std::{
     any::Any,
     collections::{BTreeMap, HashMap},
+    fs,
     future::Future,
-    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
+    io,
+    os::unix::fs::{FileExt as _, OpenOptionsExt as _},
+    sync::{
+        Arc, LazyLock, Mutex as StdMutex, OnceLock, Weak,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use orna_repository_v1::{
@@ -589,7 +595,7 @@ impl<S> RetainedInvalidDraft<S> {
 
 struct DraftState<S> {
     baseline: Arc<VfsFileSnapshot<S>>,
-    candidate: Option<Vec<u8>>,
+    candidate: Option<DraftSpool>,
     revision: u64,
     last_rejection: Option<(u64, SafeDiagnostic)>,
     last_accepted: Option<(u64, Arc<VfsFileSnapshot<S>>)>,
@@ -605,6 +611,37 @@ struct RetainedRejection<S> {
 }
 
 impl<S> DraftState<S> {
+    fn candidate_len(&self) -> u64 {
+        self.candidate
+            .as_ref()
+            .map_or(self.baseline.bytes.len() as u64, |spool| spool.len)
+    }
+
+    /// Materialises the whole candidate. Only retention and activation need
+    /// this; ranged reads and writes stay on the spool.
+    fn candidate_arc(&self) -> Arc<[u8]> {
+        match &self.candidate {
+            Some(spool) => spool
+                .read_all()
+                .expect("private draft spool is readable while its handle is open"),
+            None => Arc::clone(&self.baseline.bytes),
+        }
+    }
+
+    /// Returns the private spool, creating it from the baseline on first use.
+    fn ensure_spool(
+        &mut self,
+        quota: &Arc<DraftQuota>,
+    ) -> Result<&mut DraftSpool, EditDraftError> {
+        if self.candidate.is_none() {
+            self.candidate = Some(DraftSpool::from_baseline(
+                &self.baseline.bytes,
+                Arc::clone(quota),
+            )?);
+        }
+        Ok(self.candidate.as_mut().expect("candidate exists after creation"))
+    }
+
     /// Records one terminal rejection of `revision`, issuing a fresh identity
     /// unless the same revision was already retained.
     fn retain_rejection(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
@@ -619,11 +656,7 @@ impl<S> DraftState<S> {
     }
 
     fn retain_draft(&mut self, revision: u64, diagnostic: SafeDiagnostic) {
-        let replacement: Arc<[u8]> = Arc::from(
-            self.candidate
-                .as_deref()
-                .unwrap_or(self.baseline.bytes.as_ref()),
-        );
+        let replacement = self.candidate_arc();
         let id = match self.retained_invalid.as_ref() {
             Some(retained) if retained.draft.revision == revision => retained.id,
             _ => *Uuid::new_v4().as_bytes(),
@@ -641,13 +674,148 @@ impl<S> DraftState<S> {
     }
 }
 
-/// A private EDIT-1 replacement draft. Writes use a copy-on-write buffer;
-/// fsync serializes against writes and invokes the caller's validated table
-/// activation path. Dropping or releasing the draft never accepts it.
+/// Aggregate byte budget shared by every open EDIT-1 candidate spool.
+#[derive(Debug)]
+pub struct DraftQuota {
+    limit: u64,
+    used: AtomicU64,
+}
+
+impl DraftQuota {
+    pub fn new(limit: u64) -> Self {
+        Self {
+            limit,
+            used: AtomicU64::new(0),
+        }
+    }
+
+    fn reserve(&self, bytes: u64) -> Result<(), EditDraftError> {
+        let mut current = self.used.load(Ordering::Acquire);
+        loop {
+            let next = current
+                .checked_add(bytes)
+                .filter(|next| *next <= self.limit)
+                .ok_or(EditDraftError::QuotaExceeded)?;
+            match self
+                .used
+                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return Ok(()),
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn release(&self, bytes: u64) {
+        self.used.fetch_sub(bytes, Ordering::AcqRel);
+    }
+}
+
+/// Process-wide default budget for [`EditDraft::open`]. The spec names an
+/// aggregate draft quota without a value; this bound is conservative and is
+/// flagged for review.
+const DEFAULT_DRAFT_QUOTA_BYTES: u64 = 1 << 30;
+
+static DEFAULT_DRAFT_QUOTA: LazyLock<Arc<DraftQuota>> =
+    LazyLock::new(|| Arc::new(DraftQuota::new(DEFAULT_DRAFT_QUOTA_BYTES)));
+
+/// Logical bytes of one EDIT-1 candidate, held in an unlinked private file in
+/// the temp directory. Holes are sparse and cost no RAM; every logical byte is
+/// charged to the quota until the spool drops.
+struct DraftSpool {
+    file: fs::File,
+    len: u64,
+    quota: Arc<DraftQuota>,
+}
+
+impl DraftSpool {
+    fn create(quota: Arc<DraftQuota>) -> Result<Self, EditDraftError> {
+        let directory = std::env::temp_dir();
+        for _ in 0..8 {
+            let path = directory.join(format!("orna-draft-{}", Uuid::new_v4().simple()));
+            let mut options = fs::OpenOptions::new();
+            options.read(true).write(true).create_new(true).mode(0o600);
+            match options.open(&path) {
+                Ok(file) => {
+                    // Unlink at once so the spool lives only through this handle.
+                    fs::remove_file(&path).map_err(|_| EditDraftError::BackingIo)?;
+                    return Ok(Self {
+                        file,
+                        len: 0,
+                        quota,
+                    });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(_) => return Err(EditDraftError::BackingIo),
+            }
+        }
+        Err(EditDraftError::BackingIo)
+    }
+
+    fn from_baseline(bytes: &[u8], quota: Arc<DraftQuota>) -> Result<Self, EditDraftError> {
+        let mut spool = Self::create(quota)?;
+        spool.set_len(u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?)?;
+        spool
+            .file
+            .write_all_at(bytes, 0)
+            .map_err(|_| EditDraftError::BackingIo)?;
+        Ok(spool)
+    }
+
+    /// Grows (sparse, zero-filled) or shrinks the spool to `length`, moving the
+    /// quota charge with it. A growth that the quota refuses changes nothing.
+    fn set_len(&mut self, length: u64) -> Result<(), EditDraftError> {
+        if length > self.len {
+            let grow = length - self.len;
+            self.quota.reserve(grow)?;
+            if self.file.set_len(length).is_err() {
+                self.quota.release(grow);
+                return Err(EditDraftError::BackingIo);
+            }
+        } else if length < self.len {
+            self.file
+                .set_len(length)
+                .map_err(|_| EditDraftError::BackingIo)?;
+            self.quota.release(self.len - length);
+        }
+        self.len = length;
+        Ok(())
+    }
+
+    fn write_at(&mut self, offset: u64, bytes: &[u8]) -> Result<(), EditDraftError> {
+        let length = u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?;
+        let end = offset
+            .checked_add(length)
+            .ok_or(EditDraftError::OffsetOverflow)?;
+        self.set_len(self.len.max(end))?;
+        self.file
+            .write_all_at(bytes, offset)
+            .map_err(|_| EditDraftError::BackingIo)
+    }
+
+    fn read_all(&self) -> io::Result<Arc<[u8]>> {
+        let length = usize::try_from(self.len).map_err(|_| io::Error::other("draft too large"))?;
+        let mut bytes = vec![0; length];
+        self.file.read_exact_at(&mut bytes, 0)?;
+        Ok(Arc::from(bytes))
+    }
+}
+
+impl Drop for DraftSpool {
+    fn drop(&mut self) {
+        self.quota.release(self.len);
+    }
+}
+
+/// A private EDIT-1 replacement draft. Writes land in a disk-backed spool
+/// charged to a shared quota; fsync serializes against writes and invokes the
+/// caller's validated table activation path. Dropping or releasing the draft
+/// never accepts it.
 pub struct EditDraft<S> {
     state: Mutex<DraftState<S>>,
     operation: Mutex<()>,
     max_file_bytes: usize,
+    quota: Arc<DraftQuota>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -656,6 +824,10 @@ pub enum EditDraftError {
     OffsetOverflow,
     RevisionExhausted,
     AlreadyApplied,
+    /// The aggregate draft quota cannot hold the requested bytes.
+    QuotaExceeded,
+    /// The private candidate spool could not be created, read, or written.
+    BackingIo,
 }
 
 struct ManagedFileState<S> {
@@ -1150,12 +1322,7 @@ impl<S> TemporarySave<S> {
             if state.synced_revision == Some(revision) {
                 return Ok(revision);
             }
-            let bytes: Arc<[u8]> = Arc::from(
-                draft
-                    .candidate
-                    .as_deref()
-                    .unwrap_or(draft.baseline.bytes.as_ref()),
-            );
+            let bytes = draft.candidate_arc();
             (revision, bytes)
         };
         persist(revision, bytes).await?;
@@ -1254,6 +1421,15 @@ pub enum TemporaryRenameError<E> {
 
 impl<S> EditDraft<S> {
     pub fn open(image: Arc<VfsFileSnapshot<S>>, max_file_bytes: usize) -> Self {
+        Self::open_with_quota(image, max_file_bytes, Arc::clone(&DEFAULT_DRAFT_QUOTA))
+    }
+
+    /// Opens a draft whose candidate spool is charged against `quota`.
+    pub fn open_with_quota(
+        image: Arc<VfsFileSnapshot<S>>,
+        max_file_bytes: usize,
+        quota: Arc<DraftQuota>,
+    ) -> Self {
         Self {
             state: Mutex::new(DraftState {
                 baseline: image,
@@ -1265,6 +1441,7 @@ impl<S> EditDraft<S> {
             }),
             operation: Mutex::new(()),
             max_file_bytes,
+            quota,
         }
     }
 
@@ -1283,44 +1460,36 @@ impl<S> EditDraft<S> {
         if bytes.is_empty() {
             return Ok(());
         }
-        let start = usize::try_from(offset).map_err(|_| EditDraftError::OffsetOverflow)?;
-        let end = start
-            .checked_add(bytes.len())
+        let length = u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?;
+        let end = offset
+            .checked_add(length)
             .ok_or(EditDraftError::OffsetOverflow)?;
 
         let _operation = self.operation.lock().await;
-        let mut state = self.state.lock().await;
-        let current_len = state
-            .candidate
-            .as_ref()
-            .map_or(state.baseline.bytes.len(), Vec::len);
-        if end > current_len && end > self.max_file_bytes {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        let max_file_bytes = u64::try_from(self.max_file_bytes).unwrap_or(u64::MAX);
+        if end > state.candidate_len() && end > max_file_bytes {
             return Err(EditDraftError::FileTooLarge);
         }
         let next_revision = state
             .revision
             .checked_add(1)
             .ok_or(EditDraftError::RevisionExhausted)?;
-        let baseline_bytes = Arc::clone(&state.baseline.bytes);
-        let candidate = state
-            .candidate
-            .get_or_insert_with(|| baseline_bytes.to_vec());
-        candidate.resize(candidate.len().max(end), 0);
-        candidate[start..end].copy_from_slice(bytes);
+        // Bump before touching the spool: a failed pwrite may leave partial
+        // bytes, so the revision must not keep vouching for the old contents.
         state.revision = next_revision;
-        Ok(())
+        state.ensure_spool(&self.quota)?.write_at(offset, bytes)
     }
 
     /// Changes the candidate length. Extending creates zero-filled holes.
     pub async fn truncate(&self, length: u64) -> Result<(), EditDraftError> {
-        let length = usize::try_from(length).map_err(|_| EditDraftError::OffsetOverflow)?;
         let _operation = self.operation.lock().await;
-        let mut state = self.state.lock().await;
-        let current_len = state
-            .candidate
-            .as_ref()
-            .map_or(state.baseline.bytes.len(), Vec::len);
-        if length > current_len && length > self.max_file_bytes {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        let max_file_bytes = u64::try_from(self.max_file_bytes).unwrap_or(u64::MAX);
+        let current_len = state.candidate_len();
+        if length > current_len && length > max_file_bytes {
             return Err(EditDraftError::FileTooLarge);
         }
         if current_len == length {
@@ -1330,23 +1499,13 @@ impl<S> EditDraft<S> {
             .revision
             .checked_add(1)
             .ok_or(EditDraftError::RevisionExhausted)?;
-        let baseline_bytes = Arc::clone(&state.baseline.bytes);
-        let candidate = state
-            .candidate
-            .get_or_insert_with(|| baseline_bytes.to_vec());
-        candidate.resize(length, 0);
         state.revision = next_revision;
-        Ok(())
+        state.ensure_spool(&self.quota)?.set_len(length)
     }
 
     pub async fn candidate_bytes(&self) -> Arc<[u8]> {
         let state = self.state.lock().await;
-        Arc::from(
-            state
-                .candidate
-                .as_deref()
-                .unwrap_or(state.baseline.bytes.as_ref()),
-        )
+        state.candidate_arc()
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
@@ -1369,7 +1528,7 @@ impl<S> EditDraft<S> {
     {
         let _operation = self.operation.lock().await;
         let mut state = self.state.lock().await;
-        let Some(bytes) = state.candidate.as_ref() else {
+        if state.candidate.is_none() {
             if let Some((revision, image)) = &state.last_accepted
                 && *revision == state.revision
             {
@@ -1380,7 +1539,7 @@ impl<S> EditDraft<S> {
             return Ok(FsyncOutcome::Unchanged(SnapshotReadHandle::open(
                 Arc::clone(&state.baseline),
             )));
-        };
+        }
         if let Some((revision, diagnostic)) = state.last_rejection
             && revision == state.revision
         {
@@ -1388,17 +1547,17 @@ impl<S> EditDraft<S> {
         }
 
         let revision = state.revision;
+        let bytes = state.candidate_arc();
         let candidate = ActivationCandidate {
             baseline: state.baseline.pin.clone(),
             revision,
-            replacement: Arc::from(bytes.as_slice()),
+            replacement: Arc::clone(&bytes),
             removal: false,
         };
         match activate(candidate).await? {
             ActivationDecision::Accepted(pin) => {
-                let bytes: Arc<[u8]> =
-                    Arc::from(state.candidate.take().expect("candidate held by lock"));
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
+                state.candidate = None;
                 state.baseline = Arc::clone(&image);
                 state.last_rejection = None;
                 state.last_accepted = Some((revision, Arc::clone(&image)));
@@ -2891,12 +3050,12 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 handle: SnapshotReadHandle::open(Arc::clone(image)),
             });
         }
-        let Some(candidate) = draft_state.candidate.clone() else {
+        if draft_state.candidate.is_none() {
             return Err(VfsSaveError::NoCandidate);
-        };
+        }
         // One shared image of the candidate bytes is handed to the caller and
         // published on acceptance, so no second copy is made at either end.
-        let candidate_bytes: Arc<[u8]> = Arc::from(candidate.as_slice());
+        let candidate_bytes = draft_state.candidate_arc();
         drop(draft_state);
         drop(destination);
 
@@ -3956,7 +4115,27 @@ mod tests {
         let candidate = draft.candidate_bytes().await;
         assert_eq!(candidate.len(), BOUND);
         assert_eq!(candidate[BOUND - 1], 0x58);
-        assert_eq!(candidate[0], 0);
+        // Bytes before the write keep the baseline contents, as in the original path.
+        assert_eq!(
+            candidate[0],
+            include_bytes!("../tests/fixtures/publication-repository-main.orna")[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_draft_quota_refuses_growth_past_the_shared_limit() {
+        const LIMIT: usize = 1 << 20;
+        let quota = Arc::new(DraftQuota::new(LIMIT as u64));
+        let first = EditDraft::open_with_quota(fixture_image(), LIMIT, Arc::clone(&quota));
+        let second = EditDraft::open_with_quota(fixture_image(), LIMIT, Arc::clone(&quota));
+        first.write_at(LIMIT as u64 - 1, &[0x58]).await.unwrap();
+        assert_eq!(
+            second.write_at(0, &[0x59]).await,
+            Err(EditDraftError::QuotaExceeded)
+        );
+        first.truncate(0).await.unwrap();
+        second.write_at(0, &[0x59]).await.unwrap();
+        assert_eq!(second.candidate_bytes().await[0], 0x59);
     }
 
     #[tokio::test]

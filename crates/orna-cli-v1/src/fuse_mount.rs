@@ -50,10 +50,10 @@ use sha2::{Digest, Sha256};
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
 
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
-/// for the per-file quota, EIO for other draft failures.
+/// for the per-file or aggregate draft quota, EIO for backing I/O failures.
 fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
     match result {
-        Err(EditDraftError::FileTooLarge) => Errno::EDQUOT,
+        Err(EditDraftError::FileTooLarge | EditDraftError::QuotaExceeded) => Errno::EDQUOT,
         _ => Errno::EIO,
     }
 }
