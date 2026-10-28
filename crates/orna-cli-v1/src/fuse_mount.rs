@@ -1990,15 +1990,46 @@ pub(super) fn has_unresolved_drafts(mountpoint: &Path) -> Result<bool, String> {
     }
 }
 
-/// The unresolved drafts of a live mount, one `path<TAB>state` line each, for
+/// One unresolved draft of a mount, as the draft-list xattrs report it.
+struct UnresolvedDraft {
+    path: String,
+    /// The `sys.*` Orna cause, or empty when the profile names none.
+    code: &'static str,
+    /// The retained draft id, or empty when no candidate was kept.
+    draft: String,
+    detail: String,
+}
+
+/// Reads one draft-list xattr of a live mount as UTF-8 text. The value can grow
+/// between the size probe and the read, which fails with ERANGE; the read then
+/// re-probes and retries, up to `READ_ATTEMPTS` times.
+fn read_draft_xattr(mountpoint: &Path, name: &str) -> Result<String, rustix::io::Errno> {
+    const READ_ATTEMPTS: usize = 5;
+    for _ in 0..READ_ATTEMPTS {
+        let length = rustix::fs::getxattr(mountpoint, name, &mut [])?;
+        let mut value = vec![0_u8; length];
+        match rustix::fs::getxattr(mountpoint, name, &mut value) {
+            Ok(length) => {
+                value.truncate(length);
+                return String::from_utf8(value).map_err(|_| rustix::io::Errno::IO);
+            }
+            Err(rustix::io::Errno::RANGE) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(rustix::io::Errno::RANGE)
+}
+
+/// The unresolved drafts of a live mount, one `path<TAB>detail` line each, for
 /// an unmount refusal that names what blocks it (W15-03).
 pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
-    const NAME: &str = "user.orna.unresolved-draft-list";
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut [])?;
-    let mut value = vec![0_u8; length];
-    let length = rustix::fs::getxattr(mountpoint, NAME, &mut value)?;
-    value.truncate(length);
-    String::from_utf8(value).map_err(|_| rustix::io::Errno::IO)
+    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-list")
+}
+
+/// The unresolved drafts of a live mount, one `path<TAB>code<TAB>draft<TAB>detail`
+/// line each, for `mount status`.
+pub(super) fn unresolved_draft_fields(mountpoint: &Path) -> Result<String, rustix::io::Errno> {
+    read_draft_xattr(mountpoint, "user.orna.unresolved-draft-fields")
 }
 
 /// Why stop-time draft retention did not finish (ORNA-VFS-024).
@@ -2110,6 +2141,14 @@ struct DraftRefusal {
     unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
+/// A replacement candidate whose rename was refused. `kept` records that its
+/// candidate reached recovery storage, so the draft list reports it as retained.
+#[derive(Clone, Copy)]
+struct ScratchRefusal {
+    cause: &'static str,
+    kept: bool,
+}
+
 /// Unsynced Document drafts are retained on release with cause `unsynced`; a
 /// Document whose fsync was rejected stays unresolved until a later sync of the
 /// same file is accepted.
@@ -2121,8 +2160,8 @@ struct DraftState {
     unresolved_handles: HashMap<u64, u64>,
     retained_scratch: HashSet<u64>,
     rejected_documents: HashMap<u64, DraftRefusal>,
-    /// Scratch files whose rename was refused, with the cause.
-    rejected_scratch: HashMap<u64, &'static str>,
+    /// Scratch files whose rename was refused, with the cause and whether the candidate was kept.
+    rejected_scratch: HashMap<u64, ScratchRefusal>,
     quiescing: bool,
     /// Handles whose latest write has not been accepted (per-handle dirty bit).
     dirty_handles: HashSet<u64>,
@@ -2630,7 +2669,10 @@ impl WorkspaceFilesystem {
             }
         };
         if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
-            draft_state.rejected_scratch.insert(inode, error.cause());
+            draft_state.rejected_scratch.insert(
+                inode,
+                ScratchRefusal { cause: error.cause(), kept: false },
+            );
             return Err(error);
         }
         let bytes = save
@@ -2794,9 +2836,14 @@ impl WorkspaceFilesystem {
         failure
     }
 
-    /// One `path<TAB>state` line per unresolved draft, for an unmount refusal.
-    fn unresolved_draft_report(&self) -> String {
-        const LISTED: usize = 64;
+    /// The unresolved drafts of this mount, one per path. Both draft-list xattrs
+    /// render these, so the unmount refusal and `mount status` name the same drafts.
+    fn unresolved_drafts(&self) -> Vec<UnresolvedDraft> {
+        // The `sys.vfs.*` code of an internal cause, when the cause has one.
+        fn spec_code(cause: &'static str) -> Option<&'static str> {
+            cause.starts_with("sys.").then_some(cause)
+        }
+        const DRAFT_RETAINED: &str = "sys.vfs.draft_retained";
         let draft_state = self
             .draft_state
             .lock()
@@ -2805,48 +2852,105 @@ impl WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut unresolved = BTreeMap::new();
+        // inode -> (code, draft id, detail). The code is the spec code of the internal
+        // cause; otherwise `draft_retained` when a candidate was kept; otherwise empty.
+        let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
         for (inode, refusal) in &draft_state.rejected_documents {
-            let detail = match &refusal.draft {
-                Some(draft) => format!(
-                    "not accepted ({}); the file shows the current row; candidate retained as draft {draft}",
-                    refusal.cause
+            let code = spec_code(refusal.cause)
+                .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
+                .unwrap_or("");
+            let (draft, detail) = match &refusal.draft {
+                Some(draft) => (
+                    draft.clone(),
+                    format!(
+                        "not accepted ({}); the file shows the current row; candidate retained as draft {draft}",
+                        refusal.cause
+                    ),
                 ),
-                None => format!("not accepted ({}); candidate not retained", refusal.cause),
+                None => (
+                    String::new(),
+                    format!("not accepted ({}); candidate not retained", refusal.cause),
+                ),
             };
-            unresolved.insert(*inode, detail);
+            unresolved.insert(*inode, (code, draft, detail));
         }
-        for (inode, cause) in &draft_state.rejected_scratch {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| format!("scratch rename refused ({cause})"));
+        for (inode, refusal) in &draft_state.rejected_scratch {
+            let code = spec_code(refusal.cause)
+                .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
+                .unwrap_or("");
+            unresolved.entry(*inode).or_insert_with(|| {
+                (code, String::new(), format!("scratch rename refused ({})", refusal.cause))
+            });
         }
         for inode in &draft_state.retained_scratch {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| "scratch file not renamed".to_owned());
+            unresolved.entry(*inode).or_insert_with(|| {
+                (DRAFT_RETAINED, String::new(), "scratch file not renamed".to_owned())
+            });
         }
         for inode in draft_state.unresolved_handles.values() {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| "unsynced writes in an open file".to_owned());
+            unresolved.entry(*inode).or_insert_with(|| {
+                ("", String::new(), "unsynced writes in an open file".to_owned())
+            });
         }
         for (inode, size) in &draft_state.pending_truncates {
-            unresolved
-                .entry(*inode)
-                .or_insert_with(|| format!("truncate to {size} bytes not synced"));
+            unresolved.entry(*inode).or_insert_with(|| {
+                ("", String::new(), format!("truncate to {size} bytes not synced"))
+            });
         }
-        let mut lines = unresolved
-            .iter()
-            .map(|(inode, detail)| format!("{}\t{detail}", state.display_path(*inode)))
-            .collect::<Vec<_>>();
+        let mut drafts = Vec::with_capacity(unresolved.len());
+        for (inode, (code, draft, detail)) in unresolved {
+            drafts.push(UnresolvedDraft {
+                path: state.display_path(inode),
+                code,
+                draft,
+                detail,
+            });
+        }
+        drafts
+    }
+
+    /// One `path<TAB>detail` line per unresolved draft, for an unmount refusal.
+    fn unresolved_draft_report(&self) -> String {
+        self.render_unresolved_drafts(|draft| format!("{}\t{}", draft.path, draft.detail))
+    }
+
+    /// One `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, for
+    /// `mount status`. `code` is the `sys.*` Orna cause (or `sys.vfs.draft_retained`
+    /// for a kept candidate with no other cause) and `draft` the retained draft id;
+    /// each is empty when the draft has none.
+    fn unresolved_draft_fields(&self) -> String {
+        self.render_unresolved_drafts(|draft| {
+            format!("{}\t{}\t{}\t{}", draft.path, draft.code, draft.draft, draft.detail)
+        })
+    }
+
+    /// Renders the drafts as sorted lines, bounded by both a line count and a byte
+    /// budget so the xattr value stays small enough for the kernel to return. A draft
+    /// that does not fit is not listed; it is counted on one final `\tomitted\tN` line.
+    /// That line has an empty first field, which no draft path can have, so it is
+    /// never parsed as a draft.
+    fn render_unresolved_drafts(&self, line: impl Fn(&UnresolvedDraft) -> String) -> String {
+        const LISTED: usize = 64;
+        const BYTE_BUDGET: usize = 32 * 1024;
+        // Room for the final `\tomitted\tN` line (its count is at most 20 digits).
+        const OMITTED_RESERVE: usize = 32;
+        let mut lines: Vec<String> = self.unresolved_drafts().iter().map(line).collect();
         lines.sort();
-        if lines.len() > LISTED {
-            let more = lines.len() - LISTED;
-            lines.truncate(LISTED);
-            lines.push(format!("…\t{more} more unresolved drafts"));
+        let total = lines.len();
+        let mut kept = Vec::with_capacity(total.min(LISTED));
+        let mut bytes = 0_usize;
+        for text in lines {
+            if kept.len() == LISTED || bytes + text.len() + 1 + OMITTED_RESERVE > BYTE_BUDGET {
+                break;
+            }
+            bytes += text.len() + 1;
+            kept.push(text);
         }
-        lines.join("\n")
+        let omitted = total - kept.len();
+        if omitted > 0 {
+            kept.push(format!("\tomitted\t{omitted}"));
+        }
+        kept.join("\n")
     }
 
     /// Stop-time retention (ORNA-VFS-024): no unresolved draft is silently
@@ -3020,6 +3124,7 @@ impl Filesystem for WorkspaceFilesystem {
                 }
             }
             Some("user.orna.unresolved-draft-list") => self.unresolved_draft_report().into_bytes(),
+            Some("user.orna.unresolved-draft-fields") => self.unresolved_draft_fields().into_bytes(),
             _ => {
                 reply.error(Errno::ENODATA);
                 return;
@@ -3749,9 +3854,10 @@ impl Filesystem for WorkspaceFilesystem {
         };
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
-            draft_state
-                .rejected_scratch
-                .insert(source_inode, error.cause());
+            draft_state.rejected_scratch.insert(
+                source_inode,
+                ScratchRefusal { cause: error.cause(), kept: false },
+            );
             let stale = matches!(error, DocumentCommitError::Stale);
             // A refused candidate is retained before its rename replies (ORNA-VFS-009).
             // When recovery storage cannot keep it, the rename replies that retention
@@ -3763,7 +3869,12 @@ impl Filesystem for WorkspaceFilesystem {
                 .display_path(source_inode);
             let error = match save.writer.runtime.block_on(scratch.candidate_bytes()) {
                 Ok(bytes) => match retain_scratch_candidate(&save, &path, error.cause(), &bytes) {
-                    Ok(()) => error,
+                    Ok(()) => {
+                        if let Some(refusal) = draft_state.rejected_scratch.get_mut(&source_inode) {
+                            refusal.kept = true;
+                        }
+                        error
+                    }
                     Err(retention) => DocumentCommitError::Unretained {
                         errno: retention.errno,
                         cause: error.cause(),
@@ -3942,7 +4053,9 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
         };
-        if let Some(cause) = draft_state.rejected_scratch.get(&inode).copied() {
+        if let Some(ScratchRefusal { cause, .. }) =
+            draft_state.rejected_scratch.get(&inode).copied()
+        {
             // A refused replacement stays recoverable (ORNA-VFS-009): its
             // candidate moves to recovery storage before its name goes away. A
             // candidate recovery storage cannot keep fails with its retention
