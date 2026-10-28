@@ -30,7 +30,7 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
     vfs::{
-        EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
         project_component, project_key_component, unproject_component,
@@ -540,15 +540,90 @@ impl std::fmt::Display for RetentionError {
     }
 }
 
+/// Reads up to `size` bytes at `offset` from a candidate through `read_chunk`,
+/// one [`CANDIDATE_CHUNK_BYTES`] slice at a time. Only the reply buffer holds
+/// more than one chunk, so memory is bounded by the reply, never by the
+/// candidate's length. Stops at the candidate end.
+fn read_candidate_range<E>(
+    mut read_chunk: impl FnMut(u64, usize) -> Result<Vec<u8>, E>,
+    offset: u64,
+    size: u32,
+) -> Result<Vec<u8>, E> {
+    let wanted = size as usize;
+    let mut out = Vec::with_capacity(wanted.min(CANDIDATE_CHUNK_BYTES));
+    while out.len() < wanted {
+        let position = offset.saturating_add(out.len() as u64);
+        let chunk = read_chunk(position, (wanted - out.len()).min(CANDIDATE_CHUNK_BYTES))?;
+        if chunk.is_empty() {
+            break;
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+/// Caps a FUSE read reply at one candidate chunk, so each reply takes the
+/// candidate lock once. The kernel re-requests the rest of a larger read.
+fn reply_read_size(size: u32) -> u32 {
+    size.min(u32::try_from(CANDIDATE_CHUNK_BYTES).unwrap_or(u32::MAX))
+}
+
+/// Where a candidate the mount did not accept reads its bytes from. Retention
+/// streams a live draft or a truncation by range; only a stash whose retention
+/// was refused holds materialised bytes.
+#[derive(Clone)]
+enum CandidateSource {
+    /// A live draft, read through its spool by range.
+    Draft(Arc<EditDraft<RowMapSnapshot>>),
+    /// The newest writer draft of the file when one is open or was released
+    /// unretained, else its accepted baseline; either is cut or zero-extended to `size`.
+    Truncated { size: u64, latest: Option<Arc<EditDraft<RowMapSnapshot>>> },
+    /// Bytes already held in memory for a candidate whose retention was refused.
+    Stashed(Arc<[u8]>),
+}
+
+/// Reads up to `length` bytes at `offset` of the candidate that results from
+/// cutting or zero-extending a base of `base_len` bytes to `size`. `read_base`
+/// reads the base's bytes; growth is zero-filled. Copies only the requested window.
+fn truncated_window(
+    base_len: u64,
+    size: u64,
+    offset: u64,
+    length: usize,
+    mut read_base: impl FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
+) -> Result<Vec<u8>, RetentionError> {
+    let end = offset.saturating_add(length as u64).min(size);
+    let Some(window) = end.checked_sub(offset).filter(|window| *window > 0) else {
+        return Ok(Vec::new());
+    };
+    let mut out = vec![0_u8; window as usize];
+    let copy_end = end.min(base_len);
+    if offset < copy_end {
+        let copied = (copy_end - offset) as usize;
+        let bytes = read_base(offset, copied)?;
+        let kept = bytes.len().min(copied);
+        out[..kept].copy_from_slice(&bytes[..kept]);
+    }
+    Ok(out)
+}
+
+/// Reads up to `length` bytes at `offset` from in-memory candidate bytes.
+fn stashed_range(bytes: &[u8], offset: u64, length: usize) -> Vec<u8> {
+    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+    let end = start.saturating_add(length).min(bytes.len());
+    bytes[start..end].to_vec()
+}
+
 /// Keeps a refused scratch candidate in recovery storage before its rename or
 /// removal replies, so the bytes outlive the scratch name (ORNA-VFS-009).
 fn retain_scratch_candidate(
     save: &RowSaveContext,
     path: &str,
     cause: &str,
-    bytes: &[u8],
+    len: u64,
+    read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
 ) -> Result<(), RetentionError> {
-    let retained = save.writer.retained_drafts.retain(path, cause, bytes)?;
+    let retained = save.writer.retained_drafts.retain(path, cause, len, read_chunk)?;
     eprintln!(
         "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
         retained.id,
@@ -575,12 +650,26 @@ impl VfsRetainedDraftStore {
 
     /// Retains `bytes` as a candidate for the projected `path`. Retaining the
     /// same candidate for the same path again keeps its first record and ID.
-    fn retain(&self, path: &str, cause: &str, bytes: &[u8]) -> Result<RetainedDraft, RetentionError> {
-        let mut digest = Sha256::new();
-        digest.update(b"orna.vfs.retained-draft.v1\0");
-        VfsScratchStore::update_digest(&mut digest, path.as_bytes());
-        VfsScratchStore::update_digest(&mut digest, bytes);
-        let id = hex_bytes(&digest.finalize()[..16]);
+    /// Holds one chunk at a time: `read_chunk(offset, length)` supplies the
+    /// candidate, which is digested and written in two streaming passes.
+    fn retain(
+        &self,
+        path: &str,
+        cause: &str,
+        len: u64,
+        read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
+    ) -> Result<RetainedDraft, RetentionError> {
+        let mut prefix = Sha256::new();
+        prefix.update(b"orna.vfs.retained-draft.v1\0");
+        VfsScratchStore::update_digest(&mut prefix, path.as_bytes());
+        prefix.update(len.to_le_bytes());
+        let mut digest = prefix.clone();
+        Self::stream_candidate(len, read_chunk, |chunk| {
+            digest.update(chunk);
+            Ok(())
+        })?;
+        let digest = digest.finalize();
+        let id = hex_bytes(&digest[..16]);
         let record = self.directory.join(format!("{id}.draft"));
         if record.is_file() {
             return Ok(RetainedDraft { id, record });
@@ -625,16 +714,25 @@ impl VfsRetainedDraftStore {
                 RetentionError::io(format!("retained draft could not be staged: {error}"), &error)
             })?;
         let header = format!(
-            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {}\n\n",
-            bytes.len()
+            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
         );
-        staged
-            .write_all(header.as_bytes())
-            .and_then(|()| staged.write_all(bytes))
-            .and_then(|()| staged.as_file().sync_all())
-            .map_err(|error| {
-                RetentionError::io(format!("retained draft could not be written: {error}"), &error)
-            })?;
+        let written = |error: std::io::Error| {
+            RetentionError::io(format!("retained draft could not be written: {error}"), &error)
+        };
+        staged.write_all(header.as_bytes()).map_err(written)?;
+        let mut check = prefix.clone();
+        Self::stream_candidate(len, read_chunk, |chunk| {
+            check.update(chunk);
+            staged.write_all(chunk).map_err(written)
+        })?;
+        // The candidate is streamed twice; a change between the passes would
+        // retain bytes that do not match the record's ID.
+        if check.finalize() != digest {
+            return Err(RetentionError::from(
+                "retained candidate changed while it was being written".to_owned(),
+            ));
+        }
+        staged.as_file().sync_all().map_err(written)?;
         staged.persist(&record).map_err(|error| {
             RetentionError::io(
                 format!("retained draft could not be published: {}", error.error),
@@ -643,6 +741,30 @@ impl VfsRetainedDraftStore {
         })?;
         VfsScratchStore::sync_directory(&self.directory)?;
         Ok(RetainedDraft { id, record })
+    }
+
+    /// Feeds a candidate of `len` bytes to `sink` one [`CANDIDATE_CHUNK_BYTES`]
+    /// slice at a time, so no whole copy is made. Fails if the source ends early.
+    fn stream_candidate(
+        len: u64,
+        read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
+        mut sink: impl FnMut(&[u8]) -> Result<(), RetentionError>,
+    ) -> Result<(), RetentionError> {
+        let mut offset = 0_u64;
+        while offset < len {
+            let wanted = usize::try_from(len - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let chunk = read_chunk(offset, wanted)?;
+            if chunk.is_empty() {
+                return Err(RetentionError::from(
+                    "retained candidate ended before its recorded length".to_owned(),
+                ));
+            }
+            sink(&chunk)?;
+            offset += chunk.len() as u64;
+        }
+        Ok(())
     }
 }
 
@@ -2138,6 +2260,9 @@ struct DraftRefusal {
     draft: Option<String>,
     /// The handle whose candidate this refusal describes; a write by that handle clears it.
     handle: Option<u64>,
+    /// The released or refused writer's draft: the base a path truncate that
+    /// arrives before retention cuts (ORNA-VFS-009).
+    candidate: Option<Arc<EditDraft<RowMapSnapshot>>>,
     unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
 }
 
@@ -2167,6 +2292,8 @@ struct DraftState {
     dirty_handles: HashSet<u64>,
     /// Write-open Blob handles, keyed by handle number.
     blob_handles: HashMap<u64, BlobHandle>,
+    /// Pid that opened each writable handle; a FLUSH from another process is not the writer's close.
+    writer_owners: HashMap<u64, u32>,
 }
 
 impl DraftState {
@@ -2457,7 +2584,7 @@ impl WorkspaceFilesystem {
             parent,
             &name,
             NodeKind::Temporary {
-                bytes,
+                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
                 save,
                 target,
                 scratch,
@@ -2468,21 +2595,16 @@ impl WorkspaceFilesystem {
         )
     }
 
-    fn update_writable_bytes(&self, inode: u64, bytes: &[u8]) -> bool {
+    fn update_writable_len(&self, inode: u64, len: u64) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let Some(node) = state.nodes.get_mut(&inode) else {
-            return false;
-        };
-        let current = match &mut node.kind {
-            NodeKind::Document { bytes, .. } | NodeKind::Temporary { bytes, .. } => bytes,
-            _ => return false,
-        };
-        current.clear();
-        current.extend_from_slice(bytes);
-        true
+        if let Some(node) = state.nodes.get_mut(&inode) {
+            if let NodeKind::Temporary { len: current, .. } = &mut node.kind {
+                *current = len;
+            }
+        }
     }
     fn has_unresolved_drafts(&self) -> bool {
         self.draft_state
@@ -2501,7 +2623,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         handle: u64,
         save: &Arc<RowSaveContext>,
-        draft: &EditDraft<RowMapSnapshot>,
+        draft: &Arc<EditDraft<RowMapSnapshot>>,
         error: &DocumentCommitError,
     ) -> Option<Errno> {
         self.retain_candidate(
@@ -2524,7 +2646,7 @@ impl WorkspaceFilesystem {
         handle: u64,
         inode: u64,
         save: &Arc<RowSaveContext>,
-        draft: &EditDraft<RowMapSnapshot>,
+        draft: &Arc<EditDraft<RowMapSnapshot>>,
     ) -> Result<(), DocumentCommitError> {
         if let Err(error) = save.commit_document(draft, true) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
@@ -2752,7 +2874,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         handle: u64,
         save: &Arc<RowSaveContext>,
-        draft: &EditDraft<RowMapSnapshot>,
+        draft: &Arc<EditDraft<RowMapSnapshot>>,
     ) {
         // A candidate already refused by fsync or flush keeps its refusal cause
         // (ORNA-VFS-009); only a candidate never refused is recorded as unsynced.
@@ -2770,40 +2892,27 @@ impl WorkspaceFilesystem {
         inode: u64,
         handle: u64,
         save: &Arc<RowSaveContext>,
-        draft: &EditDraft<RowMapSnapshot>,
+        draft: &Arc<EditDraft<RowMapSnapshot>>,
         cause: &'static str,
         refresh: bool,
     ) -> Option<Errno> {
-        let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
-        let bytes = match bytes {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!(
-                    "{path}: not accepted ({cause}); candidate could not be read: {}",
-                    candidate_unreadable(error)
-                );
-                // Nothing can be retained without the bytes; the refusal stays recorded.
-                draft_state.rejected_documents.insert(
-                    inode,
-                    DraftRefusal {
-                        cause,
-                        handle: Some(handle),
-                        draft: None,
-                        unretained: None,
-                    },
-                );
-                if refresh {
-                    state.report_refresh(inode, save, &path);
-                }
-                return Some(Errno::EIO);
-            }
+        let len = save.writer.runtime.block_on(draft.candidate_len());
+        let retained = {
+            let mut read_chunk = |offset: u64, length: usize| {
+                save.writer
+                    .runtime
+                    .block_on(draft.read_range(offset, length))
+                    .map_err(|error| RetentionError::from(candidate_unreadable(error)))
+            };
+            save.writer
+                .retained_drafts
+                .retain(&path, cause, len, &mut read_chunk)
         };
-        let retained = save.writer.retained_drafts.retain(&path, cause, &bytes);
         let (retained_draft, unretained, failure) = match retained {
             Ok(retained) => {
                 eprintln!(
@@ -2815,7 +2924,20 @@ impl WorkspaceFilesystem {
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno))
+                // Recovery storage refused the candidate, so the in-memory stash is the
+                // only copy left. It is the sole whole-candidate copy on this path and
+                // exists only while retention is refused (follow-up bead).
+                match save.writer.runtime.block_on(draft.candidate_bytes()) {
+                    Ok(bytes) => (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno)),
+                    Err(error) => {
+                        // Nothing can be retained without the bytes; the refusal stays recorded.
+                        eprintln!(
+                            "{path}: not accepted ({cause}); candidate could not be read: {}",
+                            candidate_unreadable(error)
+                        );
+                        (None, None, Some(Errno::EIO))
+                    }
+                }
             }
         };
         if let Some(superseded) = draft_state.rejected_documents.insert(
@@ -2823,6 +2945,7 @@ impl WorkspaceFilesystem {
             DraftRefusal {
                 cause,
                 handle: Some(handle),
+                candidate: Some(Arc::clone(draft)),
                 draft: retained_draft,
                 unretained,
             },
@@ -2972,41 +3095,53 @@ impl WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut reports = std::collections::BTreeSet::new();
-        let mut unresolved = HashMap::new();
-        let mut candidates: Vec<(u64, Option<u64>, &'static str, Arc<RowSaveContext>, Arc<[u8]>)> =
-            Vec::new();
+        let mut candidates: Vec<(
+            u64,
+            Option<u64>,
+            &'static str,
+            Arc<RowSaveContext>,
+            CandidateSource,
+        )> = Vec::new();
         for (handle, inode) in &draft_state.unresolved_handles {
             if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
-                match save.writer.runtime.block_on(draft.candidate_bytes()) {
-                    Ok(bytes) => {
-                        candidates.push((*inode, Some(*handle), "unsynced", Arc::clone(save), bytes));
-                    }
-                    Err(error) => {
-                        let path = state.display_path(*inode);
-                        reports.insert(format!(
-                            "draft for {path} (unsynced) could not be read: {}",
-                            candidate_unreadable(error)
-                        ));
-                        unresolved.insert(
-                            *inode,
-                            DraftRefusal {
-                                cause: "unsynced",
-                                draft: None,
-                                handle: Some(*handle),
-                                unretained: None,
-                            },
-                        );
-                    }
-                }
+                candidates.push((
+                    *inode,
+                    Some(*handle),
+                    "unsynced",
+                    Arc::clone(save),
+                    CandidateSource::Draft(Arc::clone(draft)),
+                ));
             }
         }
         for (inode, size) in &draft_state.pending_truncates {
-            if let Some(NodeKind::Document { bytes, save }) =
+            if let Some(NodeKind::Document { save, .. }) =
                 state.nodes.get(inode).map(|node| &node.kind)
             {
-                let mut candidate = bytes.clone();
-                candidate.resize(usize::try_from(*size).unwrap_or(usize::MAX), 0);
-                candidates.push((*inode, None, "unsynced", Arc::clone(save), Arc::from(candidate)));
+                // A path truncate cuts the newest writer draft: the open writer's,
+                // else the candidate a released writer's refusal still holds.
+                let latest = draft_state
+                    .unresolved_handles
+                    .iter()
+                    .filter(|(_, dirty_inode)| **dirty_inode == *inode)
+                    .filter_map(|(handle, _)| match open_files.get(handle) {
+                        Some(OpenFile::Document(_, draft)) => Some((*handle, Arc::clone(draft))),
+                        _ => None,
+                    })
+                    .max_by_key(|(handle, _)| *handle)
+                    .map(|(_, draft)| draft)
+                    .or_else(|| {
+                        draft_state
+                            .rejected_documents
+                            .get(inode)
+                            .and_then(|refusal| refusal.candidate.clone())
+                    });
+                candidates.push((
+                    *inode,
+                    None,
+                    "unsynced",
+                    Arc::clone(save),
+                    CandidateSource::Truncated { size: *size, latest },
+                ));
             }
         }
         let mut unresolved = HashMap::new();
@@ -3014,7 +3149,13 @@ impl WorkspaceFilesystem {
         for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
             match (refusal.draft, refusal.unretained) {
                 (_, Some((save, bytes))) => {
-                    candidates.push((inode, refusal.handle, refusal.cause, save, bytes));
+                    candidates.push((
+                        inode,
+                        refusal.handle,
+                        refusal.cause,
+                        save,
+                        CandidateSource::Stashed(bytes),
+                    ));
                 }
                 (Some(draft), None) => {
                     let path = state.display_path(inode);
@@ -3026,9 +3167,50 @@ impl WorkspaceFilesystem {
                 (None, None) => {}
             }
         }
-        for (inode, handle, cause, save, bytes) in candidates {
+        for (inode, handle, cause, save, source) in candidates {
             let path = state.display_path(inode);
-            match save.writer.retained_drafts.retain(&path, cause, &bytes) {
+            let len = match &source {
+                CandidateSource::Draft(draft) => save.writer.runtime.block_on(draft.candidate_len()),
+                CandidateSource::Truncated { size, .. } => *size,
+                CandidateSource::Stashed(bytes) => bytes.len() as u64,
+            };
+            let mut read_chunk = |offset: u64, length: usize| match &source {
+                CandidateSource::Draft(draft) => save
+                    .writer
+                    .runtime
+                    .block_on(draft.read_range(offset, length))
+                    .map_err(|error| RetentionError::from(candidate_unreadable(error))),
+                CandidateSource::Truncated { size, latest } => match latest {
+                    Some(draft) => truncated_window(
+                        save.writer.runtime.block_on(draft.candidate_len()),
+                        *size,
+                        offset,
+                        length,
+                        |start, count| {
+                            save.writer
+                                .runtime
+                                .block_on(draft.read_range(start, count))
+                                .map_err(|error| RetentionError::from(candidate_unreadable(error)))
+                        },
+                    ),
+                    None => match state.nodes.get(&inode).map(|node| &node.kind) {
+                        Some(NodeKind::Document { bytes, .. }) => {
+                            truncated_window(bytes.len() as u64, *size, offset, length, |start, count| {
+                                Ok(stashed_range(bytes, start, count))
+                            })
+                        }
+                        _ => Err(RetentionError::from(format!(
+                            "{path} has no accepted baseline to truncate"
+                        ))),
+                    },
+                },
+                CandidateSource::Stashed(bytes) => Ok(stashed_range(bytes, offset, length)),
+            };
+            match save
+                .writer
+                .retained_drafts
+                .retain(&path, cause, len, &mut read_chunk)
+            {
                 Ok(retained) => {
                     reports.insert(format!(
                         "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
@@ -3041,13 +3223,27 @@ impl WorkspaceFilesystem {
                     reports.insert(format!(
                         "draft for {path} ({cause}) could not be retained: {error}"
                     ));
+                    // The stash is the only copy left while retention is refused; it is
+                    // materialised here alone (follow-up bead bounds it).
+                    let stash = match &source {
+                        CandidateSource::Stashed(bytes) => Ok(Arc::clone(bytes)),
+                        _ => {
+                            let mut whole = Vec::new();
+                            VfsRetainedDraftStore::stream_candidate(len, &mut read_chunk, |chunk| {
+                                whole.extend_from_slice(chunk);
+                                Ok(())
+                            })
+                            .map(|()| Arc::from(whole))
+                        }
+                    };
                     unresolved.insert(
                         inode,
                         DraftRefusal {
                             cause,
                             draft: None,
                             handle,
-                            unretained: Some((save, bytes)),
+                            candidate: None,
+                            unretained: stash.ok().map(|bytes| (save, bytes)),
                         },
                     );
                 }
@@ -3323,26 +3519,25 @@ impl Filesystem for WorkspaceFilesystem {
         handle: Option<fuser::FileHandle>,
         reply: ReplyAttr,
     ) {
-        let open_len = |handle: u64| {
+        let open_len = |handle: u64| -> Option<u64> {
             let open_file = self
                 .open_files
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(&handle)
                 .cloned()?;
-            let bytes = match &open_file {
+            Some(match &open_file {
                 OpenFile::Document(save, draft) => {
-                    save.writer.runtime.block_on(draft.candidate_bytes())
+                    save.writer.runtime.block_on(draft.candidate_len())
                 }
                 OpenFile::Temporary(save, _, scratch, _) => {
-                    save.writer.runtime.block_on(scratch.candidate_bytes())
+                    save.writer.runtime.block_on(scratch.candidate_len())
                 }
-            };
-            Some(bytes.map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX)))
+            })
         };
         let candidate_size = match handle {
             Some(handle) => open_len(handle.0),
-            // fstat without a handle reaches here; an open Blob candidate is the file.
+            // fstat without a handle reaches here; an open Document or Blob candidate is the file.
             None => {
                 let handles: Vec<u64> = self
                     .draft_state
@@ -3355,26 +3550,23 @@ impl Filesystem for WorkspaceFilesystem {
                     .collect();
                 handles
                     .into_iter()
-                    .find(|handle| {
+                    .filter(|handle| {
                         self.open_files
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .get(handle)
                             .is_some_and(|open| {
-                                matches!(open, OpenFile::Temporary(_, _, _, Some(_)))
+                                matches!(
+                                    open,
+                                    OpenFile::Document(..) | OpenFile::Temporary(_, _, _, Some(_))
+                                )
                             })
                     })
+                    .max()
                     .and_then(open_len)
             }
         };
-        let candidate_size = match candidate_size.transpose() {
-            Ok(size) => size,
-            Err(error) => {
-                eprintln!("mounted candidate size unavailable: {}", candidate_unreadable(error));
-                reply.error(Errno::EIO);
-                return;
-            }
-        };
+
         let state = self
             .state
             .lock()
@@ -3391,7 +3583,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
     }
 
-    fn open(&self, _request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
+    fn open(&self, request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
         // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
         // without truncating or replacing the blob. EPERM is the unsupported-mutation
@@ -3577,6 +3769,9 @@ impl Filesystem for WorkspaceFilesystem {
             if truncate_size.is_some() {
                 draft_state.pending_truncates.remove(&inode.0);
             }
+            if write_mode {
+                draft_state.writer_owners.insert(handle, request.pid());
+            }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
@@ -3600,11 +3795,14 @@ impl Filesystem for WorkspaceFilesystem {
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
+        if write_mode {
+            draft_state.writer_owners.insert(handle, request.pid());
+        }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
     fn create(
         &self,
-        _request: &Request,
+        request: &Request,
         parent: INodeNo,
         name: &OsStr,
         _mode: u32,
@@ -3616,7 +3814,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EINVAL);
             return;
         };
-        let draft_state = self
+        let mut draft_state = self
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3693,7 +3891,7 @@ impl Filesystem for WorkspaceFilesystem {
                 parent.0,
                 name,
                 NodeKind::Temporary {
-                    bytes: Vec::new(),
+                    len: 0,
                     save: Arc::clone(&save),
                     target: Arc::clone(&target),
                     scratch: Arc::clone(&scratch),
@@ -3715,6 +3913,7 @@ impl Filesystem for WorkspaceFilesystem {
             (attr, save, target, scratch, blob_field)
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
+        draft_state.writer_owners.insert(handle, request.pid());
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3867,29 +4066,29 @@ impl Filesystem for WorkspaceFilesystem {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .display_path(source_inode);
-            let error = match save.writer.runtime.block_on(scratch.candidate_bytes()) {
-                Ok(bytes) => match retain_scratch_candidate(&save, &path, error.cause(), &bytes) {
-                    Ok(()) => {
-                        if let Some(refusal) = draft_state.rejected_scratch.get_mut(&source_inode) {
-                            refusal.kept = true;
-                        }
-                        error
-                    }
-                    Err(retention) => DocumentCommitError::Unretained {
-                        errno: retention.errno,
-                        cause: error.cause(),
-                    },
+            let len = save.writer.runtime.block_on(scratch.candidate_len());
+            let error = match retain_scratch_candidate(
+                &save,
+                &path,
+                error.cause(),
+                len,
+                &mut |offset, length| {
+                    save.writer
+                        .runtime
+                        .block_on(scratch.read_range(offset, length))
+                        .map_err(|read| RetentionError::from(candidate_unreadable(read)))
                 },
-                Err(read) => {
-                    eprintln!(
-                        "{path}: refused scratch kept because its candidate could not be read: {}",
-                        candidate_unreadable(read)
-                    );
-                    DocumentCommitError::Unretained {
-                        errno: Errno::EIO,
-                        cause: error.cause(),
+            ) {
+                Ok(()) => {
+                    if let Some(refusal) = draft_state.rejected_scratch.get_mut(&source_inode) {
+                        refusal.kept = true;
                     }
+                    error
                 }
+                Err(retention) => DocumentCommitError::Unretained {
+                    errno: retention.errno,
+                    cause: error.cause(),
+                },
             };
             if stale {
                 let mut state = self
@@ -4061,18 +4260,13 @@ impl Filesystem for WorkspaceFilesystem {
             // candidate recovery storage cannot keep fails with its retention
             // errno (EDQUOT when full) and the scratch stays in place.
             let path = state.display_path(inode);
-            let bytes = match save.writer.runtime.block_on(scratch.candidate_bytes()) {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    eprintln!(
-                        "{path}: refused scratch kept because its candidate could not be read: {}",
-                        candidate_unreadable(error)
-                    );
-                    reply.error(Errno::EIO);
-                    return;
-                }
-            };
-            if let Err(error) = retain_scratch_candidate(&save, &path, cause, &bytes) {
+            let len = save.writer.runtime.block_on(scratch.candidate_len());
+            if let Err(error) = retain_scratch_candidate(&save, &path, cause, len, &mut |offset, length| {
+                save.writer
+                    .runtime
+                    .block_on(scratch.read_range(offset, length))
+                    .map_err(|read| RetentionError::from(candidate_unreadable(read)))
+            }) {
                 reply.error(error.errno);
                 return;
             }
@@ -4112,27 +4306,55 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&handle.0)
             .cloned();
-        let private_bytes = match open_file {
-            Some(OpenFile::Document(save, draft)) => {
-                Some(save.writer.runtime.block_on(draft.candidate_bytes()))
-            }
-            Some(OpenFile::Temporary(save, _, scratch, _)) => {
-                Some(save.writer.runtime.block_on(scratch.candidate_bytes()))
-            }
+        let private_read = match open_file {
+            Some(OpenFile::Document(save, draft)) => Some(read_candidate_range(
+                |offset, length| save.writer.runtime.block_on(draft.read_range(offset, length)),
+                offset,
+                reply_read_size(size),
+            )),
+            Some(OpenFile::Temporary(save, _, scratch, _)) => Some(read_candidate_range(
+                |offset, length| save.writer.runtime.block_on(scratch.read_range(offset, length)),
+                offset,
+                reply_read_size(size),
+            )),
             None => None,
         };
-        if let Some(bytes) = private_bytes {
-            let bytes = match bytes {
-                Ok(bytes) => bytes,
+        if let Some(bytes) = private_read {
+            match bytes {
+                Ok(bytes) => reply.data(&bytes),
                 Err(error) => {
                     eprintln!("mounted private candidate read failed: {}", candidate_unreadable(error));
                     reply.error(Errno::EIO);
-                    return;
                 }
-            };
-            let start = usize::try_from(offset).unwrap_or(usize::MAX);
-            let end = start.saturating_add(size as usize).min(bytes.len());
-            reply.data(bytes.get(start..end).unwrap_or(&[]));
+            }
+            return;
+        }
+        // A Temporary node's candidate lives in its scratch, so a read without an open
+        // handle is served by range from there. The state lock is released first.
+        let temporary = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match state.nodes.get(&inode.0).map(|node| &node.kind) {
+                Some(NodeKind::Temporary { save, scratch, .. }) => {
+                    Some((Arc::clone(save), Arc::clone(scratch)))
+                }
+                _ => None,
+            }
+        };
+        if let Some((save, scratch)) = temporary {
+            match read_candidate_range(
+                |offset, length| save.writer.runtime.block_on(scratch.read_range(offset, length)),
+                offset,
+                reply_read_size(size),
+            ) {
+                Ok(bytes) => reply.data(&bytes),
+                Err(error) => {
+                    eprintln!("mounted temporary candidate read failed: {}", candidate_unreadable(error));
+                    reply.error(Errno::EIO);
+                }
+            }
             return;
         }
         let blob = {
@@ -4145,9 +4367,7 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             };
             match &node.kind {
-                NodeKind::Bytes(bytes)
-                | NodeKind::Document { bytes, .. }
-                | NodeKind::Temporary { bytes, .. } => {
+                NodeKind::Bytes(bytes) | NodeKind::Document { bytes, .. } => {
                     let start = match usize::try_from(offset) {
                         Ok(start) if start < bytes.len() => start,
                         _ => {
@@ -4176,6 +4396,8 @@ impl Filesystem for WorkspaceFilesystem {
                     reference.clone(),
                     reference.content_identity().length(),
                 )),
+                // Temporary nodes are served from their scratch before this lookup.
+                NodeKind::Temporary { .. } => None,
                 NodeKind::Directory(_)
                 | NodeKind::Table(_)
                 | NodeKind::KeyDirectory(_)
@@ -4252,17 +4474,17 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.retained_scratch.insert(inode.0);
             }
         }
-        let (result, candidate_bytes) = match open_file {
+        let (result, candidate_len) = match open_file {
             Some(OpenFile::Document(save, draft)) => (
                 save.writer.runtime.block_on(draft.write_at(offset, data)),
                 None,
             ),
             Some(OpenFile::Temporary(save, _, scratch, _)) => {
                 let result = save.writer.runtime.block_on(scratch.write_at(offset, data));
-                let bytes = result
+                let len = result
                     .is_ok()
-                    .then(|| save.writer.runtime.block_on(scratch.candidate_bytes()));
-                (result, bytes)
+                    .then(|| save.writer.runtime.block_on(scratch.candidate_len()));
+                (result, len)
             }
             None => {
                 if !had_unresolved_handle {
@@ -4286,16 +4508,8 @@ impl Filesystem for WorkspaceFilesystem {
                 // write leaves no candidate, so it must not mark the handle dirty.
                 draft_state.dirty_handles.insert(handle.0);
             }
-            let candidate_bytes = match candidate_bytes.transpose() {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    eprintln!("mounted write candidate could not be read back: {}", candidate_unreadable(error));
-                    reply.error(Errno::EIO);
-                    return;
-                }
-            };
-            if let Some(bytes) = candidate_bytes {
-                self.update_writable_bytes(inode.0, &bytes);
+            if let Some(len) = candidate_len {
+                self.update_writable_len(inode.0, len);
             }
             reply.written(u32::try_from(data.len()).unwrap_or(u32::MAX));
         }
@@ -4342,7 +4556,7 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn flush(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         handle: fuser::FileHandle,
         _lock_owner: fuser::LockOwner,
@@ -4359,8 +4573,24 @@ impl Filesystem for WorkspaceFilesystem {
             reply.ok();
             return;
         }
+        // The kernel issues FLUSH when an inherited copy of this descriptor is
+        // closed by another process (exec(2) closes CLOEXEC fds through filp_close).
+        // While quiescing, a FLUSH on a dirty handle fails with EBUSY from any
+        // process, so the close reports that the draft was not accepted.
         if draft_state.quiescing {
             reply.error(Errno::EBUSY);
+            return;
+        }
+        // PR policy (not EDIT-1 step 5 text): a FLUSH from a process other than the
+        // one that opened the handle acknowledges without accepting the draft; the
+        // opener's own close is the close-time commit. The opener pid is recorded at
+        // open, so a later writer cannot move the gate to itself.
+        if draft_state
+            .writer_owners
+            .get(&handle.0)
+            .is_some_and(|writer| *writer != request.pid())
+        {
+            reply.ok();
             return;
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
@@ -4418,6 +4648,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .track_blob_release(generation);
         }
         draft_state.dirty_handles.remove(&handle.0);
+        draft_state.writer_owners.remove(&handle.0);
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
@@ -4434,7 +4665,7 @@ impl Filesystem for WorkspaceFilesystem {
 
     fn setattr(
         &self,
-        _request: &Request,
+        request: &Request,
         inode: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -4486,22 +4717,24 @@ impl Filesystem for WorkspaceFilesystem {
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .nodes
                         .contains_key(&inode.0);
+                // Keep the pid recorded at open(); or_insert covers handles without one.
+                draft_state.writer_owners.entry(handle.0).or_insert(request.pid());
                 if is_tracked {
                     draft_state.unresolved_handles.insert(handle.0, inode.0);
                     if is_scratch {
                         draft_state.retained_scratch.insert(inode.0);
                     }
                 }
-                let (result, candidate_bytes) = match open_file {
+                let (result, candidate_len) = match open_file {
                     OpenFile::Document(save, draft) => {
                         (save.writer.runtime.block_on(draft.truncate(size)), None)
                     }
                     OpenFile::Temporary(save, _, scratch, _) => {
                         let result = save.writer.runtime.block_on(scratch.truncate(size));
-                        let bytes = result
+                        let len = result
                             .is_ok()
-                            .then(|| save.writer.runtime.block_on(scratch.candidate_bytes()));
-                        (result, bytes)
+                            .then(|| save.writer.runtime.block_on(scratch.candidate_len()));
+                        (result, len)
                     }
                 };
                 if result.is_err() {
@@ -4514,16 +4747,8 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(draft_errno(&result));
                     return;
                 }
-                let candidate_bytes = match candidate_bytes.transpose() {
-                    Ok(bytes) => bytes,
-                    Err(error) => {
-                        eprintln!("mounted truncate candidate could not be read back: {}", candidate_unreadable(error));
-                        reply.error(Errno::EIO);
-                        return;
-                    }
-                };
-                if let Some(bytes) = candidate_bytes {
-                    self.update_writable_bytes(inode.0, &bytes);
+                if let Some(len) = candidate_len {
+                    self.update_writable_len(inode.0, len);
                 }
             } else {
                 let state = self
@@ -4673,9 +4898,7 @@ impl FsBuilder {
             NodeKind::Document { bytes, .. } => {
                 (FileType::RegularFile, bytes.len() as u64, 0o644, 1)
             }
-            NodeKind::Temporary { bytes, .. } => {
-                (FileType::RegularFile, bytes.len() as u64, 0o644, 1)
-            }
+            NodeKind::Temporary { len, .. } => (FileType::RegularFile, *len, 0o644, 1),
             NodeKind::Blob { reference, .. } => (
                 FileType::RegularFile,
                 reference.content_identity().length(),
@@ -5733,7 +5956,8 @@ enum NodeKind {
         save: Arc<RowSaveContext>,
     },
     Temporary {
-        bytes: Vec<u8>,
+        /// Cached candidate length; the bytes stay in the scratch store and are read by range.
+        len: u64,
         save: Arc<RowSaveContext>,
         target: Arc<ManagedFile<RowMapSnapshot>>,
         scratch: Arc<TemporarySave<RowMapSnapshot>>,
@@ -6367,6 +6591,60 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 #[cfg(test)]
 mod tests {
     #[test]
+    fn candidate_read_is_chunked_and_stops_at_candidate_end() {
+        use super::{CANDIDATE_CHUNK_BYTES, read_candidate_range};
+        let total = CANDIDATE_CHUNK_BYTES * 2 + 5;
+        let bytes: Vec<u8> = (0..total).map(|index| (index % 251) as u8).collect();
+        let mut requests = Vec::new();
+        let read = read_candidate_range(
+            |offset, length| {
+                requests.push(length);
+                let start = (offset as usize).min(bytes.len());
+                let end = (start + length).min(bytes.len());
+                Ok::<_, ()>(bytes[start..end].to_vec())
+            },
+            CANDIDATE_CHUNK_BYTES as u64 / 2,
+            (total + 10) as u32,
+        )
+        .unwrap();
+        assert_eq!(read, bytes[CANDIDATE_CHUNK_BYTES / 2..].to_vec());
+        assert!(requests.iter().all(|length| *length <= CANDIDATE_CHUNK_BYTES));
+        assert!(requests.len() >= 3);
+    }
+
+    #[test]
+    fn candidate_read_propagates_backing_errors() {
+        use super::read_candidate_range;
+        let failed = read_candidate_range(|_, _| Err::<Vec<u8>, _>("backing"), 0, 8);
+        assert_eq!(failed, Err("backing"));
+    }
+
+    #[test]
+    fn truncated_and_stashed_ranges_clamp_to_candidate_size() {
+        use super::{RetentionError, stashed_range, truncated_window};
+        let baseline: &[u8] = b"abcdef";
+        let window = |size: u64, offset: u64, length: usize| {
+            truncated_window(baseline.len() as u64, size, offset, length, |start, count| {
+                Ok::<_, RetentionError>(stashed_range(baseline, start, count))
+            })
+            .unwrap()
+        };
+        assert_eq!(window(4, 0, 10), b"abcd".to_vec());
+        assert_eq!(window(8, 4, 10), vec![b'e', b'f', 0, 0]);
+        assert_eq!(window(4, 6, 10), Vec::<u8>::new());
+        assert!(truncated_window(6, 4, 0, 4, |_, _| Err(RetentionError::from(String::from("boom")))).is_err());
+        assert_eq!(stashed_range(baseline, 2, 3), b"cde".to_vec());
+        assert_eq!(stashed_range(baseline, 9, 3), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn reply_read_size_caps_each_reply_at_one_chunk() {
+        let chunk = u32::try_from(super::CANDIDATE_CHUNK_BYTES).unwrap_or(u32::MAX);
+        assert_eq!(super::reply_read_size(u32::MAX), chunk);
+        assert_eq!(super::reply_read_size(5), 5);
+    }
+
+    #[test]
     fn quota_exceeded_maps_to_edquot_and_backing_io_to_eio() {
         use orna_runtime_v1::vfs::EditDraftError;
         assert_eq!(
@@ -6962,10 +7240,44 @@ mod hardening_tests {
         let refusal = super::DraftRefusal {
             cause: "sys.vfs.stale_edit",
             handle: None,
+            candidate: None,
             draft: None,
             unretained: None,
         };
         assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
+    }
+
+    /// A 64 MiB candidate is retained without a whole copy: every candidate read
+    /// is at most one chunk, and the record holds all of its bytes.
+    #[test]
+    fn retained_candidate_streams_in_bounded_chunks() {
+        const LEN: u64 = 64 * 1024 * 1024;
+        let runtime = tempfile::tempdir().unwrap();
+        let store = super::VfsRetainedDraftStore::new(runtime.path());
+        let largest_read = std::cell::Cell::new(0_usize);
+        let total_read = std::cell::Cell::new(0_u64);
+        let mut read_chunk = |offset: u64, length: usize| -> Result<Vec<u8>, super::RetentionError> {
+            largest_read.set(largest_read.get().max(length));
+            total_read.set(total_read.get() + length as u64);
+            Ok((offset..offset + length as u64).map(|index| (index % 251) as u8).collect())
+        };
+        let retained = store
+            .retain("/music/big.orna", "refused", LEN, &mut read_chunk)
+            .unwrap();
+        assert!(largest_read.get() > 0);
+        assert!(largest_read.get() <= super::CANDIDATE_CHUNK_BYTES);
+        // The digest pass and the write pass each read the whole candidate once.
+        assert_eq!(total_read.get(), 2 * LEN);
+        let record_bytes = std::fs::read(&retained.record).unwrap();
+        let marker = format!("bytes {LEN}\n\n");
+        let start = record_bytes
+            .windows(marker.len())
+            .position(|window| window == marker.as_bytes())
+            .expect("record header carries the candidate length")
+            + marker.len();
+        let body = &record_bytes[start..];
+        assert_eq!(body.len() as u64, LEN);
+        assert!(body.iter().enumerate().all(|(index, byte)| *byte == (index as u64 % 251) as u8));
     }
 
     #[test]
