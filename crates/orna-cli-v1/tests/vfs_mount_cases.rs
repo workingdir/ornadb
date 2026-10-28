@@ -22,7 +22,9 @@ mod media_commit;
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
+use editor_mount::{assert_errno, repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
+
+const EINVAL: i32 = 22;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -41,10 +43,12 @@ fn sorted_names(directory: &Path) -> Vec<String> {
     names
 }
 
-/// ORNA-VFS-020 with ORNA-VFS-015: saves to several row documents under one
-/// mount are admitted one at a time, in the order the caller performs them.
-/// A rejected later save does not roll back an earlier accepted one; no
-/// cross-file transaction is implied (grouped admission is `orna edit --row`).
+/// ORNA-VFS-015 row-document coverage (not ORNA-VFS-020). Saves to several row
+/// documents under one mount are each admitted at their own sync, in the order
+/// the caller performs them. A rejected later save does not roll back an
+/// earlier accepted one. No cross-file transaction is asserted. Grouped source
+/// edits and no-evaluation-during-speculative-writes (ORNA-VFS-020 proper) are
+/// NOT covered; see bead ornadb-9npn.
 #[tokio::test]
 async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollback() {
     if !require_fuse_or_skip() {
@@ -73,18 +77,19 @@ async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollb
     );
 
     let invalid = "{ title: \"Bad\", artist: 123, }\n";
-    assert!(
-        write_and_sync(&paris, invalid).is_err(),
-        "an invalid candidate for Music/paris is rejected at sync"
+    assert_errno(
+        write_and_sync(&paris, invalid),
+        &[EINVAL],
+        "an invalid candidate for Music/paris is refused at sync with EINVAL",
     );
     assert!(read_view(&paris).contains("Paris edit"), "rejected candidate keeps accepted paris");
     assert!(read_view(&london).contains("London edit"), "rejected paris save keeps accepted london");
 }
 
-/// ORNA-VFS-019: an open read handle keeps its captured row and never retargets
-/// to another row after a sibling row is rewritten through the mount. The
-/// collection listing keeps its row set; a fresh open sees the write.
-/// Not covered: schema-change remount (the second half of VFS-019).
+/// ORNA-VFS-019 (first half only): an open read handle keeps its captured row
+/// and never retargets to another row after a sibling row is rewritten through
+/// the mount. A fresh open sees the write. NOT covered: the cache-invalidation
+/// and reorder halves of VFS-019, and the schema-change remount half.
 #[tokio::test]
 async fn vfs_019_open_handle_does_not_retarget_after_sibling_row_write() {
     if !require_fuse_or_skip() {
@@ -119,10 +124,11 @@ async fn vfs_019_open_handle_does_not_retarget_after_sibling_row_write() {
     assert!(read_view(&london).contains("London edit"), "a fresh open sees the write");
 }
 
-/// ORNA-VFS-017: a known key resolves in a collection larger than one page
-/// (`ROW_PAGE_LIMIT` = 256), and two directory passes list the same 512 rows.
-/// Call counts are not observable from outside the daemon; the lazy page
-/// cursor is covered by unit test `workspace_readdir_uses_lazy_indexed_pages`.
+/// ORNA-VFS-017, multi-page listing consistency only: over 512 rows (more than
+/// one `ROW_PAGE_LIMIT` = 256 page), a known late key resolves and two directory
+/// passes list the same row set. This does not prove laziness or page-cursor
+/// behaviour from outside the daemon; that is covered by unit test
+/// `workspace_readdir_uses_lazy_indexed_pages`.
 #[tokio::test]
 async fn vfs_017_large_collection_lookup_and_pinned_listing() {
     if !require_fuse_or_skip() {
