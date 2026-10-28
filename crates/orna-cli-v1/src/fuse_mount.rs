@@ -491,6 +491,57 @@ struct RetainedDraft {
     record: PathBuf,
 }
 
+/// A candidate recovery storage could not keep, carrying the errno the refused
+/// write, rename or removal replies (ORNA-VFS-009, EDIT-1 step 4). A full store
+/// is EDQUOT; any other storage failure is EIO.
+#[derive(Debug)]
+struct RetentionError {
+    errno: Errno,
+    message: String,
+}
+
+impl RetentionError {
+    fn io(message: String, error: &std::io::Error) -> Self {
+        let full = matches!(error.raw_os_error(), Some(libc::ENOSPC | libc::EDQUOT));
+        Self {
+            errno: if full { Errno::EDQUOT } else { Errno::EIO },
+            message,
+        }
+    }
+}
+
+impl From<String> for RetentionError {
+    fn from(message: String) -> Self {
+        Self {
+            errno: Errno::EIO,
+            message,
+        }
+    }
+}
+
+impl std::fmt::Display for RetentionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+/// Keeps a refused scratch candidate in recovery storage before its rename or
+/// removal replies, so the bytes outlive the scratch name (ORNA-VFS-009).
+fn retain_scratch_candidate(
+    save: &RowSaveContext,
+    path: &str,
+    cause: &str,
+    bytes: &[u8],
+) -> Result<(), RetentionError> {
+    let retained = save.writer.retained_drafts.retain(path, cause, bytes)?;
+    eprintln!(
+        "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
+        retained.id,
+        retained.record.display()
+    );
+    Ok(())
+}
+
 /// Bounded recovery storage for candidates the mount did not accept
 /// (`sys.vfs.draft_retained`, ORNA-VFS-009, ORNA-VFS-024). A record keeps the
 /// exact candidate bytes under a content-derived draft ID with the row path and
@@ -509,7 +560,7 @@ impl VfsRetainedDraftStore {
 
     /// Retains `bytes` as a candidate for the projected `path`. Retaining the
     /// same candidate for the same path again keeps its first record and ID.
-    fn retain(&self, path: &str, cause: &str, bytes: &[u8]) -> Result<RetainedDraft, String> {
+    fn retain(&self, path: &str, cause: &str, bytes: &[u8]) -> Result<RetainedDraft, RetentionError> {
         let mut digest = Sha256::new();
         digest.update(b"orna.vfs.retained-draft.v1\0");
         VfsScratchStore::update_digest(&mut digest, path.as_bytes());
@@ -527,24 +578,37 @@ impl VfsRetainedDraftStore {
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => {
-                return Err(format!("VFS recovery storage could not be created: {error}"));
+                return Err(RetentionError::io(
+                    format!("VFS recovery storage could not be created: {error}"),
+                    &error,
+                ));
             }
         }
         let retained = fs::read_dir(&self.directory)
-            .map_err(|error| format!("VFS recovery storage could not be listed: {error}"))?
+            .map_err(|error| {
+                RetentionError::io(
+                    format!("VFS recovery storage could not be listed: {error}"),
+                    &error,
+                )
+            })?
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".draft"))
             .count();
         if retained >= VFS_RETAINED_DRAFT_LIMIT {
-            return Err(format!(
-                "VFS recovery storage {} already holds {VFS_RETAINED_DRAFT_LIMIT} drafts; remove recovered records first",
-                self.directory.display()
-            ));
+            return Err(RetentionError {
+                errno: Errno::EDQUOT,
+                message: format!(
+                    "VFS recovery storage {} already holds {VFS_RETAINED_DRAFT_LIMIT} drafts; remove recovered records first",
+                    self.directory.display()
+                ),
+            });
         }
         let mut staged = tempfile::Builder::new()
             .prefix(".retain-")
             .tempfile_in(&self.directory)
-            .map_err(|error| format!("retained draft could not be staged: {error}"))?;
+            .map_err(|error| {
+                RetentionError::io(format!("retained draft could not be staged: {error}"), &error)
+            })?;
         let header = format!(
             "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {}\n\n",
             bytes.len()
@@ -553,10 +617,15 @@ impl VfsRetainedDraftStore {
             .write_all(header.as_bytes())
             .and_then(|()| staged.write_all(bytes))
             .and_then(|()| staged.as_file().sync_all())
-            .map_err(|error| format!("retained draft could not be written: {error}"))?;
-        staged
-            .persist(&record)
-            .map_err(|error| format!("retained draft could not be published: {}", error.error))?;
+            .map_err(|error| {
+                RetentionError::io(format!("retained draft could not be written: {error}"), &error)
+            })?;
+        staged.persist(&record).map_err(|error| {
+            RetentionError::io(
+                format!("retained draft could not be published: {}", error.error),
+                &error.error,
+            )
+        })?;
         VfsScratchStore::sync_directory(&self.directory)?;
         Ok(RetainedDraft { id, record })
     }
@@ -1109,6 +1178,9 @@ enum DocumentCommitError {
     Stale,
     Rejected(String),
     Failed(String),
+    /// The save did not commit and recovery storage could not keep its candidate;
+    /// `errno` is the retention errno (ORNA-VFS-009, EDIT-1 step 4).
+    Unretained { errno: Errno, cause: &'static str },
 }
 
 impl DocumentCommitError {
@@ -1117,6 +1189,7 @@ impl DocumentCommitError {
     fn errno(&self) -> Errno {
         match self {
             Self::Rejected(_) => Errno::EINVAL,
+            Self::Unretained { errno, .. } => *errno,
             Self::Stale => Errno::EAGAIN,
             Self::NoCandidate | Self::Failed(_) => Errno::EIO,
         }
@@ -1128,6 +1201,7 @@ impl DocumentCommitError {
         match self {
             Self::Stale => "sys.vfs.stale_edit",
             Self::Rejected(_) => "sys.vfs.invalid_document",
+            Self::Unretained { cause, .. } => *cause,
             Self::NoCandidate | Self::Failed(_) => "backing I/O failure",
         }
     }
@@ -1175,6 +1249,7 @@ impl std::fmt::Display for DocumentCommitError {
             Self::Stale => {
                 formatter.write_str("mounted save is stale against its captured baseline")
             }
+            Self::Unretained { cause, .. } => formatter.write_str(cause),
             Self::Rejected(message) | Self::Failed(message) => formatter.write_str(message),
         }
     }
@@ -1900,12 +1975,20 @@ pub(super) fn unresolved_draft_list(mountpoint: &Path) -> Result<String, rustix:
     String::from_utf8(value).map_err(|_| rustix::io::Errno::IO)
 }
 
+/// Why stop-time draft retention did not finish (ORNA-VFS-024).
+pub(super) enum DraftRetentionStop {
+    /// Recovery storage could not keep a draft; the mount stays up and the stop retries.
+    Retention(String),
+    /// The mount could not be quiesced for retention; the stop unmounts and reports it.
+    Mount(String),
+}
+
 /// Stops a live mount from accepting edits before a stop-time unmount. A mount
 /// that still holds unresolved drafts is asked to retain every one of them
 /// (recovery storage, or the scratch store for scratch files) and to report
 /// them, so stopping never silently discards a draft (ORNA-VFS-024). Returns
 /// whether any draft was unresolved.
-pub(super) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, String> {
+pub(super) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, DraftRetentionStop> {
     match begin_unmount(mountpoint) {
         Ok(()) | Err(UnmountPreparationError::ReadOnlyMount | UnmountPreparationError::Disconnected) => {
             Ok(false)
@@ -1917,8 +2000,10 @@ pub(super) fn retain_drafts_for_shutdown(mountpoint: &Path) -> Result<bool, Stri
             rustix::fs::XattrFlags::empty(),
         )
         .map(|()| true)
-        .map_err(|error| format!("could not retain Orna mount drafts: {error}")),
-        Err(UnmountPreparationError::Operation(error)) => Err(error),
+        .map_err(|error| {
+            DraftRetentionStop::Retention(format!("could not retain Orna mount drafts: {error}"))
+        }),
+        Err(UnmountPreparationError::Operation(error)) => Err(DraftRetentionStop::Mount(error)),
     }
 }
 
@@ -2343,7 +2428,7 @@ impl WorkspaceFilesystem {
         save: &Arc<RowSaveContext>,
         draft: &EditDraft<RowMapSnapshot>,
         error: &DocumentCommitError,
-    ) {
+    ) -> Option<Errno> {
         self.retain_candidate(
             draft_state,
             inode,
@@ -2352,7 +2437,7 @@ impl WorkspaceFilesystem {
             draft,
             error.cause(),
             matches!(error, DocumentCommitError::Stale),
-        );
+        )
     }
 
     /// Accepts a dirty document candidate (EDIT-1 steps 1-2). The caller holds
@@ -2369,10 +2454,18 @@ impl WorkspaceFilesystem {
         if let Err(error) = save.commit_document(draft, true) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
-            if !matches!(error, DocumentCommitError::NoCandidate) {
-                self.refuse_document(draft_state, inode, handle, save, draft, &error);
+            if matches!(error, DocumentCommitError::NoCandidate) {
+                return Err(error);
             }
-            return Err(error);
+            // A candidate recovery storage cannot keep reports the retention errno
+            // and stays unresolved (ORNA-VFS-009).
+            return Err(match self.refuse_document(draft_state, inode, handle, save, draft, &error) {
+                Some(errno) => DocumentCommitError::Unretained {
+                    errno,
+                    cause: error.cause(),
+                },
+                None => error,
+            });
         }
         let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
         if let Some(NodeKind::Document {
@@ -2594,7 +2687,7 @@ impl WorkspaceFilesystem {
         draft: &EditDraft<RowMapSnapshot>,
         cause: &'static str,
         refresh: bool,
-    ) {
+    ) -> Option<Errno> {
         let bytes = save.writer.runtime.block_on(draft.candidate_bytes());
         let mut state = self
             .state
@@ -2602,18 +2695,18 @@ impl WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
         let retained = save.writer.retained_drafts.retain(&path, cause, &bytes);
-        let (retained_draft, unretained) = match retained {
+        let (retained_draft, unretained, failure) = match retained {
             Ok(retained) => {
                 eprintln!(
                     "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
                     retained.id,
                     retained.record.display()
                 );
-                (Some(retained.id), None)
+                (Some(retained.id), None, None)
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                (None, Some((Arc::clone(save), bytes)))
+                (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno))
             }
         };
         if let Some(superseded) = draft_state.rejected_documents.insert(
@@ -2631,6 +2724,7 @@ impl WorkspaceFilesystem {
         if refresh {
             state.report_refresh(inode, save, &path);
         }
+        failure
     }
 
     /// One `path<TAB>state` line per unresolved draft, for an unmount refusal.
@@ -2772,6 +2866,8 @@ impl WorkspaceFilesystem {
             .chain(draft_state.rejected_scratch.keys())
             .copied()
             .collect::<std::collections::BTreeSet<_>>();
+        // Scratch whose bytes could not be kept stays unresolved and keeps the mount up.
+        let mut unkept_scratch = std::collections::HashSet::new();
         for inode in scratch {
             let Some(NodeKind::Temporary {
                 save,
@@ -2784,21 +2880,30 @@ impl WorkspaceFilesystem {
                 continue;
             };
             let path = state.display_path(inode);
-            reports.insert(
-                match save.fsync_temporary(scratch, identity, baseline.as_deref()) {
-                    Ok(()) => format!("kept scratch {path} for the next mount (sys.vfs.draft_retained)"),
-                    Err(error) => format!("scratch {path} could not be kept: {error}"),
-                },
-            );
+            match save.fsync_temporary(scratch, identity, baseline.as_deref()) {
+                Ok(()) => {
+                    reports.insert(format!(
+                        "kept scratch {path} for the next mount (sys.vfs.draft_retained)"
+                    ));
+                }
+                Err(error) => {
+                    reports.insert(format!("scratch {path} could not be kept: {error}"));
+                    unkept_scratch.insert(inode);
+                }
+            }
         }
         for report in reports {
             eprintln!("{report}");
         }
         draft_state.unresolved_handles.clear();
         draft_state.pending_truncates.clear();
-        draft_state.retained_scratch.clear();
-        draft_state.rejected_scratch.clear();
-        let all_retained = unresolved.is_empty();
+        draft_state
+            .retained_scratch
+            .retain(|inode| unkept_scratch.contains(inode));
+        draft_state
+            .rejected_scratch
+            .retain(|inode, _| unkept_scratch.contains(inode));
+        let all_retained = unresolved.is_empty() && unkept_scratch.is_empty();
         draft_state.rejected_documents = unresolved;
         all_retained
     }
@@ -3546,7 +3651,24 @@ impl Filesystem for WorkspaceFilesystem {
             draft_state
                 .rejected_scratch
                 .insert(source_inode, error.cause());
-            if matches!(error, DocumentCommitError::Stale) {
+            let stale = matches!(error, DocumentCommitError::Stale);
+            // A refused candidate is retained before its rename replies (ORNA-VFS-009).
+            // When recovery storage cannot keep it, the rename replies that retention
+            // errno (EDQUOT when full) and the scratch stays in place.
+            let path = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .display_path(source_inode);
+            let bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
+            let error = match retain_scratch_candidate(&save, &path, error.cause(), &bytes) {
+                Ok(()) => error,
+                Err(retention) => DocumentCommitError::Unretained {
+                    errno: retention.errno,
+                    cause: error.cause(),
+                },
+            };
+            if stale {
                 let mut state = self
                     .state
                     .lock()
@@ -3700,20 +3822,14 @@ impl Filesystem for WorkspaceFilesystem {
         };
         if let Some(cause) = draft_state.rejected_scratch.get(&inode).copied() {
             // A refused replacement stays recoverable (ORNA-VFS-009): its
-            // candidate moves to recovery storage before its name goes away.
+            // candidate moves to recovery storage before its name goes away. A
+            // candidate recovery storage cannot keep fails with its retention
+            // errno (EDQUOT when full) and the scratch stays in place.
             let path = state.display_path(inode);
             let bytes = save.writer.runtime.block_on(scratch.candidate_bytes());
-            match save.writer.retained_drafts.retain(&path, cause, &bytes) {
-                Ok(retained) => eprintln!(
-                    "{path}: refused scratch removed; candidate retained as draft {} in {} (sys.vfs.draft_retained)",
-                    retained.id,
-                    retained.record.display()
-                ),
-                Err(error) => {
-                    eprintln!("{path}: refused scratch kept because it could not be retained: {error}");
-                    reply.error(Errno::EIO);
-                    return;
-                }
+            if let Err(error) = retain_scratch_candidate(&save, &path, cause, &bytes) {
+                reply.error(error.errno);
+                return;
             }
         }
         if let Err(error) = save.writer.scratch_store.remove(&identity) {

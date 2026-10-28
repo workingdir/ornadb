@@ -732,10 +732,28 @@ impl MountSignalHandler {
                     // Only the live Orna mount can retain its drafts; a mount
                     // that is already gone is ending normally.
                     if orna_mount_is_listed(&mountpoint, &source) {
-                        match crate::fuse_mount::retain_drafts_for_shutdown(&mountpoint) {
-                            Ok(true) => end = MountEnd::DraftsRetained,
-                            Ok(false) => {}
-                            Err(error) => retention_error = Some(error),
+                        // Stop does not unmount until every unresolved draft is kept
+                        // (ORNA-VFS-024). A failed retention resumes the mount and is
+                        // retried; repeated signals wait on this same retry loop.
+                        loop {
+                            match crate::fuse_mount::retain_drafts_for_shutdown(&mountpoint) {
+                                Ok(true) => {
+                                    end = MountEnd::DraftsRetained;
+                                    break;
+                                }
+                                Ok(false) => break,
+                                Err(crate::fuse_mount::DraftRetentionStop::Retention(error)) => {
+                                    eprintln!("{error}; retrying draft retention before unmount");
+                                    if let Err(resume) = crate::fuse_mount::cancel_unmount(&mountpoint) {
+                                        eprintln!("{resume}");
+                                    }
+                                    tokio::time::sleep(SIGNAL_UNMOUNT_RETRY).await;
+                                }
+                                Err(crate::fuse_mount::DraftRetentionStop::Mount(error)) => {
+                                    retention_error = Some(error);
+                                    break;
+                                }
+                            }
                         }
                     }
                     let live = session.as_ref().expect("live FUSE session is retained");
