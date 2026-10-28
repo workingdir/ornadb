@@ -6742,7 +6742,7 @@ mod tests {
                 key,
                 blob_fields: &[],
                 source_row: source,
-                ordinal: u8::try_from(index).unwrap(),
+                ordinal: u16::try_from(index).unwrap(),
                 insert_only: true,
             })
             .collect::<Vec<_>>();
