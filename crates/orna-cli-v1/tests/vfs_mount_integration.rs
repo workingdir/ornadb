@@ -2904,3 +2904,94 @@ async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_by
 
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): a write-mode open of a projected Blob opens a private candidate;
+/// write and fsync are accepted and the committed bytes read back.
+async fn cwd_mount_blob_write_open_accepts_write_and_fsync() {
+    let original = lcg_bytes(0x5a5a_1111_2222_3333, 96 * 1024);
+    let replacement = lcg_bytes(0x9999_8888_7777_6666, 96 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("write-mode open of a projected Blob must succeed");
+    handle
+        .write_all(&replacement)
+        .expect("write through the Blob candidate must succeed");
+    handle
+        .sync_all()
+        .expect("fsync of the Blob candidate must succeed");
+    drop(handle);
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): O_TRUNC on a projected Blob truncates the private candidate, so the
+/// file reads as empty before any write and zero-length Blob content is legal.
+async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
+    let original = lcg_bytes(0x0bad_f00d_dead_beef, 64 * 1024);
+    let replacement = lcg_bytes(0x1357_9bdf_2468_ace0, 8 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&blob_path)
+        .expect("O_TRUNC write-mode open of a projected Blob must succeed");
+    assert_eq!(
+        handle.metadata().unwrap().len(),
+        0,
+        "O_TRUNC must truncate the Blob candidate before any write"
+    );
+    handle.write_all(&replacement).unwrap();
+    handle.sync_all().unwrap();
+    drop(handle);
+
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): a read-write open of a projected Blob sees the captured bytes and
+/// its own writes coherently through the same candidate.
+async fn cwd_mount_blob_read_write_open_is_coherent() {
+    let original = lcg_bytes(0x2468_ace0_1357_9bdf, 64 * 1024);
+    let patch = lcg_bytes(0x1111_2222_3333_4444, 4 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&blob_path)
+        .expect("read-write open of a projected Blob must succeed");
+    let mut head = vec![0u8; 4 * 1024];
+    handle.read_exact(&mut head).unwrap();
+    assert_eq!(head.as_slice(), &original[..4 * 1024]);
+
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    handle.write_all(&patch).unwrap();
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut readback = vec![0u8; 4 * 1024];
+    handle.read_exact(&mut readback).unwrap();
+    assert_eq!(readback, patch, "a read after a write on one handle must see the write");
+    handle.sync_all().unwrap();
+    drop(handle);
+
+    let committed = std::fs::read(&blob_path).unwrap();
+    assert_eq!(&committed[..4 * 1024], patch.as_slice());
+    assert_eq!(&committed[4 * 1024..], &original[4 * 1024..]);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
