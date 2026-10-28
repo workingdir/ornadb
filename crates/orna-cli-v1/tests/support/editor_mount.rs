@@ -299,7 +299,7 @@ pub const FOREIGN_OWNER: [u8; 16] = [0x83; 16];
 /// Creates a repository whose `Music` table has one committed row named `key`.
 pub async fn repository_with_music_row(
     key: &str,
-    ordinal: u8,
+    ordinal: u16,
     initial: &str,
 ) -> (TempDir, Repository, [u8; 16]) {
     repository_with_source_row(MUSIC_SOURCE, key, ordinal, initial).await
@@ -309,7 +309,7 @@ pub async fn repository_with_music_row(
 pub async fn repository_with_source_row(
     source: &str,
     key: &str,
-    ordinal: u8,
+    ordinal: u16,
     initial: &str,
 ) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
@@ -375,14 +375,16 @@ pub async fn repository_with_music_rows(
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
         .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    // Each source row takes a 16-bit fixture ordinal, so every row of the
+    // collection is admitted in one commit under one writer lease.
     let writer = state
         .acquire_lease(runtime_identity.repository_id)
         .await
         .unwrap();
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     let captures = rows
         .iter()
-        .zip(0x90_u8..)
+        .zip(0x90_u16..)
         .map(|(&(key, document), ordinal)| SourceCaptureRow {
             key,
             blob_fields: &[],

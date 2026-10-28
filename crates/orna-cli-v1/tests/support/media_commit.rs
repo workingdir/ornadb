@@ -188,7 +188,7 @@ pub struct SourceCaptureRow<'a> {
     pub key: &'a str,
     pub blob_fields: &'a [(&'a str, &'a str)],
     pub source_row: &'a str,
-    pub ordinal: u8,
+    pub ordinal: u16,
     pub insert_only: bool,
 }
 
@@ -257,9 +257,10 @@ pub async fn commit_source_captures_for_table(
                 .expect("accept the captured Blob for this row");
             blob_fields.push(((*field_name).to_owned(), blob_binding));
         }
-        // Keep source ids non-zero while preserving every 8-bit fixture ordinal.
-        let mut source_row_id = [capture.ordinal; 16];
-        source_row_id[0] = 1;
+        // Keep source ids non-zero while preserving every 16-bit fixture ordinal.
+        let mut source_row_id = [capture.ordinal as u8; 16];
+        source_row_id[0] = 0x80 | (capture.ordinal >> 8) as u8;
+        source_row_id[1] = capture.ordinal as u8;
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
@@ -321,7 +322,7 @@ pub async fn commit_source_captures_for_table(
         retained_sources.push(source_bindings);
         mutations.push(mutation);
     }
-    let ordinal = captures[0].ordinal;
+    let ordinal = captures[0].ordinal as u8;
     let mut request_id = [ordinal; 16];
     request_id[0] = 0xA5;
     let request_identity = RequestIdentity {
@@ -442,9 +443,10 @@ pub async fn commit_source_replacement_through_save_admission(
             .expect("accept the captured Blob for this row");
         blob_fields.push(((*field_name).to_owned(), blob_binding));
     }
-    // Keep source ids non-zero while preserving every 8-bit fixture ordinal.
-    let mut source_row_id = [capture.ordinal; 16];
-    source_row_id[0] = 1;
+    // Keep source ids non-zero while preserving every 16-bit fixture ordinal.
+    let mut source_row_id = [capture.ordinal as u8; 16];
+    source_row_id[0] = 0x80 | (capture.ordinal >> 8) as u8;
+    source_row_id[1] = capture.ordinal as u8;
     let admitted = admit_source_row_with_owner_fields(
         &project,
         &logical_path,
