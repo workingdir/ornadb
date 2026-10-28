@@ -618,6 +618,51 @@ async fn full_recovery_store_keeps_mount_up_on_sigterm_until_the_draft_is_kept()
     );
 }
 
+/// ORNA-VFS-024, profiles/vfs-1 errno table: while a full recovery store keeps
+/// SIGTERM waiting on an unkept draft, a second stop signal ends the wait. The
+/// mount is not unmounted over the unkept draft; the stop names the draft that
+/// will be lost and exits non-zero.
+#[tokio::test]
+async fn full_recovery_store_second_stop_signal_ends_the_wait_and_names_lost_drafts() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let mut session = Session::start(&[("london", "London")]).await;
+    fill_retained_draft_store(&session.repository);
+    assert_errno(
+        write_and_sync(
+            &session.document("london"),
+            "{ title: \"Escaped stop\", artist: 123, }\n",
+        ),
+        EDQUOT,
+        "a refused save that a full recovery store cannot keep fails with EDQUOT",
+    );
+    await_draft_guard(&session.mountpoint(), b'1', "the unkept draft holds the guard");
+
+    signal(session.mounted.pid(), "TERM");
+    assert!(
+        session.mounted.wait_for_exit(Duration::from_secs(1)).is_none(),
+        "the first SIGTERM waits on the unkept draft: {}",
+        session.mounted.stderr_text(),
+    );
+    signal(session.mounted.pid(), "TERM");
+    let status = session
+        .mounted
+        .wait_for_exit(Duration::from_secs(5))
+        .expect("a second stop signal ends the wait");
+    let stderr = session.mounted.stderr_text();
+    assert!(!status.success(), "the escaped stop is not a success: {stderr}");
+    assert!(
+        stderr.contains("will be lost"),
+        "the escaped stop names the drafts that will be lost: {stderr}"
+    );
+    assert!(
+        stderr.contains("london"),
+        "the escaped stop lists the unretained draft path: {stderr}"
+    );
+    clear_retained_draft_store_filler(&session.repository);
+}
+
 /// ORNA-VFS-009, profiles/vfs-1 errno table: a temp-file rename whose refused
 /// candidate a full recovery store cannot keep fails with EDQUOT, and so does
 /// removing that scratch. The scratch stays in place until storage has room.
