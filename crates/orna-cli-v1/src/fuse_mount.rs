@@ -3523,9 +3523,6 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
         let handle = self.next_handle.fetch_add(1, Ordering::Relaxed);
-        if write_mode {
-            draft_state.writer_owners.insert(handle, request.pid());
-        }
         let pending_truncate = draft_state.pending_truncates.get(&inode.0).copied();
         let truncate_size = if flags.0 & libc::O_TRUNC != 0 {
             Some(0)
@@ -3582,6 +3579,9 @@ impl Filesystem for WorkspaceFilesystem {
             if truncate_size.is_some() {
                 draft_state.pending_truncates.remove(&inode.0);
             }
+            if write_mode {
+                draft_state.writer_owners.insert(handle, request.pid());
+            }
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
@@ -3604,6 +3604,9 @@ impl Filesystem for WorkspaceFilesystem {
             .insert(handle, OpenFile::Document(save, draft));
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
+        }
+        if write_mode {
+            draft_state.writer_owners.insert(handle, request.pid());
         }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
