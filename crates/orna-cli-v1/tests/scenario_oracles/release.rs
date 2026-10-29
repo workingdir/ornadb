@@ -412,13 +412,7 @@ pub fn entries() -> Vec<Entry> {
             workspace_lacks_a_cwd_row,
         )
         .with_fuse(),
-        Entry::gap(
-            "FINAL-VFS-020",
-            "ornadb-9npn.1.1",
-            "the workspace mount projects source modules and accepts their writes (ORNA-VFS-020)",
-            workspace_source_module_write_is_accepted,
-        )
-        .with_fuse(),
+        Entry::pass("FINAL-VFS-020", workspace_source_module_write_is_accepted).with_fuse(),
         Entry::gap(
             "FINAL-VFS-021",
             "ornadb-5il1.50",
@@ -2461,7 +2455,7 @@ fn workspace_is_read_only(db: &mut Db) -> Probe {
     ))
 }
 
-fn workspace_source_module_write_is_accepted(db: &mut Db) -> Probe {
+fn workspace_source_module_write_is_accepted(db: &mut Db) -> Check {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     let mount = db.mount("workspace", &["--cwd"])?;
     let module = mount.point.join("main.orna");
@@ -2481,7 +2475,7 @@ fn workspace_source_module_write_is_accepted(db: &mut Db) -> Probe {
             "the accepted source module write is not visible through a new open".to_owned(),
         ));
     }
-    Ok("write of main.orna in the workspace mount is accepted and visible".to_owned())
+    Ok(())
 }
 
 fn traversal_descriptor_is_admitted(db: &mut Db) -> Probe {
