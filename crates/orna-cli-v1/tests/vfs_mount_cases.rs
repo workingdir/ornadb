@@ -28,6 +28,7 @@ use editor_mount::{
 };
 
 const EINVAL: i32 = 22;
+const EAGAIN: i32 = 11;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -343,4 +344,41 @@ async fn vfs_020_source_module_append_open_continues_committed_bytes() {
     appended.write_all(EXTRA_SOURCE.as_bytes()).expect("the append is accepted");
     appended.sync_all().expect("the appended candidate is admitted at sync");
     assert_eq!(read_view(&notes), format!("{NOTES_SOURCE}{EXTRA_SOURCE}"));
+}
+
+/// ORNA-VFS-020 and 41-vfs.md errno table: a commit compares each disk file with the
+/// baseline its candidate was derived from. A module another writer changed after the
+/// open is refused with EAGAIN, and the mount keeps the other writer's bytes.
+#[tokio::test]
+async fn vfs_020_stale_source_candidate_is_refused_with_eagain() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of a source module is accepted");
+    file.write_all(b"pub fn mine(): Int = 2;\n").expect("the candidate is accepted into the draft");
+    const OTHER: &str = "pub fn other(): Int = 9;\n";
+    std::fs::write(repository_directory.path().join("notes.orna"), OTHER)
+        .expect("another writer changes the module on disk");
+    assert_errno(
+        file.sync_all(),
+        &[EAGAIN],
+        "a candidate whose disk baseline changed is refused with EAGAIN",
+    );
+    assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
 }
