@@ -50,6 +50,24 @@ use sha2::{Digest, Sha256};
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
 
+/// Bound on unbound editor scratch files held per mount (41-vfs.md Temporary-save replacement).
+/// Unbound scratch is recovery state, so an editor cannot grow it without limit.
+const MAX_UNBOUND_SCRATCH: usize = 16;
+
+/// Whether the mount already holds `MAX_UNBOUND_SCRATCH` unbound scratch records.
+fn unbound_scratch_full(store: &VfsScratchStore) -> bool {
+    store
+        .load()
+        .map(|records| {
+            records
+                .iter()
+                .filter(|record| record.identity.blob_field_name.is_none())
+                .count()
+                >= MAX_UNBOUND_SCRATCH
+        })
+        .unwrap_or(true)
+}
+
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
 fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
@@ -1541,7 +1559,7 @@ impl RowSaveContext {
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
         record_baseline: bool,
-    ) -> Result<(), DocumentCommitError> {
+    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         let replacement_bytes = self
             .writer
             .runtime
@@ -1612,9 +1630,9 @@ impl RowSaveContext {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 if record_baseline {
-                    self.record_accepted_row(row);
+                    self.record_accepted_row(row.clone());
                 }
-                Ok(())
+                Ok(row)
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted Blob replacement was rejected by semantic admission".into(),
@@ -1945,7 +1963,8 @@ impl WorkspaceFilesystem {
                     })
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
-                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline),
+                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline)
+                        .map(|_| ()),
                     draft_path,
                 )
             }),
@@ -3860,9 +3879,10 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            // Unknown files inside a row directory are private editor scratch (41-vfs.md
-            // Temporary-save replacement) only within the editor namespace: a replacement name of
-            // a Blob field binds to that field, and editor temp names stay unbound until renamed.
+            // 41-vfs.md Temporary-save replacement: an unknown file inside a row directory is
+            // private editor scratch, not a new column. A replacement name of a Blob field binds
+            // to that field; any other unknown name stays unbound until renamed. Unbound scratch
+            // is bounded per mount (MAX_UNBOUND_SCRATCH); a create past the bound is refused EDQUOT.
             let blob_field = save
                 .blob_fields
                 .lock()
@@ -3870,8 +3890,8 @@ impl Filesystem for WorkspaceFilesystem {
                 .iter()
                 .find(|field| is_replacement_scratch_for(name, &field.file_name))
                 .cloned();
-            if blob_field.is_none() && !is_editor_temporary_name(name) {
-                reply.error(Errno::EPERM);
+            if blob_field.is_none() && unbound_scratch_full(&save.writer.scratch_store) {
+                reply.error(Errno::EDQUOT);
                 return;
             }
             let Ok(key) = runtime_table_key_bytes(&save.key) else {
@@ -4077,8 +4097,9 @@ impl Filesystem for WorkspaceFilesystem {
         };
         let committed = match &blob_field {
             Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
-            None => save.commit_temporary(&scratch, baseline, true),
+            None => save.commit_temporary(&scratch, baseline, true).map(|()| None),
         };
+        let accepted_row = committed.as_ref().ok().and_then(Option::clone);
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
             draft_state.rejected_scratch.insert(
@@ -4165,6 +4186,15 @@ impl Filesystem for WorkspaceFilesystem {
                     eprintln!("mounted replacement install failed: {error}");
                     reply.error(Errno::EIO);
                     return;
+                }
+                if let Some(row) = accepted_row {
+                    if let Ok(Some(document)) = state.lookup_child(newparent.0, OsStr::new("data.orna")) {
+                        if let Some(NodeKind::Document { bytes, .. }) =
+                            state.nodes.get_mut(&document).map(|node| &mut node.kind)
+                        {
+                            *bytes = row;
+                        }
+                    }
                 }
             }
             None => {
@@ -6569,27 +6599,6 @@ fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, Str
     Ok(output)
 }
 
-fn is_editor_temporary_name(name: &str) -> bool {
-    is_replacement_scratch_for(name, "data.orna")
-        || is_hidden_replacement_shaped(name)
-        || name.strip_prefix("tmp").is_some_and(|suffix| {
-            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
-}
-
-/// `.<stem>.replace` or `.<stem>.<digits>`: the hidden editor replacement shape for any target name.
-fn is_hidden_replacement_shaped(name: &str) -> bool {
-    let Some(rest) = name.strip_prefix('.') else {
-        return false;
-    };
-    let Some((stem, extension)) = rest.rsplit_once('.') else {
-        return false;
-    };
-    !stem.is_empty()
-        && (extension == "replace"
-            || (!extension.is_empty() && extension.bytes().all(|byte| byte.is_ascii_digit())))
-}
-
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix('.')
@@ -6939,15 +6948,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["title", "artist"]
         );
-    }
-
-    #[test]
-    fn only_replacement_shaped_sibling_names_are_bound_to_their_blob() {
-        assert!(is_replacement_scratch_for(".content.mp3.replace", "content.mp3"));
-        assert!(is_replacement_scratch_for(".content.mp3.12345", "content.mp3"));
-        assert!(!is_replacement_scratch_for("content.mp3.replace", "content.mp3"));
-        assert!(!is_replacement_scratch_for(".content.wav.replace", "content.mp3"));
-        assert!(!is_replacement_scratch_for(".content.mp3.", "content.mp3"));
     }
 
     #[test]

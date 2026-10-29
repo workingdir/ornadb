@@ -3400,8 +3400,13 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     // An unbound scratch, created after the accepted replacement, commits to the Blob its rename names.
     let unbound = row_path.join(".clip.wav.replace");
     create_scratch(&unbound, &replacement);
+    let document_before = std::fs::read(row_path.join("data.orna")).unwrap();
     std::fs::rename(&unbound, &blob_path).expect("renaming unbound scratch over the Blob is accepted");
     assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    // The row document must describe the accepted Blob: data.orna is served from the same commit.
+    let document_after = std::fs::read(row_path.join("data.orna")).unwrap();
+    assert_ne!(document_before, document_after, "data.orna reflects the replaced Blob");
+    assert_eq!(std::fs::read(row_path.join("data.orna")).unwrap(), document_after, "data.orna is stable");
     assert!(!unbound.exists(), "the accepted scratch is consumed by its rename");
 
     // A retained stale candidate blocks unmount until removed (sys.vfs.stale_edit); remove it so the mount drains.

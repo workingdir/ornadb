@@ -297,14 +297,18 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
     let table_directory = row_directory.parent().expect("row sits under the table directory");
     let errno = |error: std::io::Error| error.raw_os_error();
 
-    // create outside the editor scratch namespace: no unresolved draft to own it.
-    let created = row_directory.join("extra.txt");
+    // An unknown name inside a row directory is private editor scratch, not a new column
+    // (41-vfs.md:67, "Temporary-save replacement"). Its creation captures the row baseline.
+    let scratch = row_directory.join("extra.txt");
+    let document_before = std::fs::read(row_directory.join("data.orna")).expect("row document");
+    std::fs::File::create(&scratch).expect("an unknown row-directory name is private scratch");
     assert_eq!(
-        errno(std::fs::File::create(&created).expect_err("create must be refused")),
-        Some(libc::EPERM),
-        "create of a non-scratch row entry must be EPERM"
+        std::fs::read(row_directory.join("data.orna")).expect("row document"),
+        document_before,
+        "scratch adds no column to the row"
     );
-    assert!(!created.exists(), "refused create must not leave an entry");
+    std::fs::remove_file(&scratch).expect("unlinking unbound scratch");
+    assert!(!scratch.exists(), "unlinked scratch leaves no entry");
 
     // mkdir: plain directory creation does not invent schema/key semantics.
     let made = row_directory.join("subdirectory");
