@@ -4525,7 +4525,7 @@ impl Filesystem for WorkspaceFilesystem {
                 Ok(()) => reply.ok(),
                 Err(EditError::Stale(message)) => {
                     eprintln!("explicit edit refused: {message}");
-                    reply.error(Errno::ESTALE);
+                    reply.error(Errno::EAGAIN);
                 }
                 Err(EditError::Failed(message)) => {
                     eprintln!("explicit edit failed: {message}");
