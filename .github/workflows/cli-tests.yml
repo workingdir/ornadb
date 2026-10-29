@@ -33,6 +33,7 @@ jobs:
     # FUSE tests must fail, not skip, on every step of this job.
     env:
       ORNA_REQUIRE_FUSE: "1"
+      ORNA_REQUIRE_MEDIA_PLAYER: "1"
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -42,19 +43,42 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Install Emacs for the editor compatibility suite
+      - name: Install the editors and media player for the Gate E suites
         # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
-          sudo apt-get install -y emacs-nox
+          sudo apt-get install -y emacs-nox mpv vim
 
       # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
       # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
       # publication_crash_matrix needs the crash-barriers feature. Its job below runs it with
       # that feature, so this step skips it and names that job (--covered-by).
       - name: Test the orna-cli-v1 integration suite
-        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --covered-by test:publication_crash_matrix=publication-crash-matrix
+        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --exclude-target test:vfs_media_reader --covered-by test:publication_crash_matrix=publication-crash-matrix
+
+      # Gate E media reader: the crate-wide step above excludes this suite, and the record below runs it once
+      # under its own diagnostic record (command, kernel, FUSE, mpv and editor versions), uploaded as an artifact.
+      - name: Record the Gate E media reader evidence
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record gate-e-media-reader
+          --title "Gate E media reader: 64 MiB WAV Blob through the FUSE mount"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 40
+          --require-path /dev/fuse --require-command mpv --require-command vim
+          --input-env ORNA_REQUIRE_FUSE --input-env ORNA_REQUIRE_MEDIA_PLAYER
+          --tool-version 'uname -r' --tool-version 'fusermount3 -V' --tool-version 'fusermount -V'
+          --tool-version 'mpv --version' --tool-version 'emacs --version' --tool-version 'vim --version'
+          -- cargo test --locked -p orna-cli-v1 --test vfs_media_reader
+
+      - name: Upload the Gate E media reader evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gate-e-evidence-media-reader
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
 
   repository-v1-lib-tests:
     runs-on: ubuntu-latest
