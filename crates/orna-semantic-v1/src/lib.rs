@@ -36,7 +36,8 @@ mod source_row;
 pub use located::{DiagnosticOrigin, LocatedAnalysis, analyze_with_catalogue_located};
 
 pub use source_row::{
-    LoweredRowUnit, lower_data_expression, lower_row_unit, lower_row_unit_with_owner_fields,
+    LoweredRowUnit, lower_data_expression, lower_row_unit, lower_row_unit_with_key_spelling,
+    lower_row_unit_with_owner_fields,
 };
 
 pub use semantic_payload::{
@@ -2231,12 +2232,33 @@ pub fn admit_row_unit(analysis: &Analysis, input: &RowUnitInput<'_>) -> RowUnitA
     admit_row_unit_with_owner_fields(analysis, input, &[])
 }
 
+/// How a row candidate's encoded key path becomes canonical key text.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowKeySpelling<'a> {
+    /// The frozen `key-path-v1` loose-row spelling (`~xx` escapes, `~ff` empty).
+    LegacyPathV1,
+    /// A VFS-1 projected spelling whose caller already decoded every component
+    /// to canonical key text in declared order and verified that exact spelling
+    /// (profiles/vfs-1.md:36-56).
+    VerifiedVfs1(&'a [String]),
+}
+
 /// Admits a row while reserving named stored fields for an authorized owner
 /// binding. Reserved fields must be declared stored fields and absent in source.
 pub fn admit_row_unit_with_owner_fields(
     analysis: &Analysis,
     input: &RowUnitInput<'_>,
     owner_fields: &[String],
+) -> RowUnitAdmission {
+    admit_row_unit_with_key_spelling(analysis, input, owner_fields, RowKeySpelling::LegacyPathV1)
+}
+
+/// Admits a row with an explicit key spelling. See [`RowKeySpelling`].
+pub fn admit_row_unit_with_key_spelling(
+    analysis: &Analysis,
+    input: &RowUnitInput<'_>,
+    owner_fields: &[String],
+    spelling: RowKeySpelling<'_>,
 ) -> RowUnitAdmission {
     let owner_fields = owner_fields.iter().map(String::as_str).collect::<BTreeSet<_>>();
     let mut result = RowUnitAdmission::default();
@@ -2335,7 +2357,11 @@ pub fn admit_row_unit_with_owner_fields(
     for name in &owner_fields {
         source_schema_fields.remove(*name);
     }
-    let Some(decoded_key) = decode_row_key_path(input.key_path) else {
+    let decoded_key = match spelling {
+        RowKeySpelling::LegacyPathV1 => decode_row_key_path(input.key_path),
+        RowKeySpelling::VerifiedVfs1(keys) => Some(keys.to_vec()),
+    };
+    let Some(decoded_key) = decoded_key else {
         result.diagnostics.push(diag(
             DIAG_BAD_PATH,
             "project row key path is not canonically encoded",

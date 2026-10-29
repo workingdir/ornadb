@@ -71,6 +71,7 @@ async fn commit_capture(
         format_context,
         vec![("payload".to_owned(), blob_binding)],
         vec![],
+        &[],
         owner_id,
     ).unwrap();
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();

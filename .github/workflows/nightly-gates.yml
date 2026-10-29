@@ -77,12 +77,14 @@ jobs:
         include:
           - shard: cli
             packages: -p orna-cli-v1
-            # Gate E evidence needs the editor, kernel and libfuse versions.
+            # Gate E evidence needs the editor, kernel, libfuse and media player versions.
+            # ORNA_REQUIRE_MEDIA_PLAYER makes the mpv leg of vfs_media_reader fail when mpv is absent.
             recorder: >-
-              --input-env ORNA_REQUIRE_FUSE
-              --require-path /dev/fuse --require-command emacs
+              --input-env ORNA_REQUIRE_FUSE --input-env ORNA_REQUIRE_MEDIA_PLAYER
+              --require-path /dev/fuse --require-command emacs --require-command mpv --require-command vim
               --tool-version 'uname -r' --tool-version 'fusermount3 -V' --tool-version 'fusermount -V'
               --tool-version 'emacs --version' --tool-version 'vi --version'
+              --tool-version 'vim --version' --tool-version 'mpv --version'
           - shard: evaluator
             packages: -p orna-evaluator-v1
             recorder: ""
@@ -106,17 +108,18 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
-      - name: Install Emacs for the editor compatibility suite
+      - name: Install the editors and media player for the Gate E suites
         if: matrix.shard == 'cli'
         # Run 39812765487 stalled in `apt-get update` for 5 h 51 m until the job cap.
         timeout-minutes: 15
         run: |
           sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=60 -o Acquire::https::Timeout=60 update
-          sudo apt-get install -y emacs-nox
+          sudo apt-get install -y emacs-nox mpv vim
 
       - name: Test the ${{ matrix.shard }} shard
         env:
           ORNA_REQUIRE_FUSE: ${{ matrix.shard == 'cli' && '1' || '' }}
+          ORNA_REQUIRE_MEDIA_PLAYER: ${{ matrix.shard == 'cli' && '1' || '' }}
         run: >-
           python3 scripts/gate_evidence.py run
           --record workspace-${{ matrix.shard }}
