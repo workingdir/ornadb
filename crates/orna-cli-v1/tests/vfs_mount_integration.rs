@@ -2694,6 +2694,18 @@ fn unmount_and_reap(repository: &Path, mounted: &mut MountedProcess) {
     );
 }
 
+/// Peak resident set size of `pid` in bytes, from its `VmHWM` status line.
+fn peak_rss_bytes(pid: u32) -> u64 {
+    let kib: u64 = std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .unwrap()
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|value| value.split_whitespace().next())
+        .and_then(|value| value.parse().ok())
+        .expect("Linux reports VmHWM");
+    kib * 1024
+}
+
 /// Captures `original` as `Music/london/content.mp3` (`audio/mpeg`) and mounts the cwd.
 /// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
 async fn mount_captured_blob(original: &[u8]) -> Option<MountedBlobRow> {
@@ -3270,6 +3282,62 @@ async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
     drop(handle);
 
     assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md EDIT-1; ornadb-5il1.366.3): a 64 MiB Blob candidate is written and read back
+/// through the mount in 1 MiB ranges. The mount daemon's RSS growth past its post-mount high-water
+/// mark is measured before the accept, so it bounds the spool write and ranged read path, not the commit.
+async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
+    const CHUNK_BYTES: usize = 1 << 20;
+    const CHUNKS: usize = 64;
+    const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    let original = lcg_bytes(0x0064_0000_0000_0001, 64 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+    let chunk_of = |chunk: usize| lcg_bytes(0x0064_0000_1000_0000 + chunk as u64, CHUNK_BYTES);
+    // VmHWM is a high-water mark: the growth past this baseline is what the candidate adds.
+    let baseline = peak_rss_bytes(row.mounted.child.id());
+
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&blob_path)
+        .expect("write-mode open of a projected Blob must succeed");
+    for chunk in 0..CHUNKS {
+        handle.write_all(&chunk_of(chunk)).expect("write a 1 MiB candidate chunk");
+    }
+    assert_eq!(
+        handle.metadata().unwrap().len(),
+        (CHUNK_BYTES * CHUNKS) as u64,
+        "the candidate reports its full 64 MiB length"
+    );
+
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut read_back = vec![0u8; CHUNK_BYTES];
+    for chunk in 0..CHUNKS {
+        handle.read_exact(&mut read_back).expect("read a 1 MiB candidate chunk");
+        assert!(read_back == chunk_of(chunk), "chunk {chunk} reads back from the candidate");
+    }
+
+    let growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
+    eprintln!("mount daemon peak RSS growth during 64 MiB candidate write and read-back: {growth} bytes");
+    assert!(
+        growth < RSS_GROWTH_BOUND_BYTES,
+        "mount daemon peak RSS grew {growth} bytes during the candidate, reaching the bound {RSS_GROWTH_BOUND_BYTES} bytes"
+    );
+
+    handle.sync_all().expect("the 64 MiB candidate is accepted");
+    drop(handle);
+    assert_eq!(
+        std::fs::metadata(&blob_path).unwrap().len(),
+        (CHUNK_BYTES * CHUNKS) as u64,
+        "the accepted Blob holds the full candidate"
+    );
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
 
