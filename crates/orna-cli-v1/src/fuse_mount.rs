@@ -3803,6 +3803,10 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
                 Some(NodeKind::Bytes(_)) => {
+                    if write_mode {
+                        reply.error(Errno::EPERM);
+                        return;
+                    }
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
