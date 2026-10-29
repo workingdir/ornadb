@@ -250,7 +250,12 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
     assert!(!data.contains(&big), "data.orna no longer carries the 70 KiB text");
     editor_mount::write_and_sync(&title, "short replacement")
         .expect("a UTF-8 write replaces the Str");
-    assert_eq!(read_view(&title), "short replacement", "the .txt shows the replaced Str");
+    // profiles/vfs-1.md:63-66: the 64 KiB bound applies to the replaced value, so a short
+    // Str projects inline again and the `.txt` sibling is gone.
+    assert!(!title.exists(), "a short replacement is inline; no title.txt remains");
+    let data = read_view(&row.join("data.orna"));
+    assert!(data.contains("short replacement"), "data.orna shows the replaced Str: {data:?}");
+    assert!(!data.contains("./title.txt"), "data.orna no longer names a .txt: {data:?}");
 }
 
 /// profiles/vfs-1.md:63-66: the 64 KiB bound is exclusive. A Str of exactly 65536 bytes stays
