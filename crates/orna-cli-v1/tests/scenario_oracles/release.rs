@@ -412,7 +412,11 @@ pub fn entries() -> Vec<Entry> {
             workspace_lacks_a_cwd_row,
         )
         .with_fuse(),
-        Entry::pass("FINAL-VFS-020", workspace_source_module_write_is_accepted).with_fuse(),
+        Entry::pass(
+            "FINAL-VFS-020",
+            workspace_source_module_writes_are_admitted_or_refused,
+        )
+        .with_fuse(),
         Entry::gap(
             "FINAL-VFS-021",
             "ornadb-5il1.50",
@@ -2455,7 +2459,7 @@ fn workspace_is_read_only(db: &mut Db) -> Probe {
     ))
 }
 
-fn workspace_source_module_write_is_accepted(db: &mut Db) -> Check {
+fn workspace_source_module_writes_are_admitted_or_refused(db: &mut Db) -> Check {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     let mount = db.mount("workspace", &["--cwd"])?;
     let module = mount.point.join("main.orna");
@@ -2468,12 +2472,46 @@ fn workspace_source_module_write_is_accepted(db: &mut Db) -> Check {
     fs::write(&module, EDITED.as_bytes()).map_err(|error| {
         Failure::Unmet(format!("the workspace mount refused a source module write: {error}"))
     })?;
-    let read = fs::read_to_string(&module)
-        .map_err(|error| Failure::Harness(format!("read main.orna after the write: {error}")))?;
-    if read != EDITED {
-        return Err(Failure::Unmet(
-            "the accepted source module write is not visible through a new open".to_owned(),
-        ));
+    expect_source_bytes(&module, EDITED)?;
+
+    let mut malformed = open_source_for_write(&module)?;
+    std::io::Write::write_all(&mut malformed, b"pub fn bad( {\n")
+        .map_err(|error| Failure::Harness(format!("write the malformed candidate: {error}")))?;
+    expect_source_errno(malformed.sync_all(), 22, "a malformed source candidate")?;
+    expect_source_bytes(&module, EDITED)?;
+
+    let mut stale = open_source_for_write(&module)?;
+    std::io::Write::write_all(&mut stale, b"// stale candidate\n")
+        .map_err(|error| Failure::Harness(format!("write the stale candidate: {error}")))?;
+    const OTHER: &str = "// another writer\n";
+    db.write("main.orna", OTHER)?;
+    expect_source_errno(stale.sync_all(), 11, "a candidate whose disk baseline changed")?;
+    expect_source_bytes(&module, OTHER)
+}
+
+fn open_source_for_write(module: &std::path::Path) -> Result<fs::File, Failure> {
+    fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(module)
+        .map_err(|error| Failure::Unmet(format!("write-intent open was refused: {error}")))
+}
+
+fn expect_source_errno(result: std::io::Result<()>, code: i32, what: &str) -> Check {
+    match result {
+        Err(error) if error.raw_os_error() == Some(code) => Ok(()),
+        Err(error) => Err(Failure::Unmet(format!("{what}: expected errno {code}, got {error}"))),
+        Ok(()) => Err(Failure::Unmet(format!("{what} was admitted"))),
+    }
+}
+
+fn expect_source_bytes(module: &std::path::Path, expected: &str) -> Check {
+    let read = fs::read_to_string(module)
+        .map_err(|error| Failure::Harness(format!("read main.orna: {error}")))?;
+    if read != expected {
+        return Err(Failure::Unmet(format!(
+            "a new open reads {read:?}, not the expected committed bytes {expected:?}"
+        )));
     }
     Ok(())
 }
