@@ -198,6 +198,44 @@ async fn vfs_020_reachable_source_module_is_projected_with_committed_bytes() {
     assert!(root.contains(&"Music".to_owned()), "the table directory stays beside it: {root:?}");
 }
 
+/// ORNA-VFS-020 committed read path: a large source module reads its committed bytes
+/// exactly in 128 KiB ranges, including the short final range. Reads borrow the committed
+/// bytes and copy only the requested window, so every range must match the source.
+#[tokio::test]
+async fn vfs_020_large_source_module_reads_committed_bytes_by_range() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    use std::os::unix::fs::FileExt;
+    let module: String = (0..40_000).map(|line| format!("// committed line {line:08}\n")).collect();
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use big;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("big.orna", module.as_str())],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let big = mountpoint.join("big.orna");
+    mounted.await_path(&big);
+
+    let file = File::open(&big).expect("the large source module opens for reading");
+    let expected = module.as_bytes();
+    let mut buffer = vec![0_u8; 128 * 1024];
+    let mut offset = 0_usize;
+    while offset < expected.len() {
+        let read = file.read_at(&mut buffer, offset as u64).expect("a range read succeeds");
+        assert!(read > 0, "the module ends before its committed length at {offset}");
+        assert!(
+            buffer[..read] == expected[offset..offset + read],
+            "the range at {offset} returns the committed bytes"
+        );
+        offset += read;
+    }
+    assert_eq!(file.read_at(&mut buffer, offset as u64).expect("an end-of-file read"), 0);
+}
+
 /// profiles/vfs-1.md:31-33 and ORNA-VFS-020: a source path keeps its plain name on
 /// collision. The source directory `Music` stays `Music` and lists only its source
 /// entries; the table `Music` is projected under the first-byte escape `%4Dusic` with
@@ -386,6 +424,7 @@ async fn vfs_020_stale_source_candidate_is_refused_with_eagain() {
         &[EAGAIN],
         "a candidate whose disk baseline changed is refused with EAGAIN",
     );
+    drop(file);
     assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
 }
 
