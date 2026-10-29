@@ -16578,6 +16578,7 @@ fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
             'n' => output.push('\n'),
             'r' => output.push('\r'),
             't' => output.push('\t'),
+            '0' => output.push('\0'),
             '\\' => output.push('\\'),
             '"' => output.push('"'),
             'u' => {
