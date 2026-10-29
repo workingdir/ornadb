@@ -352,7 +352,7 @@ impl<'a> StoredSchema<'a> {
         if !entries.is_empty() {
             return Err(Failure::Mismatch);
         }
-        Ok(tag(RECORD_TAG, vec![Raw::Null, Raw::Array(stored)]))
+        Ok(tag(RECORD_TAG, vec![Raw::Null, Raw::Array(canonical_record_fields(stored)?)]))
     }
 
     fn lower_nominal(&self, id: &Raw, value: &Raw, depth: usize) -> Result<Raw, Failure> {
@@ -418,7 +418,7 @@ impl<'a> StoredSchema<'a> {
         if !entries.is_empty() {
             return Err(Failure::Mismatch);
         }
-        Ok(tag(RECORD_TAG, vec![owner.clone(), Raw::Array(stored)]))
+        Ok(tag(RECORD_TAG, vec![owner.clone(), Raw::Array(canonical_record_fields(stored)?)]))
     }
 
     fn lower_enum(
@@ -1101,4 +1101,23 @@ pub table Account(id: Str) {
             Err(TypedRowError::TypeMismatch("role".to_owned()))
         );
     }
+}
+
+/// Orders stored record fields by their encoded field keys (ORNA-FORMAT-004).
+/// Declaration order and name order are not canonical for the stored value.
+fn canonical_record_fields(stored: Vec<Raw>) -> Result<Vec<Raw>, Failure> {
+    let mut keyed = stored
+        .into_iter()
+        .map(|field| {
+            let key = array(&field)
+                .and_then(|parts| parts.first())
+                .ok_or(Failure::Descriptor)?;
+            let encoded = orna_value_v1::Value::new(key.clone())
+                .and_then(|value| value.encode())
+                .map_err(|_| Failure::Mismatch)?;
+            Ok((encoded, field))
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, field)| field).collect())
 }
