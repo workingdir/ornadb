@@ -211,7 +211,7 @@ fn source_row_value(expr: &Expr) -> Option<Raw> {
             }
             LiteralKind::Date => Raw::Tag(60001, Box::new(Raw::Text(text.clone()))),
             LiteralKind::Instant => instant_raw(text)?,
-            LiteralKind::String => Raw::Text(serde_json::from_str(text).ok()?),
+            LiteralKind::String => Raw::Text(orna_syntax_v1::unescape_string_literal(text).ok()?),
         },
         Expr::Name { text, .. } => Raw::Text(text.clone()),
         Expr::Unary { op, rhs, .. } if op == "-" => match source_row_value(rhs)? {
@@ -407,4 +407,56 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     let day_of_year = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day - 1;
     let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
     era * 146_097 + day_of_era - 719_468
+}
+
+#[cfg(test)]
+mod string_literal_tests {
+    use super::{Raw, source_row_value};
+    use orna_syntax_v1::parse_expression;
+
+    fn string_raw(literal: &str) -> Option<Raw> {
+        let parsed = parse_expression(literal);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{literal}: {:?}",
+            parsed.diagnostics
+        );
+        source_row_value(&parsed.value)
+    }
+
+    #[test]
+    fn each_orna_escape_decodes_in_source_rows() {
+        for (literal, expected) in [
+            (r#""""#, ""),
+            (r#""a\"b""#, "a\"b"),
+            (r#""back\\slash""#, "back\\slash"),
+            (r#""\n\r\t""#, "\n\r\t"),
+            (r#""nul\0""#, "nul\0"),
+            (r#""bell\u{7}""#, "bell\u{7}"),
+            (r#""\u{7b}x}""#, "{x}"),
+            (r#""\u{1F600}""#, "\u{1F600}"),
+        ] {
+            assert_eq!(
+                string_raw(literal),
+                Some(Raw::Text(expected.to_owned())),
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_valid_literals_decode_to_the_same_text() {
+        for literal in [
+            r#""""#,
+            r#""plain text""#,
+            r#""a\"b""#,
+            r#""back\\slash""#,
+            r#""\n\r\t""#,
+            r#""é 😀""#,
+            r#""line one\nline two""#,
+        ] {
+            let json = serde_json::from_str::<String>(literal).expect("JSON-valid corpus entry");
+            assert_eq!(string_raw(literal), Some(Raw::Text(json)), "{literal}");
+        }
+    }
 }
