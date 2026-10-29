@@ -893,7 +893,7 @@ fn table_declaration_name_span(
     Some(name.span.clone())
 }
 
-fn checked_project_source_path(root: &Path, logical_path: &str) -> Result<PathBuf, Diagnostic> {
+pub(crate) fn checked_project_source_path(root: &Path, logical_path: &str) -> Result<PathBuf, Diagnostic> {
     let relative = Path::new(logical_path);
     let component_count = relative.components().count();
     if relative.is_absolute()
@@ -922,7 +922,7 @@ fn checked_project_source_path(root: &Path, logical_path: &str) -> Result<PathBu
     Ok(path)
 }
 
-fn write_source_atomically(path: &Path, expected: &[u8], replacement: &[u8]) -> io::Result<()> {
+pub(crate) fn write_source_atomically(path: &Path, expected: &[u8], replacement: &[u8]) -> io::Result<()> {
     write_source_atomically_before_replace(path, expected, replacement, || Ok(()))
 }
 
@@ -980,7 +980,7 @@ fn write_source_atomically_before_replace(
     result
 }
 
-fn restore_source_after_failed_write(path: &Path, original: &[u8], updated: &[u8]) -> bool {
+pub(crate) fn restore_source_after_failed_write(path: &Path, original: &[u8], updated: &[u8]) -> bool {
     let Ok(current) = fs::symlink_metadata(path) else {
         return false;
     };
