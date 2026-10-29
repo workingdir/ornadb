@@ -348,7 +348,7 @@ pub async fn commit_source_captures_for_table(
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
-            LoosePath::for_key(table_name, std::slice::from_ref(&encoded_key))
+            LoosePath::for_key(table_name, &[capture.key.to_owned()])
                 .expect("the committed source row has a managed path"),
         );
         retained_sources.push(source_bindings);

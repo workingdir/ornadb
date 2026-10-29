@@ -2284,7 +2284,7 @@ pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError
             let mut digest = [0u8; 32];
             for (index, slot) in digest.iter_mut().enumerate() {
                 *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
-                    .map_err(|_| VfsPathError::NameCollision)?;
+                    .map_err(|_| VfsPathError::WrongNamespace)?;
             }
             return Ok(VfsComponent::LongAlias { digest });
         }
