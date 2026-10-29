@@ -22,7 +22,10 @@ mod media_commit;
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{assert_errno, repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
+use editor_mount::{
+    assert_errno, repository_with_music_rows, repository_with_music_rows_and_modules,
+    require_fuse_or_skip, spawn_mount_process, write_and_sync,
+};
 
 const EINVAL: i32 = 22;
 
@@ -157,4 +160,105 @@ async fn vfs_017_large_collection_lookup_and_pinned_listing() {
     let second = sorted_names(&music);
     assert_eq!(first.len(), ROWS, "every row of the multi-page collection is listed");
     assert_eq!(first, second, "two passes over the same mount list the same rows");
+}
+
+const NOTES_SOURCE: &str = "pub fn answer(): Int = 42;\n";
+const EXTRA_SOURCE: &str = "pub fn extra(): Int = 7;\n";
+
+/// ORNA-VFS-020 and profiles/vfs-1.md: a reachable ordinary source module is
+/// projected at its logical path with its committed bytes, beside the table
+/// directories. Read projection only; writes are not covered here.
+#[tokio::test]
+async fn vfs_020_reachable_source_module_is_projected_with_committed_bytes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module reads its committed bytes");
+    let root = sorted_names(&mountpoint);
+    assert!(root.contains(&"notes.orna".to_owned()), "the source module is listed: {root:?}");
+    assert!(root.contains(&"Music".to_owned()), "the table directory stays beside it: {root:?}");
+}
+
+/// profiles/vfs-1.md:31-33 and ORNA-VFS-020: a source path keeps its plain name on
+/// collision. The source directory `Music` stays `Music` and lists only its source
+/// entries; the table `Music` is projected under the first-byte escape `%4Dusic` with
+/// its rows intact. Projection is read at mount open. Not covered: projection after a
+/// later commit changes the rows, since this fixture has no remount helper.
+#[tokio::test]
+async fn vfs_020_source_path_keeps_name_and_table_projects_escaped() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "use Music.extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+        &[("Music/extra.orna", EXTRA_SOURCE)],
+        &[("london", music_row("Original").as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let extra = mountpoint.join("Music/extra.orna");
+    let data = mountpoint.join("%4Dusic/london/data.orna");
+    mounted.await_path(&extra);
+    mounted.await_path(&data);
+
+    assert_eq!(read_view(&extra), EXTRA_SOURCE, "the colliding source module reads its bytes");
+    assert_eq!(
+        sorted_names(&mountpoint),
+        vec!["%4Dusic".to_owned(), "Music".to_owned(), "main.orna".to_owned()],
+        "the source path keeps Music; the table is projected under its escaped name"
+    );
+    assert_eq!(
+        sorted_names(&mountpoint.join("Music")),
+        vec!["extra.orna".to_owned()],
+        "the source directory lists only its source entries"
+    );
+    assert!(read_view(&data).contains("Original"), "the escaped table keeps its committed row");
+}
+
+/// ORNA-VFS-020 and profiles/vfs-1.md: a source module is read-only in this slice. A
+/// write-intent open is refused with EPERM at open time, not accepted and then failed
+/// with EBADF on write, and the committed bytes are unchanged. The spec does not name
+/// source writes, so refusing them is a conservative choice.
+#[tokio::test]
+async fn vfs_020_source_write_open_is_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_errno(
+        std::fs::OpenOptions::new().write(true).open(&notes).map(|_| ()),
+        &[libc::EPERM],
+        "a write-intent open of a source module is refused",
+    );
+    assert_errno(
+        std::fs::OpenOptions::new().append(true).open(&notes).map(|_| ()),
+        &[libc::EPERM],
+        "an append open of a source module is refused",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module keeps its committed bytes");
 }
