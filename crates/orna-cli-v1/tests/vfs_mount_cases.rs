@@ -22,9 +22,10 @@ mod media_commit;
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{assert_errno, repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
+use editor_mount::{assert_errno, repository_with_music_rows, require_fuse_or_skip, retained_drafts, spawn_mount_process, write_and_sync};
 
 const EINVAL: i32 = 22;
+const EPERM: i32 = 1;
 
 fn music_row(title: &str) -> String {
     format!("{{ title: \"{title}\", artist: \"Kieran\", }}\n")
@@ -84,6 +85,47 @@ async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollb
     );
     assert!(read_view(&paris).contains("Paris edit"), "rejected candidate keeps accepted paris");
     assert!(read_view(&london).contains("London edit"), "rejected paris save keeps accepted london");
+}
+
+/// ORNA-VFS-020 conservative guard only. Grouped source edits and candidate
+/// validation of source modules are NOT implemented: the mount projects no
+/// source module (see bead ornadb-9npn). This pins that a source-shaped name
+/// cannot be created through the mount at the root or inside a table directory:
+/// the create is refused with EPERM, nothing is written to the backing worktree,
+/// no draft is retained and HEAD does not move.
+#[tokio::test]
+async fn vfs_020_unprojected_source_names_are_refused_without_writes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, repository, _relation_id) =
+        repository_with_music_rows(&[("london", music_row("Original").as_str())]).await;
+    let head_before = repository.head().unwrap().unwrap();
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    mounted.await_path(&mountpoint.join("Music/london/data.orna"));
+    let root_names_before = sorted_names(&mountpoint);
+    let music_names_before = sorted_names(&mountpoint.join("Music"));
+
+    let root_candidate = mountpoint.join("Workspace.orna");
+    let table_candidate = mountpoint.join("Music/source.orna");
+    for candidate in [&root_candidate, &table_candidate] {
+        assert_errno(
+            write_and_sync(candidate, "{ title: \"Source\", }\n"),
+            &[EPERM],
+            "a source-shaped name is not a projected source module and is refused",
+        );
+        assert!(!candidate.exists(), "a refused source-shaped name must not appear");
+    }
+    assert_eq!(sorted_names(&mountpoint), root_names_before, "root listing is unchanged");
+    assert_eq!(sorted_names(&mountpoint.join("Music")), music_names_before, "table listing is unchanged");
+    assert!(
+        !repository_directory.path().join("Workspace.orna").exists(),
+        "a refused source-shaped name must not reach the backing worktree"
+    );
+    assert!(retained_drafts(&repository).is_empty(), "a refused create retains no draft");
+    assert_eq!(repository.head().unwrap().unwrap(), head_before, "HEAD does not move");
 }
 
 /// ORNA-VFS-019 (first half only): an open read handle keeps its captured row
