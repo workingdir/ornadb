@@ -22577,7 +22577,7 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: None,
+                cwd_generation: Some(activation_test_cwd_generation(0)),
                 expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
@@ -42140,7 +42140,7 @@ mod tests {
             (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
             (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
         ];
-        assert_eq!(table.len(), 48);
+        assert_eq!(table.len(), 49);
         for (variant, class) in table {
             assert_eq!(admin_failure_class(variant), *class);
             assert_eq!(admin_failure_from_class(class), *variant, "{class}");
