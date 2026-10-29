@@ -812,10 +812,10 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         "orna edit's strong read baseline refuses the save: {diagnostics}"
     );
     // The owner refuses the explicit edit with ESTALE (fuse_mount.rs:2586-2590), and the CLI
-    // reports that reply as the stale detail with E2000 (cli_mount.rs:436-440). That refusal
-    // returns before the mount records a draft refusal (fuse_mount.rs:3893), so the spec cause
-    // sys.vfs.stale_edit (fuse_mount.rs:1587, Orna-1.1.0.md:8674) is not in the mount's
-    // unresolved-draft fields and is not observable from `orna edit` output in this scenario.
+    // reports that reply as the stale detail with E2000 (cli_mount.rs:436-440). [INFERENCE] from
+    // reading fuse_mount.rs:3893: that refusal returns before the mount records a draft refusal,
+    // so the spec cause sys.vfs.stale_edit (fuse_mount.rs:1587, Orna-1.1.0.md:8674) is not in
+    // the mount's unresolved-draft fields. This test does not assert that absence.
     assert!(
         diagnostics.contains("E2000"),
         "the refusal carries the product code E2000: {diagnostics}"
