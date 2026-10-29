@@ -511,8 +511,8 @@ async fn stat_after_owner_write_reports_fresh_size() {
 
 /// ORNA-VFS-019 and 41-vfs.md:67-68: a writer opened before an owner-routed write
 /// captured the baseline current at its open. Its save is refused with EAGAIN and
-/// the owner's row stays. The refused draft stays retained, so while it is
-/// unresolved a path `stat` reports the draft's size, as it did before this fix.
+/// the owner's row stays. A path stat seen by other opens is asserted by
+/// `other_open_stat_after_refused_writer_reports_accepted_size` (ornadb-5il1.470).
 #[tokio::test]
 async fn writer_opened_before_owner_write_is_refused_with_eagain() {
     if !require_fuse_or_skip() {
@@ -536,12 +536,154 @@ async fn writer_opened_before_owner_write_is_refused_with_eagain() {
         view.contains("Owner change") && !view.contains("Stale writer"),
         "the refused writer leaves the owner's row in place, got {view}"
     );
+    drop(writer);
+}
+
+/// ORNA-VFS-019 and 41-vfs.md:38-39: a writer's stat reports its own draft size
+/// while the draft is open, before any owner write.
+#[tokio::test]
+async fn writer_stat_reports_its_own_draft_size() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut writer = open_rw(&fixture);
+    writer.set_len(0).unwrap();
+    writer.write_all(music_row("Stale writer").as_bytes()).unwrap();
     assert_eq!(
         std::fs::metadata(&fixture.data_path).unwrap().len(),
         music_row("Stale writer").len() as u64,
-        "stat reports the retained refused draft while it is unresolved"
+        "the writer's stat reports its own draft size"
     );
     drop(writer);
+}
+
+/// ORNA-VFS-019 and 41-vfs.md:38-39: after a refused writer, other opens see the
+/// accepted state. A path stat by another open reports the accepted size, not the
+/// retained draft.
+#[tokio::test]
+async fn other_open_stat_after_refused_writer_reports_accepted_size() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut writer = open_rw(&fixture);
+    writer.set_len(0).unwrap();
+    writer.write_all(music_row("Stale writer").as_bytes()).unwrap();
+    owner_routed_edit(&fixture, "Owner change");
+    assert_errno(
+        writer.sync_all(),
+        &[libc::EAGAIN],
+        "a writer opened before the owner change must be refused",
+    );
+    drop(writer);
+    let accepted = fresh_view(&fixture);
+    // The refused draft can still be reported for a moment after the writer is dropped.
+    // Poll for a bounded time: a lag clears, while a stale accepted size still fails.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::fs::metadata(&fixture.data_path).unwrap().len() != accepted.len() as u64
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        std::fs::metadata(&fixture.data_path).unwrap().len(),
+        accepted.len() as u64,
+        "a stat by another open reports the accepted size"
+    );
+}
+
+/// ORNA-VFS-022, 41-vfs.md:39-40 and profiles/vfs-1.md:128: a clean handle opened
+/// before an owner-routed write keeps its generation, so its fstat reports the
+/// size of the generation it pinned. Ignored until ornadb-5il1.470: FUSE passes
+/// no file handle to fstat, so the server cannot tell this handle from a path stat.
+#[ignore = "ornadb-5il1.470: fstat on a handle opened before an owner write reports the accepted size"]
+#[tokio::test]
+async fn reader_opened_before_owner_write_keeps_fstat_size() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let reader = File::open(&fixture.data_path).unwrap();
+    owner_routed_edit(&fixture, "Api write with a longer title");
+    assert_ne!(fresh_view(&fixture).len(), original.len(), "the owner write changes the size");
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on a handle opened before the owner write reports its pinned size"
+    );
+    drop(reader);
+}
+
+/// ORNA-VFS-019 and 41-vfs.md:39-40: a handle opened before an owner write that
+/// shrinks the row keeps its captured bytes. One owner write from the original row.
+#[tokio::test]
+async fn reader_opened_before_shrinking_owner_write_keeps_old_bytes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let pinned = fresh_view(&fixture);
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut reader), pinned);
+    owner_routed_edit(&fixture, "x");
+    let accepted = fresh_view(&fixture);
+    assert!(accepted.len() < pinned.len(), "the owner write shrinks the row, got {accepted}");
+    assert_eq!(
+        read_from_start(&mut reader),
+        pinned,
+        "a handle opened before the shrinking write keeps its captured bytes"
+    );
+    drop(reader);
+}
+
+/// ORNA-VFS-011 and 41-vfs.md:75-77: an `orna edit` that starts after an owner-routed
+/// write captures its draft and read-to-save baseline from the accepted row, not from
+/// a stale in-process copy of the row. The editor sees the owner's row and its save
+/// succeeds. A stale baseline would make this save fail (E2000) or overwrite the draft.
+/// Ignored until ornadb-5il1.471: the owner compares the explicit edit against the mount's cached
+/// baseline, which an earlier owner-routed plain edit left stale (E2000).
+#[ignore = "ornadb-5il1.471: owner-routed explicit edit CAS uses the mount's cached baseline"]
+#[tokio::test]
+async fn orna_edit_started_after_owner_write_starts_from_fresh_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    owner_routed_edit(&fixture, "Owner change");
+    let scripts = TempDir::new().unwrap();
+    let editor = scripts.path().join("fresh-editor");
+    std::fs::write(
+        &editor,
+        format!(
+            "#!/bin/sh\ngrep -q 'Owner change' \"$1\" || exit 3\nprintf '%s\\n' '{}' > \"$1\"\n",
+            music_row("Mine").trim_end()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(fixture._repository_directory.path())
+        .args(["edit", "Music/london/data.orna"])
+        .env("EDITOR", &editor)
+        .output()
+        .expect("run orna edit after an owner write");
+    let diagnostics = format!(
+        "stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    assert!(
+        output.status.success(),
+        "an edit started after the owner write saves from the fresh row: {diagnostics}"
+    );
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Mine") && !view.contains("Owner change"),
+        "the edit's save replaces the fresh row, got {view}"
+    );
 }
 
 /// ORNA-VFS-019 and profiles/vfs-1.md:133: a handle opened after an owner-routed
@@ -573,8 +715,8 @@ async fn reader_opened_after_owner_write_sees_fresh_bytes_and_size() {
 
 /// ORNA-VFS-019 (open handles do not retarget): a handle opened before an
 /// owner-routed write keeps the bytes of its generation, while a path stat
-/// reports the accepted size. fstat is not asserted: FUSE passes no handle to
-/// fstat, so it reports the accepted size (see `attr_of`).
+/// reports the accepted size. fstat on that handle is not asserted here; see
+/// `reader_opened_before_owner_write_keeps_fstat_size` (ornadb-5il1.470).
 #[tokio::test]
 async fn reader_opened_before_owner_write_keeps_old_bytes() {
     if !require_fuse_or_skip() {
