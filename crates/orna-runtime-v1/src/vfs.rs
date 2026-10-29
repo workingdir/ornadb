@@ -167,6 +167,12 @@ impl VfsRepositoryCache {
         })
     }
 
+    /// The aggregate draft quota this view's spools are charged to. Recovery
+    /// storage charges its on-disk records to the same budget.
+    pub fn draft_quota(&self) -> Arc<DraftQuota> {
+        self.draft_storage.quota()
+    }
+
     pub async fn generation(&self) -> u64 {
         self.epoch.generation().await
     }
@@ -625,28 +631,45 @@ struct DraftState<S> {
 /// (profiles/vfs-1.md: rejected candidates are quota accounted).
 struct RetainedRejection<S> {
     id: [u8; 16],
-    charge: RetainedCharge,
+    charge: QuotaCharge,
     draft: RetainedInvalidDraft<S>,
 }
 
-/// Quota charge for the bytes of one retained rejected candidate. Dropping the
-/// retained copy (replacement, or the draft itself) releases the charge.
-struct RetainedCharge {
+/// Quota charge for bytes held beyond a live spool: one retained rejected
+/// candidate, or one on-disk retained draft record. Dropping the charge
+/// releases its bytes.
+pub struct QuotaCharge {
     quota: Arc<DraftQuota>,
     bytes: u64,
 }
 
-impl RetainedCharge {
-    fn reserve(quota: &Arc<DraftQuota>, bytes: u64) -> Result<Self, EditDraftError> {
+impl QuotaCharge {
+    /// Charges `bytes` to `quota`, refusing with [`EditDraftError::QuotaExceeded`]
+    /// when the quota cannot hold them.
+    pub fn reserve(quota: &Arc<DraftQuota>, bytes: u64) -> Result<Self, EditDraftError> {
         quota.reserve(bytes)?;
         Ok(Self {
             quota: Arc::clone(quota),
             bytes,
         })
     }
+
+    /// Charges `bytes` that already exist on disk, even past the limit. Only new
+    /// reservations are refused until enough charges are released.
+    pub fn restore(quota: &Arc<DraftQuota>, bytes: u64) -> Self {
+        quota.used.fetch_add(bytes, Ordering::AcqRel);
+        Self {
+            quota: Arc::clone(quota),
+            bytes,
+        }
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.bytes
+    }
 }
 
-impl Drop for RetainedCharge {
+impl Drop for QuotaCharge {
     fn drop(&mut self) {
         self.quota.release(self.bytes);
     }
@@ -758,8 +781,7 @@ impl<S> DraftState<S> {
                 },
             },
             previous => {
-                let charge = match RetainedCharge::reserve(&self.quota, replacement.len() as u64)
-                {
+                let charge = match QuotaCharge::reserve(&self.quota, replacement.len() as u64) {
                     Ok(charge) => charge,
                     Err(error) => {
                         self.retained_invalid = previous;
@@ -851,6 +873,11 @@ impl DraftStorage {
             directory: Arc::from(directory),
             quota,
         }
+    }
+
+    /// The aggregate quota that charges this storage's spools.
+    pub fn quota(&self) -> Arc<DraftQuota> {
+        Arc::clone(&self.quota)
     }
 
     /// Creates or reuses the private spool directory under the runtime root.
