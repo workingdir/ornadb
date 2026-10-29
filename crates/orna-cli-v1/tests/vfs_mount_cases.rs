@@ -7,7 +7,7 @@
 
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
 };
 
@@ -252,4 +252,95 @@ async fn vfs_020_source_module_write_is_accepted_and_visible_after_sync() {
     const EDITED: &str = "// edited through the mount\n";
     write_and_sync(&notes, EDITED).expect("a synced source module write is accepted");
     assert_eq!(read_view(&notes), EDITED, "the accepted source edit is visible through a new open");
+}
+
+/// ORNA-VFS-020 and 41-vfs.md "Failure/recovery": a malformed source candidate is refused
+/// at sync with EINVAL, the draft is kept, and the committed module keeps its bytes.
+#[tokio::test]
+async fn vfs_020_invalid_source_candidate_is_refused_with_einval_and_committed_bytes_kept() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_errno(
+        write_and_sync(&notes, "pub fn broken( {\n"),
+        &[EINVAL],
+        "a malformed source candidate is refused at sync with EINVAL",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the committed source module is unchanged");
+}
+
+/// ORNA-VFS-020: speculative source writes are not evaluated. A half-written file that
+/// would not parse is held in the open handle; a new open still reads the committed
+/// bytes, and only the synced complete candidate is visible.
+#[tokio::test]
+async fn vfs_020_speculative_source_write_is_not_visible_until_sync() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of a source module is accepted");
+    file.write_all(b"pub fn half").expect("a speculative write is accepted into the draft");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "a new open reads the committed bytes while the draft is unsynced"
+    );
+    file.write_all(b"(): Int = 1;\n").expect("the rest of the candidate is accepted");
+    file.sync_all().expect("the complete candidate is admitted at sync");
+    assert_eq!(read_view(&notes), "pub fn half(): Int = 1;\n");
+}
+
+/// ORNA-VFS-020: a truncating open and an append open of a source module are both
+/// accepted; the append continues from the committed bytes.
+#[tokio::test]
+async fn vfs_020_source_module_append_open_continues_committed_bytes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    let mut appended = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&notes)
+        .expect("an append open of a source module is accepted");
+    appended.write_all(EXTRA_SOURCE.as_bytes()).expect("the append is accepted");
+    appended.sync_all().expect("the appended candidate is admitted at sync");
+    assert_eq!(read_view(&notes), format!("{NOTES_SOURCE}{EXTRA_SOURCE}"));
 }
