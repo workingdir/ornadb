@@ -4,9 +4,9 @@
 //! other opens and remounts, read handles pin their generation, kernel IO
 //! modes do not leak drafts, and temp-and-rename saves are compared against
 //! their captured baseline (including a baseline moved by `orna edit`). REPL
-//! writes while the mount is live are not covered here: a live mount holds the
-//! writer lease, so an owner REPL write is refused. The other concurrency
-//! baseline cases are open under ornadb-5il1.64.
+//! writes while the mount is live are refused: a live mount holds the writer
+//! lease, so an owner REPL write is refused. The other concurrency baseline cases
+//! are open under ornadb-5il1.368; the stat freshness gap is ornadb-5il1.468.
 //!
 //! Spec (Orna-1.1.0, source/41-vfs.md): EDIT-1 ("A writer sees its own draft;
 //! other opens see accepted state"; "Read handles ... pin coherent
@@ -462,12 +462,12 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     );
 }
 
-/// ORNA-VFS-022 and 41-vfs.md:117-119 (EDIT-1 "other opens see accepted state"):
+/// ORNA-VFS-022 and 41-vfs.md:39-40 (EDIT-1 "other opens see accepted state"):
 /// a row written through the owner while the mount is live, with the kernel
 /// caching disabled by direct_io on editable opens, is visible to every new open.
 /// A read handle opened before that write keeps its generation, which is the
-/// pinned-generation rule, not a stale cache. A fresh `stat` size is not
-/// asserted here: that is an open gap (ornadb-5il1.368).
+/// pinned-generation rule, not a stale cache. The fresh `stat` size after this
+/// write is asserted by the ignored test `stat_after_owner_write_reports_fresh_size`.
 #[tokio::test]
 async fn owner_write_is_visible_through_mount_to_every_new_open() {
     if !require_fuse_or_skip() {
@@ -493,12 +493,30 @@ async fn owner_write_is_visible_through_mount_to_every_new_open() {
     drop(pinned);
 }
 
-/// Demonstrated limitation (41-vfs.md:117-119, profiles/vfs-1.md:118-119): "Blind
+/// ORNA-VFS-019 and profiles/vfs-1.md:133 ("stat reports descriptor size without
+/// media access"): after an owner-routed API write, `stat` on the document must
+/// report the accepted row's size. It currently reports the size cached at the
+/// last projection. A refresh on lookup/getattr re-baselined open writers and
+/// broke stale-save refusal, so this stays ignored until ornadb-5il1.468 lands.
+#[ignore = "ornadb-5il1.468: ORNA-VFS-019 stat coherence after owner API write"]
+#[tokio::test]
+async fn stat_after_owner_write_reports_fresh_size() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    owner_routed_edit(&fixture, "Api write with a longer title");
+    let accepted = fresh_view(&fixture);
+    let size = std::fs::metadata(&fixture.data_path).unwrap().len();
+    assert_eq!(size, accepted.len() as u64, "stat reports the accepted row size");
+}
+
+/// Demonstrated limitation (profiles/vfs-1.md:118-119, 41-vfs.md:65-77): "Blind
 /// replacement after a late temp-create has no original-read witness." An
 /// editor that read the row, then saw another writer commit, then created its
 /// temporary and renamed it over the row, succeeds and silently replaces the
 /// other writer's change. The same race through `orna edit` (strong read
-/// baseline) is refused with EAGAIN, which is the supported protection.
+/// baseline) is refused with E2000 (the stale-edit cause), which is the supported protection.
 #[tokio::test]
 async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses() {
     if !require_fuse_or_skip() {
@@ -553,21 +571,34 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         .env("EDITOR", &outer_editor)
         .output()
         .expect("run orna edit against a concurrent writer");
-    assert!(
-        !output.status.success(),
-        "orna edit's strong read baseline refuses the save"
+    let diagnostics = format!(
+        "stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
     assert!(
-        fresh_view(&fixture).contains("Second owner change"),
-        "the refused orna edit leaves the other writer's row in place"
+        !output.status.success(),
+        "orna edit's strong read baseline refuses the save: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("E2000"),
+        "the refusal is the stale-edit cause E2000: {diagnostics}"
+    );
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Second owner change") && !view.contains("Strong edit"),
+        "the refused orna edit leaves the other writer's row and does not admit Strong edit, got {view}"
     );
 }
 
-/// A REPL write while a live editor mount holds the writer lease is refused with
-/// ORNA-REPL-EFFECT, not applied through a second writable handle (ORNA-TURSO-005:
-/// other local writers coordinate with the owner or fail). The refused insert
-/// leaves the mounted row unchanged. The supported write route while mounted is
-/// the owner-routed path (`orna edit`, cli_mount.rs:351-353).
+/// A REPL write while a live editor mount holds the writer lease is refused, not
+/// applied through a second writable handle (ORNA-TURSO-005: other local writers
+/// coordinate with the owner or fail). The surfaced code is ORNA-REPL-EFFECT, but
+/// `run_repl_input` maps every open failure to that code and discards the
+/// underlying error (main.rs `map_err(|_| "ORNA-REPL-EFFECT")`), so the code alone
+/// does not identify the lease. The cause is established by a control below: the
+/// same command succeeds once only the mount is released. The supported write route
+/// while mounted is the owner-routed path (`orna edit`, cli_mount.rs:351-353).
 #[tokio::test]
 async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
     if !require_fuse_or_skip() {
@@ -601,5 +632,23 @@ async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
         fresh_view(&fixture),
         before,
         "the refused REPL write leaves the mounted row unchanged"
+    );
+
+    // Control: dropping only the mount releases the writer lease and keeps the
+    // repository directory, so the same command must now succeed.
+    drop(fixture._mounted);
+    let released = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(fixture._repository_directory.path())
+        .args([
+            "repl",
+            "main.Music.insert({ id: \"paris\", title: \"Repl\", artist: \"Kieran\" })",
+        ])
+        .output()
+        .expect("run orna repl after the mount is released");
+    assert!(
+        released.status.success(),
+        "the same REPL write succeeds once the mount releases the lease: stderr={}",
+        String::from_utf8_lossy(&released.stderr),
     );
 }
