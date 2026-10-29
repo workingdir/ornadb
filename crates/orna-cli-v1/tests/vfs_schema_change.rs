@@ -283,3 +283,114 @@ fn vfs_019_stale_generation_write_after_schema_change_is_eagain() {
         .expect("the mount process exits after unmount");
     assert!(status.success(), "mount exited with {status}");
 }
+
+/// ORNA-VFS-019 restart hardening: a persisted temporary scratch record that cannot be read is
+/// reported on mount stderr and left on disk, so one damaged record cannot stop the mount opening.
+#[test]
+fn vfs_019_unreadable_persisted_scratch_is_reported_and_left_on_disk() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    // The runtime scratch store lives under the repository's git directory and is private (0700).
+    let scratch_directory = root.join(".git/orna/vfs-editor-scratch-v1");
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&scratch_directory)
+            .expect("create the private scratch store");
+    }
+    let damaged = scratch_directory.join("0000.scratch");
+    fs::write(&damaged, b"not a record").expect("write the damaged scratch record");
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(&root, &mountpoint);
+    let london = mountpoint.join("Music/london/data.orna");
+    mounted.await_path(&london);
+    let mut stderr = mounted.stderr_text();
+    for _ in 0..50 {
+        if stderr.contains("unreadable persisted temporary scratch") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        stderr = mounted.stderr_text();
+    }
+    assert!(
+        stderr.contains("unreadable persisted temporary scratch") && stderr.contains("0000.scratch"),
+        "the damaged record is reported on mount stderr: {stderr:?}"
+    );
+    assert_eq!(
+        fs::read(&damaged).expect("the damaged record still exists"),
+        b"not a record",
+        "the damaged record is left on disk untouched"
+    );
+
+    run_orna_unmount(&root, &mountpoint);
+    let status = mounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the mount process exits after unmount");
+    assert!(status.success(), "mount exited with {status}");
+}
+
+/// ORNA-VFS-019 restart: a temporary scratch fsynced under schema v1 is restored after the owner
+/// commits a schema change while the mount is down. Its captured bytes survive intact; the scratch
+/// keeps its creation generation (a later commit of it is refused EAGAIN, not retargeted).
+/// Red under ornadb-eufo.2.1: the restarted v2 mount skips the v1 CWD row with
+/// `InvalidValue` ("the CWD row failed validation against the mounted schema"), so the
+/// persisted scratch is never exposed. Not weakened; ignored until the bead lands.
+#[ignore = "ornadb-eufo.2.1"]
+#[test]
+fn vfs_019_persisted_scratch_is_restored_after_schema_change() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let mut first = spawn_mount_process(&root, &mountpoint);
+    let row = mountpoint.join("Music/london");
+    first.await_path(&row.join("data.orna"));
+    let expected: &[u8] = b"durable scratch captured under schema v1";
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(row.join(".data.orna.persisted-scratch"))
+        .expect("create temporary scratch through FUSE");
+    scratch.write_all(expected).expect("write the scratch");
+    scratch.sync_all().expect("fsync persists the scratch");
+    drop(scratch);
+    // A synced scratch holds the draft guard, so the first mount is torn down by dropping its
+    // process rather than by a clean unmount (as vfs_editor_compat.rs does).
+    drop(first);
+
+    fs::write(root.join("main.orna"), V2).expect("write the v2 declaration");
+    commit_source(&root, "Add optional note to Music");
+
+    let restarted = mount_parent.path().join("restarted");
+    let mut remounted = spawn_mount_process(&root, &restarted);
+    let restarted_row = restarted.join("Music/london");
+    let restored = restarted_row.join(".data.orna.persisted-scratch");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !restored.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        restored.exists(),
+        "the v1 scratch is restored under the v2 mount; mount stderr: {}",
+        remounted.stderr_text()
+    );
+    assert_eq!(
+        fs::read(&restored).expect("read the restored scratch"),
+        expected,
+        "the scratch captured under v1 is restored intact after the schema change; mount stderr: {}",
+        remounted.stderr_text()
+    );
+    drop(remounted);
+}
