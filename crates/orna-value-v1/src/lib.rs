@@ -8764,3 +8764,90 @@ mod resolver_integrity_tests {
         assert_eq!(blob.read_to_end(), Err(Error::ContentDigestMismatch));
     }
 }
+
+#[cfg(test)]
+mod anonymous_record_order_tests {
+    use super::*;
+
+    fn str_type() -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())])
+    }
+
+    fn int_type() -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())])
+    }
+
+    /// The descriptor declares `label` before `rank`, which is name order. Stored entries
+    /// must follow encoded field-key order (`rank` before `label`), so matching is by key.
+    fn descriptor_fields() -> Vec<Raw> {
+        vec![
+            Raw::Array(vec![Raw::Text("label".into()), str_type()]),
+            Raw::Array(vec![Raw::Text("rank".into()), int_type()]),
+        ]
+    }
+
+    fn record(entries: Vec<(&str, Raw)>) -> Raw {
+        Raw::Tag(
+            60009,
+            Box::new(Raw::Array(vec![
+                Raw::Null,
+                Raw::Array(
+                    entries
+                        .into_iter()
+                        .map(|(name, value)| {
+                            Raw::Array(vec![Raw::Text(name.to_owned()), value])
+                        })
+                        .collect(),
+                ),
+            ])),
+        )
+    }
+
+    #[test]
+    fn accepts_ascending_encoded_keys_in_any_descriptor_order() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("label", Raw::Text("x".into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn refuses_unordered_entries() {
+        let stored = record(vec![
+            ("label", Raw::Text("x".into())),
+            ("rank", Raw::Int(1.into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::DuplicateOrUnorderedMapKey)
+        );
+    }
+
+    #[test]
+    fn refuses_duplicate_keys() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("rank", Raw::Int(2.into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::DuplicateOrUnorderedMapKey)
+        );
+    }
+
+    #[test]
+    fn refuses_unknown_keys() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("other", Raw::Text("x".into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::InvalidValue)
+        );
+    }
+}

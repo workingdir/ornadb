@@ -861,6 +861,97 @@ mod tests {
             uuid_raw(Uuid::parse_str(marker).unwrap().as_bytes())
         );
     }
+    /// profiles/vfs-1.md and Orna-1.1.0.md:4015 (29-formats.md:46): encoders sort stored
+    /// record fields by encoded field key, not by descriptor name order. `rank` (encoded
+    /// length 4) precedes `label` (length 5) even though `label` is declared first.
+    #[test]
+    fn structural_record_fields_are_stored_in_encoded_key_order() {
+        let table = Table::new(
+            "pub table Probe(id: Str) {
+    meta: { label: Str, rank: Int, },
+}
+",
+            "Probe",
+        );
+        let stored = table.lower(
+            text("k"),
+            &[
+                ("id", text("k")),
+                (
+                    "meta",
+                    Raw::Map(vec![
+                        (text("label"), text("x")),
+                        (text("rank"), Raw::Int(1.into())),
+                    ]),
+                ),
+            ],
+        );
+        assert_eq!(
+            stored["meta"],
+            tag(
+                RECORD_TAG,
+                vec![
+                    Raw::Null,
+                    Raw::Array(vec![
+                        Raw::Array(vec![text("rank"), Raw::Int(1.into())]),
+                        Raw::Array(vec![text("label"), text("x")]),
+                    ]),
+                ],
+            )
+        );
+    }
+
+    /// Orna-1.1.0.md:4015: nominal record fields are likewise stored in encoded field-ObjectId
+    /// key order, whatever the declaration order of the members.
+    #[test]
+    fn nominal_record_fields_are_stored_in_encoded_key_order() {
+        let table = Table::new(
+            "pub type Contact {
+    label: Str,
+    rank: Int,
+}
+
+pub table Probe(id: Str) {
+    contact: Contact,
+}
+",
+            "Probe",
+        );
+        let stored = table.lower(
+            text("k"),
+            &[
+                ("id", text("k")),
+                (
+                    "contact",
+                    Raw::Map(vec![
+                        (text("label"), text("x")),
+                        (text("rank"), Raw::Int(1.into())),
+                    ]),
+                ),
+            ],
+        );
+        let Raw::Tag(RECORD_TAG, body) = &stored["contact"] else {
+            panic!("a nominal record is stored as a record tag");
+        };
+        let Raw::Array(parts) = body.as_ref() else {
+            panic!("a nominal record body is an array");
+        };
+        let Raw::Array(entries) = &parts[1] else {
+            panic!("a nominal record carries an entry array");
+        };
+        let keys = entries
+            .iter()
+            .map(|entry| {
+                let Raw::Array(pair) = entry else {
+                    panic!("a nominal entry is a pair");
+                };
+                canonical(pair[0].clone())
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keys.len(), 2);
+        assert!(keys[0] < keys[1], "entries are ascending by encoded field id");
+    }
+
 
     #[test]
     fn nominal_enum_and_refined_values_lower_by_object_identity() {
