@@ -22,7 +22,7 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EditorMount, clear_retained_draft_store_filler, fill_retained_draft_store,
-    require_fuse_or_skip, retained_drafts, start_editor_mount,
+    require_fuse_or_skip, retained_draft_records, retained_drafts, start_editor_mount,
 };
 
 const EINVAL: i32 = 22;
@@ -187,6 +187,59 @@ async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
         fresh_view(&fixture).contains("Fsync accepted"),
         "a new open reads accepted state, never the rejected draft",
     );
+}
+
+/// The mount's `user.orna.unresolved-draft-fields` report: one
+/// `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, as `mount status` reads it.
+fn unresolved_draft_fields(fixture: &EditorMount) -> String {
+    let mut value = vec![0_u8; 16 * 1024];
+    let length = rustix::fs::getxattr(
+        mount_root(fixture).as_path(),
+        "user.orna.unresolved-draft-fields",
+        &mut value[..],
+    )
+    .expect("read the unresolved draft fields");
+    String::from_utf8_lossy(&value[..length]).into_owned()
+}
+
+/// Gate E item E3 and profiles/vfs-1.md:101-102 (ORNA-VFS-009/024): a sync refused with
+/// EINVAL keeps the rejected candidate out of the row. Unmount-time retention then
+/// stores it as a recoverable record `<id>.draft` in recovery storage with its exact bytes,
+/// and the fields `mount status` reads name that same id with the `sys.vfs.invalid_document`
+/// cause and a non-empty diagnostic.
+#[tokio::test]
+async fn rejected_sync_retains_recoverable_draft_listed_by_id() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let candidate = invalid_row("Diagnosed draft");
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &candidate);
+    assert_errno(file.sync_all(), EINVAL, "invalid draft fsync must fail with EINVAL");
+    await_draft_guard(&fixture, b'1', "the rejected draft holds the draft guard").await;
+    assert_view_lacks(&fixture, "Diagnosed draft");
+    let fields = unresolved_draft_fields(&fixture);
+    retain_drafts(&fixture).expect("retain the rejected draft");
+    let line = fields
+        .lines()
+        .find(|line| line.starts_with("Music/london/data.orna\tsys.vfs.invalid_document\t"))
+        .unwrap_or_else(|| panic!("the fields name the invalid-document cause: {fields:?}"));
+    let mut columns = line.split('\t').skip(2);
+    let draft_id = columns.next().unwrap_or_default();
+    let detail = columns.next().unwrap_or_default();
+    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {line:?}");
+    assert!(!detail.trim().is_empty(), "the diagnostic is listed: {line:?}");
+
+    let records = retained_draft_records(&fixture.repository);
+    let record = records
+        .iter()
+        .find(|(id, _)| id == draft_id)
+        .unwrap_or_else(|| panic!("the listed id {draft_id:?} names a retained record: {records:?}"));
+    let (header, body) = record.1.split_once("\n\n").unwrap_or_else(|| panic!("the record has a header: {:?}", record.1));
+    assert!(header.contains(&format!("draft {draft_id}\n")), "the record header names the listed id: {header:?}");
+    assert!(header.contains("cause sys.vfs.invalid_document\n"), "the record header names the cause: {header:?}");
+    assert_eq!(body, candidate, "the retained record body holds the exact rejected candidate bytes");
 }
 
 /// ORNA-VFS-008: fdatasync acknowledges and rejects with the same contract as fsync.
