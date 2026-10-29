@@ -1000,17 +1000,28 @@ impl MountWriter {
         coordinates: &VfsSaveCoordinates,
         bytes: &[u8],
         replacement_binding: Option<(String, OrpBlobBinding)>,
+        text_replacement: Option<(&str, &[u8])>,
     ) -> Result<(VfsSaveCandidate, Vec<u8>), orna_runtime_v1::TableActivationError> {
         let source = std::str::from_utf8(bytes).map_err(|_| {
             orna_runtime_v1::TableActivationError::Runtime(
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             )
         })?;
-        let blob_fields = row
+        let (text_fields, blob_fields): (Vec<BlobField>, Vec<BlobField>) = row
             .blob_fields
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+            .clone()
+            .into_iter()
+            .partition(|field| field.text);
+        let substituted = substitute_text_fields(source, &text_fields, text_replacement)
+            .map_err(|error| {
+                eprintln!("mounted row text field was refused: {error}");
+                orna_runtime_v1::TableActivationError::Runtime(
+                    orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                )
+            })?;
+        let source = substituted.as_str();
         validate_blob_descriptors(source, &blob_fields).map_err(|error| {
             eprintln!("mounted row document was refused: {error}");
             orna_runtime_v1::TableActivationError::Runtime(
@@ -1070,10 +1081,15 @@ impl MountWriter {
                             )
                         })?
                 } else {
+                    let reference = field.reference.as_ref().ok_or(
+                        orna_runtime_v1::TableActivationError::Runtime(
+                            orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                        ),
+                    )?;
                     let pin = row
                         .source
                         .graph
-                        .protect_admitted_blob_reference(&field.reference, &scope)
+                        .protect_admitted_blob_reference(reference, &scope)
                         .map_err(|_| {
                             orna_runtime_v1::TableActivationError::Runtime(
                                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
@@ -1202,10 +1218,13 @@ struct BlobField {
     file_name: String,
     media_type: String,
     suffix: Option<String>,
-    reference: AdmittedBlobReference,
+    reference: Option<AdmittedBlobReference>,
     replacement_bytes: Option<Arc<[u8]>>,
     /// Whether the row schema requires this field: a required Blob is never unlinked (VFS-013).
     required: bool,
+    /// A large Str projected as a sibling text file (profiles/vfs-1.md), not a Blob. Its
+    /// `replacement_bytes` always hold the Str's current content.
+    text: bool,
 }
 struct RowSaveContext {
     writer: Arc<MountWriter>,
@@ -1667,7 +1686,7 @@ impl RowSaveContext {
                     let (candidate, row_bytes) =
                         row_context
                             .writer
-                            .candidate(&row_context, &coordinates, &bytes, None)?;
+                            .candidate(&row_context, &coordinates, &bytes, None, None)?;
                     *accepted_row_output
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
@@ -1694,6 +1713,103 @@ impl RowSaveContext {
         }
     }
 
+    /// Commits a replacement for a large Str's sibling text file (profiles/vfs-1.md). The bytes
+    /// must be valid UTF-8 and replace the Str through the durable row transaction; no Blob
+    /// binding is created.
+    fn commit_text_temporary(
+        self: &Arc<Self>,
+        target: &Arc<ManagedFile<RowMapSnapshot>>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        field: &BlobField,
+        replacement_bytes: Arc<[u8]>,
+        expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
+    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
+        if std::str::from_utf8(&replacement_bytes).is_err() {
+            return Err(DocumentCommitError::Rejected(
+                "mounted text replacement must be valid UTF-8".into(),
+            ));
+        }
+        let document = self.writer.runtime.block_on(self.target.open_read());
+        let document_length = usize::try_from(document.len())
+            .map_err(|_| "mounted row document length is invalid".to_owned())?;
+        let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
+        let save = self.durable_save_with_baseline(expected_baseline_row)?;
+        let row_context = Arc::clone(self);
+        let field_name = field.name.clone();
+        let admitted_text = Arc::clone(&replacement_bytes);
+        let accepted_row = Arc::new(Mutex::new(None));
+        let accepted_row_output = Arc::clone(&accepted_row);
+        let outcome = self
+            .writer
+            .runtime
+            .block_on(target.commit_durable_temporary_rename(
+                scratch,
+                &self.writer.state,
+                save,
+                move |coordinates, _document| async move {
+                    let (candidate, row_bytes) = row_context.writer.candidate(
+                        &row_context,
+                        &coordinates,
+                        &document_bytes,
+                        None,
+                        Some((field_name.as_str(), &admitted_text[..])),
+                    )?;
+                    *accepted_row_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
+                    Ok(candidate)
+                },
+                &NoFault,
+            ));
+        self.settle_replacement(outcome, &accepted_row, field, replacement_bytes, record_baseline)
+    }
+
+    /// Records an accepted replacement on its field, or maps the save outcome to a refusal. The
+    /// accepted row is recorded as the baseline when the caller asked for one.
+    fn settle_replacement(
+        self: &Arc<Self>,
+        outcome: Result<
+            TemporaryRenameOutcome<RowMapSnapshot>,
+            VfsSaveError<orna_runtime_v1::TableActivationError>,
+        >,
+        accepted_row: &Mutex<Option<Vec<u8>>>,
+        field: &BlobField,
+        replacement_bytes: Arc<[u8]>,
+        record_baseline: bool,
+    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
+        match outcome {
+            Ok(TemporaryRenameOutcome::Applied { .. }) => {
+                if let Some(field) = self
+                    .blob_fields
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .iter_mut()
+                    .find(|candidate| candidate.name == field.name)
+                {
+                    field.replacement_bytes = Some(replacement_bytes);
+                } else {
+                    return Err(DocumentCommitError::Failed(
+                        "replaced field disappeared from its row".into(),
+                    ));
+                }
+                let row = accepted_row
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if record_baseline {
+                    self.record_accepted_row(row.clone());
+                }
+                Ok(row)
+            }
+            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
+                "mounted replacement was rejected by semantic admission".into(),
+            )),
+            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(error) => Err(save_failure("mounted replacement failed", error)),
+        }
+    }
+
     fn commit_blob_temporary(
         self: &Arc<Self>,
         target: &Arc<ManagedFile<RowMapSnapshot>>,
@@ -1707,6 +1823,16 @@ impl RowSaveContext {
             .runtime
             .block_on(scratch.candidate_bytes())
             .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
+        if field.text {
+            return self.commit_text_temporary(
+                target,
+                scratch,
+                field,
+                replacement_bytes,
+                expected_baseline_row,
+                record_baseline,
+            );
+        }
         let length = u64::try_from(replacement_bytes.len())
             .map_err(|_| "replacement Blob length is invalid".to_owned())?;
         let digest: [u8; 32] = Sha256::digest(&replacement_bytes).into();
@@ -1744,6 +1870,7 @@ impl RowSaveContext {
                         &coordinates,
                         &document_bytes,
                         Some((field_name, binding)),
+                        None,
                     )?;
                     *accepted_row_output
                         .lock()
@@ -1752,36 +1879,7 @@ impl RowSaveContext {
                 },
                 &NoFault,
             ));
-        match outcome {
-            Ok(TemporaryRenameOutcome::Applied { .. }) => {
-                if let Some(field) = self
-                    .blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter_mut()
-                    .find(|candidate| candidate.name == field.name)
-                {
-                    field.replacement_bytes = Some(replacement_bytes);
-                } else {
-                    return Err(DocumentCommitError::Failed(
-                        "replaced Blob field disappeared from its row".into(),
-                    ));
-                }
-                let row = accepted_row
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .take();
-                if record_baseline {
-                    self.record_accepted_row(row.clone());
-                }
-                Ok(row)
-            }
-            Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
-                "mounted Blob replacement was rejected by semantic admission".into(),
-            )),
-            Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(error) => Err(save_failure("mounted Blob replacement failed", error)),
-        }
+        self.settle_replacement(outcome, &accepted_row, field, replacement_bytes, record_baseline)
     }
 
     fn commit_temporary(
@@ -1805,7 +1903,7 @@ impl RowSaveContext {
                     let (candidate, row_bytes) =
                         row_context
                             .writer
-                            .candidate(&row_context, &coordinates, &bytes, None)?;
+                            .candidate(&row_context, &coordinates, &bytes, None, None)?;
                     *accepted_row_output
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
@@ -7214,6 +7312,128 @@ fn plain_string_literal(value: &Expr) -> Option<&str> {
             .filter(|body| !body.contains('\\')),
         _ => None,
     }
+}
+
+/// Replaces each captured text Str descriptor in a candidate `data.orna` with the Str literal of
+/// its bytes (profiles/vfs-1.md, Large Str values). The descriptor must keep the field's own
+/// sibling path and `utf-8` encoding. The replacement, when named, supplies new content for that
+/// field; otherwise the captured bytes stand. An optional field may stay `null`.
+fn substitute_text_fields(
+    source: &str,
+    fields: &[BlobField],
+    replacement: Option<(&str, &[u8])>,
+) -> Result<String, String> {
+    if let Some((name, _)) = replacement
+        && !fields.iter().any(|field| field.name == name)
+    {
+        return Err(format!("replacement names {name}, which is not a text field"));
+    }
+    if fields.is_empty() {
+        return Ok(source.to_owned());
+    }
+    let parsed = parse_row(source);
+    if !parsed.diagnostics.is_empty() {
+        return Err("mounted row document is not a valid source row".into());
+    }
+    let Expr::Record { fields: entries, .. } = &parsed.value else {
+        return Err("mounted row document is not a record".into());
+    };
+    let mut edits = Vec::with_capacity(fields.len());
+    for field in fields {
+        let name = &field.name;
+        let entry = entries
+            .iter()
+            .find(|entry| &entry.name == name)
+            .ok_or_else(|| format!("Str field {name} is missing; data.orna must keep its descriptor"))?;
+        if !field.required && matches!(entry.value, Expr::Literal { kind: LiteralKind::Null, .. }) {
+            continue;
+        }
+        validate_text_descriptor(&entry.value, field)?;
+        let bytes = match replacement {
+            Some((replaced, bytes)) if replaced == name => bytes,
+            _ => field
+                .replacement_bytes
+                .as_deref()
+                .ok_or_else(|| format!("Str field {name} has no captured text"))?,
+        };
+        edits.push((
+            entry.span.start..entry.span.end,
+            format!("{name}: {}", orna_string_literal(bytes)?),
+        ));
+    }
+    edits.sort_by_key(|(range, _): &(std::ops::Range<usize>, String)| range.start);
+    let mut output = source.to_owned();
+    for (range, text) in edits.into_iter().rev() {
+        output.replace_range(range, &text);
+    }
+    Ok(output)
+}
+
+/// Checks that a text Str's descriptor is exactly the projected `{ text, encoding }` pair for its
+/// sibling file. Content changes by renaming a file over the sibling, never by editing the row.
+fn validate_text_descriptor(value: &Expr, field: &BlobField) -> Result<(), String> {
+    let name = &field.name;
+    let Expr::Record {
+        fields: descriptor, ..
+    } = value
+    else {
+        return Err(format!(
+            "Str field {name} must keep its {{ text, encoding }} descriptor"
+        ));
+    };
+    let mut text = None;
+    let mut encoding = None;
+    for part in descriptor {
+        let value = plain_string_literal(&part.value).ok_or_else(|| {
+            format!("Str field {name} descriptor entries must be plain strings")
+        })?;
+        match part.name.as_str() {
+            "text" if text.is_none() => text = Some(value),
+            "encoding" if encoding.is_none() => encoding = Some(value),
+            other => {
+                return Err(format!(
+                    "Str field {name} descriptor has an unsupported entry {other}"
+                ));
+            }
+        }
+    }
+    let expected_text = format!("./{}", field.file_name);
+    if text != Some(expected_text.as_str()) {
+        return Err(format!(
+            "Str field {name} must keep text \"{expected_text}\"; replace its content by renaming a file over {}",
+            field.file_name
+        ));
+    }
+    if encoding != Some("utf-8") {
+        return Err(format!("Str field {name} must keep encoding \"utf-8\""));
+    }
+    Ok(())
+}
+
+/// The Orna string literal whose value is `bytes`, which must be UTF-8. `{` is escaped so the
+/// literal never opens an interpolation, and other control characters use `\u{..}`.
+fn orna_string_literal(bytes: &[u8]) -> Result<String, String> {
+    let text =
+        std::str::from_utf8(bytes).map_err(|_| "text field content is not valid UTF-8".to_owned())?;
+    let mut literal = String::with_capacity(text.len() + 2);
+    literal.push('"');
+    for character in text.chars() {
+        match character {
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '\t' => literal.push_str("\\t"),
+            '\0' => literal.push_str("\\0"),
+            '{' => literal.push_str("\\u{7b}"),
+            control if control.is_control() => {
+                let _ = write!(literal, "\\u{{{:x}}}", control as u32);
+            }
+            other => literal.push(other),
+        }
+    }
+    literal.push('"');
+    Ok(literal)
 }
 
 /// Removes projected Blob summary fields from a source row before row admission.
