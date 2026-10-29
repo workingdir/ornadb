@@ -394,3 +394,111 @@ fn vfs_019_persisted_scratch_is_restored_after_schema_change() {
     );
     drop(remounted);
 }
+
+/// Rewrites an ORNAVFS2 scratch record as the ORNAVFS1 layout: the same identity, baseline and
+/// candidate with the 32-byte creation schema identity removed. Field order follows
+/// `VfsScratchStore::write_identity` (length-prefixed row path, relation, key and name, then an
+/// optional Blob field), then the schema identity, then the optional baseline and the candidate.
+fn legacy_record_from_v2(v2: &[u8]) -> Vec<u8> {
+    fn skip_bytes(record: &[u8], at: usize) -> usize {
+        let length = u64::from_le_bytes(record[at..at + 8].try_into().expect("8-byte length"));
+        at + 8 + usize::try_from(length).expect("field length fits in memory")
+    }
+    assert_eq!(&v2[..8], b"ORNAVFS2", "the seeded record is written as ORNAVFS2");
+    let mut at = skip_bytes(v2, 8);
+    at += 16; // relation id
+    at = skip_bytes(v2, at); // key
+    at = skip_bytes(v2, at); // name
+    at = match v2[at] {
+        0 => at + 1,
+        1 => skip_bytes(v2, at + 1),
+        other => panic!("unexpected optional Blob field tag {other}"),
+    };
+    let mut legacy = b"ORNAVFS1".to_vec();
+    legacy.extend_from_slice(&v2[8..at]);
+    legacy.extend_from_slice(&v2[at + 32..]);
+    legacy
+}
+
+/// ORNA-VFS-019 legacy restart: an ORNAVFS1 scratch record has no creation schema identity, so
+/// mount open must not bind it to the live schema. Its candidate is kept as a retained draft
+/// (`sys.vfs.stale_edit`), the record is removed, and no scratch node is mounted. The candidate
+/// bytes stay recoverable from the retained draft; the user re-applies them through a normal write.
+#[test]
+fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let mut first = spawn_mount_process(&root, &mountpoint);
+    let row = mountpoint.join("Music/london");
+    first.await_path(&row.join("data.orna"));
+    let expected: &[u8] = b"legacy durable scratch captured under schema v1";
+    let mut scratch = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(row.join(".data.orna.persisted-scratch"))
+        .expect("create temporary scratch through FUSE");
+    scratch.write_all(expected).expect("write the scratch");
+    scratch.sync_all().expect("fsync persists the scratch");
+    drop(scratch);
+    drop(first);
+
+    let scratch_directory = root.join(".git/orna/vfs-editor-scratch-v1");
+    let records: Vec<PathBuf> = fs::read_dir(&scratch_directory)
+        .expect("list the scratch store")
+        .map(|entry| entry.expect("scratch entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "scratch"))
+        .collect();
+    assert_eq!(records.len(), 1, "the synced scratch is persisted as one record");
+    let record = records[0].clone();
+    let v2 = fs::read(&record).expect("read the ORNAVFS2 record");
+    fs::write(&record, legacy_record_from_v2(&v2)).expect("rewrite the record as ORNAVFS1");
+
+    fs::write(root.join("main.orna"), V2).expect("write the v2 declaration");
+    commit_source(&root, "Add optional note to Music");
+
+    let restarted = mount_parent.path().join("restarted");
+    let mut remounted = spawn_mount_process(&root, &restarted);
+    let restarted_row = restarted.join("Music/london");
+    // A restarted v2 mount may not expose the v1 row (ornadb-eufo.2.1), so wait for the legacy
+    // record's disposition and its stderr report rather than for the row.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while (record.exists() || !remounted.stderr_text().contains("legacy scratch record"))
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let stderr = remounted.stderr_text();
+
+    assert!(!record.exists(), "the legacy record is removed once retained; stderr: {stderr}");
+    assert!(
+        !restarted_row.join(".data.orna.persisted-scratch").exists(),
+        "a legacy candidate is not bound to the live schema as a mounted scratch; stderr: {stderr}"
+    );
+    let drafts: Vec<PathBuf> = fs::read_dir(root.join(".git/orna/vfs-retained-drafts-v1"))
+        .expect("list the retained drafts")
+        .map(|entry| entry.expect("draft entry").path())
+        .filter(|path| path.extension().is_some_and(|extension| extension == "draft"))
+        .collect();
+    assert_eq!(drafts.len(), 1, "the legacy candidate is listed as one retained draft; stderr: {stderr}");
+    let draft = fs::read(&drafts[0]).expect("read the retained draft");
+    let header = String::from_utf8_lossy(&draft[..draft.len().min(256)]).into_owned();
+    assert!(
+        header.contains("cause sys.vfs.stale_edit"),
+        "the retained draft records the stale cause: {header:?}"
+    );
+    assert!(
+        draft.windows(expected.len()).any(|window| window == expected),
+        "the candidate bytes are recoverable from the retained draft; stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("legacy scratch record (ORNAVFS1) kept as retained draft"),
+        "mount stderr reports the legacy retention: {stderr}"
+    );
+    drop(remounted);
+}
