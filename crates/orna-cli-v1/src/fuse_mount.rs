@@ -3997,7 +3997,7 @@ impl Filesystem for WorkspaceFilesystem {
         };
         let candidate_size = match handle {
             Some(handle) => open_len(handle.0),
-            // fstat without a handle reaches here; an open Document or Blob candidate is the file.
+            // fstat without a handle reaches here; an open Document, Temporary or Source candidate is the file.
             None => {
                 let handles: Vec<u64> = self
                     .draft_state
@@ -4018,7 +4018,9 @@ impl Filesystem for WorkspaceFilesystem {
                             .is_some_and(|open| {
                                 matches!(
                                     open,
-                                    OpenFile::Document(..) | OpenFile::Temporary(_, _, _, Some(_))
+                                    OpenFile::Document(..)
+                                        | OpenFile::Temporary(_, _, _, Some(_))
+                                        | OpenFile::Source(_)
                                 )
                             })
                     })
@@ -4085,7 +4087,7 @@ impl Filesystem for WorkspaceFilesystem {
         if write_mode && self.is_source_module(inode.0) {
             let truncate = flags.0 & libc::O_TRUNC != 0;
             match self.source_open_write(&mut draft_state, inode.0, truncate, request.pid()) {
-                Ok(handle) => reply.opened(fuser::FileHandle(handle), fuser::FopenFlags::empty()),
+                Ok(handle) => reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS),
                 Err(errno) => reply.error(errno),
             }
             return;
