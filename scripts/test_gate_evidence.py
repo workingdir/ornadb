@@ -311,6 +311,12 @@ class FailureTests(unittest.TestCase):
             select_test_targets(metadata, ["missing-v1"], [], False)
         with self.assertRaisesRegex(EvidenceError, "has no test target test:absent"):
             select_test_targets(metadata, ["orna-demo-v1"], ["test:absent"], False)
+        self.assertEqual(
+            select_test_targets(metadata, ["orna-demo-v1"], [], False, ("test:storage_scale",)),
+            [("orna-demo-v1", "lib")],
+        )
+        with self.assertRaisesRegex(EvidenceError, "has no test target test:absent"):
+            select_test_targets(metadata, ["orna-demo-v1"], [], False, ("test:absent",))
 
 
 class BaselineFileTests(unittest.TestCase):
@@ -688,15 +694,17 @@ class ReviewFindingTests(unittest.TestCase):
         text = (root / "cli-tests.yml").read_text(encoding="utf-8")
         cli_run = [line for line in text.splitlines() if "gate_evidence.py test -p orna-cli-v1 --timeout-minutes" in line]
         self.assertEqual(len(cli_run), 1, cli_run)
+        self.assertIn("--exclude-target test:vfs_media_reader", cli_run[0])
         self.assertIn("--skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata", cli_run[0])
-        # Every bare `cargo test` in the per-PR cli workflow must sit inside a recorded `gate_evidence.py run`.
+        # The media reader runs only in its recorded step, so the one bare `cargo test` line in the
+        # per-PR cli workflow is that record; its step must call `gate_evidence.py run` above the line.
         lines = text.splitlines()
-        for index, line in enumerate(lines):
-            if "cargo test" not in line:
-                continue
-            openers = [i for i in range(index) if "gate_evidence.py" in lines[i]]
-            self.assertTrue(openers, line)
-            self.assertIn("gate_evidence.py run", lines[openers[-1]], line)
+        cargo = [number for number, line in enumerate(lines) if "cargo test" in line]
+        self.assertEqual(len(cargo), 1, [lines[number] for number in cargo])
+        index = cargo[0]
+        step = max(number for number in range(index) if lines[number].lstrip().startswith("- name:"))
+        run = max(number for number in range(step, index) if lines[number].lstrip().startswith("run:"))
+        self.assertIn("gate_evidence.py run", "\n".join(lines[run:index]), lines[index])
 
     def test_gate_b_items_name_the_nightly_cli_record(self) -> None:
         # B1-B3 are evidence from the nightly workspace-cli record; per-PR runs skip the test.
