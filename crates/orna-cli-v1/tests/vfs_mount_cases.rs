@@ -26,9 +26,12 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     assert_errno, repository_with_music_rows, repository_with_music_rows_and_modules,
-    require_fuse_or_skip, retained_drafts, spawn_mount_process, write_and_sync,
+    require_fuse_or_skip, retained_drafts, spawn_mount_process, spawn_snapshot_mount_process,
+    write_and_sync, MountedProcess,
 };
 
+const EPERM: i32 = 1;
+const EIO: i32 = 5;
 const EINVAL: i32 = 22;
 const EAGAIN: i32 = 11;
 
@@ -497,4 +500,211 @@ async fn vfs_020_dirty_source_draft_is_retained_at_unmount() {
         stderr.contains("sys.vfs.draft_retained") && stderr.contains("notes.orna"),
         "stop reports the retained source draft: {stderr}"
     );
+}
+
+/// Waits until the mount's stderr contains `needle`. A refusal is logged before its sync
+/// returns, but the stderr reader thread may lag behind the reply.
+fn await_stderr(mounted: &MountedProcess, needle: &str) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !mounted.stderr_text().contains(needle) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the mount stderr lacks {needle}: {}",
+            mounted.stderr_text()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// ORNA-VFS-020 and 41-vfs.md: a truncating open alone empties the candidate. The open
+/// handle reports the empty candidate, while a new open still reads the committed bytes.
+#[tokio::test]
+async fn vfs_020_o_trunc_only_open_holds_an_empty_candidate_until_sync() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    let file = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a truncating open of a source module is accepted");
+    assert_eq!(
+        file.metadata().expect("attributes of the open candidate").len(),
+        0,
+        "O_TRUNC alone empties the candidate"
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "a new open reads the committed bytes");
+}
+
+/// ORNA-VFS-020 and 41-vfs.md: a snapshot mount (`mount --at`) has no writer, so a
+/// write-intent open of a source module is refused with EPERM and the snapshot is unchanged.
+#[tokio::test]
+async fn vfs_020_source_write_on_snapshot_mount_is_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let head = repository.head().unwrap().unwrap();
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_snapshot_mount_process(
+        repository_directory.path(),
+        &mountpoint,
+        head.as_str(),
+    );
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_errno(
+        OpenOptions::new().write(true).truncate(true).open(&notes).map(|_| ()),
+        &[EPERM],
+        "a write-intent open on a snapshot mount is refused",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the snapshot keeps its committed bytes");
+}
+
+/// ORNA-VFS-020: a source module is edited in place. Renaming or removing it on the live
+/// mount is refused with EPERM, and the committed module is unchanged.
+#[tokio::test]
+async fn vfs_020_source_module_rename_and_unlink_are_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_errno(
+        std::fs::rename(&notes, mountpoint.join("renamed.orna")).map(|_| ()),
+        &[EPERM],
+        "a source module cannot be renamed",
+    );
+    assert_errno(
+        std::fs::remove_file(&notes),
+        &[EPERM],
+        "a source module cannot be removed",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the committed source module is unchanged");
+}
+
+/// ORNA-VFS-020 and profiles/vfs-1.md: a sync reports only its own candidate. A malformed
+/// `extra.orna` is refused with EINVAL on its own sync. A sync whose group holds it fails
+/// with EIO rather than the sibling's cause. The valid `notes.orna` is admitted on its own
+/// sync once the malformed candidate has been refused.
+#[tokio::test]
+async fn vfs_020_sibling_refusal_is_not_reported_on_another_modules_sync() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\nuse extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE), ("extra.orna", EXTRA_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    let extra = mountpoint.join("extra.orna");
+    mounted.await_path(&notes);
+    mounted.await_path(&extra);
+
+    const NOTES_ACCEPTED: &str = "pub fn sibling_a(): Int = 1;\n";
+    let mut notes_handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of notes.orna is accepted");
+    let mut extra_handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&extra)
+        .expect("a write-intent open of extra.orna is accepted");
+    notes_handle.write_all(NOTES_ACCEPTED.as_bytes()).expect("the notes candidate is accepted");
+    extra_handle.write_all(b"pub fn bad_b( {\n").expect("the malformed candidate is accepted");
+    assert_errno(
+        notes_handle.sync_all(),
+        &[EIO],
+        "a group sync with a malformed sibling fails with EIO, not the sibling's EINVAL",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the failed group is not written");
+    assert_errno(
+        extra_handle.sync_all(),
+        &[EINVAL],
+        "the malformed candidate is refused with EINVAL on its own sync",
+    );
+    await_stderr(&mounted, "sys.vfs.invalid_document");
+    notes_handle.sync_all().expect("the valid candidate is admitted once its sibling is refused");
+    assert_eq!(read_view(&notes), NOTES_ACCEPTED);
+    assert_eq!(read_view(&extra), EXTRA_SOURCE, "the refused sibling keeps its committed bytes");
+}
+
+/// ORNA-VFS-020 and 41-vfs.md errno table: a stale candidate is refused with EAGAIN, and
+/// the refusal names `sys.vfs.stale_edit`. The open handle keeps its own candidate; it is
+/// not reseeded from the disk bytes that replaced it.
+#[tokio::test]
+async fn vfs_020_stale_source_candidate_is_held_on_its_handle_not_reseeded() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    const MINE: &str = "pub fn mine(): Int = 2;\n";
+    const OTHER: &str = "pub fn other(): Int = 9;\n";
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of notes.orna is accepted");
+    file.write_all(MINE.as_bytes()).expect("the candidate is accepted into the draft");
+    std::fs::write(repository_directory.path().join("notes.orna"), OTHER)
+        .expect("another writer changes the module on disk");
+    assert_errno(
+        file.sync_all(),
+        &[EAGAIN],
+        "a candidate whose disk baseline changed is refused with EAGAIN",
+    );
+    assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
+    await_stderr(&mounted, "sys.vfs.stale_edit");
+    file.seek(SeekFrom::Start(0)).expect("seek the held candidate");
+    let mut held = String::new();
+    file.read_to_string(&mut held).expect("read the held candidate through its handle");
+    assert_eq!(held, MINE, "the handle still reads its own candidate, not the replacement bytes");
 }
