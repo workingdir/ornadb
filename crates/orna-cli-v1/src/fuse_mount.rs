@@ -17,7 +17,7 @@ use fuser::{
 use orna_conformance_v1::transactional_loaded_project_candidate_validator;
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_project_v1::{
-    ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
+    KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
     admit_source_row_with_owner_fields,
 };
 use orna_repository_v1::{
@@ -1114,6 +1114,7 @@ impl MountWriter {
             &row.source.value_context,
             blob_bindings,
             Vec::new(),
+            &row.key_components,
             mutation_id,
         )
         .map_err(|error| {
@@ -1215,6 +1216,7 @@ struct RowSaveContext {
     table: RuntimeTableIdentity,
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
     logical_path: String,
+    key_components: Vec<KeyComponentText>,
     expected_baseline_row: Mutex<Option<Vec<u8>>>,
     blob_fields: Mutex<Vec<BlobField>>,
 }
@@ -1389,6 +1391,10 @@ fn row_save_context(
     };
     let mut components = Vec::new();
     flatten_key_components(key, &mut components)?;
+    let key_components = components
+        .iter()
+        .map(key_component_text)
+        .collect::<Result<Vec<_>, _>>()?;
     let Some((leaf, prefixes)) = components.split_last() else {
         return Err("committed row key has no path components".into());
     };
@@ -1415,6 +1421,7 @@ fn row_save_context(
         target,
         table,
         logical_path,
+        key_components,
         table_object_ids,
         expected_baseline_row: Mutex::new(expected_baseline_row),
         blob_fields: Mutex::new(blob_fields),
@@ -7310,27 +7317,30 @@ fn civil_date_from_days(days: i64) -> (i64, i64, i64) {
     (year, month, date)
 }
 
-fn key_component(key: &TypedKey) -> Result<String, String> {
-    let canonical_text = match key {
-        TypedKey::Null => "null".to_owned(),
-        TypedKey::Bool(value) => value.to_string(),
-        TypedKey::UInt(value) => value.to_string(),
-        TypedKey::Int(value) => value.to_string(),
-        TypedKey::Bytes(bytes) => format!("0x{}", hex_bytes(bytes)),
-        TypedKey::Text(value) => value.clone(),
-        TypedKey::Tuple(_) => {
-            return Err("tuple key must be projected component by component".into());
-        }
-        TypedKey::Value(value) => value
-            .canonical_text()
-            .ok_or_else(|| "key type needs its schema to project".to_owned())?,
-    };
+fn key_component_text(key: &TypedKey) -> Result<KeyComponentText, String> {
+    if let TypedKey::Tuple(_) = key {
+        return Err("tuple key must be projected component by component".into());
+    }
+    let text = key
+        .component_text()
+        .ok_or_else(|| "key type needs its schema to project".to_owned())?;
     // A long key's `~key-` alias digests the typed component's canonical
     // OVB-1 encoding, not its text (VFS-1, "Row/key directory mapping").
     let canonical_encoding = key
         .canonical_bytes()
         .map_err(|_| "key component has no canonical encoding".to_owned())?;
-    Ok(project_key_component(&canonical_text, &canonical_encoding))
+    Ok(KeyComponentText {
+        text,
+        canonical_encoding,
+    })
+}
+
+fn key_component(key: &TypedKey) -> Result<String, String> {
+    let component = key_component_text(key)?;
+    Ok(project_key_component(
+        &component.text,
+        &component.canonical_encoding,
+    ))
 }
 
 /// Checks every captured Blob field of a candidate `data.orna` before its
