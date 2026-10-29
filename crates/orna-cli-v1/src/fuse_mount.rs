@@ -2049,8 +2049,10 @@ impl WorkspaceFilesystem {
     /// Attributes of `inode` as a path stat reports them. A document's size is
     /// the accepted image its new opens read (`ManagedFile::stat`), so an owner
     /// write is visible to stat at once (profiles/vfs-1.md:133, ORNA-VFS-019).
-    /// Only the node's served size changes; open handles keep their own draft,
-    /// captured baseline and generation, so stale-save refusal is unaffected.
+    /// Open handles keep their own draft, captured baseline and generation, so
+    /// reads and stale-save refusal are unaffected. FUSE passes no handle to
+    /// fstat, so fstat on a clean handle opened before an owner write also
+    /// reports the accepted size; that is a known residual.
     fn attr_of(&self, inode: u64) -> Option<FileAttr> {
         let (mut attr, document) = {
             let state = self
