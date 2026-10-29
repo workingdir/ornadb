@@ -50,6 +50,11 @@ use sha2::{Digest, Sha256};
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
 
+/// Bound on unbound editor scratch files one mount may create (41-vfs.md Temporary-save
+/// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
+/// Records restored from earlier mounts are not counted (`VfsScratchStore::reserve_unbound`).
+const MAX_UNBOUND_SCRATCH: usize = 16;
+
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
 fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
@@ -102,6 +107,8 @@ struct PersistedTemporaryScratch {
 
 struct VfsScratchStore {
     directory: PathBuf,
+    /// Unbound scratch record names this mount created; restored records are never counted.
+    unbound_created: Mutex<HashSet<String>>,
 }
 
 impl VfsScratchStore {
@@ -124,7 +131,10 @@ impl VfsScratchStore {
         }
         ensure_private_directory(&directory, "temporary scratch directory")?;
         Self::sync_directory(&directory)?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            unbound_created: Mutex::new(HashSet::new()),
+        })
     }
 
     fn persist(
@@ -215,6 +225,34 @@ impl VfsScratchStore {
                 "temporary scratch record could not be removed: {error}"
             )),
         }
+    }
+
+    /// Reserves one of this mount's unbound scratch slots for `identity`. A slot this mount
+    /// already holds stays admitted; a new one past `MAX_UNBOUND_SCRATCH` is refused.
+    fn reserve_unbound(&self, identity: &TemporaryScratchIdentity) -> bool {
+        let name = Self::record_name(identity);
+        let mut created = self
+            .unbound_created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if created.contains(&name) {
+            return true;
+        }
+        if created.len() >= MAX_UNBOUND_SCRATCH {
+            return false;
+        }
+        created.insert(name);
+        true
+    }
+
+    /// Releases the slot of a record this mount removed. Restored records were never reserved,
+    /// so releasing them is a no-op.
+    fn release_unbound(&self, identity: &TemporaryScratchIdentity) {
+        let name = Self::record_name(identity);
+        self.unbound_created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&name);
     }
 
     fn record_path(&self, identity: &TemporaryScratchIdentity) -> PathBuf {
@@ -1468,6 +1506,36 @@ impl RowSaveContext {
             })
     }
 
+    /// Re-admits an unbound scratch's candidate under the Blob `blob_field` target, the same
+    /// target a Blob-bound create uses, so the rename commits through that target.
+    fn retarget_unbound_scratch(
+        &self,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        blob_field: &BlobField,
+    ) -> Result<(Arc<ManagedFile<RowMapSnapshot>>, Arc<TemporarySave<RowMapSnapshot>>), String>
+    {
+        let target = self.temporary_target(Some(blob_field))?;
+        let retargeted = self
+            .writer
+            .runtime
+            .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES));
+        let len = self.writer.runtime.block_on(scratch.candidate_len());
+        if len > 0 {
+            let length = usize::try_from(len)
+                .map_err(|_| "scratch candidate exceeds addressable memory".to_owned())?;
+            let bytes = self
+                .writer
+                .runtime
+                .block_on(scratch.read_range(0, length))
+                .map_err(|error| format!("scratch candidate could not be read: {error:?}"))?;
+            self.writer
+                .runtime
+                .block_on(retargeted.write_at(0, &bytes))
+                .map_err(|error| format!("scratch candidate could not be moved: {error:?}"))?;
+        }
+        Ok((target, Arc::new(retargeted)))
+    }
+
     fn fsync_temporary(
         &self,
         scratch: &TemporarySave<RowMapSnapshot>,
@@ -1541,7 +1609,7 @@ impl RowSaveContext {
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
         record_baseline: bool,
-    ) -> Result<(), DocumentCommitError> {
+    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         let replacement_bytes = self
             .writer
             .runtime
@@ -1612,9 +1680,9 @@ impl RowSaveContext {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 if record_baseline {
-                    self.record_accepted_row(row);
+                    self.record_accepted_row(row.clone());
                 }
-                Ok(())
+                Ok(row)
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted Blob replacement was rejected by semantic admission".into(),
@@ -1945,7 +2013,8 @@ impl WorkspaceFilesystem {
                     })
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
-                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline),
+                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline)
+                        .map(|_| ()),
                     draft_path,
                 )
             }),
@@ -2730,7 +2799,9 @@ impl WorkspaceFilesystem {
             Some(OpenFile::Document(save, draft)) => {
                 self.accept_document(draft_state, handle, inode.0, &save, &draft)
             }
-            Some(OpenFile::Temporary(save, target, scratch, Some(field))) => {
+            Some(OpenFile::Temporary(save, target, scratch, Some(field)))
+                if draft_state.blob_handles.contains_key(&handle) =>
+            {
                 self.commit_blob_candidate(draft_state, handle, &save, &target, &scratch, &field)
             }
             Some(OpenFile::Temporary(save, _, scratch, _)) => {
@@ -3858,20 +3929,16 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             };
-            let blob_field = if is_editor_temporary_name(name) {
-                None
-            } else {
-                save.blob_fields
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .iter()
-                    .find(|field| is_replacement_scratch_for(name, &field.file_name))
-                    .cloned()
-            };
-            if !is_editor_temporary_name(name) && blob_field.is_none() {
-                reply.error(Errno::EPERM);
-                return;
-            }
+            // 41-vfs.md Temporary-save replacement: an unknown file inside a row directory is
+            // private editor scratch, not a new column. A replacement name of a Blob field binds
+            // to that field; any other unknown name stays unbound until renamed.
+            let blob_field = save
+                .blob_fields
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .find(|field| is_replacement_scratch_for(name, &field.file_name))
+                .cloned();
             let Ok(key) = runtime_table_key_bytes(&save.key) else {
                 reply.error(Errno::EIO);
                 return;
@@ -3896,6 +3963,16 @@ impl Filesystem for WorkspaceFilesystem {
                     .runtime
                     .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
             );
+            if blob_field.is_none() {
+                if matches!(state.lookup_child(parent.0, std::ffi::OsStr::new(name)), Ok(Some(_))) {
+                    reply.error(Errno::EEXIST);
+                    return;
+                }
+                if !save.writer.scratch_store.reserve_unbound(&identity) {
+                    reply.error(Errno::EDQUOT);
+                    return;
+                }
+            }
             let inode = match state.add_file(
                 parent.0,
                 name,
@@ -3911,6 +3988,7 @@ impl Filesystem for WorkspaceFilesystem {
             ) {
                 Ok(inode) => inode,
                 Err(_) => {
+                    save.writer.scratch_store.release_unbound(&identity);
                     reply.error(Errno::EEXIST);
                     return;
                 }
@@ -4006,13 +4084,30 @@ impl Filesystem for WorkspaceFilesystem {
                 baseline.clone(),
                 Arc::clone(identity),
             );
-            let expected_name = blob_field
-                .as_ref()
-                .map_or("data.orna", |field| field.file_name.as_str());
-            if newname.to_str() != Some(expected_name) {
-                reply.error(Errno::EPERM);
-                return;
-            }
+            // An unbound scratch commits to the destination its rename names: the row document
+            // or the Blob field of that name. A Blob-bound scratch must rename to its own field.
+            let blob_field = match blob_field.clone() {
+                Some(field) if newname.to_str() == Some(field.file_name.as_str()) => Some(field),
+                Some(_) => {
+                    reply.error(Errno::EPERM);
+                    return;
+                }
+                None if newname.to_str() == Some("data.orna") => None,
+                None => {
+                    let field = save
+                        .blob_fields
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .iter()
+                        .find(|field| newname.to_str() == Some(field.file_name.as_str()))
+                        .cloned();
+                    let Some(field) = field else {
+                        reply.error(Errno::EPERM);
+                        return;
+                    };
+                    Some(field)
+                }
+            };
             let destination_inode = match state.lookup_child(newparent.0, newname) {
                 Ok(Some(inode)) => inode,
                 Ok(None) | Err(_) => {
@@ -4056,10 +4151,26 @@ impl Filesystem for WorkspaceFilesystem {
                 identity,
             )
         };
+        // An unbound scratch renamed onto a Blob moves its candidate into a scratch of that Blob's
+        // own target, the target a Blob-bound create uses, so it commits through that target.
+        let (target, scratch) = match &blob_field {
+            Some(field) if identity.blob_field_name.is_none() => {
+                match save.retarget_unbound_scratch(&scratch, field) {
+                    Ok(retargeted) => retargeted,
+                    Err(error) => {
+                        eprintln!("mounted replacement scratch retarget failed: {error}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                }
+            }
+            _ => (target, scratch),
+        };
         let committed = match &blob_field {
             Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
-            None => save.commit_temporary(&scratch, baseline, true),
+            None => save.commit_temporary(&scratch, baseline, true).map(|()| None),
         };
+        let accepted_row = committed.as_ref().ok().and_then(Option::clone);
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
             draft_state.rejected_scratch.insert(
@@ -4147,6 +4258,15 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EIO);
                     return;
                 }
+                if let Some(row) = accepted_row {
+                    if let Ok(Some(document)) = state.lookup_child(newparent.0, OsStr::new("data.orna")) {
+                        if let Some(NodeKind::Document { bytes, .. }) =
+                            state.nodes.get_mut(&document).map(|node| &mut node.kind)
+                        {
+                            *bytes = row;
+                        }
+                    }
+                }
             }
             None => {
                 let Some(NodeKind::Document {
@@ -4172,6 +4292,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        save.writer.scratch_store.release_unbound(&identity);
         let removed = state
             .nodes
             .get_mut(&parent.0)
@@ -4285,6 +4406,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        save.writer.scratch_store.release_unbound(&identity);
         if state
             .directory_mut(parent.0)
             .and_then(|directory| directory.remove_entry(OsStr::new(name)))
@@ -6550,17 +6672,6 @@ fn source_without_fields(source: &str, omitted: &[String]) -> Result<String, Str
     Ok(output)
 }
 
-fn is_replacement_scratch_name(name: &str) -> bool {
-    is_replacement_scratch_for(name, "data.orna")
-}
-
-fn is_editor_temporary_name(name: &str) -> bool {
-    is_replacement_scratch_name(name)
-        || name.strip_prefix("tmp").is_some_and(|suffix| {
-            suffix.len() == 6 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
-}
-
 fn is_replacement_scratch_for(name: &str, file_name: &str) -> bool {
     let Some(suffix) = name
         .strip_prefix('.')
@@ -6674,8 +6785,8 @@ mod tests {
 
     use super::{
         Expr, FsBuilder, NodeKind, ROOT_INODE, RowProjectionSource, StoredFieldShape,
-        is_editor_temporary_name, is_replacement_scratch_for, is_replacement_scratch_name,
-        key_directory, parse_row, runtime_row_baseline_from_rows, runtime_table_key_bytes,
+        is_replacement_scratch_for, key_directory, parse_row, runtime_row_baseline_from_rows,
+        runtime_table_key_bytes,
         select_runtime_row_fields, source_without_fields,
     };
     use super::{EDITABLE_OPEN_FLAGS, EDITOR_INIT_CAPABILITIES, ROW_PAGE_LIMIT, WorkspaceFilesystem};
@@ -6910,20 +7021,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["title", "artist"]
         );
-    }
-
-    #[test]
-    fn only_replacement_shaped_sibling_names_are_candidates() {
-        assert!(is_replacement_scratch_name(".data.orna.tmp"));
-        assert!(is_replacement_scratch_name(".data.orna.12345"));
-        assert!(!is_replacement_scratch_name("unrelated"));
-        assert!(!is_replacement_scratch_name("backup"));
-        assert!(!is_replacement_scratch_name(".data.orna."));
-        assert!(is_editor_temporary_name("tmpldofdR"));
-        assert!(is_editor_temporary_name("tmpBX4D0m"));
-        assert!(!is_editor_temporary_name("tmp"));
-        assert!(!is_editor_temporary_name("tmpabcde"));
-        assert!(!is_editor_temporary_name("unrelated"));
     }
 
     #[test]

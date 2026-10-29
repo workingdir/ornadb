@@ -1233,14 +1233,15 @@ async fn live_mount_structural_refusals_are_eperm() {
         EPERM,
         "a create directly in the table directory is refused",
     );
-    assert_errno(
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(session.row("london").join("notes.txt")),
-        EPERM,
-        "a create of a non-blob name inside a row is refused",
-    );
+    // 41-vfs.md:67: an unknown name inside a row directory is private scratch, so its create
+    // succeeds; mkdir and links in the same directory are still refused (EPERM).
+    let scratch = session.row("london").join("notes.txt");
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("an unknown row-directory name is private scratch");
+    fs::remove_file(&scratch).expect("unlinking unbound scratch");
     assert_errno(
         fs::remove_file(session.document("london")),
         EPERM,
