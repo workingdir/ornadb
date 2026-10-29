@@ -321,7 +321,61 @@ async fn large_str_text_rejects_invalid_utf8_and_keeps_the_row() {
     drop(file);
     assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
     assert!(read_view(&row.join("data.orna")).contains("./title.txt"));
- }
+}
+
+/// ORNA-VFS-009 and profiles/vfs-1.md:63-66: a `.txt` write-intent handle opened before
+/// another writer's accepted save is stale. Its fsync refuses the candidate, and the
+/// candidate is kept in recovery storage before the fsync replies.
+#[tokio::test]
+async fn stale_large_str_candidate_is_retained_before_fsync_replies() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let big = "e".repeat(70 * 1024);
+    let document = format!("{{ title: \"{big}\", artist: \"Kieran\", }}\n");
+    let (repository_directory, repository, _relation_id) =
+        repository_with_music_rows(&[("london", document.as_str())]).await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let title = row.join("title.txt");
+    let data = row.join("data.orna");
+    mounted.await_path(&title);
+
+    let mut stale_text = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&title)
+        .expect("a write-intent open of the .txt");
+
+    // Another writer's accepted save advances the row past the open handle.
+    let advanced = read_view(&data).replace("artist: \"Kieran\"", "artist: \"Other\"");
+    let mut other = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data)
+        .expect("a write-intent open of data.orna");
+    std::io::Write::write_all(&mut other, advanced.as_bytes()).expect("the bytes are buffered");
+    other.sync_all().expect("the other writer's save is accepted");
+    drop(other);
+    assert!(read_view(&data).contains("artist: \"Other\""));
+
+    let candidate = "stale candidate text";
+    std::io::Write::write_all(&mut stale_text, candidate.as_bytes())
+        .expect("the bytes are buffered");
+    assert!(stale_text.sync_all().is_err(), "a stale .txt candidate is refused at fsync");
+    drop(stale_text);
+
+    let records = editor_mount::retained_drafts(&repository);
+    assert!(
+        records.iter().any(|record| {
+            record.contains("path Music/london/title.txt")
+                && record.contains(&format!("\n\n{candidate}"))
+        }),
+        "the stale candidate is retained in recovery storage: {records:?}"
+    );
+    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
+}
 
 /// profiles/vfs-1.md:71-74 (nested records and lists): a record field projects as
 /// an escaped directory whose children are its fields, and a list field projects
