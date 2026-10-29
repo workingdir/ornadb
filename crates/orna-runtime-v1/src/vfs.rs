@@ -692,6 +692,25 @@ impl<S> DraftState<S> {
         }
     }
 
+    /// Opens a streaming view of the candidate for one fsync callback. A spool
+    /// is shared through a cloned handle and the baseline through its `Arc`, so
+    /// no candidate bytes are copied. Writers hold the operation lock, so the
+    /// candidate cannot change while the view is in use.
+    fn candidate_snapshot(&self) -> Result<CandidateSnapshot, EditDraftError> {
+        match &self.candidate {
+            Some(spool) => Ok(CandidateSnapshot {
+                len: spool.len,
+                source: CandidateSource::Spool(
+                    spool.file.try_clone().map_err(|_| EditDraftError::BackingIo)?,
+                ),
+            }),
+            None => Ok(CandidateSnapshot {
+                len: self.baseline.bytes.len() as u64,
+                source: CandidateSource::Baseline(Arc::clone(&self.baseline.bytes)),
+            }),
+        }
+    }
+
     /// Reads `[offset, offset + length)` of the candidate, clamped to its
     /// length. Holds at most `length` bytes.
     fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
@@ -1043,6 +1062,52 @@ impl DraftSpool {
 impl Drop for DraftSpool {
     fn drop(&mut self) {
         self.quota.release(self.len);
+    }
+}
+
+/// A read-only, ranged view of one candidate revision, valid for the fsync
+/// callback that receives it. It holds a private handle on the spool or a
+/// share of the baseline bytes, never a copy of the candidate, so a consumer
+/// streams it through [`CANDIDATE_CHUNK_BYTES`]-sized reads.
+pub struct CandidateSnapshot {
+    len: u64,
+    source: CandidateSource,
+}
+
+enum CandidateSource {
+    Spool(fs::File),
+    Baseline(Arc<[u8]>),
+}
+
+impl CandidateSnapshot {
+    /// The candidate's length in bytes.
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the candidate has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Reads `[offset, offset + length)` clamped to the candidate length. Holds
+    /// at most `length` bytes.
+    pub fn read_range(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
+        let end = offset.saturating_add(length as u64).min(self.len);
+        if offset >= end {
+            return Ok(Vec::new());
+        }
+        let size = usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
+        let mut bytes = vec![0; size];
+        match &self.source {
+            CandidateSource::Spool(file) => file.read_exact_at(&mut bytes, offset)?,
+            CandidateSource::Baseline(source) => {
+                let start =
+                    usize::try_from(offset).map_err(|_| io::Error::other("range too large"))?;
+                bytes.copy_from_slice(&source[start..start + size]);
+            }
+        }
+        Ok(bytes)
     }
 }
 
@@ -1569,15 +1634,17 @@ impl<S> TemporarySave<S> {
         self.state.lock().await.draft.retained_invalid_draft().await
     }
 
-    /// Persists only the private scratch sequence. This callback does not call
-    /// the row activation boundary and is skipped for an already-synced seq.
+    /// Persists only the private scratch sequence. The callback receives a
+    /// streaming [`CandidateSnapshot`] of the fsynced revision, so no whole
+    /// copy of the candidate is made. This callback does not call the row
+    /// activation boundary and is skipped for an already-synced seq.
     pub async fn fsync_scratch_with<F, Fut, E>(&self, persist: F) -> Result<u64, FsyncFailure<E>>
     where
-        F: FnOnce(u64, Arc<[u8]>) -> Fut,
+        F: FnOnce(u64, CandidateSnapshot) -> Fut,
         Fut: Future<Output = Result<(), E>>,
     {
         let _operation = self.operation.lock().await;
-        let (revision, bytes) = {
+        let (revision, snapshot) = {
             let state = self.state.lock().await;
             if let Some((revision, _)) = &state.applied {
                 return Ok(*revision);
@@ -1587,10 +1654,10 @@ impl<S> TemporarySave<S> {
             if state.synced_revision == Some(revision) {
                 return Ok(revision);
             }
-            let bytes = draft.candidate_arc().map_err(FsyncFailure::Backing)?;
-            (revision, bytes)
+            let snapshot = draft.candidate_snapshot().map_err(FsyncFailure::Backing)?;
+            (revision, snapshot)
         };
-        persist(revision, bytes)
+        persist(revision, snapshot)
             .await
             .map_err(FsyncFailure::Activation)?;
         self.state.lock().await.synced_revision = Some(revision);
@@ -4804,7 +4871,7 @@ mod tests {
                 backup_syncs_by_route.fetch_add(1, Ordering::SeqCst);
                 async move {
                     assert_eq!(revision, 0);
-                    assert_eq!(bytes.as_ref(), row_text);
+                    assert_eq!(bytes.read_range(0, row_text.len()).unwrap(), row_text);
                     Ok::<_, ()>(())
                 }
             })
@@ -4835,7 +4902,7 @@ mod tests {
                 temp_syncs_by_route.fetch_add(1, Ordering::SeqCst);
                 async move {
                     assert_eq!(revision, 2);
-                    assert_eq!(bytes.as_ref(), row_text);
+                    assert_eq!(bytes.read_range(0, row_text.len()).unwrap(), row_text);
                     Ok::<_, ()>(())
                 }
             })
@@ -5060,7 +5127,7 @@ mod tests {
                 scratch_syncs.fetch_add(1, Ordering::SeqCst);
                 async move {
                     assert_eq!(revision, 2);
-                    assert_eq!(bytes.as_ref(), &[0x58]);
+                    assert_eq!(bytes.read_range(0, 1).unwrap(), &[0x58]);
                     Ok::<_, ()>(())
                 }
             })
@@ -5882,7 +5949,7 @@ mod tests {
             scratch.fsync_scratch_with(|_, bytes| {
                 let expected_bytes = replacement_bytes.as_slice();
                 async move {
-                    assert_eq!(bytes.as_ref(), expected_bytes);
+                    assert_eq!(bytes.read_range(0, expected_bytes.len()).unwrap(), expected_bytes);
                     assert_eq!(
                         scratch_for_persist.candidate_bytes().await.unwrap().as_ref(),
                         expected_bytes
@@ -5979,7 +6046,7 @@ mod tests {
         let replacement_for_flush = replacement_bytes.clone();
         scratch
             .fsync_scratch_with(move |_, bytes| async move {
-                assert_eq!(bytes.as_ref(), replacement_for_flush.as_slice());
+                assert_eq!(bytes.read_range(0, replacement_for_flush.len()).unwrap(), replacement_for_flush.as_slice());
                 Ok::<_, ()>(())
             })
             .await
