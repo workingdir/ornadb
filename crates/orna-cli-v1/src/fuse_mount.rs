@@ -96,8 +96,8 @@ fn refuse_unsupported(operation: &str) -> Errno {
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
 /// ORNAVFS2 records carry the schema identity captured when the scratch was created (ORNA-VFS-019).
-/// ORNAVFS1 records predate that identity; they are read as legacy records and rewritten as
-/// ORNAVFS2 on the next persist.
+/// ORNAVFS1 records predate that identity. They are never bound to the live schema: at mount open
+/// their candidate is kept as a retained draft and the record is removed (`retain_legacy_scratch`).
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS2";
 const VFS_SCRATCH_RECORD_MAGIC_V1: &[u8; 8] = b"ORNAVFS1";
 
@@ -3414,6 +3414,14 @@ impl WorkspaceFilesystem {
             }
             for record in records {
                 let logical_path = record.identity.logical_path.clone();
+                if record.schema_identity.is_none() {
+                    if let Err(error) = Self::retain_legacy_scratch(writer, &record) {
+                        eprintln!(
+                            "legacy persisted temporary scratch {logical_path} left on disk: {error}"
+                        );
+                    }
+                    continue;
+                }
                 match Self::restore_temporary_scratch(&mut builder, writer, record) {
                     Ok(inode) => {
                         retained_scratch.insert(inode);
@@ -3436,6 +3444,53 @@ impl WorkspaceFilesystem {
             next_handle: AtomicU64::new(1),
         })
     }
+    /// Keeps a legacy ORNAVFS1 candidate as a retained draft instead of binding it to the live
+    /// schema (ORNA-VFS-019, ORNA-VFS-009). A legacy record has no creation schema identity, so its
+    /// staleness cannot be decided: the candidate is listed as a retained draft (cause
+    /// `sys.vfs.stale_edit`), its commit stays refused until the user re-applies it, and the scratch
+    /// record is removed only after retention has succeeded. Returns the retained draft ID.
+    fn retain_legacy_scratch(
+        writer: &MountWriter,
+        record: &PersistedTemporaryScratch,
+    ) -> Result<String, String> {
+        let candidate = &record.candidate;
+        let mut file = File::open(&candidate.record).map_err(|error| {
+            format!("persisted temporary scratch record could not be reopened: {error}")
+        })?;
+        let retained = writer
+            .retained_drafts
+            .retain(
+                &record.identity.logical_path,
+                "sys.vfs.stale_edit",
+                candidate.len,
+                &mut |offset, length| {
+                    file.seek(SeekFrom::Start(candidate.offset + offset)).map_err(|error| {
+                        RetentionError::io(
+                            format!("persisted temporary scratch bytes could not be read: {error}"),
+                            &error,
+                        )
+                    })?;
+                    let mut buffer = vec![0_u8; length];
+                    file.read_exact(&mut buffer).map_err(|error| {
+                        RetentionError::io(
+                            format!("persisted temporary scratch bytes could not be read: {error}"),
+                            &error,
+                        )
+                    })?;
+                    Ok(buffer)
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer.scratch_store.remove(&record.identity)?;
+        eprintln!(
+            "{}: legacy scratch record (ORNAVFS1) kept as retained draft {} in {} (sys.vfs.draft_retained); commit refused until re-applied",
+            record.identity.logical_path,
+            retained.id,
+            retained.record.display()
+        );
+        Ok(retained.id)
+    }
+
     fn restore_temporary_scratch(
         builder: &mut FsBuilder,
         writer: &Arc<MountWriter>,
@@ -3521,20 +3576,11 @@ impl WorkspaceFilesystem {
             candidate,
             schema_identity,
         } = record;
-        // A legacy ORNAVFS1 record has no creation identity, so it binds to the schema committed
-        // now, as it did before ORNAVFS2. The next persist rewrites it as ORNAVFS2 with that
-        // identity. This is the flagged legacy rule: a schema change before the remount is not
-        // detected for such a record.
-        let schema_identity = match schema_identity {
-            Some(identity) => identity,
-            None => {
-                eprintln!(
-                    "legacy persisted temporary scratch {} binds to the live schema",
-                    identity.logical_path
-                );
-                save.live_schema_identity()?
-            }
-        };
+        // `from_snapshot` routes a legacy ORNAVFS1 record (no creation identity) to
+        // `retain_legacy_scratch` before any scratch is begun, so only identified records restore.
+        let schema_identity = schema_identity.ok_or_else(|| {
+            "legacy persisted temporary scratch cannot restore as a Temporary node".to_owned()
+        })?;
         let name = identity.name.clone();
         builder.add_file(
             parent,
