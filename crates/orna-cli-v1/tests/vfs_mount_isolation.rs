@@ -825,9 +825,10 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
 /// applied through a second writable handle (ORNA-TURSO-005: other local writers
 /// coordinate with the owner or fail). The refusal carries ORNA-REPL-EFFECT together
 /// with its cause (the repository's runtime owner lock is held by another live process,
-/// so this REPL cannot take the writer lease) and the remedy. The same command succeeds
-/// once only the mount is released (control below). File writes while mounted go
-/// through the owner-routed `orna edit` (ORNA-VFS-015, cli_mount.rs run_edit).
+/// so this REPL cannot take the writer lease) and the remedy (stop the mount for REPL
+/// database writes; file writes while mounted go through the owner-routed `orna edit`,
+/// 41-vfs.md:76; profiles/vfs-1.md:119). The same command succeeds once only the mount
+/// is released (control below).
 #[tokio::test]
 async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
     if !require_fuse_or_skip() {
@@ -858,12 +859,19 @@ async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
         "the refusal is ORNA-REPL-EFFECT: {diagnostics}"
     );
     assert!(
-        diagnostics.contains("runtime owner lock") && diagnostics.contains("writer lease"),
-        "the refusal names the writer-lease cause: {diagnostics}"
+        diagnostics.contains("the runtime owner lock is held by another live process")
+            && diagnostics.contains("writer lease"),
+        "the refusal names the writer-lease cause for this path: {diagnostics}"
     );
     assert!(
-        diagnostics.contains("orna unmount") && diagnostics.contains("orna edit"),
-        "the refusal names the remedy (unmount the mount, or write files with orna edit): {diagnostics}"
+        !diagnostics.contains("another writer owns the repository writer lease"),
+        "this REPL does not hold the runtime owner lock, so the other lease-cause text must not appear: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("REPL database writes need the mount stopped")
+            && diagnostics.contains("orna unmount")
+            && diagnostics.contains("orna edit"),
+        "the refusal names the remedy: stop the mount for REPL writes, file writes go through orna edit: {diagnostics}"
     );
     assert_eq!(
         fresh_view(&fixture),
