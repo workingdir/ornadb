@@ -9,10 +9,10 @@
 //! - keep the live directory listing and attributes coherent with the pinned
 //!   generation rather than mixing old and new shapes.
 //!
-//! Two gaps are kept as ignored red proofs rather than weakened here: a write
-//! whose open captured the old generation must fail EAGAIN (profiles/vfs-1.md
-//! :91-92 and :138; bead ornadb-eufo.1), and a restarted mount must expose the
-//! new shape without EIO (ORNA-VFS-019; bead ornadb-eufo.2).
+//! A write whose open captured the old generation must fail EAGAIN (profiles/vfs-1.md
+//! :91-92 and :138; bead ornadb-eufo.1), and is proven live. One gap stays an ignored red
+//! proof rather than weakened here: a restarted mount must expose the new shape without EIO
+//! (ORNA-VFS-019; bead ornadb-eufo.2).
 
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
