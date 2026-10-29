@@ -56,8 +56,8 @@ fn sorted_names(directory: &Path) -> Vec<String> {
 /// documents under one mount are each admitted at their own sync, in the order
 /// the caller performs them. A rejected later save does not roll back an
 /// earlier accepted one. No cross-file transaction is asserted. Grouped source
-/// edits and no-evaluation-during-speculative-writes (ORNA-VFS-020 proper) are
-/// NOT covered; see bead ornadb-9npn.
+/// edits are covered by `vfs_020_source_module_group_is_admitted_together_or_not_at_all`;
+/// no-evaluation-during-speculative-writes (ORNA-VFS-020 proper) is NOT covered; see bead ornadb-9npn.
 #[tokio::test]
 async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollback() {
     if !require_fuse_or_skip() {
