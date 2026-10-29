@@ -61,9 +61,10 @@ The editor packages are installed by the job's `apt-get install -y emacs-nox mpv
   whole-process budget for the test runner.
 - Editor versions are the versions installed on the CI image; the record does not prove a
   particular editor build beyond `--version` output.
-- The `cwd_mount_*` media tests are skipped in the crate-wide `cli-tests.yml` step and run only
-  in their own record, so their outcome appears under `gate-e-media-reader`. The nightly
-  workspace-cli record runs them within the full crate suite.
+- The `cwd_mount_*` media tests run twice on the per-PR path: once in the crate-wide `cli-tests.yml`
+  step (which now requires mpv) and once in their own `gate-e-media-reader` record. The second run is
+  the evidence of record; the first keeps `vfs_media_reader` from running zero tests under the
+  crate-wide filter. The nightly workspace-cli record runs them within the full crate suite.
 
 ## Local run
 
