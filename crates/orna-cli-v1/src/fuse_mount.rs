@@ -2503,6 +2503,20 @@ impl WorkspaceFilesystem {
             None => Some(super::invocation_owner_id()),
         };
 
+        // Reachable source modules are projected before any table directory, so a
+        // source path that collides with a table directory takes priority.
+        let project = match &writer {
+            Some(writer) => Arc::clone(&writer.project),
+            None => Arc::new(
+                loader
+                    .load_committed_snapshot(repository, commit)
+                    .map_err(|error| {
+                        format!("committed source project could not be loaded: {error:?}")
+                    })?,
+            ),
+        };
+        builder.add_source_modules(project.modules())?;
+
         for (relation_id, qualified_name) in tables {
             let schema = loader
                 .resolve_committed_source_table_schema(
@@ -2511,6 +2525,15 @@ impl WorkspaceFilesystem {
                     TableObjectId::new(relation_id),
                 )
                 .map_err(|error| format!("committed table schema is unavailable: {error:?}"))?;
+            if builder.table_path_is_source(
+                schema.binding().module_name().unwrap_or_default(),
+                schema.declaration_name(),
+            ) {
+                eprintln!(
+                    "skipped table {qualified_name}: a source path takes priority on collision"
+                );
+                continue;
+            }
             let table_directory = builder.table_directory(
                 schema.binding().module_name().unwrap_or_default(),
                 schema.declaration_name(),
@@ -4977,6 +5000,9 @@ struct FsBuilder {
     open_blobs: HashMap<u64, u64>,
     /// Replaced blob inodes kept readable until their last open handle is released.
     superseded_blobs: HashSet<u64>,
+    /// Inodes of projected source modules and their directories. A table path
+    /// that reaches one of these yields to the source path (profiles/vfs-1.md).
+    source_nodes: HashSet<u64>,
 }
 
 impl FsBuilder {
@@ -4996,6 +5022,7 @@ impl FsBuilder {
             table_object_ids: Arc::new(BTreeMap::new()),
             open_blobs: HashMap::new(),
             superseded_blobs: HashSet::new(),
+            source_nodes: HashSet::new(),
         }
     }
 
@@ -5062,6 +5089,71 @@ impl FsBuilder {
 
     fn directory_mut(&mut self, inode: u64) -> Option<&mut Directory> {
         self.nodes.get_mut(&inode)?.kind.directory_mut()
+    }
+
+    /// Projects each reachable source module at its logical path, creating its
+    /// directories. Reserved root `.git` and `.orna` are never projected.
+    fn add_source_modules(
+        &mut self,
+        modules: &[orna_semantic_v1::ModuleInput],
+    ) -> Result<(), String> {
+        for module in modules {
+            let components = module.logical_path.split('/').collect::<Vec<_>>();
+            let Some((leaf, directories)) = components.split_last() else {
+                continue;
+            };
+            if matches!(components.first(), Some(&(".git" | ".orna"))) {
+                continue;
+            }
+            let mut parent = ROOT_INODE;
+            for directory in directories {
+                parent = self.ensure_directory(parent, directory)?;
+                self.source_nodes.insert(parent);
+            }
+            let inode = self.insert_node(
+                parent,
+                leaf,
+                NodeKind::Bytes(module.source.clone().into_bytes()),
+                FileType::RegularFile,
+            )?;
+            self.source_nodes.insert(inode);
+        }
+        Ok(())
+    }
+
+    /// Whether a source path occupies the table's directory path. A source path
+    /// takes priority on collision (profiles/vfs-1.md), so such a table is not
+    /// projected: its final component is source-owned, or an intermediate
+    /// component is a source file rather than a directory.
+    fn table_path_is_source(&self, module_name: &str, table_name: &str) -> bool {
+        let components = module_name
+            .split('.')
+            .filter(|component| !component.is_empty())
+            .chain(std::iter::once(table_name))
+            .map(project_component)
+            .collect::<Vec<_>>();
+        let last = components.len().saturating_sub(1);
+        let mut parent = ROOT_INODE;
+        for (index, component) in components.iter().enumerate() {
+            let Some(inode) = self
+                .directory(parent)
+                .and_then(|directory| directory.entry(OsStr::new(component)))
+                .map(|entry| entry.inode)
+            else {
+                return false;
+            };
+            if self.source_nodes.contains(&inode) {
+                let is_directory = self
+                    .nodes
+                    .get(&inode)
+                    .is_some_and(|node| node.kind.is_directory());
+                if index == last || !is_directory {
+                    return true;
+                }
+            }
+            parent = inode;
+        }
+        false
     }
 
     fn table_directory(&mut self, module_name: &str, table_name: &str) -> Result<u64, String> {

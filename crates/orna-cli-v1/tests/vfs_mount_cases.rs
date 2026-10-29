@@ -158,3 +158,63 @@ async fn vfs_017_large_collection_lookup_and_pinned_listing() {
     assert_eq!(first.len(), ROWS, "every row of the multi-page collection is listed");
     assert_eq!(first, second, "two passes over the same mount list the same rows");
 }
+
+const NOTES_SOURCE: &str = "pub fn answer(): Int = 42;\n";
+const EXTRA_SOURCE: &str = "pub fn extra(): Int = 7;\n";
+
+/// ORNA-VFS-020 and profiles/vfs-1.md: a reachable ordinary source module is
+/// projected at its logical path with its committed bytes, beside the table
+/// directories. Read projection only; writes are not covered here.
+#[tokio::test]
+async fn vfs_020_reachable_source_module_is_projected_with_committed_bytes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module reads its committed bytes");
+    let root = sorted_names(&mountpoint);
+    assert!(root.contains(&"notes.orna".to_owned()), "the source module is listed: {root:?}");
+    assert!(root.contains(&"Music".to_owned()), "the table directory stays beside it: {root:?}");
+}
+
+/// profiles/vfs-1.md: on collision a source path takes priority over a table
+/// directory. The table `Music` yields to the source directory `Music`, so the
+/// nested source module is readable and the directory lists only source entries.
+/// Row-level suppression is not observable here (the fixture commits no rows);
+/// it is covered by the table-skip path in the projection.
+#[tokio::test]
+async fn vfs_020_source_path_takes_priority_over_colliding_table_directory() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use Music.extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("Music/extra.orna", EXTRA_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let music = mountpoint.join("Music");
+    let extra = music.join("extra.orna");
+    mounted.await_path(&extra);
+
+    assert_eq!(read_view(&extra), EXTRA_SOURCE, "the colliding source module reads its bytes");
+    assert_eq!(
+        sorted_names(&music),
+        vec!["extra.orna".to_owned()],
+        "the source directory owns Music; the table directory is not projected"
+    );
+}
