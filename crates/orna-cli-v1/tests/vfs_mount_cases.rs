@@ -229,12 +229,11 @@ async fn vfs_020_source_path_keeps_name_and_table_projects_escaped() {
     assert!(read_view(&data).contains("Original"), "the escaped table keeps its committed row");
 }
 
-/// ORNA-VFS-020 and profiles/vfs-1.md: a source module is read-only in this slice. A
-/// write-intent open is refused with EPERM at open time, not accepted and then failed
-/// with EBADF on write, and the committed bytes are unchanged. The spec does not name
-/// source writes, so refusing them is a conservative choice.
+/// ORNA-VFS-020 and profiles/vfs-1.md: a source module is editable through the
+/// workspace source path. A write-intent write that is synced is accepted, and the
+/// accepted bytes are visible through a new open.
 #[tokio::test]
-async fn vfs_020_source_write_open_is_refused_with_eperm() {
+async fn vfs_020_source_module_write_is_accepted_and_visible_after_sync() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -250,15 +249,7 @@ async fn vfs_020_source_write_open_is_refused_with_eperm() {
     let notes = mountpoint.join("notes.orna");
     mounted.await_path(&notes);
 
-    assert_errno(
-        std::fs::OpenOptions::new().write(true).open(&notes).map(|_| ()),
-        &[libc::EPERM],
-        "a write-intent open of a source module is refused",
-    );
-    assert_errno(
-        std::fs::OpenOptions::new().append(true).open(&notes).map(|_| ()),
-        &[libc::EPERM],
-        "an append open of a source module is refused",
-    );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module keeps its committed bytes");
+    const EDITED: &str = "// edited through the mount\n";
+    write_and_sync(&notes, EDITED).expect("a synced source module write is accepted");
+    assert_eq!(read_view(&notes), EDITED, "the accepted source edit is visible through a new open");
 }

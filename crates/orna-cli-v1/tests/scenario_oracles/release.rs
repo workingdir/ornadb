@@ -415,8 +415,8 @@ pub fn entries() -> Vec<Entry> {
         Entry::gap(
             "FINAL-VFS-020",
             "ornadb-9npn.1.1",
-            "the workspace mount projects source modules but refuses writes to them (stage 2)",
-            workspace_source_module_write_is_refused,
+            "the workspace mount projects source modules and accepts their writes (ORNA-VFS-020)",
+            workspace_source_module_write_is_accepted,
         )
         .with_fuse(),
         Entry::gap(
@@ -2461,7 +2461,7 @@ fn workspace_is_read_only(db: &mut Db) -> Probe {
     ))
 }
 
-fn workspace_source_module_write_is_refused(db: &mut Db) -> Probe {
+fn workspace_source_module_write_is_accepted(db: &mut Db) -> Probe {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     let mount = db.mount("workspace", &["--cwd"])?;
     let module = mount.point.join("main.orna");
@@ -2470,15 +2470,18 @@ fn workspace_source_module_write_is_refused(db: &mut Db) -> Probe {
             "the workspace mount no longer projects main.orna".to_owned(),
         ));
     }
-    let error = fs::write(&module, b"// edited\n").err().ok_or_else(|| {
-        Failure::Unmet("the workspace mount now accepts a source module write".to_owned())
+    const EDITED: &str = "// edited\n";
+    fs::write(&module, EDITED.as_bytes()).map_err(|error| {
+        Failure::Unmet(format!("the workspace mount refused a source module write: {error}"))
     })?;
-    if error.raw_os_error() != Some(libc::EPERM) {
-        return Err(Failure::Harness(format!(
-            "the source module write failed for another reason: {error}"
-        )));
+    let read = fs::read_to_string(&module)
+        .map_err(|error| Failure::Harness(format!("read main.orna after the write: {error}")))?;
+    if read != EDITED {
+        return Err(Failure::Unmet(
+            "the accepted source module write is not visible through a new open".to_owned(),
+        ));
     }
-    Ok(format!("write of main.orna in the workspace mount: {error}"))
+    Ok("write of main.orna in the workspace mount is accepted and visible".to_owned())
 }
 
 fn traversal_descriptor_is_admitted(db: &mut Db) -> Probe {
