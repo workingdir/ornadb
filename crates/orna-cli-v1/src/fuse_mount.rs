@@ -6530,8 +6530,23 @@ impl FsBuilder {
             .writer
             .live_row(table, &key)?
             .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
-        let document = self
-            .project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?
+        let parent = self
+            .nodes
+            .get(&document_inode)
+            .map(|node| node.parent)
+            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
+        let files = self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
+        // Only a row that carries or carried a `.txt` sibling changes its document reference;
+        // other rows keep the document node the handles were opened against.
+        let large_now = files.iter().any(|(_, kind)| matches!(kind, NodeKind::Text { .. }));
+        let large_before = self
+            .nodes
+            .values()
+            .any(|node| node.parent == parent && matches!(node.kind, NodeKind::Text { .. }));
+        if !large_now && !large_before {
+            return Ok(());
+        }
+        let document = files
             .into_iter()
             .find_map(|(name, kind)| (name == "data.orna").then_some(kind))
             .ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
