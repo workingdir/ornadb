@@ -397,7 +397,7 @@ pub fn format3_repository_for_table(
     table_name: &str,
 ) -> (TempDir, Repository, [u8; 16]) {
     let (directory, repository, relation_id, _, _) =
-        format3_repository_parts(media_source, table_name);
+        format3_repository_parts(media_source, table_name, &[]);
     (directory, repository, relation_id)
 }
 /// Creates an empty format-3 table and returns a context pinned to that
@@ -407,8 +407,19 @@ pub fn format3_repository_with_context(
     media_source: &str,
     table_name: &str,
 ) -> (TempDir, Repository, [u8; 16], Format3Context) {
+    format3_repository_with_context_and_modules(media_source, table_name, &[])
+}
+
+/// Like [`format3_repository_with_context`], with extra `(logical path, source)`
+/// modules committed beside `main.orna`. `main.orna` must `use` a module to make
+/// it reachable; only one directory level is supported in `logical path`.
+pub fn format3_repository_with_context_and_modules(
+    media_source: &str,
+    table_name: &str,
+    extra_modules: &[(&str, &str)],
+) -> (TempDir, Repository, [u8; 16], Format3Context) {
     let (directory, repository, relation_id, schema_root, store_root) =
-        format3_repository_parts(media_source, table_name);
+        format3_repository_parts(media_source, table_name, extra_modules);
     let commit = repository.head().unwrap().unwrap();
     let context =
         persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
@@ -418,6 +429,7 @@ pub fn format3_repository_with_context(
 fn format3_repository_parts(
     media_source: &str,
     declaration_name: &str,
+    extra_modules: &[(&str, &str)],
 ) -> (TempDir, Repository, [u8; 16], String, String) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
@@ -430,7 +442,8 @@ fn format3_repository_parts(
     let database_uuid = "00000000-0000-4000-8000-000000000001";
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
-    let modules = [ModuleInput::new("main.orna", media_source)];
+    let mut modules = vec![ModuleInput::new("main.orna", media_source)];
+    modules.extend(extra_modules.iter().map(|&(path, source)| ModuleInput::new(path, source)));
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
@@ -451,6 +464,11 @@ fn format3_repository_parts(
     std::fs::write(root.join(".orna/object-identities.cbor"), &manifest_bytes).unwrap();
     std::fs::write(root.join(".orna/store/data"), b"store marker").unwrap();
     std::fs::write(root.join("main.orna"), media_source).unwrap();
+    for &(path, source) in extra_modules {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
     git(root, &["add", "--all"]);
     git(
         root,
@@ -530,10 +548,24 @@ fn format3_repository_parts(
             "100644 blob {database_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
         ),
     );
-    let root_tree = git_tree(
-        root,
-        &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
-    );
+    let mut root_entries =
+        format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n");
+    let mut directories = std::collections::BTreeMap::<&str, String>::new();
+    for &(path, source) in extra_modules {
+        let oid = git_object(root, "blob", source.as_bytes());
+        match path.split_once('/') {
+            Some((directory, name)) => directories
+                .entry(directory)
+                .or_default()
+                .push_str(&format!("100644 blob {oid}\t{name}\n")),
+            None => root_entries.push_str(&format!("100644 blob {oid}\t{path}\n")),
+        }
+    }
+    for (directory, entries) in directories {
+        let tree = git_tree(root, &entries);
+        root_entries.push_str(&format!("040000 tree {tree}\t{directory}\n"));
+    }
+    let root_tree = git_tree(root, &root_entries);
     let parent = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
