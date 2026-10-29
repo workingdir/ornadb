@@ -1221,11 +1221,12 @@ def cargo_metadata() -> dict:
     return json.loads(completed.stdout)
 
 
-def select_test_targets(metadata: dict, packages: list[str], targets: list[str], integration: bool) -> list[tuple[str, str]]:
+def select_test_targets(metadata: dict, packages: list[str], targets: list[str], integration: bool, excluded: tuple[str, ...] = ()) -> list[tuple[str, str]]:
     """Return (package, target label) for the test targets of the named packages, in metadata order.
 
     `targets` keeps only the named labels, and every named package must have each of them.
     `integration` keeps only `test:` targets, for jobs whose library suite runs in another job.
+    `excluded` drops the named labels; every named package must have each of them too.
     """
     members = {str(package["name"]): package for package in metadata.get("packages", [])}
     unknown = sorted(set(packages) - set(members))
@@ -1240,11 +1241,12 @@ def select_test_targets(metadata: dict, packages: list[str], targets: list[str],
         ]
         if integration:
             labels = [label for label in labels if label.startswith("test:")]
-        for wanted in targets:
+        for wanted in [*targets, *excluded]:
             if wanted not in labels:
                 raise EvidenceError(f"{name} has no test target {wanted}")
         if targets:
             labels = [label for label in labels if label in targets]
+        labels = [label for label in labels if label not in excluded]
         selected.extend((name, label) for label in labels)
     return selected
 
@@ -1319,13 +1321,13 @@ def known_failures_for(baseline: list[KnownFailure], package: str, target: str) 
 
 
 def command_test(arguments: argparse.Namespace) -> int:
-    for target in arguments.target:
+    for target in [*arguments.target, *arguments.exclude_target]:
         if not TARGET_PATTERN.fullmatch(target):
             raise EvidenceError(f"target {target!r} is not lib, doc or KIND:NAME")
     baseline = load_baseline(Path(arguments.baseline))
     overrides = dict(arguments.timeout_override)
     metadata = cargo_metadata()
-    selected = select_test_targets(metadata, arguments.package, arguments.target, arguments.integration)
+    selected = select_test_targets(metadata, arguments.package, arguments.target, arguments.integration, tuple(arguments.exclude_target))
     gated = feature_gates(metadata, selected, arguments.features, dict(arguments.covered_by))
     failed: list[str] = []
     for package, target in selected:
@@ -1416,6 +1418,7 @@ def main(argv: list[str] | None = None) -> int:
     tests = commands.add_parser("test", help="run each test target with the known failures of the baseline skipped")
     tests.add_argument("-p", "--package", action="append", required=True, help="Cargo package to test (repeatable)")
     tests.add_argument("--target", action="append", default=[], help="only this target: lib, test:NAME or bin:NAME (repeatable)")
+    tests.add_argument("--exclude-target", action="append", default=[], help="skip this target: lib, test:NAME or bin:NAME (repeatable); every named package must have it")
     tests.add_argument("--integration", action="store_true", help="only integration test targets (test:NAME)")
     tests.add_argument("--features", help="Cargo features to enable")
     tests.add_argument("--timeout-minutes", type=float, default=None, help="kill each test binary after this long")
