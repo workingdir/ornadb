@@ -302,10 +302,10 @@ id = "E3"
 title = "Invalid rows and refinements reject without partial state; the detailed diagnostic and rejected draft remain"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "fsync_acknowledges_valid_draft_and_rejects_invalid_draft" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_lists_invalid_document_cause_draft_id_and_diagnostic" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_retains_recoverable_draft_listed_by_id" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
 ]
-limitations = ["The mount's unresolved-draft report lists the draft id and diagnostic (E3 selector). The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
+limitations = ["The rejected candidate is kept by the unmount-time retain request, and the test asserts the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
 
 [[item]]
 gate = "E"
@@ -332,7 +332,7 @@ gate = "E"
 id = "E6"
 title = "Demonstrate blind replacement's limitation"
 select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses" }]
-limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119)."]
+limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119). The orna edit refusal is asserted as E2000 with the stale detail and a retained draft; the spec cause sys.vfs.stale_edit (Orna-1.1.0.md:8674) is not in this command's output or in mount status for this path."]
 
 [[item]]
 gate = "E"
@@ -353,9 +353,10 @@ select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_unsupported_ops" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
-  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte_and_lookalikes_keep_spelling" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_spelling_beyond_vfs_1_text_is_conservative" },
 ]
-limitations = ["Only the selectors above are claimed; composite keys, nested collections, large Str and multi-file source edits have no selector for this item (ornadb-5il1.63)."]
+limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text (any-case or any-extension device names, CLOCK$, lookalikes) are a conservative, spec-silent selector, not a spec requirement. Composite keys, nested collections, large Str and multi-file source edits have no selector for this item (ornadb-5il1.63)."]
 
 [[item]]
 gate = "E"
