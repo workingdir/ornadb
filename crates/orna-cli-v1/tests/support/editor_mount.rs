@@ -369,8 +369,18 @@ pub async fn live_foreign_writer(repository: &Repository) -> RuntimeState {
 pub async fn repository_with_music_rows(
     rows: &[(&str, &str)],
 ) -> (TempDir, Repository, [u8; 16]) {
+    repository_with_music_rows_and_modules(MUSIC_SOURCE, &[], rows).await
+}
+
+/// Like `repository_with_music_rows`, with a caller's media source and extra
+/// source modules committed beside the `Music` table.
+pub async fn repository_with_music_rows_and_modules(
+    media_source: &str,
+    extra_modules: &[(&str, &str)],
+    rows: &[(&str, &str)],
+) -> (TempDir, Repository, [u8; 16]) {
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_with_context(MUSIC_SOURCE, "Music");
+        format3::format3_repository_with_context_and_modules(media_source, "Music", extra_modules);
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
         .await
