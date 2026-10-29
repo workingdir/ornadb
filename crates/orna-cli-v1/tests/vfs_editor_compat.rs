@@ -65,11 +65,17 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(std::fs::read_to_string(&data_path).unwrap().contains("In place"));
 
 
+    // 41-vfs.md:67: an unknown file inside a row directory is private scratch, not a column.
+    // Its create succeeds, leaves the row document unchanged, and it can be unlinked.
     let arbitrary = row_directory.join("unrelated");
-    assert!(
-        File::create(&arbitrary).is_err(),
-        "an arbitrary sibling create must not become a row-save candidate",
+    let document_before = std::fs::read(&data_path).unwrap();
+    File::create(&arbitrary).expect("an unknown row-directory name is private scratch");
+    assert_eq!(
+        std::fs::read(&data_path).unwrap(),
+        document_before,
+        "arbitrary scratch must not change the row document",
     );
+    std::fs::remove_file(&arbitrary).expect("unlinking unbound scratch");
 
     let stale_temporary = row_directory.join(".data.orna.stale-tmp");
     let mut stale_file = OpenOptions::new()
