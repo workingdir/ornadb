@@ -4527,6 +4527,7 @@ impl Filesystem for WorkspaceFilesystem {
                         reply.error(refuse_unsupported("open for write"));
                         return;
                     }
+                    state.track_blob_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -5712,7 +5713,6 @@ impl Filesystem for WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let parent = match state.nodes.get(&inode.0) {
             Some(node) => node.parent,
             None => {
@@ -5724,21 +5724,21 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::ENOTDIR);
             return;
         }
-        if start == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
+        if offset == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
             reply.ok();
             return;
         }
-        if start <= 1
+        if offset <= 1
             && reply.add(INodeNo(parent), 2, FileType::Directory, OsStr::new(".."))
         {
             reply.ok();
             return;
         }
         if state
-            .readdir_page(inode.0, start, |index, entry| {
+            .readdir_page(inode.0, offset, |entry_offset, entry| {
                 !reply.add(
                     INodeNo(entry.inode),
-                    u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
+                    entry_offset,
                     entry.kind,
                     entry.name.as_os_str(),
                 )
@@ -6094,7 +6094,7 @@ impl FsBuilder {
         Ok(Some(inode))
     }
 
-    fn ensure_readdir(&mut self, inode: u64, start: usize) -> Result<(), String> {
+    fn ensure_readdir(&mut self, inode: u64, start: u64) -> Result<(), String> {
         self.load_nested_children(inode)?;
         if matches!(
             self.nodes.get(&inode).map(|node| &node.kind),
@@ -6110,22 +6110,13 @@ impl FsBuilder {
         let Some(table_inode) = table_inode else {
             return Ok(());
         };
-        let child_start = start.saturating_sub(2);
-        let loaded = self
-            .directory(inode)
-            .ok_or_else(|| "mount directory is missing".to_owned())?
-            .entries
-            .len();
-        if child_start > loaded {
-            return Ok(());
-        }
-        let target = child_start.saturating_add(ROW_PAGE_LIMIT);
         loop {
-            let loaded = self
+            let directory = self
                 .directory(inode)
-                .ok_or_else(|| "mount directory is missing".to_owned())?
-                .entries
-                .len();
+                .ok_or_else(|| "mount directory is missing".to_owned())?;
+            // Loading pages moves the cursor's index, so the target is recomputed each round.
+            let target = directory.resume_index(start).saturating_add(ROW_PAGE_LIMIT);
+            let loaded = directory.entries.len();
             let (exhausted, error) = match self.nodes.get(&table_inode).map(|node| &node.kind) {
                 Some(NodeKind::Table(table)) => (table.exhausted, table.error.clone()),
                 _ => return Err("mount table directory is missing".into()),
@@ -6140,23 +6131,19 @@ impl FsBuilder {
         }
     }
 
+    /// Visits the entries after the kernel cursor `start`, loading table pages as needed.
     fn readdir_page(
         &mut self,
         inode: u64,
-        start: usize,
-        mut visit: impl FnMut(usize, &DirectoryEntry) -> bool,
+        start: u64,
+        mut visit: impl FnMut(u64, &DirectoryEntry) -> bool,
     ) -> Result<(), String> {
         self.ensure_readdir(inode, start)?;
         let directory = self
             .directory(inode)
             .ok_or_else(|| "mount directory is missing".to_owned())?;
-        for (index, entry) in directory
-            .entries
-            .iter()
-            .enumerate()
-            .skip(start.saturating_sub(2))
-        {
-            if !visit(index, entry) {
+        for entry in &directory.entries[directory.resume_index(start)..] {
+            if !visit(entry.offset(), entry) {
                 break;
             }
         }
@@ -6336,14 +6323,7 @@ impl FsBuilder {
             let directory = self
                 .directory_mut(parent)
                 .ok_or_else(|| "mount row parent is not a directory".to_owned())?;
-            let entry_name = OsString::from(name);
-            let index = directory.entries.len();
-            directory.by_name.insert(entry_name.clone(), index);
-            directory.entries.push(DirectoryEntry {
-                inode,
-                name: entry_name,
-                kind: FileType::Directory,
-            });
+            directory.push(OsString::from(name), inode, FileType::Directory);
             return Ok(inode);
         }
         self.insert_node(
@@ -6785,8 +6765,8 @@ impl FsBuilder {
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
         // data.orna keeps its node, so handles opened earlier keep their captured baseline. Pending
         // scratch files keep their entries: their saves belong to the user, not the row. The row's
-        // other projected files, nested directories included, are replaced as one set so every view
-        // agrees on the new row. Replaced nodes stay in `nodes` for handles opened earlier.
+        // other projected files are reconciled by name, in place, so every view agrees on the new
+        // row and held listings keep their positions. Files the row no longer projects are retired.
         let (kept_inodes, kept_names): (HashSet<u64>, HashSet<OsString>) = {
             let directory = self
                 .directory(row_inode)
@@ -6812,11 +6792,38 @@ impl FsBuilder {
                 "the refreshed row entry {name} collides with a pending scratch file"
             ));
         }
-        self.directory_mut(row_inode)
+        // Reconcile by name so a surviving row file keeps its readdir position and cookie: a file
+        // the refreshed row still projects is swapped in place, a new one is appended, and a file
+        // the row no longer projects leaves. Pending scratch files were kept above.
+        let vanished: Vec<(OsString, u64)> = self
+            .directory(row_inode)
             .ok_or_else(|| "the refreshed row is not a directory".to_owned())?
-            .retain_entries(|entry| kept_inodes.contains(&entry.inode));
+            .entries
+            .iter()
+            .filter(|entry| {
+                !kept_inodes.contains(&entry.inode)
+                    && !others
+                        .iter()
+                        .any(|(name, _)| name.as_str() == entry.name.as_os_str())
+            })
+            .map(|entry| (entry.name.clone(), entry.inode))
+            .collect();
+        for (name, inode) in vanished {
+            self.directory_mut(row_inode)
+                .and_then(|directory| directory.remove_entry(&name))
+                .ok_or_else(|| "a vanished row entry had already left its directory".to_owned())?;
+            self.retire_node(inode);
+        }
         for (name, kind) in others {
-            self.add_file(row_inode, &name, kind)?;
+            let listed = self
+                .directory(row_inode)
+                .and_then(|directory| directory.entry(OsStr::new(name.as_str())))
+                .is_some();
+            if listed {
+                self.replace_child(row_inode, OsStr::new(name.as_str()), kind)?;
+            } else {
+                self.add_file(row_inode, &name, kind)?;
+            }
         }
         self.nodes
             .get_mut(&document_inode)
@@ -6931,7 +6938,8 @@ impl FsBuilder {
     }
 
     /// Swaps the child `name` of `parent` for a new node at the same readdir position, so
-    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles.
+    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles,
+    /// and a superseded directory stays loaded for a held listing.
     fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<(), String> {
         let inode = self.next_inode;
         self.next_inode = inode
@@ -6946,7 +6954,10 @@ impl FsBuilder {
             .by_name
             .get(name)
             .ok_or_else(|| "the mount child to replace is missing".to_owned())?;
-        let superseded = std::mem::replace(&mut directory.entries[index].inode, inode);
+        let file_type = kind.file_type();
+        let entry = &mut directory.entries[index];
+        let superseded = std::mem::replace(&mut entry.inode, inode);
+        entry.kind = file_type;
         self.nodes.insert(inode, FsNode { parent, kind });
         self.retire_node(superseded);
         Ok(())
@@ -6970,19 +6981,7 @@ impl FsBuilder {
         {
             return Err(format!("mount path contains a duplicate file name: {name}"));
         }
-        let file_type = match &kind {
-            NodeKind::Directory(_)
-            | NodeKind::Table(_)
-            | NodeKind::KeyDirectory(_)
-            | NodeKind::Row(_)
-            | NodeKind::NestedDirectory(_) => FileType::Directory,
-            NodeKind::Bytes(_)
-            | NodeKind::BlobBytes(_)
-            | NodeKind::Text { .. }
-            | NodeKind::Document { .. }
-            | NodeKind::Temporary { .. }
-            | NodeKind::Blob { .. } => FileType::RegularFile,
-        };
+        let file_type = kind.file_type();
         self.insert_node(parent, name, kind, file_type)
     }
 
@@ -7065,13 +7064,7 @@ impl FsBuilder {
         if directory.entry(name.as_os_str()).is_some() {
             return Err("mount directory contains a duplicate entry".into());
         }
-        let index = directory.entries.len();
-        directory.by_name.insert(name.clone(), index);
-        directory.entries.push(DirectoryEntry {
-            inode,
-            name,
-            kind: file_type,
-        });
+        directory.push(name, inode, file_type);
         self.next_inode = next_inode;
         self.nodes.insert(inode, FsNode { parent, kind });
         Ok(inode)
@@ -7101,12 +7094,20 @@ impl FsBuilder {
     /// Drops a generation that is no longer reachable by name. Open handles keep it
     /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
     ///
+    /// A directory is never dropped here: a held directory handle keeps enumerating its
+    /// listing, and a refresh never makes that listing fail with ENOENT (41-vfs.md:39-40).
+    /// Directories are dropped only at remount. The children of a retired directory are not
+    /// reclaimed with it.
+    ///
     /// Accepted FUSE nodeid-lifetime deviation: retention follows tracked open handles, not
     /// kernel lookup counts. `forget` and `batch_forget` keep fuser's no-op defaults, so a
     /// retired generation is removed once no handle holds it, even if the kernel still
     /// caches its nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes
     /// on use; a stale nodeid then fails with ENOENT instead of serving retired bytes.
     fn retire_node(&mut self, inode: u64) {
+        if self.directory(inode).is_some() {
+            return;
+        }
         if self.open_blobs.contains_key(&inode) {
             self.superseded_blobs.insert(inode);
         } else {
@@ -7275,11 +7276,31 @@ impl NodeKind {
     fn is_directory(&self) -> bool {
         self.directory().is_some()
     }
+
+    /// The readdir file type of a node of this kind.
+    fn file_type(&self) -> FileType {
+        match self {
+            Self::Directory(_)
+            | Self::Table(_)
+            | Self::KeyDirectory(_)
+            | Self::Row(_)
+            | Self::NestedDirectory(_) => FileType::Directory,
+            Self::Bytes(_)
+            | Self::BlobBytes(_)
+            | Self::Text { .. }
+            | Self::Document { .. }
+            | Self::Temporary { .. }
+            | Self::Blob { .. } => FileType::RegularFile,
+        }
+    }
 }
 
 struct Directory {
     entries: Vec<DirectoryEntry>,
     by_name: HashMap<OsString, usize>,
+    /// Cookie the next pushed entry takes. Cookies only grow, so removing or replacing a sibling
+    /// never changes an existing entry's readdir offset.
+    next_cookie: u64,
 }
 
 impl Directory {
@@ -7287,7 +7308,28 @@ impl Directory {
         Self {
             entries: Vec::new(),
             by_name: HashMap::new(),
+            next_cookie: 0,
         }
+    }
+
+    /// Appends `name` in readdir order under a fresh cookie.
+    fn push(&mut self, name: OsString, inode: u64, kind: FileType) {
+        let cookie = self.next_cookie;
+        self.next_cookie += 1;
+        self.by_name.insert(name.clone(), self.entries.len());
+        self.entries.push(DirectoryEntry {
+            inode,
+            name,
+            kind,
+            cookie,
+        });
+    }
+
+    /// Index of the first entry whose readdir offset is past `start`, the offset the kernel
+    /// hands back for the last entry it received. Offsets are cookies, so removing an entry
+    /// before a held cursor shifts indexes but not offsets, and the listing resumes after it.
+    fn resume_index(&self, start: u64) -> usize {
+        self.entries.partition_point(|entry| entry.offset() <= start)
     }
 
     fn entry(&self, name: &OsStr) -> Option<&DirectoryEntry> {
@@ -7297,7 +7339,7 @@ impl Directory {
     }
     fn remove_entry(&mut self, name: &OsStr) -> Option<DirectoryEntry> {
         let index = self.by_name.remove(name)?;
-        // Order-preserving: readdir offsets index `entries`, so siblings keep their positions.
+        // Order-preserving: siblings keep their readdir order and cookies, so offsets hold.
         let removed = self.entries.remove(index);
         for (position, entry) in self.entries.iter().enumerate().skip(index) {
             self.by_name.insert(entry.name.clone(), position);
@@ -7391,10 +7433,22 @@ struct TableSource {
     runtime_table: Option<RuntimeTableIdentity>,
     runtime_field_layout: Option<StoredFieldLayout>,
 }
+
+/// Readdir offsets of entries begin after `.` (1) and `..` (2).
+const READDIR_ENTRY_BASE: u64 = 3;
+
 struct DirectoryEntry {
     inode: u64,
     name: OsString,
     kind: FileType,
+    /// Assigned when the entry is pushed and never reused within its directory.
+    cookie: u64,
+}
+
+impl DirectoryEntry {
+    fn offset(&self) -> u64 {
+        self.cookie.saturating_add(READDIR_ENTRY_BASE)
+    }
 }
 
 fn flatten_key_components(key: &TypedKey, components: &mut Vec<TypedKey>) -> Result<(), String> {
@@ -8863,8 +8917,9 @@ mod tests {
         assert!(!table.exhausted, "a full page does not prove that another page is absent");
 
         let mut next_page = Vec::new();
+        let resume = u64::try_from(ROW_PAGE_LIMIT + 2).expect("the page limit fits a cursor");
         builder
-            .readdir_page(table_inode, ROW_PAGE_LIMIT + 2, |_, entry| {
+            .readdir_page(table_inode, resume, |_, entry| {
                 next_page.push(entry.name.to_string_lossy().into_owned());
                 true
             })
@@ -9071,23 +9126,13 @@ mod hardening_tests {
 mod directory_removal_tests {
     use std::ffi::{OsStr, OsString};
 
-    use super::{Directory, DirectoryEntry, FileType};
-
-    fn entry(inode: u64, name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            inode,
-            name: OsString::from(name),
-            kind: FileType::RegularFile,
-        }
-    }
+    use super::{Directory, FileType};
 
     /// A directory whose entries sit in the given order, laid out as `insert_node` does.
     fn directory_of(entries: &[(u64, &str)]) -> Directory {
         let mut directory = Directory::new();
         for &(inode, name) in entries {
-            let index = directory.entries.len();
-            directory.by_name.insert(OsString::from(name), index);
-            directory.entries.push(entry(inode, name));
+            directory.push(OsString::from(name), inode, FileType::RegularFile);
         }
         directory
     }
@@ -9144,6 +9189,117 @@ mod directory_removal_tests {
             directory.entry(OsStr::new("b")).map(|entry| entry.inode),
             Some(3)
         );
+    }
+}
+
+#[cfg(test)]
+mod readdir_cursor_tests {
+    use std::ffi::OsStr;
+
+    use super::{Directory, FileType, FsBuilder, NodeKind, ROOT_INODE};
+
+    /// A builder whose directory `dir` lists `names` in order; returns the builder and `dir`.
+    fn directory_with(names: &[&str]) -> (FsBuilder, u64) {
+        let mut builder = FsBuilder::new();
+        let dir = builder
+            .insert_node(
+                ROOT_INODE,
+                "dir",
+                NodeKind::Directory(Directory::new()),
+                FileType::Directory,
+            )
+            .expect("create the test directory");
+        for name in names {
+            builder
+                .add_file(dir, name, NodeKind::Bytes(Vec::new()))
+                .expect("add a test entry");
+        }
+        (builder, dir)
+    }
+
+    /// Lists `dir` from the kernel cursor `start`, keeping at most `limit` entries. Each item is
+    /// the offset the kernel passes back for that entry and its name.
+    fn list(builder: &mut FsBuilder, dir: u64, start: u64, limit: usize) -> Vec<(u64, String)> {
+        let mut seen = Vec::new();
+        builder
+            .readdir_page(dir, start, |offset, entry| {
+                seen.push((offset, entry.name.to_string_lossy().into_owned()));
+                seen.len() < limit
+            })
+            .expect("list the test directory");
+        seen
+    }
+
+    fn names(listing: &[(u64, String)]) -> Vec<&str> {
+        listing.iter().map(|(_, name)| name.as_str()).collect()
+    }
+
+    fn offset_of(listing: &[(u64, String)], name: &str) -> u64 {
+        listing
+            .iter()
+            .find(|(_, listed)| listed == name)
+            .map(|(offset, _)| *offset)
+            .expect("the entry is listed")
+    }
+
+    /// ORNA-VFS-017: a listing held across a removal resumes after its cursor. Positional
+    /// offsets would skip `c` here, because removing `a` shifts every later index down.
+    #[test]
+    fn held_listing_resumes_after_its_cursor_when_an_earlier_entry_is_removed() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c", "d"]);
+        let first = list(&mut builder, dir, 0, 2);
+        assert_eq!(names(&first), ["a", "b"]);
+        let cursor = first.last().expect("two entries are listed").0;
+        builder
+            .directory_mut(dir)
+            .and_then(|directory| directory.remove_entry(OsStr::new("a")))
+            .expect("a is present before removal");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(
+            names(&rest),
+            ["c", "d"],
+            "entries after the cursor are neither skipped nor repeated"
+        );
+    }
+
+    /// ORNA-VFS-017: a surviving entry keeps the offset it was listed with.
+    #[test]
+    fn surviving_entries_keep_their_offsets_after_an_earlier_removal() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c", "d"]);
+        let before = list(&mut builder, dir, 0, usize::MAX);
+        builder
+            .directory_mut(dir)
+            .and_then(|directory| directory.remove_entry(OsStr::new("a")))
+            .expect("a is present before removal");
+        let after = list(&mut builder, dir, 0, usize::MAX);
+        assert_eq!(offset_of(&after, "c"), offset_of(&before, "c"), "c keeps its offset");
+        assert_eq!(offset_of(&after, "d"), offset_of(&before, "d"), "d keeps its offset");
+    }
+
+    /// A child replaced in place (refresh, Blob generation) keeps its position in a held listing.
+    #[test]
+    fn replaced_child_keeps_its_position_for_a_held_listing() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c"]);
+        let first = list(&mut builder, dir, 0, 1);
+        let cursor = first.last().expect("one entry is listed").0;
+        builder
+            .replace_child(dir, OsStr::new("b"), NodeKind::Bytes(vec![1]))
+            .expect("replace b");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(names(&rest), ["b", "c"]);
+    }
+
+    /// A directory retired while a listing is held keeps its loaded entries, so the held
+    /// cursor still enumerates the entries after it (ORNA-VFS-017, 41-vfs.md:39-40).
+    #[test]
+    fn directory_retired_after_a_listing_opened_still_enumerates() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c"]);
+        let first = list(&mut builder, dir, 0, 1);
+        let cursor = first.last().expect("one entry is listed").0;
+        builder.retire_node(dir);
+        assert!(builder.directory(dir).is_some(), "a retired directory stays loaded");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(names(&rest), ["b", "c"]);
     }
 }
 
