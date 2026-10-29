@@ -290,6 +290,7 @@ id = "E2"
 title = "Media player plus binary export and replacement"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:edit_cli" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_media_reader" },
 ]
@@ -301,9 +302,10 @@ id = "E3"
 title = "Invalid rows and refinements reject without partial state; the detailed diagnostic and rejected draft remain"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "fsync_acknowledges_valid_draft_and_rejects_invalid_draft" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_lists_invalid_document_cause_draft_id_and_diagnostic" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
 ]
-limitations = ["No unique diagnostic or draft ID is kept in local state (ornadb-5il1.140)."]
+limitations = ["The mount's unresolved-draft report lists the draft id and diagnostic (E3 selector). The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
 
 [[item]]
 gate = "E"
@@ -329,13 +331,19 @@ limitations = ["No live REPL runs alongside a mount, and the workspace mount is 
 gate = "E"
 id = "E6"
 title = "Demonstrate blind replacement's limitation"
-limitations = ["No test exists (ornadb-5il1.64)."]
+select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses" }]
+limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119)."]
 
 [[item]]
 gate = "E"
 id = "E7"
 title = "Open reads remain on old content after replacement"
-limitations = ["Only a model test covers it; no test holds a mounted handle across replacement (ornadb-5il1.64, ornadb-5il1.139)."]
+select = [
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "read_handle_opened_before_temp_rename_keeps_old_bytes" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "reader_opened_before_owner_write_keeps_old_bytes" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement" },
+]
+limitations = ["Covers rename-over and owner-write replacement through the mount; other replacement shapes have no selector for this item."]
 
 [[item]]
 gate = "E"
@@ -345,14 +353,19 @@ select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_unsupported_ops" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte_and_lookalikes_keep_spelling" },
 ]
-limitations = ["Only schema change and unsupported operations are covered (ornadb-5il1.63)."]
+limitations = ["Only the selectors above are claimed; composite keys, nested collections, large Str and multi-file source edits have no selector for this item (ornadb-5il1.63)."]
 
 [[item]]
 gate = "E"
 id = "E9"
 title = "Kernel caching does not leak private drafts into another handle or generation"
-limitations = ["Only a unit test of the mount flags exists; no cross-handle test (ornadb-5il1.64)."]
+select = [
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
+]
+limitations = ["Only the mount-level selectors above are claimed. The mount-flag unit test (editor_open_flags_bypass_kernel_cache_without_writeback_capability, bin:orna) is not selected by this record (ornadb-5il1.64)."]
 
 [[item]]
 gate = "E"

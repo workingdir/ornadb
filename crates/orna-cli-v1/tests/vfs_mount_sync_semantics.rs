@@ -189,6 +189,45 @@ async fn fsync_acknowledges_valid_draft_and_rejects_invalid_draft() {
     );
 }
 
+/// The mount's `user.orna.unresolved-draft-fields` report: one
+/// `path<TAB>code<TAB>draft<TAB>detail` line per unresolved draft, as `mount status` reads it.
+fn unresolved_draft_fields(fixture: &EditorMount) -> String {
+    let mut value = vec![0_u8; 16 * 1024];
+    let length = rustix::fs::getxattr(
+        mount_root(fixture).as_path(),
+        "user.orna.unresolved-draft-fields",
+        &mut value[..],
+    )
+    .expect("read the unresolved draft fields");
+    String::from_utf8_lossy(&value[..length]).into_owned()
+}
+
+/// Gate E item E3 and profiles/vfs-1.md errno table (ORNA-VFS-009): a sync refused with
+/// EINVAL keeps the rejected draft out of the row, and the fields `mount status` reads name
+/// its `sys.vfs.invalid_document` cause, a non-empty retained draft id and a non-empty diagnostic.
+#[tokio::test]
+async fn rejected_sync_lists_invalid_document_cause_draft_id_and_diagnostic() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    replace_draft(&mut file, &invalid_row("Diagnosed draft"));
+    assert_errno(file.sync_all(), EINVAL, "invalid draft fsync must fail with EINVAL");
+    await_draft_guard(&fixture, b'1', "the rejected draft holds the draft guard").await;
+    let fields = unresolved_draft_fields(&fixture);
+    let line = fields
+        .lines()
+        .find(|line| line.starts_with("Music/london/data.orna\tsys.vfs.invalid_document\t"))
+        .unwrap_or_else(|| panic!("the fields name the invalid-document cause: {fields:?}"));
+    let mut columns = line.split('\t').skip(2);
+    let draft_id = columns.next().unwrap_or_default();
+    let detail = columns.next().unwrap_or_default();
+    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {line:?}");
+    assert!(!detail.trim().is_empty(), "the diagnostic is listed: {line:?}");
+    assert_view_lacks(&fixture, "Diagnosed draft");
+}
+
 /// ORNA-VFS-008: fdatasync acknowledges and rejects with the same contract as fsync.
 #[tokio::test]
 async fn fdatasync_acknowledges_valid_draft_and_rejects_invalid_draft() {

@@ -85,3 +85,35 @@ Results (three local runs on this worktree before the W282 fixes; `EXIT` is the 
 - Run 3, with `ORNA_REQUIRE_MEDIA_PLAYER=1` (mpv at `/usr/bin/mpv`, CI configuration): `3 passed; 0 failed; 0 ignored`, finished in 67.54s, mount daemon peak RSS `51960 KiB`. The `EXIT=0` on this run is the status of `grep`, which was piped after cargo; the `test result: ok` line is the evidence for run 3.
 
 Run 3 demonstrates the mpv leg: it is the only local run with `ORNA_REQUIRE_MEDIA_PLAYER=1`, and run 2 is the same test without that variable. The local runs predate the Barrier, mpv stderr and comment changes and were not repeated locally. The CI artifact for this head is `gate-e-evidence-media-reader` in the PR 9407 check run for the head commit. vim is not installed on this worktree's host, so the vim `--require-command` path was not exercised locally; CI installs vim with apt.
+
+## Gate E items E2, E3, E6, E7, E8, E9 (ornadb-5il1.245)
+
+These items are registered in `scripts/gate-evidence-items.toml` against the `workspace-cli` record. That record runs `gate_evidence.py test -p orna-cli-v1`, which covers every `tests/*.rs` target, so no CI step was added. Each selector is an existing mount test; this change adds selectors and two new tests (E3 and E8) in existing files.
+
+- E2: adds `cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_byte` (`vfs_mount_integration`): a WAV Blob serves seek and range reads through the mount and exports byte-for-byte (profiles/vfs-1.md Blob fields).
+- E3: adds `rejected_sync_lists_invalid_document_cause_draft_id_and_diagnostic` (`vfs_mount_sync_semantics`): an fsync refused with EINVAL leaves the row unchanged, and the `user.orna.unresolved-draft-fields` report names the `sys.vfs.invalid_document` cause with a non-empty draft id and diagnostic (profiles/vfs-1.md errno table, ORNA-VFS-009).
+- E6: `blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses` (`vfs_mount_isolation`): demonstrates the limitation in profiles/vfs-1.md:118-119. A temp created after an owner change and renamed over the row replaces it; the same race through `orna edit` is refused with E2000. The test pins the limitation as current behaviour. It is not a protection.
+- E7: `read_handle_opened_before_temp_rename_keeps_old_bytes` and `reader_opened_before_owner_write_keeps_old_bytes` (`vfs_mount_isolation`), and `cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement` (`vfs_mount_integration`): handles opened before a rename-over or an owner write keep their captured bytes and size; new opens see the replacement.
+- E8: adds `reserved_key_components_escape_first_byte_and_lookalikes_keep_spelling` (`vfs_projection_features`): `.git`, `.orna`, `CON`, `nul.tar`, `com1.txt`, `LPT9` and `CLOCK$` project with the first byte percent-escaped and resolve their own rows; `conx`, `com10` and `console` keep their spelling (profiles/vfs-1.md:31-33, 44-50).
+- E9: `unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount` and `repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation` (`vfs_mount_isolation`): an unsynced draft is not visible to a second open, a new open, or a remount after SIGKILL, and repeated observer reads never show it. The mount-flag unit test (`editor_open_flags_bypass_kernel_cache_without_writeback_capability`, `bin:orna`) is not selected by this record.
+
+Local results on `fix/ornadb-5il1.245-gate-e-items` (`CARGO_TARGET_DIR` on the shared lane, `ORNA_REQUIRE_FUSE=1`):
+
+- `vfs_mount_sync_semantics rejected_sync_lists_invalid_document_cause_draft_id_and_diagnostic --exact`: 1 passed.
+- `vfs_projection_features reserved_key_components_escape_first_byte_and_lookalikes_keep_spelling --exact`: 1 passed.
+- `vfs_mount_isolation` (whole binary): 18 passed, 1 ignored (the pre-existing ignored test).
+- `vfs_mount_integration` (the two selectors above): 2 passed.
+- `vfs_mount_isolation` E9 test: failed once in three runs before a fix. The failure was `fresh_view` returning NotFound after the SIGKILL remount. `wait_for_mount` waits only for the root to answer, so the test now calls `await_path` on the projected row before reading. After the fix, five consecutive single-test runs passed. The cause is [INFERENCE] a readiness race; the failure did not reproduce on demand.
+- `python3 scripts/gate_evidence.py check`: exit 0.
+- `python3 -m unittest scripts/test_gate_evidence.py`: 44 tests, OK.
+
+No product defect was found, so no product change was made. The two new tests passed on first run; they were not shown red beforehand. The CI record for this head is not yet produced.
+
+Limitations (honest):
+
+- E2: the mpv leg runs only where mpv is installed (CI sets `ORNA_REQUIRE_MEDIA_PLAYER=1`); one player only (ornadb-5il1.62).
+- E3: the `orna edit --row` draft admission and report path is not covered by this item (ornadb-5il1.140).
+- E6: the test demonstrates a limitation; it does not show a fix.
+- E7: replacement shapes beyond rename-over and owner write have no selector here.
+- E8: no selector covers composite keys, nested collections, large Str or multi-file source edits, and the empty-key projection test is ignored (ornadb-5il1.63).
+- E9: the mount-flag unit test is not selected by this record.
