@@ -13,7 +13,8 @@ use orna_conformance_v1::{
 };
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_project_v1::{
-    ObjectIdentityManifest, ObjectKind, ProjectLoader, admit_source_row_with_owner_fields,
+    KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader,
+    admit_source_row_with_owner_fields,
 };
 use orna_repository_v1::{Repository, RuntimeGeneration};
 use orna_runtime_v1::{
@@ -23,6 +24,22 @@ use orna_runtime_v1::{
 };
 use orna_storage_v1::LoosePath;
 use orna_value_v1::Format3Context;
+
+/// Projects one fixture row key with the VFS-1 key spelling the mount writes
+/// (profiles/vfs-1.md:44-56) and returns its canonical pair for admission.
+fn vfs_key_component(key: &str) -> (String, KeyComponentText) {
+    let canonical_encoding = orna_repository_v1::TypedKey::Text(key.to_owned())
+        .canonical_bytes()
+        .expect("the fixture key has a canonical encoding");
+    let encoded = orna_runtime_v1::vfs::project_key_component(key, &canonical_encoding);
+    (
+        encoded,
+        KeyComponentText {
+            text: key.to_owned(),
+            canonical_encoding,
+        },
+    )
+}
 
 /// Commits one captured media row and publishes it, so the row is durable in
 /// the store before the caller reads it.
@@ -255,10 +272,9 @@ pub async fn commit_source_captures_for_table(
     let mut paths_by_key = std::collections::BTreeMap::new();
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
-        // Admission decodes each logical path component with the source path
-        // encoding, so the fixture encodes the key the same way.
-        let encoded_key = orna_value_v1::path_encode_component(capture.key)
-            .expect("the fixture key has a source path encoding");
+        // Admission decodes each logical path component with the VFS-1 key
+        // projection (profiles/vfs-1.md:44-56), the same spelling the mount writes.
+        let (encoded_key, key_component) = vfs_key_component(capture.key);
         let logical_path = format!("{table_name}/{encoded_key}.orna");
         let row_source = capture.source_row;
         let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
@@ -284,6 +300,7 @@ pub async fn commit_source_captures_for_table(
             format_context,
             blob_fields,
             vec![],
+            &[key_component],
             source_row_id,
         )
         .unwrap_or_else(|error| {
@@ -331,7 +348,7 @@ pub async fn commit_source_captures_for_table(
         assert!(mutation.value().is_some_and(|value| !value.is_empty()));
         paths_by_key.insert(
             mutation.key().to_vec(),
-            LoosePath::for_key(table_name, &[capture.key.to_string()])
+            LoosePath::for_key(table_name, std::slice::from_ref(&encoded_key))
                 .expect("the committed source row has a managed path"),
         );
         retained_sources.push(source_bindings);
@@ -442,7 +459,8 @@ pub async fn commit_source_replacement_through_save_admission(
         .await
         .expect("begin the save admission for the captured row");
     let coordinates = admission.coordinates();
-    let logical_path = format!("{table_name}/{}.orna", capture.key);
+    let (encoded_key, key_component) = vfs_key_component(capture.key);
+    let logical_path = format!("{table_name}/{encoded_key}.orna");
     let row_source = capture.source_row;
     let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
     for (field_name, expression) in capture.blob_fields {
@@ -467,6 +485,7 @@ pub async fn commit_source_replacement_through_save_admission(
         format_context,
         blob_fields,
         vec![],
+        &[key_component],
         source_row_id,
     )
     .unwrap_or_else(|error| {
