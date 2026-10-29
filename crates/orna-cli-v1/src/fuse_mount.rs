@@ -607,9 +607,8 @@ fn reply_read_size(size: u32) -> u32 {
     size.min(u32::try_from(CANDIDATE_CHUNK_BYTES).unwrap_or(u32::MAX))
 }
 
-/// Where a candidate the mount did not accept reads its bytes from. Retention
-/// streams a live draft or a truncation by range; only a stash whose retention
-/// was refused holds materialised bytes.
+/// Where a candidate the mount did not accept reads its bytes from.
+/// Retention streams a live draft or a truncation by range; nothing is copied whole.
 #[derive(Clone)]
 enum CandidateSource {
     /// A live draft, read through its spool by range.
@@ -617,8 +616,6 @@ enum CandidateSource {
     /// The newest writer draft of the file when one is open or was released
     /// unretained, else its accepted baseline; either is cut or zero-extended to `size`.
     Truncated { size: u64, latest: Option<Arc<EditDraft<RowMapSnapshot>>> },
-    /// Bytes already held in memory for a candidate whose retention was refused.
-    Stashed(Arc<[u8]>),
 }
 
 /// Reads up to `length` bytes at `offset` of the candidate that results from
@@ -2416,7 +2413,7 @@ enum OpenFile {
 /// Why a submitted candidate was not accepted, for the unmount listing and
 /// the stop-time report. `draft` is its recovery record once retained. While
 /// recovery storage refuses the candidate, `unretained` holds its save context
-/// and bytes so a later retention attempt can still write them.
+/// and its live source so a later retention attempt can still write it.
 struct DraftRefusal {
     cause: &'static str,
     draft: Option<String>,
@@ -2425,7 +2422,7 @@ struct DraftRefusal {
     /// The released or refused writer's draft: the base a path truncate that
     /// arrives before retention cuts (ORNA-VFS-009).
     candidate: Option<Arc<EditDraft<RowMapSnapshot>>>,
-    unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
+    unretained: Option<(Arc<RowSaveContext>, CandidateSource)>,
 }
 
 /// A replacement candidate whose rename was refused. `kept` records that its
@@ -2810,6 +2807,20 @@ impl WorkspaceFilesystem {
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
     ) -> Result<(), DocumentCommitError> {
+        // A path truncate issued while this writer was open is recorded, not applied to
+        // the draft. It is applied before the candidate is judged, so the accepted or
+        // refused candidate reflects the cut (ORNA-VFS-009; POSIX arrival order).
+        if let Some(size) = draft_state.pending_truncates.get(&inode).copied() {
+            save.writer
+                .runtime
+                .block_on(draft.truncate(size))
+                .map_err(|error| {
+                    DocumentCommitError::Failed(format!(
+                        "candidate could not be cut to {size} bytes: {error:?}"
+                    ))
+                })?;
+            draft_state.pending_truncates.remove(&inode);
+        }
         if let Err(error) = save.commit_document(draft, true) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
@@ -2861,9 +2872,6 @@ impl WorkspaceFilesystem {
         {
             draft_state.unresolved_handles.remove(&refused);
         }
-        // The accepted candidate is the synced state of the inode, so a truncate
-        // that was waiting for a sync is satisfied and must not retain at unmount.
-        draft_state.pending_truncates.remove(&inode);
         Ok(())
     }
 
@@ -3091,20 +3099,13 @@ impl WorkspaceFilesystem {
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                // Recovery storage refused the candidate, so the in-memory stash is the
-                // only copy left. It is the sole whole-candidate copy on this path and
-                // exists only while retention is refused (follow-up bead).
-                match save.writer.runtime.block_on(draft.candidate_bytes()) {
-                    Ok(bytes) => (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno)),
-                    Err(error) => {
-                        // Nothing can be retained without the bytes; the refusal stays recorded.
-                        eprintln!(
-                            "{path}: not accepted ({cause}); candidate could not be read: {}",
-                            candidate_unreadable(error)
-                        );
-                        (None, None, Some(Errno::EIO))
-                    }
-                }
+                // Recovery storage refused the candidate: the live draft is the only copy
+                // left, so it stays unresolved and is retried at the next retention.
+                (
+                    None,
+                    Some((Arc::clone(save), CandidateSource::Draft(Arc::clone(draft)))),
+                    Some(retain_error.errno),
+                )
             }
         };
         if let Some(superseded) = draft_state.rejected_documents.insert(
@@ -3339,13 +3340,13 @@ impl WorkspaceFilesystem {
                         .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
             });
             match (refusal.draft, refusal.unretained) {
-                (_, Some((save, bytes))) => {
+                (_, Some((save, source))) => {
                     candidates.push((
                         inode,
                         refusal.handle,
                         refusal.cause,
                         save,
-                        CandidateSource::Stashed(bytes),
+                        source,
                     ));
                 }
                 (Some(draft), None) => {
@@ -3368,7 +3369,6 @@ impl WorkspaceFilesystem {
             let len = match &source {
                 CandidateSource::Draft(draft) => save.writer.runtime.block_on(draft.candidate_len()),
                 CandidateSource::Truncated { size, .. } => *size,
-                CandidateSource::Stashed(bytes) => bytes.len() as u64,
             };
             let truncated = matches!(source, CandidateSource::Truncated { .. });
             let mut read_chunk = |offset: u64, length: usize| match &source {
@@ -3401,7 +3401,6 @@ impl WorkspaceFilesystem {
                         ))),
                     },
                 },
-                CandidateSource::Stashed(bytes) => Ok(stashed_range(bytes, offset, length)),
             };
             match save
                 .writer
@@ -3436,19 +3435,8 @@ impl WorkspaceFilesystem {
                             reports.insert(report);
                         }
                     }
-                    // The stash is the only copy left while retention is refused; it is
-                    // materialised here alone (follow-up bead bounds it).
-                    let stash = match &source {
-                        CandidateSource::Stashed(bytes) => Ok(Arc::clone(bytes)),
-                        _ => {
-                            let mut whole = Vec::new();
-                            VfsRetainedDraftStore::stream_candidate(len, &mut read_chunk, |chunk| {
-                                whole.extend_from_slice(chunk);
-                                Ok(())
-                            })
-                            .map(|()| Arc::from(whole))
-                        }
-                    };
+                    // Recovery storage refused the candidate: it stays unresolved, and its
+                    // live source is retried at the next retention rather than copied here.
                     unresolved.insert(
                         inode,
                         DraftRefusal {
@@ -3456,7 +3444,7 @@ impl WorkspaceFilesystem {
                             draft: None,
                             handle,
                             candidate: None,
-                            unretained: stash.ok().map(|bytes| (save, bytes)),
+                            unretained: Some((save, source)),
                         },
                     );
                 }

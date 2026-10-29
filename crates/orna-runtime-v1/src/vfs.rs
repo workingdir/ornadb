@@ -840,7 +840,11 @@ impl DraftQuota {
     }
 
     fn release(&self, bytes: u64) {
-        self.used.fetch_sub(bytes, Ordering::AcqRel);
+        // Saturating: a release that exceeds the charged total must not wrap the
+        // aggregate budget, which would admit reservations past the limit.
+        let _ = self.used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            Some(used.saturating_sub(bytes))
+        });
     }
 }
 
@@ -4525,6 +4529,21 @@ mod tests {
         );
         drop(draft);
         assert_eq!(quota.used.load(Ordering::Acquire), 0);
+    }
+
+    /// An over-release cannot wrap the aggregate budget: the charge floors at
+    /// zero, so the budget still refuses bytes beyond its limit.
+    #[test]
+    fn draft_quota_release_saturates_at_zero() {
+        let quota = DraftQuota::new(100);
+        quota.reserve(40).unwrap();
+        quota.release(60);
+        assert_eq!(quota.used.load(Ordering::Acquire), 0);
+        quota.release(1);
+        assert_eq!(quota.used.load(Ordering::Acquire), 0);
+        assert!(quota.reserve(101).is_err());
+        quota.reserve(100).unwrap();
+        assert!(quota.reserve(1).is_err());
     }
 
     #[tokio::test]

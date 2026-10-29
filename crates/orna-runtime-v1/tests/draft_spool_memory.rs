@@ -6,7 +6,7 @@ use std::{
     alloc::{GlobalAlloc, Layout, System},
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, Ordering},
     },
 };
 
@@ -17,10 +17,12 @@ const CHUNK_BYTES: usize = 1 << 20;
 const CHUNKS: usize = 64;
 const CANDIDATE_BYTES: usize = CHUNK_BYTES * CHUNKS;
 /// The live heap may hold a few chunks at a time, never the whole candidate.
-const PEAK_LIMIT_BYTES: u64 = 8 * CHUNK_BYTES as u64;
+const PEAK_LIMIT_BYTES: i64 = 8 * CHUNK_BYTES as i64;
 
-static LIVE_BYTES: AtomicU64 = AtomicU64::new(0);
-static PEAK_BYTES: AtomicU64 = AtomicU64::new(0);
+// Signed: a block allocated before the measurement window can be freed inside
+// it, which must drive the live count down without wrapping.
+static LIVE_BYTES: AtomicI64 = AtomicI64::new(0);
+static PEAK_BYTES: AtomicI64 = AtomicI64::new(0);
 
 struct CountingAllocator;
 
@@ -34,14 +36,14 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
-        LIVE_BYTES.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+        LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
         unsafe { System.dealloc(pointer, layout) };
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let result = unsafe { System.realloc(pointer, layout, new_size) };
         if !result.is_null() {
-            LIVE_BYTES.fetch_sub(layout.size() as u64, Ordering::Relaxed);
+            LIVE_BYTES.fetch_sub(layout.size() as i64, Ordering::Relaxed);
             track_grow(new_size);
         }
         result
@@ -49,7 +51,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
 }
 
 fn track_grow(size: usize) {
-    let live = LIVE_BYTES.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+    let live = LIVE_BYTES.fetch_add(size as i64, Ordering::Relaxed) + size as i64;
     PEAK_BYTES.fetch_max(live, Ordering::Relaxed);
 }
 
