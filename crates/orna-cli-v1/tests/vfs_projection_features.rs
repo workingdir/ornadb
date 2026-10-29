@@ -245,7 +245,6 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
 /// until bead ornadb-5il1.372 is implemented; the mount projection is not yet
 /// verified by this case.
 #[tokio::test]
-#[ignore = "ornadb-5il1.372: source admission refuses nested record/list rows (InvalidSourceRow)"]
 async fn nested_record_and_list_fields_project_as_pinned_directories() {
     if !require_fuse_or_skip() {
         return;
