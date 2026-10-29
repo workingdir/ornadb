@@ -121,6 +121,52 @@ async fn key_components_escape_utf8_percent_and_tilde_per_profile() {
     }
 }
 
+/// profiles/vfs-1.md:31-33 and 44-50 (Gate E item E8): a key whose spelling is a
+/// reserved component escapes its first otherwise-literal byte, so `.git`, `.orna`,
+/// DOS device basenames in any case with any extension (`CON`, `nul.tar`, `com1.txt`,
+/// `LPT9`) and `CLOCK$` project as `%HH` directories that resolve their own rows.
+/// Keys that only share a prefix with a reserved name (`conx`, `com10`, `console`)
+/// keep their spelling.
+#[tokio::test]
+async fn reserved_key_components_escape_first_byte_and_lookalikes_keep_spelling() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let keys = [
+        (".git", "%2Egit"),
+        (".orna", "%2Eorna"),
+        ("CON", "%43ON"),
+        ("nul.tar", "%6Eul.tar"),
+        ("com1.txt", "%63om1.txt"),
+        ("LPT9", "%4CPT9"),
+        ("CLOCK$", "%43LOCK%24"),
+        ("conx", "conx"),
+        ("com10", "com10"),
+        ("console", "console"),
+    ];
+    let documents = keys.iter().map(|(key, _)| music_row(key)).collect::<Vec<_>>();
+    let rows = keys
+        .iter()
+        .zip(&documents)
+        .map(|((key, _), document)| (*key, document.as_str()))
+        .collect::<Vec<_>>();
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows(&rows).await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let music = mountpoint.join("Music");
+    let last = music.join("%43LOCK%24/data.orna");
+    mounted.await_path(&last);
+
+    let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(sorted_names(&music), expected, "every reserved-spelling key has one directory");
+    for (key, encoded) in keys.iter() {
+        let view = read_view(&music.join(encoded).join("data.orna"));
+        assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
+    }
+}
+
 /// ORNA-VFS-016 and profiles/vfs-1.md:52-56: a component over 200 encoded bytes
 /// projects as `~key-<64 lowercase hex>` where the digest is SHA-256 of the
 /// canonical typed key component. The alias resolves the same row.
