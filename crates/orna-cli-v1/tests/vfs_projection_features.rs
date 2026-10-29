@@ -3,7 +3,7 @@
 //! FUSE projection cases for `profiles/vfs-1.md` that the mount must show:
 //! module-path directories (bead ornadb-5il1.464), key-component escaping and
 //! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), and the
-//! projections that are not implemented yet (bead ornadb-5il1.372). The ignored
+//! projection of nested record and list fields (profiles/vfs-1.md:71-74, bead ornadb-5il1.372).
 //! cases record the spec'd behaviour and are run with `--include-ignored` to show
 //! the current red output.
 
@@ -240,10 +240,8 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
 
 /// profiles/vfs-1.md:71-74 (nested records and lists): a record field projects as
 /// an escaped directory whose children are its fields, and a list field projects
-/// as a directory of decimal element indices. Source admission currently refuses
-/// this row (InvalidSourceRow) before the mount is reached, so this case is red
-/// until bead ornadb-5il1.372 is implemented; the mount projection is not yet
-/// verified by this case.
+/// as a directory of decimal element indices. The case runs against the live mount
+/// and reads the initial projection; refresh of nested directories is not covered here.
 #[tokio::test]
 async fn nested_record_and_list_fields_project_as_pinned_directories() {
     if !require_fuse_or_skip() {
