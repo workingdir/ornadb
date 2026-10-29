@@ -2493,6 +2493,7 @@ pub enum RuntimeError {
     InvalidCapture,
     EmptyMutationBatch,
     InvalidTableMutation,
+    StaleTableSchema,
     ConflictingPublicationIntent,
     ConflictingPublicationCommit,
     InvalidPublicationCommit,
@@ -2594,6 +2595,7 @@ impl fmt::Display for RuntimeError {
             Self::InvalidCapture => "invalid runtime capture",
             Self::EmptyMutationBatch => "empty runtime mutation batch",
             Self::InvalidTableMutation => "invalid durable table mutation",
+            Self::StaleTableSchema => "table schema changed since the save was admitted",
             Self::ConflictingPublicationIntent => "conflicting publication intent",
             Self::ConflictingPublicationCommit => "conflicting publication commit",
             Self::InvalidPublicationCommit => "invalid publication commit",
@@ -3257,13 +3259,35 @@ pub struct StreamValidatedTableDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
+/// The identity of the committed schema a table row is validated under: a
+/// digest of the table object and the descriptor its committed head resolves
+/// it to (ORNA-VFS-019). Computed by the caller at one committed head.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableSchemaIdentity([u8; 32]);
+
+impl TableSchemaIdentity {
+    pub const fn new(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub const fn bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 /// An ordinary table activation that validates its post-mutation candidate
 /// before publishing rows, the mutation ledger, and the CWD checkpoint.
 pub struct ValidatedTableActivationCommit<'a> {
     pub writer: WriterLease,
     pub context: &'a RuntimeActivationContext,
-    /// Repository-issued CWD and schema generation used to capture the candidate.
-    pub cwd_generation: &'a CwdGeneration,
+    /// Repository-issued CWD generation the candidate was captured under, for
+    /// validators that decode rows against the whole repository state. `None`
+    /// when the save is pinned to a table schema identity instead.
+    pub cwd_generation: Option<&'a CwdGeneration>,
+    /// Table schema identity the save was admitted under. The runtime compares
+    /// it with the validator's live identity inside the writer transaction, so a
+    /// schema change between admission and commit is refused.
+    pub expected_schema: Option<TableSchemaIdentity>,
     pub mutations: &'a [TableMutation],
     /// Native graph pins that protect content referenced by the candidate.
     pub content_pins: &'a mut [ProtectedContentPin],
@@ -3438,10 +3462,19 @@ pub trait TableActivationCandidateValidator {
         None
     }
 
-    /// Exact repository-issued CWD and schema generation used to decode and
-    /// validate rows. The runtime compares this with the captured request
-    /// before applying any candidate mutation.
-    fn cwd_generation(&self) -> &CwdGeneration;
+    /// Repository-issued CWD generation used to decode and validate rows, when
+    /// the candidate is pinned to the whole repository state (conformance).
+    /// Schema-scoped validators return `None`.
+    fn cwd_generation(&self) -> Option<&CwdGeneration> {
+        None
+    }
+
+    /// The live identity of the table schema the candidate is validated under,
+    /// read inside the writer transaction. `None` when the validator has no
+    /// schema-scoped identity; a save expecting one then fails closed.
+    fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+        None
+    }
 
     /// Returns a safe failure diagnostic when the candidate cannot commit.
     fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic>;
@@ -4703,6 +4736,7 @@ fn admin_failure_class(error: &RuntimeError) -> &'static str {
         RuntimeError::StreamFailureStateConflict => "stream_failure_state_conflict",
         RuntimeError::StreamFailureSkipUnsupported => "stream_failure_skip_unsupported",
         RuntimeError::InvalidTableMutation => "invalid_table_mutation",
+        RuntimeError::StaleTableSchema => "stale_table_schema",
         RuntimeError::ConflictingPublicationIntent => "conflicting_publication_intent",
         RuntimeError::ConflictingPublicationCommit => "conflicting_publication_commit",
         RuntimeError::InvalidPublicationCommit => "invalid_publication_commit",
@@ -4770,6 +4804,7 @@ fn admin_failure_from_class(class: &str) -> RuntimeError {
         "stream_failure_skip_unsupported" => RuntimeError::StreamFailureSkipUnsupported,
         "empty_mutation_batch" => RuntimeError::EmptyMutationBatch,
         "invalid_table_mutation" => RuntimeError::InvalidTableMutation,
+        "stale_table_schema" => RuntimeError::StaleTableSchema,
         "conflicting_publication_intent" => RuntimeError::ConflictingPublicationIntent,
         "conflicting_publication_commit" => RuntimeError::ConflictingPublicationCommit,
         "invalid_publication_commit" => RuntimeError::InvalidPublicationCommit,
@@ -7009,6 +7044,7 @@ impl RuntimeState {
             writer,
             context,
             cwd_generation,
+            expected_schema,
             mutations,
             content_pins,
             next_digest,
@@ -7084,8 +7120,15 @@ impl RuntimeState {
             .map_err(TableActivationError::Runtime)?
         {
             // An exact replay of a save the relation already holds publishes
-            // nothing new: no row effect, mutation record or checkpoint.
+            // nothing new: no row effect, mutation record or checkpoint. It is
+            // checked before the schema, so a schema change after admission
+            // does not turn an idempotent replay into a stale refusal.
             return Ok(current);
+        }
+        if validator.schema_identity() != expected_schema {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::StaleTableSchema,
+            ));
         }
         if !transfers.is_empty() {
             let Some(expected_graph_repository_id) = self.graph_repository_id.as_ref() else {
@@ -22483,6 +22526,9 @@ mod tests {
                 .unwrap()
         })
     }
+    fn activation_test_schema() -> TableSchemaIdentity {
+        TableSchemaIdentity::new([7; 32])
+    }
     async fn open_state(repo: &Repository) -> RuntimeState {
         RuntimeState::open(
             repo,
@@ -22531,7 +22577,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: activation_test_cwd_generation(0),
+                cwd_generation: Some(activation_test_cwd_generation(0)),
+                expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -22577,8 +22624,12 @@ mod tests {
             self.table_object_ids.clone()
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            activation_test_cwd_generation(0)
+        fn cwd_generation(&self) -> Option<&CwdGeneration> {
+            None
+        }
+
+        fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+            Some(activation_test_schema())
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -22628,7 +22679,7 @@ mod tests {
         draft.write_at(0, &accepted_row).await.unwrap();
         let save = vfs::VfsDurableSave::new(
             id(4),
-            activation_test_cwd_generation(0).clone(),
+            activation_test_schema(),
             identity.clone(),
             accepted_key.clone(),
         );
@@ -22696,7 +22747,7 @@ mod tests {
                 &state,
                 vfs::VfsDurableSave::new(
                     id(4),
-                    activation_test_cwd_generation(0).clone(),
+                    activation_test_schema(),
                     identity.clone(),
                     accepted_key.clone(),
                 ),
@@ -22746,7 +22797,7 @@ mod tests {
                 &state,
                 vfs::VfsDurableSave::new(
                     id(4),
-                    activation_test_cwd_generation(0).clone(),
+                    activation_test_schema(),
                     identity.clone(),
                     accepted_key.clone(),
                 ),
@@ -22828,6 +22879,100 @@ mod tests {
         );
     }
 
+    /// M4: a save the relation already holds is an exact replay. It publishes
+    /// nothing new, so a schema change after the save was admitted must not
+    /// turn the replay into a stale refusal; the already-durable check runs first.
+    #[tokio::test]
+    async fn replay_of_already_durable_mutations_survives_schema_change() {
+        /// A schema-scoped validator with no CWD generation whose live schema
+        /// identity the test controls.
+        struct LiveSchemaValidator {
+            tables: Vec<String>,
+            live: TableSchemaIdentity,
+        }
+
+        impl TableActivationCandidateValidator for LiveSchemaValidator {
+            fn tables(&self) -> &[String] {
+                &self.tables
+            }
+
+            fn cwd_generation(&self) -> Option<&CwdGeneration> {
+                None
+            }
+
+            fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+                Some(self.live.clone())
+            }
+
+            fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+                Ok(())
+            }
+        }
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let mutations = [table_mutation(5, 1, Some(9))];
+        let admitted = activation_test_schema();
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = LiveSchemaValidator {
+            tables: vec!["books".into()],
+            live: admitted.clone(),
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted.clone()),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        let generation = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the first commit publishes its checkpoint")
+            .generation;
+
+        // The replay is admitted under the schema the save was first committed
+        // under, but the live validator now reports a different schema; the
+        // relation already holds the mutation, so the replay still succeeds.
+        let context = state.begin_activation().await.unwrap();
+        let mut replay_validator = LiveSchemaValidator {
+            tables: vec!["books".into()],
+            live: TableSchemaIdentity::new([8; 32]),
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut replay_validator,
+                faults: &NoFault,
+            })
+            .await
+            .expect("an exact replay of a durable save is not a stale schema");
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the first commit publishes its checkpoint")
+                .generation,
+            generation
+        );
+    }
+
     /// ORNA-VFS-008/VFS-021: a VFS save whose durable commit succeeded but
     /// whose acknowledgement was lost is not committed a second time. The
     /// replay of the identical candidate publishes the accepted image and
@@ -22851,7 +22996,7 @@ mod tests {
         let durable_save = || {
             vfs::VfsDurableSave::new(
                 id(4),
-                activation_test_cwd_generation(0).clone(),
+                activation_test_schema(),
                 identity.clone(),
                 vec![1],
             )
@@ -23002,7 +23147,7 @@ mod tests {
         let durable_save = || {
             vfs::VfsDurableSave::new(
                 id(4),
-                activation_test_cwd_generation(0).clone(),
+                activation_test_schema(),
                 identity.clone(),
                 vec![1],
             )
@@ -23125,7 +23270,7 @@ mod tests {
         let durable_save = || {
             vfs::VfsDurableSave::new(
                 id(4),
-                activation_test_cwd_generation(0).clone(),
+                activation_test_schema(),
                 identity.clone(),
                 vec![1],
             )
@@ -23432,7 +23577,7 @@ mod tests {
         let durable_save = || {
             vfs::VfsDurableSave::new(
                 id(4),
-                activation_test_cwd_generation(0).clone(),
+                activation_test_schema(),
                 identity.clone(),
                 vec![1],
             )
@@ -23576,7 +23721,7 @@ mod tests {
         let save = || {
             vfs::VfsDurableSave::new(
                 id(4),
-                activation_test_cwd_generation(0).clone(),
+                activation_test_schema(),
                 identity.clone(),
                 vec![1],
             )
@@ -24594,7 +24739,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[table_mutation(20, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24619,7 +24765,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[
                     table_mutation(20, 1, Some(9)),
                     table_mutation(21, 2, Some(8)),
@@ -24664,7 +24811,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24751,7 +24899,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &duplicate_mutations,
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24788,7 +24937,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[decoded],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24811,7 +24961,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[mutation],
                 content_pins: &mut pins,
                 next_digest: digest(6),
@@ -24856,7 +25007,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24899,7 +25051,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -24939,7 +25092,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation,
+                cwd_generation: Some(cwd_generation),
+                expected_schema: None,
                 mutations: &[table_mutation(5, 1, Some(9))],
                 content_pins: &mut [],
                 next_digest: digest(6),
@@ -36976,8 +37130,8 @@ mod tests {
             &self.tables
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            activation_test_cwd_generation(0)
+        fn cwd_generation(&self) -> Option<&CwdGeneration> {
+            Some(activation_test_cwd_generation(0))
         }
 
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -36998,8 +37152,8 @@ mod tests {
             &self.tables
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            activation_test_cwd_generation(0)
+        fn cwd_generation(&self) -> Option<&CwdGeneration> {
+            Some(activation_test_cwd_generation(0))
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -37030,8 +37184,8 @@ mod tests {
             &self.tables
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            activation_test_cwd_generation(0)
+        fn cwd_generation(&self) -> Option<&CwdGeneration> {
+            Some(activation_test_cwd_generation(0))
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -37065,8 +37219,8 @@ mod tests {
             &self.tables
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            activation_test_cwd_generation(0)
+        fn cwd_generation(&self) -> Option<&CwdGeneration> {
+            Some(activation_test_cwd_generation(0))
         }
 
         fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -41964,6 +42118,7 @@ mod tests {
             (RuntimeError::InvalidCapture, "invalid_capture"),
             (RuntimeError::EmptyMutationBatch, "empty_mutation_batch"),
             (RuntimeError::InvalidTableMutation, "invalid_table_mutation"),
+            (RuntimeError::StaleTableSchema, "stale_table_schema"),
             (RuntimeError::ConflictingPublicationIntent, "conflicting_publication_intent"),
             (RuntimeError::ConflictingPublicationCommit, "conflicting_publication_commit"),
             (RuntimeError::InvalidPublicationCommit, "invalid_publication_commit"),
@@ -41985,7 +42140,7 @@ mod tests {
             (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
             (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
         ];
-        assert_eq!(table.len(), 48);
+        assert_eq!(table.len(), 49);
         for (variant, class) in table {
             assert_eq!(admin_failure_class(variant), *class);
             assert_eq!(admin_failure_from_class(class), *variant, "{class}");
@@ -53595,7 +53750,8 @@ mod tests {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context: &context,
-                cwd_generation: activation_test_cwd_generation(0),
+                cwd_generation: Some(activation_test_cwd_generation(0)),
+                expected_schema: None,
                 mutations: &[],
                 content_pins: &mut [],
                 next_digest: digest(6),
