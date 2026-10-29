@@ -689,7 +689,14 @@ class ReviewFindingTests(unittest.TestCase):
         cli_run = [line for line in text.splitlines() if "gate_evidence.py test -p orna-cli-v1 --timeout-minutes" in line]
         self.assertEqual(len(cli_run), 1, cli_run)
         self.assertIn("--skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata", cli_run[0])
-        self.assertNotIn("cargo test", text)
+        # Every bare `cargo test` in the per-PR cli workflow must sit inside a recorded `gate_evidence.py run`.
+        lines = text.splitlines()
+        for index, line in enumerate(lines):
+            if "cargo test" not in line:
+                continue
+            openers = [i for i in range(index) if "gate_evidence.py" in lines[i]]
+            self.assertTrue(openers, line)
+            self.assertIn("gate_evidence.py run", lines[openers[-1]], line)
 
     def test_gate_b_items_name_the_nightly_cli_record(self) -> None:
         # B1-B3 are evidence from the nightly workspace-cli record; per-PR runs skip the test.
