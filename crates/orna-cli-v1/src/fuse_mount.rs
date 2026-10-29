@@ -3584,10 +3584,13 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         match state.lookup_child(parent.0, name) {
-            Ok(Some(inode)) => match state.attr(inode) {
-                Some(attr) => reply.entry(&ENTRY_TTL, &attr, Generation(1)),
-                None => reply.error(Errno::EIO),
-            },
+            Ok(Some(inode)) => {
+                state.refresh_document_node(inode);
+                match state.attr(inode) {
+                    Some(attr) => reply.entry(&ENTRY_TTL, &attr, Generation(1)),
+                    None => reply.error(Errno::EIO),
+                }
+            }
             Ok(None) => reply.error(Errno::ENOENT),
             Err(_) => reply.error(Errno::EIO),
         }
@@ -3648,10 +3651,11 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
 
-        let state = self
+        let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.refresh_document_node(inode.0);
         match state.attr(inode.0) {
             Some(mut attr) => {
                 if let Some(size) = candidate_size {
@@ -5891,6 +5895,18 @@ impl FsBuilder {
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
         node.kind = document;
         Ok(true)
+    }
+
+    /// Refreshes a document node from the live row before its attributes are
+    /// reported, so `stat` reports the accepted size that reads already return
+    /// (profiles/vfs-1.md:133). A row unchanged from its baseline is left as is.
+    fn refresh_document_node(&mut self, document_inode: u64) {
+        let save = match self.nodes.get(&document_inode).map(|node| &node.kind) {
+            Some(NodeKind::Document { save, .. }) => Arc::clone(save),
+            _ => return,
+        };
+        let path = self.display_path(document_inode);
+        self.report_refresh(document_inode, &save, &path);
     }
 
     /// Refreshes a stale document and reports the outcome on stderr.
