@@ -6,9 +6,11 @@
 //! `profiles/vfs-1.md` is tracked by bead ornadb-5il1.464 and is not a test yet.
 
 use std::{
-    fs::File,
+    fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::Path,
+    process::Command,
+    time::Duration,
 };
 
 use tempfile::TempDir;
@@ -24,7 +26,7 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     assert_errno, repository_with_music_rows, repository_with_music_rows_and_modules,
-    require_fuse_or_skip, spawn_mount_process, write_and_sync,
+    require_fuse_or_skip, retained_drafts, spawn_mount_process, write_and_sync,
 };
 
 const EINVAL: i32 = 22;
@@ -444,4 +446,55 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
     );
     assert_eq!(read_view(&notes), NOTES_ACCEPTED, "the malformed group leaves notes committed");
     assert_eq!(read_view(&extra), EXTRA_ACCEPTED, "the valid sibling is not admitted alone");
+}
+
+/// ORNA-VFS-020/024 and 41-vfs.md: a source candidate written while its handle is still open
+/// is dirty and unsynced when the mount stops. Stopping must not report it as saved: the
+/// candidate is retained as a draft and named with `sys.vfs.draft_retained`. The committed
+/// module keeps its bytes. The spec does not fix the stop exit status, so none is asserted.
+#[tokio::test]
+async fn vfs_020_dirty_source_draft_is_retained_at_unmount() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    const UNSYNCED: &str = "pub fn unsynced_draft(): Int = 9;\n";
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of notes.orna is accepted");
+    handle.write_all(UNSYNCED.as_bytes()).expect("the candidate is written");
+
+    let signal = Command::new("kill")
+        .args(["-TERM", &mounted.pid().to_string()])
+        .status()
+        .expect("send SIGTERM to the mount process");
+    assert!(signal.success(), "kill -TERM failed");
+    // The open handle keeps the mount up (ORNA-VFS-024); stop retains the dirty candidate first.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !retained_drafts(&repository).iter().any(|draft| draft.contains("unsynced_draft")) {
+        assert!(std::time::Instant::now() < deadline, "stop did not retain the dirty source draft");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    drop(handle);
+    mounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the mount stops once the handle is closed");
+    let stderr = mounted.stderr_text();
+    assert!(
+        stderr.contains("sys.vfs.draft_retained") && stderr.contains("notes.orna"),
+        "stop reports the retained source draft: {stderr}"
+    );
 }
