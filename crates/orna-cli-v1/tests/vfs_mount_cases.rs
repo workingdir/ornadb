@@ -218,3 +218,37 @@ async fn vfs_020_source_path_takes_priority_over_colliding_table_directory() {
         "the source directory owns Music; the table directory is not projected"
     );
 }
+
+/// ORNA-VFS-020 and profiles/vfs-1.md: a source module is read-only in this slice. A
+/// write-intent open is refused with EPERM at open time, not accepted and then failed
+/// with EBADF on write, and the committed bytes are unchanged. The spec does not name
+/// source writes, so refusing them is a conservative choice.
+#[tokio::test]
+async fn vfs_020_source_write_open_is_refused_with_eperm() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    mounted.await_path(&notes);
+
+    assert_errno(
+        std::fs::OpenOptions::new().write(true).open(&notes).map(|_| ()),
+        &[libc::EPERM],
+        "a write-intent open of a source module is refused",
+    );
+    assert_errno(
+        std::fs::OpenOptions::new().append(true).open(&notes).map(|_| ()),
+        &[libc::EPERM],
+        "an append open of a source module is refused",
+    );
+    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module keeps its committed bytes");
+}
