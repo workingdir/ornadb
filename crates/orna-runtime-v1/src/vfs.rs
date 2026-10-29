@@ -3762,12 +3762,15 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             )));
         }
         // Lock order (ORNA-VFS-019, ornadb-eufo.2.2): the VFS operation gates
-        // below are taken first, then the SQLite writer transaction inside
-        // `commit_durable_save`. The committed table schema identity is read
-        // inside that transaction, before validation and again immediately
-        // before COMMIT (`require_live_table_schema` in lib.rs). No lock covers
-        // git refs, so a schema commit landing after the last read is not
-        // serialized with this save; that residual is recorded in CHANGELOG.md.
+        // below are taken first, then the VFS projection epoch lock
+        // (`cache_epoch.generation`, taken in `commit_durable_save` after the
+        // admission callback and held across `admission.commit`), then the
+        // SQLite writer transaction inside `admission.commit`. The committed
+        // table schema identity is read inside that transaction, before
+        // validation and again immediately before COMMIT
+        // (`require_live_table_schema` in lib.rs). No lock covers git refs, so
+        // a schema commit landing after the last read is not serialized with
+        // this save; that residual is recorded in CHANGELOG.md.
         let _operation = self.operation.lock().await;
         let _scratch_operation = scratch.operation.lock().await;
         let draft = {

@@ -550,11 +550,10 @@ pub async fn commit_source_replacement_through_save_admission(
     .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
     let live_repository = repository.clone();
     let live_table = coordinates.table().object_id();
+    let mut live_identity = table_schema::LiveTableSchemaIdentity::new(live_table);
     let candidate = VfsSaveCandidate::new(replacement, validator)
         .with_protected_content_transfers(replacement_bytes, content_transfers)
-        .with_live_schema_identity(move || {
-            committed_table_schema_identity(&live_repository, live_table).ok()
-        });
+        .with_live_schema_identity(move || live_identity.read(&live_repository));
     admission
         .commit(candidate)
         .await
