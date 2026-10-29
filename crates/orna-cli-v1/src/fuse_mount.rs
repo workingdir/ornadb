@@ -45,6 +45,9 @@ use orna_value_v1::{
     Format3Context, Raw, SchemaDescriptor, blob_metadata_from_raw, decode_canonical_storage_value,
 };
 use sha2::{Digest, Sha256};
+use crate::cli_dispatch::{checked_project_source_path, restore_source_after_failed_write, write_source_atomically};
+
+mod source_write;
 
 /// Implementation draft quota for every mounted draft and scratch file: 64 MiB,
 /// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec
@@ -2555,6 +2558,7 @@ enum OpenFile {
         Arc<TemporarySave<RowMapSnapshot>>,
         Option<BlobField>,
     ),
+    Source(u64),
 }
 /// Why a submitted candidate was not accepted, for the unmount listing and
 /// the stop-time report. `draft` is its recovery record once retained. While
@@ -2599,6 +2603,8 @@ struct DraftState {
     blob_handles: HashMap<u64, BlobHandle>,
     /// Pid that opened each writable handle; a FLUSH from another process is not the writer's close.
     writer_owners: HashMap<u64, u32>,
+    /// Source modules with a private write-intent candidate (ORNA-VFS-020), keyed by inode.
+    source_drafts: BTreeMap<u64, source_write::SourceDraft>,
 }
 
 impl DraftState {
@@ -2608,6 +2614,7 @@ impl DraftState {
             || !self.retained_scratch.is_empty()
             || !self.rejected_documents.is_empty()
             || !self.rejected_scratch.is_empty()
+            || self.source_drafts.values().any(source_write::SourceDraft::is_unresolved)
     }
 
     /// A write or truncate by `handle` makes its candidate newer than the refused
@@ -2652,6 +2659,8 @@ struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     draft_state: Mutex<DraftState>,
+    /// Serializes source-module group commits; held outside the draft lock.
+    source_gate: Mutex<()>,
     next_handle: AtomicU64,
 }
 
@@ -2994,6 +3003,7 @@ impl WorkspaceFilesystem {
                 retained_scratch,
                 ..DraftState::default()
             }),
+            source_gate: Mutex::new(()),
             next_handle: AtomicU64::new(1),
         })
     }
@@ -3267,6 +3277,9 @@ impl WorkspaceFilesystem {
                     )),
                 }
             }
+            Some(OpenFile::Source(_)) => Err(DocumentCommitError::Failed(
+                "source module commits go through source_sync".to_owned(),
+            )),
             None => Err(DocumentCommitError::Failed(
                 "file handle is not open".to_owned(),
             )),
@@ -3529,6 +3542,33 @@ impl WorkspaceFilesystem {
             };
             unresolved.insert(*inode, (code, draft, detail));
         }
+        for (inode, source) in &draft_state.source_drafts {
+            let Some(refusal) = &source.refusal else {
+                if source.dirty {
+                    unresolved.entry(*inode).or_insert_with(|| {
+                        ("", String::new(), "unsynced writes in an open file".to_owned())
+                    });
+                }
+                continue;
+            };
+            let code = spec_code(refusal.cause)
+                .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
+                .unwrap_or("");
+            let (draft, detail) = match &refusal.draft {
+                Some(draft) => (
+                    draft.clone(),
+                    format!(
+                        "not accepted ({}); candidate retained as draft {draft}",
+                        refusal.cause
+                    ),
+                ),
+                None => (
+                    String::new(),
+                    format!("not accepted ({}); candidate not retained", refusal.cause),
+                ),
+            };
+            unresolved.entry(*inode).or_insert((code, draft, detail));
+        }
         for (inode, refusal) in &draft_state.rejected_scratch {
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
@@ -3617,6 +3657,7 @@ impl WorkspaceFilesystem {
     /// its bytes as an unresolved refusal, so a later attempt retries it.
     /// Returns the errno of the refusal that kept a draft, or `None` when every draft was retained.
     fn retain_all_drafts(&self, draft_state: &mut DraftState) -> Option<Errno> {
+        let source_refused = self.retain_unsynced_sources(draft_state);
         let open_files = self
             .open_files
             .lock()
@@ -3859,6 +3900,9 @@ impl WorkspaceFilesystem {
             .rejected_scratch
             .retain(|inode, _| unkept_scratch.contains(inode));
         draft_state.rejected_documents = unresolved;
+        if let Some(errno) = source_refused {
+            refused = worst_retention_errno(refused, errno);
+        }
         refused
     }
 }
@@ -4099,11 +4143,12 @@ impl Filesystem for WorkspaceFilesystem {
                 OpenFile::Temporary(save, _, scratch, _) => {
                     save.writer.runtime.block_on(scratch.candidate_len())
                 }
+                OpenFile::Source(source_inode) => self.source_candidate_len(*source_inode),
             })
         };
         let candidate_size = match handle {
             Some(handle) => open_len(handle.0),
-            // fstat without a handle reaches here; an open Document or Blob candidate is the file.
+            // fstat without a handle reaches here; an open Document, Temporary or Source candidate is the file.
             None => {
                 let handles: Vec<u64> = self
                     .draft_state
@@ -4124,7 +4169,9 @@ impl Filesystem for WorkspaceFilesystem {
                             .is_some_and(|open| {
                                 matches!(
                                     open,
-                                    OpenFile::Document(..) | OpenFile::Temporary(_, _, _, Some(_))
+                                    OpenFile::Document(..)
+                                        | OpenFile::Temporary(_, _, _, Some(_))
+                                        | OpenFile::Source(_)
                                 )
                             })
                     })
@@ -4182,6 +4229,14 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if draft_state.quiescing {
             reply.error(Errno::EBUSY);
+            return;
+        }
+        if write_mode && self.is_source_module(inode.0) {
+            let truncate = flags.0 & libc::O_TRUNC != 0;
+            match self.source_open_write(&mut draft_state, inode.0, truncate, request.pid()) {
+                Ok(handle) => reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS),
+                Err(errno) => reply.error(errno),
+            }
             return;
         }
         let (save, target, scratch, blob_field) = {
@@ -4977,6 +5032,10 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&handle.0)
             .cloned();
+        if let Some(OpenFile::Source(source_inode)) = &open_file {
+            reply.data(&self.source_read(*source_inode, offset, size));
+            return;
+        }
         let private_read = match open_file {
             Some(OpenFile::Document(save, draft)) => Some(read_candidate_range(
                 |offset, length| save.writer.runtime.block_on(draft.read_range(offset, length)),
@@ -4988,6 +5047,7 @@ impl Filesystem for WorkspaceFilesystem {
                 offset,
                 reply_read_size(size),
             )),
+            Some(OpenFile::Source(_)) => None,
             None => None,
         };
         if let Some(bytes) = private_read {
@@ -5119,6 +5179,13 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EBUSY);
             return;
         }
+        if let Some(source_inode) = self.source_handle_inode(handle.0) {
+            match self.source_write(&mut draft_state, handle.0, source_inode, offset, data) {
+                Ok(()) => reply.written(u32::try_from(data.len()).unwrap_or(u32::MAX)),
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         let open_file = self
             .open_files
             .lock()
@@ -5157,7 +5224,7 @@ impl Filesystem for WorkspaceFilesystem {
                     .then(|| save.writer.runtime.block_on(scratch.candidate_len()));
                 (result, len)
             }
-            None => {
+            Some(OpenFile::Source(_)) | None => {
                 if !had_unresolved_handle {
                     draft_state.unresolved_handles.remove(&handle.0);
                 }
@@ -5194,6 +5261,13 @@ impl Filesystem for WorkspaceFilesystem {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        if let Some(trigger) = self.source_handle_inode(handle.0) {
+            match self.source_sync(trigger) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         let mut draft_state = self
             .draft_state
             .lock()
@@ -5264,6 +5338,14 @@ impl Filesystem for WorkspaceFilesystem {
             reply.ok();
             return;
         }
+        if let Some(trigger) = self.source_handle_inode(handle.0) {
+            drop(draft_state);
+            match self.source_sync(trigger) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
             Ok(()) => {
                 draft_state.unresolved_handles.remove(&handle.0);
@@ -5320,6 +5402,9 @@ impl Filesystem for WorkspaceFilesystem {
         }
         draft_state.dirty_handles.remove(&handle.0);
         draft_state.writer_owners.remove(&handle.0);
+        if let Some(OpenFile::Source(source_inode)) = &released {
+            self.source_release(&mut draft_state, *source_inode);
+        }
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
@@ -5365,7 +5450,16 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EBUSY);
                 return;
             }
-            if let Some(handle) = handle {
+            let source = handle.and_then(|handle| {
+                self.source_handle_inode(handle.0)
+                    .map(|source_inode| (handle.0, source_inode))
+            });
+            if let Some((handle, source_inode)) = source {
+                if let Err(errno) = self.source_truncate(&mut draft_state, handle, source_inode, size) {
+                    reply.error(errno);
+                    return;
+                }
+            } else if let Some(handle) = handle {
                 let open_file = self
                     .open_files
                     .lock()
@@ -5406,6 +5500,10 @@ impl Filesystem for WorkspaceFilesystem {
                             .is_ok()
                             .then(|| save.writer.runtime.block_on(scratch.candidate_len()));
                         (result, len)
+                    }
+                    OpenFile::Source(_) => {
+                        reply.error(Errno::EBADF);
+                        return;
                     }
                 };
                 if result.is_err() {
