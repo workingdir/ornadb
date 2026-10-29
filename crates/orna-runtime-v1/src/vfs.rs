@@ -33,6 +33,7 @@ use super::{
     RuntimeActivationContext, RuntimeError, RuntimeQueryError, RuntimeState,
     RuntimeTableActivationSnapshot, RuntimeTableIdentity, SafeDiagnostic,
     TableActivationCandidateValidator, TableActivationError, TableMutation,
+    TableSchemaIdentity,
     ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
@@ -2924,12 +2925,12 @@ pub async fn commit_vfs_table_activation(
 /// The repository-issued coordinates one durable document save commits under.
 ///
 /// The writer that owns the repository, the admitted relation identity and
-/// typed key, and the repository-issued CWD and schema generation are one unit:
-/// a save cannot combine a generation from one repository state with a row
+/// typed key, and the table schema identity it is validated under are one unit:
+/// a save cannot combine a schema identity from one committed state with a row
 /// identity from another (`ORNA-STATE-003`, VFS-002).
 pub struct VfsDurableSave {
     owner_id: [u8; 16],
-    cwd_generation: CwdGeneration,
+    expected_schema: TableSchemaIdentity,
     table: RuntimeTableIdentity,
     key: Vec<u8>,
     expected_baseline_row: Option<Option<Vec<u8>>>,
@@ -2938,13 +2939,13 @@ pub struct VfsDurableSave {
 impl VfsDurableSave {
     pub fn new(
         owner_id: [u8; 16],
-        cwd_generation: CwdGeneration,
+        expected_schema: TableSchemaIdentity,
         table: RuntimeTableIdentity,
         key: Vec<u8>,
     ) -> Self {
         Self {
             owner_id,
-            cwd_generation,
+            expected_schema,
             table,
             key,
             expected_baseline_row: None,
@@ -2973,17 +2974,11 @@ impl VfsDurableSave {
 /// relation identity and typed key the candidate row must address. Owned, so a
 /// caller's async candidate builder borrows nothing from the admission.
 pub struct VfsSaveCoordinates {
-    cwd_generation: CwdGeneration,
     table: RuntimeTableIdentity,
     key: Vec<u8>,
 }
 
 impl VfsSaveCoordinates {
-    /// The CWD generation captured with this save admission.
-    pub fn cwd_generation(&self) -> &CwdGeneration {
-        &self.cwd_generation
-    }
-
     /// The admitted committed identity of the saved row's relation.
     pub fn table(&self) -> &RuntimeTableIdentity {
         &self.table
@@ -3060,6 +3055,22 @@ impl VfsSaveCandidate {
     pub fn replacement(&self) -> &VfsTableRowReplacement {
         &self.replacement
     }
+
+    /// Makes the commit read the table schema identity inside the writer
+    /// transaction and refuse when it differs from the one this save was
+    /// admitted under.
+    pub fn with_live_schema_identity(
+        self,
+        read: impl FnMut() -> Option<TableSchemaIdentity> + Send + 'static,
+    ) -> Self {
+        Self {
+            replacement: self.replacement,
+            validator: Box::new(LiveSchemaCandidateValidator {
+                inner: self.validator,
+                read: Box::new(read),
+            }),
+        }
+    }
 }
 struct ContentPinCandidateValidator {
     inner: Box<dyn TableActivationCandidateValidator>,
@@ -3078,8 +3089,12 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
         self.inner.table_object_ids()
     }
 
-    fn cwd_generation(&self) -> &CwdGeneration {
+    fn cwd_generation(&self) -> Option<&CwdGeneration> {
         self.inner.cwd_generation()
+    }
+
+    fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+        self.inner.schema_identity()
     }
 
     fn validate(&mut self, rows: &super::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -3098,6 +3113,55 @@ impl TableActivationCandidateValidator for ContentPinCandidateValidator {
                     .iter()
                     .any(|(key, value)| key == &self.key && value == &self.row_value)
             })
+    }
+}
+
+/// Reads the table schema identity inside the writer transaction, so a save
+/// admitted under one schema cannot commit under another (ORNA-VFS-019).
+struct LiveSchemaCandidateValidator {
+    inner: Box<dyn TableActivationCandidateValidator>,
+    read: Box<dyn FnMut() -> Option<TableSchemaIdentity> + Send>,
+}
+
+impl TableActivationCandidateValidator for LiveSchemaCandidateValidator {
+    fn tables(&self) -> &[String] {
+        self.inner.tables()
+    }
+
+    fn table_object_ids(&self) -> BTreeMap<String, super::TableObjectId> {
+        self.inner.table_object_ids()
+    }
+
+    fn committed_rows(&self) -> Option<&super::PinnedCommittedRows> {
+        self.inner.committed_rows()
+    }
+
+    fn cwd_generation(&self) -> Option<&CwdGeneration> {
+        self.inner.cwd_generation()
+    }
+
+    fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+        (self.read)()
+    }
+
+    fn validate(&mut self, rows: &super::RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+        self.inner.validate(rows)
+    }
+
+    fn validate_changed(
+        &mut self,
+        rows: &super::RuntimeTableRows,
+        changed_tables: &std::collections::BTreeSet<String>,
+    ) -> Result<(), SafeDiagnostic> {
+        self.inner.validate_changed(rows, changed_tables)
+    }
+
+    fn validate_content_pins(
+        &mut self,
+        rows: &super::RuntimeTableRows,
+        transfers: &[ProtectedContentTransfer],
+    ) -> bool {
+        self.inner.validate_content_pins(rows, transfers)
     }
 }
 
@@ -3143,7 +3207,6 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
     /// caller's candidate builder can own them across its own await points.
     pub fn coordinates(&self) -> VfsSaveCoordinates {
         VfsSaveCoordinates {
-            cwd_generation: self.save.cwd_generation.clone(),
             table: self.save.table.clone(),
             key: self.save.key.clone(),
         }
@@ -3207,7 +3270,8 @@ impl<'a, S: Send + Sync + 'static> VfsSaveAdmission<'a, S> {
             ValidatedTableActivationCommit {
                 writer: self.writer,
                 context: &self.context,
-                cwd_generation: &self.save.cwd_generation,
+                cwd_generation: None,
+                expected_schema: Some(self.save.expected_schema.clone()),
                 mutations: std::slice::from_ref(&mutation),
                 content_pins: &mut content_pins,
                 next_digest: self.digest,
@@ -3526,6 +3590,19 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                     .retain_rejection(revision, diagnostic)
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Rejected {
+                    generation: *cache_generation,
+                    diagnostic,
+                });
+            }
+            Err(TableActivationError::Runtime(RuntimeError::StaleTableSchema)) => {
+                let diagnostic = stale_baseline_diagnostic();
+                draft
+                    .state
+                    .lock()
+                    .await
+                    .retain_retryable_conflict(revision, diagnostic)
+                    .map_err(VfsSaveError::Backing)?;
+                return Err(VfsSaveError::Stale {
                     generation: *cache_generation,
                     diagnostic,
                 });
@@ -5482,7 +5559,7 @@ mod tests {
         object_id: TableObjectId,
         accepted: Vec<u8>,
         expected_content_transfer: Option<ProtectedContentTransferEvidence>,
-        cwd_generation: CwdGeneration,
+        schema: TableSchemaIdentity,
     }
 
     impl TableActivationCandidateValidator for DurableRenameValidator {
@@ -5494,8 +5571,8 @@ mod tests {
             BTreeMap::from([(self.table.clone(), self.object_id)])
         }
 
-        fn cwd_generation(&self) -> &CwdGeneration {
-            &self.cwd_generation
+        fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+            Some(self.schema.clone())
         }
 
         fn validate(&mut self, rows: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
@@ -5539,7 +5616,7 @@ mod tests {
                 .success()
         );
         let repo = Repository::discover(temp.path()).unwrap();
-        let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        let schema = TableSchemaIdentity::new([7; 32]);
         let state = RuntimeState::open(
             &repo,
             RuntimeIdentity {
@@ -5563,14 +5640,14 @@ mod tests {
             include_bytes!("../tests/fixtures/vfs-row-music-london.orna").to_vec();
         let stale_fixture =
             include_bytes!("../tests/fixtures/publication-repository-main.orna").to_vec();
-        let cwd_for_admit = cwd_generation.clone();
+        let schema_for_admit = schema.clone();
         let accepted_baseline = accepted_for_admit.clone();
         let stale_for_validation = stale_fixture.clone();
         let scratch = target.begin_temporary_replacement(1 << 20).await;
         scratch.write_at(0, &accepted_for_admit).await.unwrap();
         let save = VfsDurableSave::new(
             [4; 16],
-            cwd_generation.clone(),
+            schema.clone(),
             identity.clone(),
             key.clone(),
         )
@@ -5597,7 +5674,7 @@ mod tests {
                             object_id: identity_for_admit.object_id(),
                             accepted: accepted_for_validation.clone(),
                             expected_content_transfer: None,
-                            cwd_generation: cwd_for_admit.clone(),
+                            schema: schema_for_admit.clone(),
                         }),
                     ))
                 },
@@ -5616,7 +5693,7 @@ mod tests {
                 &state,
                 VfsDurableSave::new(
                     [4; 16],
-                    cwd_generation.clone(),
+                    schema.clone(),
                     identity.clone(),
                     key.clone(),
                 )
@@ -5642,14 +5719,14 @@ mod tests {
             .unwrap();
         let identical_identity = identity.clone();
         let identical_bytes = accepted_for_admit.clone();
-        let cwd_for_identical = cwd_generation.clone();
+        let schema_for_identical = schema.clone();
         let identical = target
             .commit_durable_temporary_rename(
                 &identical_scratch,
                 &state,
                 VfsDurableSave::new(
                     [4; 16],
-                    cwd_generation.clone(),
+                    schema.clone(),
                     identity.clone(),
                     key.clone(),
                 )
@@ -5669,7 +5746,7 @@ mod tests {
                             object_id: identical_identity.object_id(),
                             accepted: identical_bytes,
                             expected_content_transfer: None,
-                            cwd_generation: cwd_for_identical,
+                            schema: schema_for_identical,
                         }),
                     ))
                 },
@@ -5689,14 +5766,14 @@ mod tests {
         let stale_scratch = target.begin_temporary_replacement(1 << 20).await;
         stale_scratch.write_at(0, &stale_fixture).await.unwrap();
         let stale_identity = identity.clone();
-        let cwd_for_stale = cwd_generation.clone();
+        let schema_for_stale = schema.clone();
         let stale = target
             .commit_durable_temporary_rename(
                 &stale_scratch,
                 &state,
                 VfsDurableSave::new(
                     [4; 16],
-                    cwd_generation.clone(),
+                    schema.clone(),
                     identity.clone(),
                     key.clone(),
                 )
@@ -5716,7 +5793,7 @@ mod tests {
                             object_id: stale_identity.object_id(),
                             accepted: stale_for_validation,
                             expected_content_transfer: None,
-                            cwd_generation: cwd_for_stale.clone(),
+                            schema: schema_for_stale.clone(),
                         }),
                     ))
                 },
@@ -5734,14 +5811,14 @@ mod tests {
         assert_eq!(state.pending().await.unwrap().len(), 1);
         let retry_identity = identity.clone();
         let retry_fixture = stale_fixture.clone();
-        let cwd_for_retry = cwd_generation.clone();
+        let schema_for_retry = schema.clone();
         let retried = target
             .commit_durable_temporary_rename(
                 &stale_scratch,
                 &state,
                 VfsDurableSave::new(
                     [4; 16],
-                    cwd_generation.clone(),
+                    schema.clone(),
                     identity.clone(),
                     key.clone(),
                 )
@@ -5761,7 +5838,7 @@ mod tests {
                             object_id: retry_identity.object_id(),
                             accepted: retry_fixture,
                             expected_content_transfer: None,
-                            cwd_generation: cwd_for_retry.clone(),
+                            schema: schema_for_retry.clone(),
                         }),
                     ))
                 },
@@ -5779,7 +5856,7 @@ mod tests {
             &state,
             VfsDurableSave::new(
                 [4; 16],
-                cwd_generation.clone(),
+                schema.clone(),
                 identity.clone(),
                 key.clone(),
             ),
@@ -5898,7 +5975,7 @@ mod tests {
         let table = RuntimeTableIdentity::new("media", TableObjectId::new(relation_id)).unwrap();
         let table_for_checks = table.clone();
         let key = b"image".to_vec();
-        let cwd_generation = repo.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        let schema = TableSchemaIdentity::new([7; 32]);
         let pins_before = test_git_output(
             repo.worktree(),
             &["for-each-ref", "--format=%(refname)", "refs/orna/pins"],
@@ -5928,7 +6005,7 @@ mod tests {
                 &target,
                 &scratch,
                 &state,
-                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone())
                     .with_expected_baseline_row(None),
                 &capture,
                 ContentIdentity::new(
@@ -5993,13 +6070,13 @@ mod tests {
         let stale_table = table.clone();
         let stale_table_name = stale_table.table().to_owned();
         let stale_object_id = stale_table.object_id();
-        let stale_cwd_generation = cwd_generation.clone();
+        let stale_schema = schema.clone();
         let stale = cache
             .commit_durable_blob_rename(
                 &target,
                 &scratch,
                 &state,
-                VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+                VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone())
                     .with_expected_baseline_row(Some(b"stale baseline".to_vec())),
                 &capture,
                 expected_identity,
@@ -6034,7 +6111,7 @@ mod tests {
                             object_id: stale_object_id,
                             accepted: row_value,
                             expected_content_transfer: Some(expected_content_transfer),
-                            cwd_generation: stale_cwd_generation,
+                            schema: stale_schema,
                         }),
                     ))
                 },
@@ -6074,14 +6151,14 @@ mod tests {
         let save_table = table.clone();
         let save_table_name = save_table.table().to_owned();
         let save_object_id = save_table.object_id();
-        let save_cwd_generation = cwd_generation.clone();
+        let save_schema = schema.clone();
         let target_for_admit = Arc::clone(&target);
         let scratch_for_admit = &scratch;
         let state_for_admit = &state;
         let nested_save =
-            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone());
+            VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone());
         let nested_document_save =
-            VfsDurableSave::new(owner_id, cwd_generation.clone(), table.clone(), key.clone())
+            VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone())
                 .with_expected_baseline_row(None);
         let save_key = key.clone();
         let replacement_for_admit = replacement_bytes.clone();
@@ -6090,7 +6167,7 @@ mod tests {
                 &target,
                 &scratch,
                 &state,
-                VfsDurableSave::new(owner_id, cwd_generation, table, key.clone())
+                VfsDurableSave::new(owner_id, schema, table, key.clone())
                     .with_expected_baseline_row(None),
                 &capture,
                 expected_identity,
@@ -6171,7 +6248,7 @@ mod tests {
                             object_id: save_object_id,
                             accepted: row_value,
                             expected_content_transfer: Some(expected_content_transfer),
-                            cwd_generation: save_cwd_generation,
+                            schema: save_schema,
                         }),
                     ))
                 },
