@@ -4794,12 +4794,28 @@ fn validate_anonymous_record(value: &Raw, fields: &[Raw], definitions: &[Raw]) -
     if values.len() != fields.len() {
         return Err(Error::InvalidValue);
     }
-    for (field, value) in fields.iter().zip(values) {
-        let field = array(field)?;
+    // Stored fields are ordered by encoded field key (ORNA-FORMAT-004), which
+    // need not match descriptor declaration order, so match each entry by key.
+    let mut prior = None;
+    for value in values {
         let entry = array(value)?;
-        if entry.len() != 2 || entry[0] != field[0] {
+        if entry.len() != 2 {
             return Err(Error::InvalidValue);
         }
+        let key = encode_raw(&entry[0])?;
+        if prior.as_ref().is_some_and(|x: &Vec<u8>| key <= *x) {
+            return Err(Error::DuplicateOrUnorderedMapKey);
+        }
+        prior = Some(key);
+        let field = fields
+            .iter()
+            .map(array)
+            .find_map(|field| match field {
+                Ok(field) if field.first() == Some(&entry[0]) => Some(Ok(field)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .ok_or(Error::InvalidValue)??;
         validate_stored_value_as_type(
             &entry[1],
             field.get(1).ok_or(Error::InvalidSchema)?,
@@ -8746,5 +8762,92 @@ mod resolver_integrity_tests {
         assert_eq!(blob.read(0, 1).unwrap(), b"a");
         assert_eq!(blob.read(0, 3), Err(Error::ContentDigestMismatch));
         assert_eq!(blob.read_to_end(), Err(Error::ContentDigestMismatch));
+    }
+}
+
+#[cfg(test)]
+mod anonymous_record_order_tests {
+    use super::*;
+
+    fn str_type() -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())])
+    }
+
+    fn int_type() -> Raw {
+        Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Int".into())])
+    }
+
+    /// The descriptor declares `label` before `rank`, which is name order. Stored entries
+    /// must follow encoded field-key order (`rank` before `label`), so matching is by key.
+    fn descriptor_fields() -> Vec<Raw> {
+        vec![
+            Raw::Array(vec![Raw::Text("label".into()), str_type()]),
+            Raw::Array(vec![Raw::Text("rank".into()), int_type()]),
+        ]
+    }
+
+    fn record(entries: Vec<(&str, Raw)>) -> Raw {
+        Raw::Tag(
+            60009,
+            Box::new(Raw::Array(vec![
+                Raw::Null,
+                Raw::Array(
+                    entries
+                        .into_iter()
+                        .map(|(name, value)| {
+                            Raw::Array(vec![Raw::Text(name.to_owned()), value])
+                        })
+                        .collect(),
+                ),
+            ])),
+        )
+    }
+
+    #[test]
+    fn accepts_ascending_encoded_keys_in_any_descriptor_order() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("label", Raw::Text("x".into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn refuses_unordered_entries() {
+        let stored = record(vec![
+            ("label", Raw::Text("x".into())),
+            ("rank", Raw::Int(1.into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::DuplicateOrUnorderedMapKey)
+        );
+    }
+
+    #[test]
+    fn refuses_duplicate_keys() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("rank", Raw::Int(2.into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::DuplicateOrUnorderedMapKey)
+        );
+    }
+
+    #[test]
+    fn refuses_unknown_keys() {
+        let stored = record(vec![
+            ("rank", Raw::Int(1.into())),
+            ("other", Raw::Text("x".into())),
+        ]);
+        assert_eq!(
+            validate_anonymous_record(&stored, &descriptor_fields(), &[]),
+            Err(Error::InvalidValue)
+        );
     }
 }
