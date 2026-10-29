@@ -2474,58 +2474,60 @@ impl WorkspaceFilesystem {
         if newname == name {
             return Ok(());
         }
-        let (inode, save, old, new, document_inode, document) = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let inode = state
-                .lookup_child(parent, name)
-                .map_err(|_| Errno::EIO)?
-                .ok_or(Errno::ENOENT)?;
-            let old = match state.nodes.get(&inode).map(|node| &node.kind) {
-                Some(NodeKind::Blob {
-                    candidate: Some(candidate),
-                    ..
-                }) => candidate.field.clone(),
-                _ => return Err(refused_mutation_errno()),
-            };
-            let newname_text = newname.to_str().ok_or(Errno::EPERM)?;
-            let suffix =
-                blob_rename_hint(&old.media_type, &old.name, newname_text).ok_or(Errno::EPERM)?;
-            if state
-                .lookup_child(parent, newname)
-                .map_err(|_| Errno::EIO)?
-                .is_some()
-            {
-                return Err(Errno::EEXIST);
-            }
-            let new = BlobField {
-                file_name: newname_text.to_owned(),
-                suffix,
-                ..old.clone()
-            };
-            let (document_inode, document) = row_document(&mut state, parent)?;
-            let save = document_save(&state, document_inode)?;
-            (inode, save, old, new, document_inode, document)
+        // The guard spans the EEXIST check, the baseline capture, the commit and the directory
+        // update, so no other namespace operation on this mount can claim `newname` in between.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inode = state
+            .lookup_child(parent, name)
+            .map_err(|_| Errno::EIO)?
+            .ok_or(Errno::ENOENT)?;
+        let old = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Blob {
+                candidate: Some(candidate),
+                ..
+            }) => candidate.field.clone(),
+            _ => return Err(refused_mutation_errno()),
         };
+        let newname_text = newname.to_str().ok_or(Errno::EPERM)?;
+        let suffix =
+            blob_rename_hint(&old.media_type, &old.name, newname_text).ok_or(Errno::EPERM)?;
+        if state
+            .lookup_child(parent, newname)
+            .map_err(|_| Errno::EIO)?
+            .is_some()
+        {
+            return Err(Errno::EEXIST);
+        }
+        let new = BlobField {
+            file_name: newname_text.to_owned(),
+            suffix,
+            ..old.clone()
+        };
+        let (document_inode, document) = row_document(&mut state, parent)?;
+        let save = document_save(&state, document_inode)?;
+        // The baseline is read with the bytes it describes, so the CAS compares the same image.
+        let baseline = save.recorded_baseline();
         let text = std::str::from_utf8(&document).map_err(|_| Errno::EIO)?;
         let rewritten = replace_descriptor_path(text, &old.name, &old.file_name, &new.file_name)
             .map_err(|error| {
                 eprintln!("mounted Blob rename refused: {error}");
                 Errno::EIO
             })?;
-        if let Err(error) =
-            commit_blob_descriptor_change(&save, &old.name, Some(new.clone()), rewritten.as_bytes())
-        {
+        if let Err(error) = commit_blob_descriptor_change(
+            &save,
+            &old.name,
+            Some(new.clone()),
+            rewritten.as_bytes(),
+            baseline,
+        ) {
             eprintln!("mounted Blob rename failed: {error}");
+            drop(state);
             self.refresh_stale_blob_document(document_inode, &save, &error);
             return Err(error.errno());
         }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(NodeKind::Document { bytes, .. }) = state
             .nodes
             .get_mut(&document_inode)
@@ -2533,21 +2535,12 @@ impl WorkspaceFilesystem {
         {
             *bytes = rewritten.into_bytes();
         }
-        let removed = state
+        // The commit is already durable, so a refused directory rename is reported, not failed.
+        let renamed = state
             .directory_mut(parent)
-            .and_then(|directory| directory.remove_entry(name));
-        match removed {
-            Some(entry) => {
-                if let Some(directory) = state.directory_mut(parent) {
-                    directory.insert_entry(DirectoryEntry {
-                        inode: entry.inode,
-                        name: newname.to_owned(),
-                        kind: entry.kind,
-                    });
-                }
-            }
-            // The commit is already durable, so a missing entry is reported, not failed.
-            None => eprintln!("mounted Blob rename: {name:?} had already left its directory"),
+            .is_some_and(|directory| directory.rename_entry(name, newname));
+        if !renamed {
+            eprintln!("mounted Blob rename: {name:?} could not take the name {newname:?} in its directory");
         }
         if let Some(NodeKind::Blob {
             candidate: Some(candidate),
@@ -2563,51 +2556,49 @@ impl WorkspaceFilesystem {
     /// `null` through the row's CAS boundary, then its sibling file goes away. A required Blob
     /// field is refused with EPERM.
     fn unlink_blob(&self, parent: u64, name: &OsStr) -> Result<(), Errno> {
-        let (inode, save, field, document_inode, document) = {
-            let mut state = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if !matches!(
-                state.nodes.get(&parent).map(|node| &node.kind),
-                Some(NodeKind::Row(_))
-            ) {
-                return Err(Errno::EPERM);
-            }
-            let inode = state
-                .lookup_child(parent, name)
-                .map_err(|_| Errno::EIO)?
-                .ok_or(Errno::ENOENT)?;
-            let field = match state.nodes.get(&inode).map(|node| &node.kind) {
-                Some(NodeKind::Blob {
-                    candidate: Some(candidate),
-                    ..
-                }) => candidate.field.clone(),
-                _ => return Err(refused_mutation_errno()),
-            };
-            if field.required {
-                return Err(Errno::EPERM);
-            }
-            let (document_inode, document) = row_document(&mut state, parent)?;
-            let save = document_save(&state, document_inode)?;
-            (inode, save, field, document_inode, document)
+        // The guard spans the field lookup, the baseline capture, the commit and the directory
+        // update, as in rename_blob_suffix.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.nodes.get(&parent).map(|node| &node.kind),
+            Some(NodeKind::Row(_))
+        ) {
+            return Err(Errno::EPERM);
+        }
+        let inode = state
+            .lookup_child(parent, name)
+            .map_err(|_| Errno::EIO)?
+            .ok_or(Errno::ENOENT)?;
+        let field = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Blob {
+                candidate: Some(candidate),
+                ..
+            }) => candidate.field.clone(),
+            _ => return Err(refused_mutation_errno()),
         };
+        if field.required {
+            return Err(Errno::EPERM);
+        }
+        let (document_inode, document) = row_document(&mut state, parent)?;
+        let save = document_save(&state, document_inode)?;
+        // The baseline is read with the bytes it describes, so the CAS compares the same image.
+        let baseline = save.recorded_baseline();
         let text = std::str::from_utf8(&document).map_err(|_| Errno::EIO)?;
         let rewritten = null_descriptor(text, &field.name, &field.file_name).map_err(|error| {
             eprintln!("mounted Blob unlink refused: {error}");
             Errno::EIO
         })?;
         if let Err(error) =
-            commit_blob_descriptor_change(&save, &field.name, None, rewritten.as_bytes())
+            commit_blob_descriptor_change(&save, &field.name, None, rewritten.as_bytes(), baseline)
         {
             eprintln!("mounted Blob unlink failed: {error}");
+            drop(state);
             self.refresh_stale_blob_document(document_inode, &save, &error);
             return Err(error.errno());
         }
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(NodeKind::Document { bytes, .. }) = state
             .nodes
             .get_mut(&document_inode)
@@ -2615,9 +2606,13 @@ impl WorkspaceFilesystem {
         {
             *bytes = rewritten.into_bytes();
         }
-        // The commit is durable, so the entry and node are retired without failing the unlink.
-        if let Some(directory) = state.directory_mut(parent) {
-            directory.remove_entry(name);
+        // The commit is durable, so a missing entry is reported, not failed (LOW-4).
+        if state
+            .directory_mut(parent)
+            .and_then(|directory| directory.remove_entry(name))
+            .is_none()
+        {
+            eprintln!("mounted Blob unlink: {name:?} had already left its directory");
         }
         // Open handles keep reading the captured bytes until their last release (profiles/vfs-1.md).
         state.retire_node(inode);
@@ -6385,9 +6380,18 @@ impl Directory {
         }
         Some(removed)
     }
-    fn insert_entry(&mut self, entry: DirectoryEntry) {
-        self.by_name.insert(entry.name.clone(), self.entries.len());
-        self.entries.push(entry);
+    /// Renames `name` in place, so every entry keeps its readdir position (ORNA-VFS-017).
+    /// Returns false, leaving the directory unchanged, when `name` is absent or `newname` is taken.
+    fn rename_entry(&mut self, name: &OsStr, newname: &OsStr) -> bool {
+        if self.by_name.contains_key(newname) {
+            return false;
+        }
+        let Some(index) = self.by_name.remove(name) else {
+            return false;
+        };
+        self.entries[index].name = newname.to_owned();
+        self.by_name.insert(newname.to_owned(), index);
+        true
     }
 }
 
@@ -6519,14 +6523,14 @@ fn stored_field_layout(descriptor: &SchemaDescriptor) -> Result<StoredFieldLayou
     })
 }
 
-/// Commits `bytes` as the row's whole document through the CAS boundary a draft save uses,
-/// against the row this view last accepted (41-vfs.md Temporary-save replacement).
+/// Commits `bytes` as the row's whole document through the CAS boundary a draft save uses.
+/// `baseline` is the row `bytes` were derived from, captured with them (41-vfs.md
+/// Temporary-save replacement); the commit refuses as stale when the live row has moved on.
 fn commit_row_document(
     save: &Arc<RowSaveContext>,
     bytes: &[u8],
+    baseline: Option<Vec<u8>>,
 ) -> Result<(), DocumentCommitError> {
-    // The recorded baseline refuses the rewrite as stale when another writer changed the row.
-    let baseline = save.recorded_baseline();
     let scratch = save.writer.runtime.block_on(
         save.target
             .begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES),
@@ -6541,12 +6545,14 @@ fn commit_row_document(
 }
 
 /// Swaps the admitted Blob field `field_name` for `replacement` (`None` removes it) and commits
-/// the rewritten `data.orna`. A refused commit restores the admitted list.
+/// the rewritten `data.orna` against `baseline`, the row `document` was derived from. A refused
+/// commit restores the admitted list.
 fn commit_blob_descriptor_change(
     save: &Arc<RowSaveContext>,
     field_name: &str,
     replacement: Option<BlobField>,
     document: &[u8],
+    baseline: Option<Vec<u8>>,
 ) -> Result<(), DocumentCommitError> {
     let removed = replacement.is_none();
     let mut fields = save
@@ -6564,7 +6570,7 @@ fn commit_blob_descriptor_change(
         None => fields.remove(index),
     };
     drop(fields);
-    let committed = commit_row_document(save, document);
+    let committed = commit_row_document(save, document, baseline);
     if committed.is_err() {
         let mut fields = save
             .blob_fields
@@ -7764,22 +7770,33 @@ mod directory_removal_tests {
         }
     }
 
+    /// A directory whose entries sit in the given order, laid out as `insert_node` does.
+    fn directory_of(entries: &[(u64, &str)]) -> Directory {
+        let mut directory = Directory::new();
+        for &(inode, name) in entries {
+            let index = directory.entries.len();
+            directory.by_name.insert(OsString::from(name), index);
+            directory.entries.push(entry(inode, name));
+        }
+        directory
+    }
+
+    fn names(directory: &Directory) -> Vec<&str> {
+        directory
+            .entries
+            .iter()
+            .map(|entry| entry.name.to_str().expect("test names are UTF-8"))
+            .collect()
+    }
+
     #[test]
     fn removing_an_entry_keeps_sibling_readdir_positions() {
-        let mut directory = Directory::new();
-        for (inode, name) in [(2, "a"), (3, "b"), (4, "c"), (5, "d")] {
-            directory.insert_entry(entry(inode, name));
-        }
+        let mut directory = directory_of(&[(2, "a"), (3, "b"), (4, "c"), (5, "d")]);
         let removed = directory
             .remove_entry(OsStr::new("b"))
             .expect("b is present before removal");
         assert_eq!(removed.inode, 3);
-        let names: Vec<&str> = directory
-            .entries
-            .iter()
-            .map(|entry| entry.name.to_str().expect("test names are UTF-8"))
-            .collect();
-        assert_eq!(names, ["a", "c", "d"], "siblings keep their readdir order");
+        assert_eq!(names(&directory), ["a", "c", "d"], "siblings keep their readdir order");
         assert_eq!(
             directory.entry(OsStr::new("c")).map(|entry| entry.inode),
             Some(4)
@@ -7789,6 +7806,33 @@ mod directory_removal_tests {
             Some(5)
         );
         assert!(directory.entry(OsStr::new("b")).is_none());
+    }
+
+    #[test]
+    fn renaming_an_entry_keeps_its_readdir_position() {
+        let mut directory = directory_of(&[(2, "a"), (3, "b"), (4, "c")]);
+        assert!(directory.rename_entry(OsStr::new("b"), OsStr::new("b.mp1")));
+        assert_eq!(names(&directory), ["a", "b.mp1", "c"], "the renamed entry keeps its index");
+        assert_eq!(
+            directory.entry(OsStr::new("b.mp1")).map(|entry| entry.inode),
+            Some(3)
+        );
+        assert!(directory.entry(OsStr::new("b")).is_none());
+    }
+
+    #[test]
+    fn renaming_onto_a_taken_name_leaves_the_directory_unchanged() {
+        let mut directory = directory_of(&[(2, "a"), (3, "b")]);
+        assert!(!directory.rename_entry(OsStr::new("a"), OsStr::new("b")));
+        assert_eq!(names(&directory), ["a", "b"]);
+        assert_eq!(
+            directory.entry(OsStr::new("a")).map(|entry| entry.inode),
+            Some(2)
+        );
+        assert_eq!(
+            directory.entry(OsStr::new("b")).map(|entry| entry.inode),
+            Some(3)
+        );
     }
 }
 
