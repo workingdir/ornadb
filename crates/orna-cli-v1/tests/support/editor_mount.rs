@@ -190,18 +190,28 @@ pub fn spawn_mount_process(repository_path: &Path, mountpoint: &Path) -> Mounted
 /// Starts `mount --cwd` on an existing mountpoint directory without waiting for
 /// the FUSE mount to appear.
 pub fn start_mount_process(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
+    spawn_mount_with(repository_path, mountpoint, &["--cwd"])
+}
+
+/// Starts `mount --at <selector>` on an existing mountpoint, then waits until the
+/// Linux mount table lists `mountpoint`. A snapshot mount has no writer.
+pub fn spawn_snapshot_mount_process(
+    repository_path: &Path,
+    mountpoint: &Path,
+    selector: &str,
+) -> MountedProcess {
+    std::fs::create_dir(mountpoint).unwrap();
+    wait_for_mount(spawn_mount_with(repository_path, mountpoint, &["--at", selector]))
+}
+
+fn spawn_mount_with(repository_path: &Path, mountpoint: &Path, mode: &[&str]) -> MountedProcess {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
-        .args([
-            "--db",
-            repository_path.to_str().unwrap(),
-            "mount",
-            mountpoint.to_str().unwrap(),
-            "--cwd",
-        ])
+        .args(["--db", repository_path.to_str().unwrap(), "mount", mountpoint.to_str().unwrap()])
+        .args(mode)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("start mount --cwd");
+        .expect("start mount");
     let stderr = Arc::new(Mutex::new(String::new()));
     let stderr_reader = child.stderr.take().map(|mut pipe| {
         let sink = Arc::clone(&stderr);
