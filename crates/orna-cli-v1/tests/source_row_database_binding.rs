@@ -1,7 +1,11 @@
 use std::sync::Arc;
 
-use orna_project_v1::{ProjectLoadError, ProjectLoader, admit_source_row};
-use orna_repository_v1::GitCommitRef;
+use orna_project_v1::{
+    KeyComponentText, ProjectLoadError, ProjectLoader, admit_source_row,
+    admit_source_row_with_owner_fields,
+};
+use orna_repository_v1::{GitCommitRef, TypedKey};
+use orna_runtime_v1::vfs::project_key_component;
 use orna_value_v1::{
     AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Context,
     Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
@@ -118,4 +122,108 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
         [0x77; 16],
     );
     assert!(matches!(result, Err(ProjectLoadError::InvalidSourceRow)));
+}
+
+#[test]
+fn legacy_key_path_spelling_is_refused_and_vfs_spelling_admits() {
+    let (_directory, repository, relation_id) = format3::format3_repository(
+        "pub table media(id: Str) { content: Str, }\n",
+    );
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+    let schema = loader
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            orna_runtime_v1::TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    let context = format3_context_for_database(&commit, *schema.database_id());
+    let row_source = "{ content: \"space\", }\n";
+
+    // `~20` is the legacy key-path-v1 spelling of a space. Only the VFS-1
+    // projection `%20` is admitted (profiles/vfs-1.md:44-50).
+    let legacy = admit_source_row(
+        &project,
+        "media/~20.orna",
+        row_source,
+        &schema,
+        &context,
+        Vec::new(),
+        [0x78; 16],
+    );
+    assert!(matches!(legacy, Err(ProjectLoadError::InvalidSourceRow)));
+
+    let vfs = admit_source_row(
+        &project,
+        "media/%20.orna",
+        row_source,
+        &schema,
+        &context,
+        Vec::new(),
+        [0x79; 16],
+    );
+    assert!(vfs.is_ok(), "the VFS-1 spelling of a space admits");
+}
+
+/// A `~key-` alias resolves only through a supplied pair whose encoding digests
+/// to the alias and whose text is the canonical text of that encoding
+/// (profiles/vfs-1.md:52-56). A digest-matching pair with other text is refused.
+#[test]
+fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
+    let (_directory, repository, relation_id) = format3::format3_repository(
+        "pub table media(id: Str) { content: Str, }\n",
+    );
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+    let schema = loader
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            orna_runtime_v1::TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    let context = format3_context_for_database(&commit, *schema.database_id());
+    let key = "k".repeat(300);
+    let encoding = TypedKey::Text(key.clone()).canonical_bytes().unwrap();
+    let alias = project_key_component(&key, &encoding);
+    assert!(alias.starts_with("~key-"));
+    let logical_path = format!("media/{alias}.orna");
+    let row_source = "{ content: \"long\", }\n";
+    let pair = |text: String| KeyComponentText {
+        text,
+        canonical_encoding: encoding.clone(),
+    };
+
+    let forged = admit_source_row_with_owner_fields(
+        &project,
+        &logical_path,
+        row_source,
+        &schema,
+        &context,
+        Vec::new(),
+        Vec::new(),
+        &[pair("forged".to_owned())],
+        [0x7a; 16],
+    );
+    assert!(matches!(forged, Err(ProjectLoadError::InvalidSourceRow)));
+
+    let admitted = admit_source_row_with_owner_fields(
+        &project,
+        &logical_path,
+        row_source,
+        &schema,
+        &context,
+        Vec::new(),
+        Vec::new(),
+        &[pair(key)],
+        [0x7b; 16],
+    );
+    assert!(admitted.is_ok(), "the pair whose text encodes to the alias admits");
 }

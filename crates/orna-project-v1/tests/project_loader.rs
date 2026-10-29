@@ -245,6 +245,28 @@ fn format3_candidate_writing_a_loose_row_mixes_formats() {
     assert_loose_row_refused(error, path);
 }
 
+/// A legacy `key-path-v1` spelling (`~ff`, `~xx`) names a loose-row file, not a
+/// VFS-1 projection (profiles/vfs-1.md:44-56). A committed format-3 snapshot that
+/// holds one is refused with ORNA-REPO-CONTEXT-004: legacy rows are read only
+/// through their recorded import context (Orna-1.1.0.md, "File extension").
+#[test]
+fn format3_legacy_key_path_spelling_row_is_refused() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (".orna/database.orna", FORMAT3_DATABASE),
+        (".orna/store/data", "format-3 row graph"),
+    ]);
+    let row_path = directory.path().join("Music/~ff.orna");
+    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
+    fs::write(&row_path, "{\n    title: \"Legacy empty key\",\n}\n").unwrap();
+    commit_all(&directory);
+    let mixed = repository.head().unwrap().unwrap();
+    let error = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &mixed)
+        .expect_err("a legacy key-path-v1 row mixes formats");
+    assert_loose_row_refused(error, "Music/~ff.orna");
+}
+
 /// The loose-row refusal recognises only row files: an unreached
 /// `<table>/<key>.orna`. A module a `use` reaches is a module even beside a
 /// table of the same name (ORNA-NS-002), and `dir/main.orna`, files beside a
