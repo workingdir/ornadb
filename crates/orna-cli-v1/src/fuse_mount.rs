@@ -32,6 +32,7 @@ use orna_runtime_v1::{
     vfs::{
         CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
+        DraftQuota, QuotaCharge,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
         project_component, project_key_component, unproject_component,
         FsyncFailure,
@@ -606,9 +607,8 @@ fn reply_read_size(size: u32) -> u32 {
     size.min(u32::try_from(CANDIDATE_CHUNK_BYTES).unwrap_or(u32::MAX))
 }
 
-/// Where a candidate the mount did not accept reads its bytes from. Retention
-/// streams a live draft or a truncation by range; only a stash whose retention
-/// was refused holds materialised bytes.
+/// Where a candidate the mount did not accept reads its bytes from.
+/// Retention streams a live draft or a truncation by range; nothing is copied whole.
 #[derive(Clone)]
 enum CandidateSource {
     /// A live draft, read through its spool by range.
@@ -616,8 +616,6 @@ enum CandidateSource {
     /// The newest writer draft of the file when one is open or was released
     /// unretained, else its accepted baseline; either is cut or zero-extended to `size`.
     Truncated { size: u64, latest: Option<Arc<EditDraft<RowMapSnapshot>>> },
-    /// Bytes already held in memory for a candidate whose retention was refused.
-    Stashed(Arc<[u8]>),
 }
 
 /// Reads up to `length` bytes at `offset` of the candidate that results from
@@ -677,13 +675,71 @@ fn retain_scratch_candidate(
 /// after its handle, scratch name or mount is gone.
 struct VfsRetainedDraftStore {
     directory: PathBuf,
+    /// The aggregate draft budget every retained record is charged to.
+    quota: Arc<DraftQuota>,
+    /// One charge per record on disk, keyed by draft ID. A record's charge is
+    /// released when the record is removed.
+    records: Mutex<BTreeMap<String, QuotaCharge>>,
 }
 
 impl VfsRetainedDraftStore {
-    fn new(runtime_root: &Path) -> Self {
-        Self {
-            directory: runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY),
+    /// Opens recovery storage under `runtime_root`. Every record already on disk
+    /// is charged to `quota` as it is found, even past the limit, so a restart
+    /// cannot grow past the budget; only new retention is refused.
+    fn open(runtime_root: &Path, quota: Arc<DraftQuota>) -> Result<Self, String> {
+        let directory = runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY);
+        let mut records = BTreeMap::new();
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        format!("VFS recovery storage could not be listed: {error}")
+                    })?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Some(id) = name.strip_suffix(".draft") else {
+                        continue;
+                    };
+                    let metadata = entry.metadata().map_err(|error| {
+                        format!("VFS recovery record {name} could not be inspected: {error}")
+                    })?;
+                    if metadata.is_file() {
+                        records.insert(id.to_owned(), QuotaCharge::restore(&quota, metadata.len()));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "VFS recovery storage could not be listed: {error}"
+                ));
+            }
         }
+        Ok(Self {
+            directory,
+            quota,
+            records: Mutex::new(records),
+        })
+    }
+
+    /// Removes the record `id` and releases its quota charge. A record that is
+    /// already gone is not an error.
+    fn remove(&self, id: &str) -> Result<(), RetentionError> {
+        let record = self.directory.join(format!("{id}.draft"));
+        match fs::remove_file(&record) {
+            Ok(()) => VfsScratchStore::sync_directory(&self.directory)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RetentionError::io(
+                    format!("retained draft {id} could not be removed: {error}"),
+                    &error,
+                ));
+            }
+        }
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+        Ok(())
     }
 
     /// Retains `bytes` as a candidate for the projected `path`. Retaining the
@@ -710,6 +766,13 @@ impl VfsRetainedDraftStore {
         let id = hex_bytes(&digest[..16]);
         let record = self.directory.join(format!("{id}.draft"));
         if record.is_file() {
+            // A record already on disk, written by another process, counts too.
+            let on_disk = fs::metadata(&record).map_or(0, |metadata| metadata.len());
+            self.records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(id.clone())
+                .or_insert_with(|| QuotaCharge::restore(&self.quota, on_disk));
             return Ok(RetainedDraft { id, record });
         }
         match fs::create_dir(&self.directory) {
@@ -745,15 +808,25 @@ impl VfsRetainedDraftStore {
                 ),
             });
         }
+        let header = format!(
+            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
+        );
+        // The whole record is charged before any byte is staged, so a refused
+        // reservation (EDQUOT) leaves nothing behind.
+        let charge = QuotaCharge::reserve(&self.quota, header.len() as u64 + len).map_err(|_| {
+            RetentionError {
+                errno: Errno::EDQUOT,
+                message: format!(
+                    "VFS recovery storage quota is exhausted; a {len}-byte candidate cannot be retained; remove recovered records first"
+                ),
+            }
+        })?;
         let mut staged = tempfile::Builder::new()
             .prefix(".retain-")
             .tempfile_in(&self.directory)
             .map_err(|error| {
                 RetentionError::io(format!("retained draft could not be staged: {error}"), &error)
             })?;
-        let header = format!(
-            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
-        );
         let written = |error: std::io::Error| {
             RetentionError::io(format!("retained draft could not be written: {error}"), &error)
         };
@@ -777,6 +850,10 @@ impl VfsRetainedDraftStore {
                 &error.error,
             )
         })?;
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), charge);
         VfsScratchStore::sync_directory(&self.directory)?;
         Ok(RetainedDraft { id, record })
     }
@@ -848,6 +925,12 @@ impl MountWriter {
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
         let scratch_store = VfsScratchStore::open(repository.runtime_paths().root())?;
+        let cache = Arc::new(
+            VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
+                .map_err(|error| format!("draft spool unavailable: {error}"))?,
+        );
+        let retained_drafts =
+            VfsRetainedDraftStore::open(repository.runtime_paths().root(), cache.draft_quota())?;
         Ok(Arc::new(Self {
             runtime,
             state,
@@ -856,12 +939,9 @@ impl MountWriter {
             project: Arc::new(project),
             runtime_commit,
             mount_snapshot: OnceLock::new(),
-            cache: Arc::new(
-                VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
-                    .map_err(|error| format!("draft spool unavailable: {error}"))?,
-            ),
+            cache,
             scratch_store,
-            retained_drafts: VfsRetainedDraftStore::new(repository.runtime_paths().root()),
+            retained_drafts,
             owner_id,
             row_baselines,
         }))
@@ -1123,6 +1203,8 @@ struct BlobField {
     suffix: Option<String>,
     reference: AdmittedBlobReference,
     replacement_bytes: Option<Arc<[u8]>>,
+    /// Whether the row schema requires this field: a required Blob is never unlinked (VFS-013).
+    required: bool,
 }
 struct RowSaveContext {
     writer: Arc<MountWriter>,
@@ -1485,6 +1567,15 @@ impl RowSaveContext {
             return Ok(recorded);
         };
         Ok(self.writer.live_row(table, key)?.or(recorded))
+    }
+
+    /// The row this view last loaded or accepted: the CAS baseline for a commit that does not
+    /// re-read the live row.
+    fn recorded_baseline(&self) -> Option<Vec<u8>> {
+        self.expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     fn temporary_target(
@@ -2362,7 +2453,7 @@ enum OpenFile {
 /// Why a submitted candidate was not accepted, for the unmount listing and
 /// the stop-time report. `draft` is its recovery record once retained. While
 /// recovery storage refuses the candidate, `unretained` holds its save context
-/// and bytes so a later retention attempt can still write them.
+/// and its live source so a later retention attempt can still write it.
 struct DraftRefusal {
     cause: &'static str,
     draft: Option<String>,
@@ -2371,7 +2462,7 @@ struct DraftRefusal {
     /// The released or refused writer's draft: the base a path truncate that
     /// arrives before retention cuts (ORNA-VFS-009).
     candidate: Option<Arc<EditDraft<RowMapSnapshot>>>,
-    unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
+    unretained: Option<(Arc<RowSaveContext>, CandidateSource)>,
 }
 
 /// A replacement candidate whose rename was refused. `kept` records that its
@@ -2469,6 +2560,193 @@ fn worst_retention_errno(current: Option<Errno>, next: Errno) -> Option<Errno> {
 }
 
 impl WorkspaceFilesystem {
+    /// Whether `name` under `parent` is a Blob this mount can write.
+    fn is_candidate_blob(&self, parent: u64, name: &OsStr) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        matches!(
+            state.lookup_child(parent, name),
+            Ok(Some(inode))
+                if matches!(
+                    state.nodes.get(&inode).map(|node| &node.kind),
+                    Some(NodeKind::Blob { candidate: Some(_), .. })
+                )
+        )
+    }
+
+    /// Renames a Blob to a compatible suffix (41-vfs.md VFS-012): the bytes are not transcoded
+    /// and the field is not renamed. Only the suffix hint moves, committed through the row's
+    /// CAS boundary as a rewritten `data.orna` descriptor.
+    fn rename_blob_suffix(&self, parent: u64, name: &OsStr, newname: &OsStr) -> Result<(), Errno> {
+        if newname == name {
+            return Ok(());
+        }
+        // The guard spans the EEXIST check, the baseline capture, the commit and the directory
+        // update, so no other namespace operation on this mount can claim `newname` in between.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let inode = state
+            .lookup_child(parent, name)
+            .map_err(|_| Errno::EIO)?
+            .ok_or(Errno::ENOENT)?;
+        let old = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Blob {
+                candidate: Some(candidate),
+                ..
+            }) => candidate.field.clone(),
+            _ => return Err(refused_mutation_errno()),
+        };
+        let newname_text = newname.to_str().ok_or(Errno::EPERM)?;
+        let suffix =
+            blob_rename_hint(&old.media_type, &old.name, newname_text).ok_or(Errno::EPERM)?;
+        if state
+            .lookup_child(parent, newname)
+            .map_err(|_| Errno::EIO)?
+            .is_some()
+        {
+            return Err(Errno::EEXIST);
+        }
+        let new = BlobField {
+            file_name: newname_text.to_owned(),
+            suffix,
+            ..old.clone()
+        };
+        let (document_inode, document) = row_document(&mut state, parent)?;
+        let save = document_save(&state, document_inode)?;
+        // The baseline is read with the bytes it describes, so the CAS compares the same image.
+        let baseline = save.recorded_baseline();
+        let text = std::str::from_utf8(&document).map_err(|_| Errno::EIO)?;
+        let rewritten = replace_descriptor_path(text, &old.name, &old.file_name, &new.file_name)
+            .map_err(|error| {
+                eprintln!("mounted Blob rename refused: {error}");
+                Errno::EIO
+            })?;
+        if let Err(error) = commit_blob_descriptor_change(
+            &save,
+            &old.name,
+            Some(new.clone()),
+            rewritten.as_bytes(),
+            baseline,
+        ) {
+            eprintln!("mounted Blob rename failed: {error}");
+            drop(state);
+            self.refresh_stale_blob_document(document_inode, &save, &error);
+            return Err(error.errno());
+        }
+        if let Some(NodeKind::Document { bytes, .. }) = state
+            .nodes
+            .get_mut(&document_inode)
+            .map(|node| &mut node.kind)
+        {
+            *bytes = rewritten.into_bytes();
+        }
+        // The commit is already durable, so a refused directory rename is reported, not failed.
+        let renamed = state
+            .directory_mut(parent)
+            .is_some_and(|directory| directory.rename_entry(name, newname));
+        if !renamed {
+            eprintln!("mounted Blob rename: {name:?} could not take the name {newname:?} in its directory");
+        }
+        if let Some(NodeKind::Blob {
+            candidate: Some(candidate),
+            ..
+        }) = state.nodes.get_mut(&inode).map(|node| &mut node.kind)
+        {
+            candidate.field = new;
+        }
+        Ok(())
+    }
+
+    /// Unlinks an optional Blob field (ORNA-VFS-013, profiles/vfs-1.md): its descriptor becomes
+    /// `null` through the row's CAS boundary, then its sibling file goes away. A required Blob
+    /// field is refused with EPERM.
+    fn unlink_blob(&self, parent: u64, name: &OsStr) -> Result<(), Errno> {
+        // The guard spans the field lookup, the baseline capture, the commit and the directory
+        // update, as in rename_blob_suffix.
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !matches!(
+            state.nodes.get(&parent).map(|node| &node.kind),
+            Some(NodeKind::Row(_))
+        ) {
+            return Err(Errno::EPERM);
+        }
+        let inode = state
+            .lookup_child(parent, name)
+            .map_err(|_| Errno::EIO)?
+            .ok_or(Errno::ENOENT)?;
+        let field = match state.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::Blob {
+                candidate: Some(candidate),
+                ..
+            }) => candidate.field.clone(),
+            _ => return Err(refused_mutation_errno()),
+        };
+        if field.required {
+            return Err(Errno::EPERM);
+        }
+        let (document_inode, document) = row_document(&mut state, parent)?;
+        let save = document_save(&state, document_inode)?;
+        // The baseline is read with the bytes it describes, so the CAS compares the same image.
+        let baseline = save.recorded_baseline();
+        let text = std::str::from_utf8(&document).map_err(|_| Errno::EIO)?;
+        let rewritten = null_descriptor(text, &field.name, &field.file_name).map_err(|error| {
+            eprintln!("mounted Blob unlink refused: {error}");
+            Errno::EIO
+        })?;
+        if let Err(error) =
+            commit_blob_descriptor_change(&save, &field.name, None, rewritten.as_bytes(), baseline)
+        {
+            eprintln!("mounted Blob unlink failed: {error}");
+            drop(state);
+            self.refresh_stale_blob_document(document_inode, &save, &error);
+            return Err(error.errno());
+        }
+        if let Some(NodeKind::Document { bytes, .. }) = state
+            .nodes
+            .get_mut(&document_inode)
+            .map(|node| &mut node.kind)
+        {
+            *bytes = rewritten.into_bytes();
+        }
+        // The commit is durable, so a missing entry is reported, not failed (LOW-4).
+        if state
+            .directory_mut(parent)
+            .and_then(|directory| directory.remove_entry(name))
+            .is_none()
+        {
+            eprintln!("mounted Blob unlink: {name:?} had already left its directory");
+        }
+        // Open handles keep reading the captured bytes until their last release (profiles/vfs-1.md).
+        state.retire_node(inode);
+        Ok(())
+    }
+
+    /// After a stale refusal the row's current image becomes the recorded baseline, so the next
+    /// rename or unlink compares against the durable row instead of the refused one.
+    fn refresh_stale_blob_document(
+        &self,
+        document_inode: u64,
+        save: &Arc<RowSaveContext>,
+        error: &DocumentCommitError,
+    ) {
+        if !matches!(error, DocumentCommitError::Stale) {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let path = state.display_path(document_inode);
+        state.report_refresh(document_inode, save, &path);
+    }
+
     fn from_snapshot(
         repository: &Repository,
         commit: &GitCommitRef,
@@ -2756,6 +3034,20 @@ impl WorkspaceFilesystem {
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
     ) -> Result<(), DocumentCommitError> {
+        // A path truncate issued while this writer was open is recorded, not applied to
+        // the draft. It is applied before the candidate is judged, so the accepted or
+        // refused candidate reflects the cut (ORNA-VFS-009; POSIX arrival order).
+        if let Some(size) = draft_state.pending_truncates.get(&inode).copied() {
+            save.writer
+                .runtime
+                .block_on(draft.truncate(size))
+                .map_err(|error| {
+                    DocumentCommitError::Failed(format!(
+                        "candidate could not be cut to {size} bytes: {error:?}"
+                    ))
+                })?;
+            draft_state.pending_truncates.remove(&inode);
+        }
         if let Err(error) = save.commit_document(draft, true) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
@@ -3034,20 +3326,13 @@ impl WorkspaceFilesystem {
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                // Recovery storage refused the candidate, so the in-memory stash is the
-                // only copy left. It is the sole whole-candidate copy on this path and
-                // exists only while retention is refused (follow-up bead).
-                match save.writer.runtime.block_on(draft.candidate_bytes()) {
-                    Ok(bytes) => (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno)),
-                    Err(error) => {
-                        // Nothing can be retained without the bytes; the refusal stays recorded.
-                        eprintln!(
-                            "{path}: not accepted ({cause}); candidate could not be read: {}",
-                            candidate_unreadable(error)
-                        );
-                        (None, None, Some(Errno::EIO))
-                    }
-                }
+                // Recovery storage refused the candidate: the live draft is the only copy
+                // left, so it stays unresolved and is retried at the next retention.
+                (
+                    None,
+                    Some((Arc::clone(save), CandidateSource::Draft(Arc::clone(draft)))),
+                    Some(retain_error.errno),
+                )
             }
         };
         if let Some(superseded) = draft_state.rejected_documents.insert(
@@ -3212,17 +3497,10 @@ impl WorkspaceFilesystem {
             Arc<RowSaveContext>,
             CandidateSource,
         )> = Vec::new();
-        for (handle, inode) in &draft_state.unresolved_handles {
-            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
-                candidates.push((
-                    *inode,
-                    Some(*handle),
-                    "unsynced",
-                    Arc::clone(save),
-                    CandidateSource::Draft(Arc::clone(draft)),
-                ));
-            }
-        }
+        // A path truncate cuts the newest writer draft of its inode. That cut is
+        // the record the draft is retained as, so the same draft's untruncated
+        // copy is superseded and is not retained a second time.
+        let mut truncations = Vec::new();
         for (inode, size) in &draft_state.pending_truncates {
             if let Some(NodeKind::Document { save, .. }) =
                 state.nodes.get(inode).map(|node| &node.kind)
@@ -3245,34 +3523,70 @@ impl WorkspaceFilesystem {
                             .get(inode)
                             .and_then(|refusal| refusal.candidate.clone())
                     });
+                truncations.push((*inode, *size, Arc::clone(save), latest));
+            }
+        }
+        for (handle, inode) in &draft_state.unresolved_handles {
+            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
+                let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
+                    *truncated == *inode
+                        && latest.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, draft))
+                });
+                if cut_by_truncate {
+                    continue;
+                }
                 candidates.push((
                     *inode,
-                    None,
+                    Some(*handle),
                     "unsynced",
                     Arc::clone(save),
-                    CandidateSource::Truncated { size: *size, latest },
+                    CandidateSource::Draft(Arc::clone(draft)),
                 ));
             }
         }
+        for (inode, size, save, latest) in &truncations {
+            candidates.push((
+                *inode,
+                None,
+                "unsynced",
+                Arc::clone(save),
+                CandidateSource::Truncated { size: *size, latest: latest.clone() },
+            ));
+        }
         let mut unresolved = HashMap::new();
         let mut refused: Option<Errno> = None;
+        let mut superseded: HashMap<u64, (String, String)> = HashMap::new();
         for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
+            // A refusal whose candidate a path truncate cuts is superseded by the
+            // truncated record once that record is retained.
+            let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
+                *truncated == inode
+                    && latest
+                        .as_ref()
+                        .zip(refusal.candidate.as_ref())
+                        .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
+            });
             match (refusal.draft, refusal.unretained) {
-                (_, Some((save, bytes))) => {
+                (_, Some((save, source))) => {
                     candidates.push((
                         inode,
                         refusal.handle,
                         refusal.cause,
                         save,
-                        CandidateSource::Stashed(bytes),
+                        source,
                     ));
                 }
                 (Some(draft), None) => {
                     let path = state.display_path(inode);
-                    reports.insert(format!(
+                    let report = format!(
                         "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
                         refusal.cause
-                    ));
+                    );
+                    if cut_by_truncate {
+                        superseded.insert(inode, (draft, report));
+                    } else {
+                        reports.insert(report);
+                    }
                 }
                 (None, None) => {}
             }
@@ -3282,8 +3596,8 @@ impl WorkspaceFilesystem {
             let len = match &source {
                 CandidateSource::Draft(draft) => save.writer.runtime.block_on(draft.candidate_len()),
                 CandidateSource::Truncated { size, .. } => *size,
-                CandidateSource::Stashed(bytes) => bytes.len() as u64,
             };
+            let truncated = matches!(source, CandidateSource::Truncated { .. });
             let mut read_chunk = |offset: u64, length: usize| match &source {
                 CandidateSource::Draft(draft) => save
                     .writer
@@ -3314,7 +3628,6 @@ impl WorkspaceFilesystem {
                         ))),
                     },
                 },
-                CandidateSource::Stashed(bytes) => Ok(stashed_range(bytes, offset, length)),
             };
             match save
                 .writer
@@ -3327,25 +3640,30 @@ impl WorkspaceFilesystem {
                         retained.id,
                         retained.record.display()
                     ));
+                if truncated {
+                    if let Some((old, _)) = superseded.remove(&inode) {
+                        if old != retained.id {
+                            if let Err(error) = save.writer.retained_drafts.remove(&old) {
+                                reports.insert(format!(
+                                    "superseded draft {old} for {path} could not be removed: {error}"
+                                ));
+                            }
+                        }
+                    }
+                }
                 }
                 Err(error) => {
                     refused = worst_retention_errno(refused, error.errno);
                     reports.insert(format!(
                         "draft for {path} ({cause}) could not be retained: {error}"
                     ));
-                    // The stash is the only copy left while retention is refused; it is
-                    // materialised here alone (follow-up bead bounds it).
-                    let stash = match &source {
-                        CandidateSource::Stashed(bytes) => Ok(Arc::clone(bytes)),
-                        _ => {
-                            let mut whole = Vec::new();
-                            VfsRetainedDraftStore::stream_candidate(len, &mut read_chunk, |chunk| {
-                                whole.extend_from_slice(chunk);
-                                Ok(())
-                            })
-                            .map(|()| Arc::from(whole))
+                    if truncated {
+                        if let Some((_, report)) = superseded.remove(&inode) {
+                            reports.insert(report);
                         }
-                    };
+                    }
+                    // Recovery storage refused the candidate: it stays unresolved, and its
+                    // live source is retried at the next retention rather than copied here.
                     unresolved.insert(
                         inode,
                         DraftRefusal {
@@ -3353,7 +3671,7 @@ impl WorkspaceFilesystem {
                             draft: None,
                             handle,
                             candidate: None,
-                            unretained: stash.ok().map(|bytes| (save, bytes)),
+                            unretained: Some((save, source)),
                         },
                     );
                 }
@@ -4068,6 +4386,13 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EBUSY);
             return;
         }
+        if self.is_candidate_blob(parent.0, name) {
+            match self.rename_blob_suffix(parent.0, name, newname) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         let (
             source_inode,
             destination_inode,
@@ -4357,6 +4682,13 @@ impl Filesystem for WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if draft_state.quiescing {
             reply.error(Errno::EBUSY);
+            return;
+        }
+        if self.is_candidate_blob(parent.0, OsStr::new(name)) {
+            match self.unlink_blob(parent.0, OsStr::new(name)) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
             return;
         }
         let mut state = self
@@ -5767,6 +6099,7 @@ impl FsBuilder {
                     suffix,
                     reference: reference.clone(),
                     replacement_bytes: None,
+                    required: !is_optional_field(field_type),
                 });
                 blob_files.push((file_name, reference));
             } else if stored_value_is_null(&value) {
@@ -6182,11 +6515,25 @@ impl Directory {
     }
     fn remove_entry(&mut self, name: &OsStr) -> Option<DirectoryEntry> {
         let index = self.by_name.remove(name)?;
-        let removed = self.entries.swap_remove(index);
-        if let Some(moved) = self.entries.get(index) {
-            self.by_name.insert(moved.name.clone(), index);
+        // Order-preserving: readdir offsets index `entries`, so siblings keep their positions.
+        let removed = self.entries.remove(index);
+        for (position, entry) in self.entries.iter().enumerate().skip(index) {
+            self.by_name.insert(entry.name.clone(), position);
         }
         Some(removed)
+    }
+    /// Renames `name` in place, so every entry keeps its readdir position (ORNA-VFS-017).
+    /// Returns false, leaving the directory unchanged, when `name` is absent or `newname` is taken.
+    fn rename_entry(&mut self, name: &OsStr, newname: &OsStr) -> bool {
+        if self.by_name.contains_key(newname) {
+            return false;
+        }
+        let Some(index) = self.by_name.remove(name) else {
+            return false;
+        };
+        self.entries[index].name = newname.to_owned();
+        self.by_name.insert(newname.to_owned(), index);
+        true
     }
 }
 
@@ -6316,6 +6663,143 @@ fn stored_field_layout(descriptor: &SchemaDescriptor) -> Result<StoredFieldLayou
         fields: stored_fields,
         indexes,
     })
+}
+
+/// Commits `bytes` as the row's whole document through the CAS boundary a draft save uses.
+/// `baseline` is the row `bytes` were derived from, captured with them (41-vfs.md
+/// Temporary-save replacement); the commit refuses as stale when the live row has moved on.
+fn commit_row_document(
+    save: &Arc<RowSaveContext>,
+    bytes: &[u8],
+    baseline: Option<Vec<u8>>,
+) -> Result<(), DocumentCommitError> {
+    let scratch = save.writer.runtime.block_on(
+        save.target
+            .begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES),
+    );
+    save.writer
+        .runtime
+        .block_on(scratch.write_at(0, bytes))
+        .map_err(|error| {
+            DocumentCommitError::Failed(format!("row document could not be staged: {error:?}"))
+        })?;
+    save.commit_temporary(&scratch, baseline, true)
+}
+
+/// Swaps the admitted Blob field `field_name` for `replacement` (`None` removes it) and commits
+/// the rewritten `data.orna` against `baseline`, the row `document` was derived from. A refused
+/// commit restores the admitted list.
+fn commit_blob_descriptor_change(
+    save: &Arc<RowSaveContext>,
+    field_name: &str,
+    replacement: Option<BlobField>,
+    document: &[u8],
+    baseline: Option<Vec<u8>>,
+) -> Result<(), DocumentCommitError> {
+    let removed = replacement.is_none();
+    let mut fields = save
+        .blob_fields
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let index = fields
+        .iter()
+        .position(|field| field.name == field_name)
+        .ok_or_else(|| {
+            DocumentCommitError::Failed(format!("Blob field {field_name} is not admitted"))
+        })?;
+    let previous = match replacement {
+        Some(replacement) => std::mem::replace(&mut fields[index], replacement),
+        None => fields.remove(index),
+    };
+    drop(fields);
+    let committed = commit_row_document(save, document, baseline);
+    if committed.is_err() {
+        let mut fields = save
+            .blob_fields
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if removed {
+            let index = index.min(fields.len());
+            fields.insert(index, previous);
+        } else if let Some(slot) = fields.get_mut(index) {
+            *slot = previous;
+        }
+    }
+    committed
+}
+
+/// The suffix hint for renaming Blob field `field_name` of `media_type` to the sibling
+/// `newname`, when `newname` is that field's projected name under a compatible suffix (VFS-012).
+fn blob_rename_hint(media_type: &str, field_name: &str, newname: &str) -> Option<Option<String>> {
+    newname.match_indices('.').find_map(|(index, _)| {
+        let hint =
+            orna_runtime_v1::vfs::classify_content_suffix(media_type, Some(&newname[index + 1..]))
+                .ok()?;
+        let projected =
+            orna_runtime_v1::vfs::project_content_name(field_name, media_type, hint.as_deref())
+                .ok()?;
+        (projected == newname).then_some(hint)
+    })
+}
+
+/// The row's `data.orna` inode and its current bytes.
+fn row_document(state: &mut FsBuilder, row: u64) -> Result<(u64, Vec<u8>), Errno> {
+    let inode = state
+        .lookup_child(row, OsStr::new("data.orna"))
+        .map_err(|_| Errno::EIO)?
+        .ok_or(Errno::EIO)?;
+    match state.nodes.get(&inode).map(|node| &node.kind) {
+        Some(NodeKind::Document { bytes, .. }) => Ok((inode, bytes.clone())),
+        _ => Err(Errno::EIO),
+    }
+}
+
+/// The save context of a row's `data.orna` document. Blob commits take it from the document, so a
+/// refresh after a stale refusal (41-vfs.md EDIT-1) reaches the next rename or unlink.
+fn document_save(state: &FsBuilder, document_inode: u64) -> Result<Arc<RowSaveContext>, Errno> {
+    match state.nodes.get(&document_inode).map(|node| &node.kind) {
+        Some(NodeKind::Document { save, .. }) => Ok(Arc::clone(save)),
+        _ => Err(Errno::EIO),
+    }
+}
+
+/// The canonical descriptor line prefix of Blob field `name` whose sibling file is `file`.
+fn descriptor_prefix(name: &str, file: &str) -> String {
+    format!("    {name}: {{ path: \"./{file}\", media_type: \"")
+}
+
+/// Repoints Blob field `name`'s descriptor from sibling `old` to sibling `new`. The canonical
+/// descriptor must appear exactly once, otherwise the document is refused.
+fn replace_descriptor_path(
+    document: &str,
+    name: &str,
+    old: &str,
+    new: &str,
+) -> Result<String, String> {
+    let from = descriptor_prefix(name, old);
+    if document.matches(&from).count() != 1 {
+        return Err(format!("Blob field {name} descriptor is not in its canonical form"));
+    }
+    Ok(document.replacen(&from, &descriptor_prefix(name, new), 1))
+}
+
+/// Sets Blob field `name`'s canonical descriptor for sibling `file` to `null`. The canonical
+/// descriptor must appear exactly once, otherwise the document is refused.
+fn null_descriptor(document: &str, name: &str, file: &str) -> Result<String, String> {
+    let from = descriptor_prefix(name, file);
+    if document.matches(&from).count() != 1 {
+        return Err(format!("Blob field {name} descriptor is not in its canonical form"));
+    }
+    let start = document
+        .find(&from)
+        .ok_or_else(|| format!("Blob field {name} descriptor is missing"))?;
+    let close = "\" },\n";
+    let rest = &document[start..];
+    let end = rest
+        .find(close)
+        .ok_or_else(|| format!("Blob field {name} descriptor is not closed"))?
+        + close.len();
+    Ok(format!("{}    {name}: null,\n{}", &document[..start], &rest[end..]))
 }
 
 fn is_optional_field(field_type: &Raw) -> bool {
@@ -7381,7 +7865,8 @@ mod hardening_tests {
     fn retained_candidate_streams_in_bounded_chunks() {
         const LEN: u64 = 64 * 1024 * 1024;
         let runtime = tempfile::tempdir().unwrap();
-        let store = super::VfsRetainedDraftStore::new(runtime.path());
+        let quota = std::sync::Arc::new(orna_runtime_v1::vfs::DraftQuota::new(1 << 30));
+        let store = super::VfsRetainedDraftStore::open(runtime.path(), quota).unwrap();
         let largest_read = std::cell::Cell::new(0_usize);
         let total_read = std::cell::Cell::new(0_u64);
         let mut read_chunk = |offset: u64, length: usize| -> Result<Vec<u8>, super::RetentionError> {
@@ -7411,6 +7896,86 @@ mod hardening_tests {
     #[test]
     fn live_mount_refusal_is_eperm() {
         assert_eq!(refused_mutation_errno(), Errno::EPERM);
+    }
+}
+
+#[cfg(test)]
+mod directory_removal_tests {
+    use std::ffi::{OsStr, OsString};
+
+    use super::{Directory, DirectoryEntry, FileType};
+
+    fn entry(inode: u64, name: &str) -> DirectoryEntry {
+        DirectoryEntry {
+            inode,
+            name: OsString::from(name),
+            kind: FileType::RegularFile,
+        }
+    }
+
+    /// A directory whose entries sit in the given order, laid out as `insert_node` does.
+    fn directory_of(entries: &[(u64, &str)]) -> Directory {
+        let mut directory = Directory::new();
+        for &(inode, name) in entries {
+            let index = directory.entries.len();
+            directory.by_name.insert(OsString::from(name), index);
+            directory.entries.push(entry(inode, name));
+        }
+        directory
+    }
+
+    fn names(directory: &Directory) -> Vec<&str> {
+        directory
+            .entries
+            .iter()
+            .map(|entry| entry.name.to_str().expect("test names are UTF-8"))
+            .collect()
+    }
+
+    #[test]
+    fn removing_an_entry_keeps_sibling_readdir_positions() {
+        let mut directory = directory_of(&[(2, "a"), (3, "b"), (4, "c"), (5, "d")]);
+        let removed = directory
+            .remove_entry(OsStr::new("b"))
+            .expect("b is present before removal");
+        assert_eq!(removed.inode, 3);
+        assert_eq!(names(&directory), ["a", "c", "d"], "siblings keep their readdir order");
+        assert_eq!(
+            directory.entry(OsStr::new("c")).map(|entry| entry.inode),
+            Some(4)
+        );
+        assert_eq!(
+            directory.entry(OsStr::new("d")).map(|entry| entry.inode),
+            Some(5)
+        );
+        assert!(directory.entry(OsStr::new("b")).is_none());
+    }
+
+    #[test]
+    fn renaming_an_entry_keeps_its_readdir_position() {
+        let mut directory = directory_of(&[(2, "a"), (3, "b"), (4, "c")]);
+        assert!(directory.rename_entry(OsStr::new("b"), OsStr::new("b.mp1")));
+        assert_eq!(names(&directory), ["a", "b.mp1", "c"], "the renamed entry keeps its index");
+        assert_eq!(
+            directory.entry(OsStr::new("b.mp1")).map(|entry| entry.inode),
+            Some(3)
+        );
+        assert!(directory.entry(OsStr::new("b")).is_none());
+    }
+
+    #[test]
+    fn renaming_onto_a_taken_name_leaves_the_directory_unchanged() {
+        let mut directory = directory_of(&[(2, "a"), (3, "b")]);
+        assert!(!directory.rename_entry(OsStr::new("a"), OsStr::new("b")));
+        assert_eq!(names(&directory), ["a", "b"]);
+        assert_eq!(
+            directory.entry(OsStr::new("a")).map(|entry| entry.inode),
+            Some(2)
+        );
+        assert_eq!(
+            directory.entry(OsStr::new("b")).map(|entry| entry.inode),
+            Some(3)
+        );
     }
 }
 
