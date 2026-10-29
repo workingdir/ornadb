@@ -3276,6 +3276,36 @@ fn repl_effect_failure(message: &str, remedy: &str) -> repl::ReplFailure {
     }
 }
 
+/// Locates a REPL refusal to take the repository writer lease (ORNA-TURSO-005).
+/// `LeaseHeld` from a process that could not take the runtime owner lock means a
+/// live writer, such as a mounted editor, holds it; otherwise another owner is
+/// bound to this lock. Any other lease failure keeps the bare code.
+fn repl_lease_failure(error: &RuntimeError, state: &RuntimeState) -> repl::ReplFailure {
+    if *error != RuntimeError::LeaseHeld {
+        return repl::ReplFailure::from("ORNA-REPL-EFFECT".to_owned());
+    }
+    if state.holds_runtime_owner_lock() {
+        // This process holds the runtime owner lock, so no mount is implicated
+        // on this path and no remedy is offered for it.
+        return repl::ReplFailure {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            detail: Some(orna_evaluator_v1::ReplDetail {
+                code: "ORNA-REPL-EFFECT".to_owned(),
+                message:
+                    "another writer owns the repository writer lease for this runtime owner lock"
+                        .to_owned(),
+                span: None,
+                notes: Vec::new(),
+                help: Vec::new(),
+            }),
+        };
+    }
+    repl_effect_failure(
+        "the repository writer lease is held by a live writer: the runtime owner lock is held by another live process (such as a mounted editor), so this REPL cannot take the writer lease",
+        "REPL database writes need the mount stopped: run `orna unmount DIR`, then rerun this REPL. File writes while it is mounted go through `orna edit`",
+    )
+}
+
 /// Binds one REPL request row to its session, query, source text and the
 /// project digest it was evaluated against, so a replayed identity cannot
 /// adopt a different request's effects.
@@ -3386,16 +3416,14 @@ fn run_repl_input(
         .as_mut()
         .expect("host bindings initialized");
     if transactions.lease.is_none() {
+        let state = transactions
+            .state
+            .as_ref()
+            .expect("runtime state initialized");
         let lease = transactions
             .runtime
-            .block_on(
-                transactions
-                    .state
-                    .as_ref()
-                    .expect("runtime state initialized")
-                    .acquire_lease(invocation_owner_id()),
-            )
-            .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+            .block_on(state.acquire_lease(invocation_owner_id()))
+            .map_err(|error| repl_lease_failure(&error, state))?;
         transactions.lease = Some(lease);
     }
     let state = transactions
