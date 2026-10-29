@@ -1060,7 +1060,6 @@ async fn cwd_mount_consecutive_saves_of_one_row_both_commit() {
     assert_title(&row.stored_row().await, "after-two");
 }
 
-#[ignore = "ornadb-eufo.1.1: EAGAIN xattr reply reaches the client as EOPNOTSUPP (os error 95), so orna edit reports E2010 not E2000"]
 #[tokio::test]
 /// ORNA-VFS-005: a save after another writer changed the row and advanced HEAD
 /// is refused as stale, and the other writer's row is kept.
