@@ -2078,7 +2078,13 @@ fn views_expose_no_repository_internals(db: &mut Db) -> Check {
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    ensure!(names == ["media"], "the view root lists {names:?}");
+    // ORNA-VFS-020 (ornadb-9npn.1): a reachable ordinary source module at the root is projected
+    // beside the table directories; only repository internals (.git, .orna) are forbidden here.
+    ensure!(
+        names.iter().any(|name| name == "media")
+            && names.iter().all(|name| name == "media" || name == "main.orna"),
+        "the view root lists {names:?}"
+    );
     ensure!(
         fs::write(mount.point.join(".git"), b"x").is_err()
             && fs::write(mount.point.join("data"), b"x").is_err(),
