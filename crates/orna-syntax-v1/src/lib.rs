@@ -8,10 +8,12 @@ mod admission;
 pub mod editor;
 mod lexer;
 mod parser;
+mod string_literal;
 
 pub use admission::{
     ParseContext, SourceDocumentId, SyntaxAdmissionError, admit_diagnostic, admit_span,
 };
+pub use string_literal::{StringEscapeError, unescape_string_body, unescape_string_literal};
 
 pub use lexer::{
     BLOCK_COMMENT_END, BLOCK_COMMENT_START, Keyword, LINE_COMMENT_START, LexError, OPERATORS,

@@ -672,6 +672,42 @@ fn retain_scratch_candidate(
     Ok(())
 }
 
+/// Records a refused scratch candidate and keeps it in recovery storage before the
+/// call that refused it replies (ORNA-VFS-009). Returns the error to reply with: the
+/// retention errno when recovery storage cannot keep the candidate.
+fn retain_refused_scratch(
+    draft_state: &mut DraftState,
+    save: &RowSaveContext,
+    scratch: &TemporarySave<RowMapSnapshot>,
+    inode: u64,
+    path: &str,
+    error: DocumentCommitError,
+) -> DocumentCommitError {
+    let cause = error.cause();
+    draft_state
+        .rejected_scratch
+        .insert(inode, ScratchRefusal { cause, kept: false });
+    let len = save.writer.runtime.block_on(scratch.candidate_len());
+    let retained = retain_scratch_candidate(save, path, cause, len, &mut |offset, length| {
+        save.writer
+            .runtime
+            .block_on(scratch.read_range(offset, length))
+            .map_err(|read| RetentionError::from(candidate_unreadable(read)))
+    });
+    match retained {
+        Ok(()) => {
+            if let Some(refusal) = draft_state.rejected_scratch.get_mut(&inode) {
+                refusal.kept = true;
+            }
+            error
+        }
+        Err(retention) => DocumentCommitError::Unretained {
+            errno: retention.errno,
+            cause,
+        },
+    }
+}
+
 /// Bounded recovery storage for candidates the mount did not accept
 /// (`sys.vfs.draft_retained`, ORNA-VFS-009, ORNA-VFS-024). A record keeps the
 /// exact candidate bytes under a content-derived draft ID with the row path and
@@ -2646,15 +2682,6 @@ struct DraftState {
 }
 
 impl DraftState {
-    fn has_unresolved_drafts(&self) -> bool {
-        !self.pending_truncates.is_empty()
-            || !self.unresolved_handles.is_empty()
-            || !self.retained_scratch.is_empty()
-            || !self.rejected_documents.is_empty()
-            || !self.rejected_scratch.is_empty()
-            || self.source_drafts.values().any(source_write::SourceDraft::is_unresolved)
-    }
-
     /// A write or truncate by `handle` makes its candidate newer than the refused
     /// one, so the refusal no longer names that handle. An accepted save must not
     /// end the unresolved state of that newer candidate (ORNA-VFS-008).
@@ -2713,7 +2740,7 @@ fn worst_retention_errno(current: Option<Errno>, next: Errno) -> Option<Errno> {
 }
 
 impl WorkspaceFilesystem {
-    /// Whether `name` under `parent` is a Blob this mount can write.
+    /// Whether `name` under `parent` is a Blob or large-Str sibling this mount can write.
     fn is_candidate_blob(&self, parent: u64, name: &OsStr) -> bool {
         let mut state = self
             .state
@@ -2724,7 +2751,10 @@ impl WorkspaceFilesystem {
             Ok(Some(inode))
                 if matches!(
                     state.nodes.get(&inode).map(|node| &node.kind),
-                    Some(NodeKind::Blob { candidate: Some(_), .. })
+                    Some(
+                        NodeKind::Blob { candidate: Some(_), .. }
+                            | NodeKind::Text { candidate: Some(_), .. },
+                    )
                 )
         )
     }
@@ -2814,7 +2844,7 @@ impl WorkspaceFilesystem {
         Ok(())
     }
 
-    /// Unlinks an optional Blob field (ORNA-VFS-013, profiles/vfs-1.md): its descriptor becomes
+    /// Unlinks an optional Blob or large-Str field (ORNA-VFS-013, profiles/vfs-1.md): its descriptor becomes
     /// `null` through the row's CAS boundary, then its sibling file goes away. A required Blob
     /// field is refused with EPERM.
     fn unlink_blob(&self, parent: u64, name: &OsStr) -> Result<(), Errno> {
@@ -2834,11 +2864,15 @@ impl WorkspaceFilesystem {
             .lookup_child(parent, name)
             .map_err(|_| Errno::EIO)?
             .ok_or(Errno::ENOENT)?;
-        let field = match state.nodes.get(&inode).map(|node| &node.kind) {
+        let (is_text, field) = match state.nodes.get(&inode).map(|node| &node.kind) {
             Some(NodeKind::Blob {
                 candidate: Some(candidate),
                 ..
-            }) => candidate.field.clone(),
+            }) => (false, candidate.field.clone()),
+            Some(NodeKind::Text {
+                candidate: Some(candidate),
+                ..
+            }) => (true, candidate.field.clone()),
             _ => return Err(refused_mutation_errno()),
         };
         if field.required {
@@ -2849,7 +2883,12 @@ impl WorkspaceFilesystem {
         // The baseline is read with the bytes it describes, so the CAS compares the same image.
         let baseline = save.recorded_baseline();
         let text = std::str::from_utf8(&document).map_err(|_| Errno::EIO)?;
-        let rewritten = null_descriptor(text, &field.name, &field.file_name).map_err(|error| {
+        let nulled = if is_text {
+            null_text_descriptor(text, &field)
+        } else {
+            null_descriptor(text, &field.name, &field.file_name)
+        };
+        let rewritten = nulled.map_err(|error| {
             eprintln!("mounted Blob unlink refused: {error}");
             Errno::EIO
         })?;
@@ -3162,10 +3201,7 @@ impl WorkspaceFilesystem {
         }
     }
     fn has_unresolved_drafts(&self) -> bool {
-        self.draft_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .has_unresolved_drafts()
+        !self.unresolved_drafts().is_empty()
     }
 
     /// Records a refused document save (ORNA-VFS-009): the candidate is kept in
@@ -3370,11 +3406,12 @@ impl WorkspaceFilesystem {
             }
         };
         if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
-            draft_state.rejected_scratch.insert(
-                inode,
-                ScratchRefusal { cause: error.cause(), kept: false },
-            );
-            return Err(error);
+            let path = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .display_path(inode);
+            return Err(retain_refused_scratch(draft_state, save, scratch, inode, &path, error));
         }
         let bytes = save
             .writer
@@ -3544,20 +3581,12 @@ impl WorkspaceFilesystem {
 
     /// The unresolved drafts of this mount, one per path. Both draft-list xattrs
     /// render these, so the unmount refusal and `mount status` name the same drafts.
-    fn unresolved_drafts(&self) -> Vec<UnresolvedDraft> {
+    fn unresolved_drafts_of(draft_state: &DraftState, state: &FsBuilder) -> Vec<UnresolvedDraft> {
         // The `sys.vfs.*` code of an internal cause, when the cause has one.
         fn spec_code(cause: &'static str) -> Option<&'static str> {
             cause.starts_with("sys.").then_some(cause)
         }
         const DRAFT_RETAINED: &str = "sys.vfs.draft_retained";
-        let draft_state = self
-            .draft_state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // inode -> (code, draft id, detail). The code is the spec code of the internal
         // cause; otherwise `draft_retained` when a candidate was kept; otherwise empty.
         let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
@@ -3589,6 +3618,11 @@ impl WorkspaceFilesystem {
                 }
                 continue;
             };
+            // A candidate kept as a draft whose node left the mount has nothing left to resolve
+            // (ORNA-VFS-009).
+            if refusal.draft.is_some() && state.path_of(*inode).is_none() {
+                continue;
+            }
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
                 .unwrap_or("");
@@ -3608,6 +3642,11 @@ impl WorkspaceFilesystem {
             unresolved.entry(*inode).or_insert((code, draft, detail));
         }
         for (inode, refusal) in &draft_state.rejected_scratch {
+            // A kept candidate whose node was retired has no scratch left in the mount, and its
+            // bytes are in recovery storage (ORNA-VFS-009), so it has nothing left to resolve.
+            if refusal.kept && state.path_of(*inode).is_none() {
+                continue;
+            }
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
                 .unwrap_or("");
@@ -3616,6 +3655,13 @@ impl WorkspaceFilesystem {
             });
         }
         for inode in &draft_state.retained_scratch {
+            // A candidate already kept in recovery storage whose node left the mount has
+            // nothing left to resolve (ORNA-VFS-009).
+            let kept_outside_mount = state.path_of(*inode).is_none()
+                && draft_state.rejected_scratch.get(inode).is_some_and(|refusal| refusal.kept);
+            if kept_outside_mount {
+                continue;
+            }
             unresolved.entry(*inode).or_insert_with(|| {
                 (DRAFT_RETAINED, String::new(), "scratch file not renamed".to_owned())
             });
@@ -3640,6 +3686,18 @@ impl WorkspaceFilesystem {
             });
         }
         drafts
+    }
+
+    fn unresolved_drafts(&self) -> Vec<UnresolvedDraft> {
+        let draft_state = self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Self::unresolved_drafts_of(&draft_state, &state)
     }
 
     /// One `path<TAB>detail` line per unresolved draft, for an unmount refusal.
@@ -4051,7 +4109,8 @@ impl Filesystem for WorkspaceFilesystem {
                 Some(errno) => reply.error(errno),
             }
         } else if value == b"1" {
-            if draft_state.has_unresolved_drafts() {
+            let state = self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !Self::unresolved_drafts_of(&draft_state, &state).is_empty() {
                 reply.error(Errno::EBUSY);
                 return;
             }
@@ -4799,43 +4858,23 @@ impl Filesystem for WorkspaceFilesystem {
         let accepted_row = committed.as_ref().ok().and_then(Option::clone);
         if let Err(error) = committed {
             eprintln!("mounted replacement failed: {error}");
-            draft_state.rejected_scratch.insert(
-                source_inode,
-                ScratchRefusal { cause: error.cause(), kept: false },
-            );
             let stale = matches!(error, DocumentCommitError::Stale);
-            // A refused candidate is retained before its rename replies (ORNA-VFS-009).
-            // When recovery storage cannot keep it, the rename replies that retention
-            // errno (EDQUOT when full) and the scratch stays in place.
             let path = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .display_path(source_inode);
-            let len = save.writer.runtime.block_on(scratch.candidate_len());
-            let error = match retain_scratch_candidate(
+            // A refused candidate is retained before its rename replies (ORNA-VFS-009).
+            // When recovery storage cannot keep it, the rename replies that retention
+            // errno (EDQUOT when full) and the scratch stays in place.
+            let error = retain_refused_scratch(
+                &mut draft_state,
                 &save,
+                &scratch,
+                source_inode,
                 &path,
-                error.cause(),
-                len,
-                &mut |offset, length| {
-                    save.writer
-                        .runtime
-                        .block_on(scratch.read_range(offset, length))
-                        .map_err(|read| RetentionError::from(candidate_unreadable(read)))
-                },
-            ) {
-                Ok(()) => {
-                    if let Some(refusal) = draft_state.rejected_scratch.get_mut(&source_inode) {
-                        refusal.kept = true;
-                    }
-                    error
-                }
-                Err(retention) => DocumentCommitError::Unretained {
-                    errno: retention.errno,
-                    cause: error.cause(),
-                },
-            };
+                error,
+            );
             if stale {
                 let mut state = self
                     .state
@@ -7353,6 +7392,27 @@ fn null_descriptor(document: &str, name: &str, file: &str) -> Result<String, Str
         .ok_or_else(|| format!("Blob field {name} descriptor is not closed"))?
         + close.len();
     Ok(format!("{}    {name}: null,\n{}", &document[..start], &rest[end..]))
+}
+
+/// Sets the large-Str field `field` to `null` in `document`, replacing its `{ text, encoding }`
+/// entry. The entry must be the projected descriptor for the field's sibling file.
+fn null_text_descriptor(document: &str, field: &BlobField) -> Result<String, String> {
+    let parsed = parse_row(document);
+    if !parsed.diagnostics.is_empty() {
+        return Err("mounted row document is not a valid source row".into());
+    }
+    let Expr::Record { fields: entries, .. } = &parsed.value else {
+        return Err("mounted row document is not a record".into());
+    };
+    let name = &field.name;
+    let entry = entries
+        .iter()
+        .find(|entry| &entry.name == name)
+        .ok_or_else(|| format!("Str field {name} is missing; data.orna must keep its descriptor"))?;
+    validate_text_descriptor(&entry.value, field)?;
+    let mut output = document.to_owned();
+    output.replace_range(entry.span.start..entry.span.end, &format!("{name}: null"));
+    Ok(output)
 }
 
 fn is_optional_field(field_type: &Raw) -> bool {
