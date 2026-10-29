@@ -3285,8 +3285,9 @@ pub struct ValidatedTableActivationCommit<'a> {
     /// when the save is pinned to a table schema identity instead.
     pub cwd_generation: Option<&'a CwdGeneration>,
     /// Table schema identity the save was admitted under. The runtime compares
-    /// it with the validator's live identity inside the writer transaction, so a
-    /// schema change between admission and commit is refused.
+    /// it with the validator's live identity inside the writer transaction, both
+    /// before validation and immediately before COMMIT, so a schema change
+    /// between admission and commit is refused.
     pub expected_schema: Option<TableSchemaIdentity>,
     pub mutations: &'a [TableMutation],
     /// Native graph pins that protect content referenced by the candidate.
@@ -7036,6 +7037,16 @@ impl RuntimeState {
     /// validator accepts the exact post-mutation candidate read inside the
     /// writer transaction. Validation failure drops the transaction, so no
     /// table row, mutation record, or checkpoint capture becomes visible.
+    ///
+    /// Lock order (ORNA-VFS-019): the VFS operation gates are taken first, then
+    /// the SQLite writer transaction (`BEGIN IMMEDIATE`). The committed schema
+    /// identity is read only inside that transaction, and it is read twice: once
+    /// before the candidate is validated and again immediately before COMMIT.
+    /// The identity is a Git head read that no SQLite lock covers, so a schema
+    /// commit that lands between the reads and COMMIT is refused with
+    /// `StaleTableSchema` instead of publishing a row under the wrong schema.
+    /// A schema commit landing after the final read and before COMMIT is not
+    /// serialized by this transaction, because a Git ref is outside SQLite's lock.
     pub async fn commit_validated_table_activation(
         &self,
         request: ValidatedTableActivationCommit<'_>,
@@ -7125,11 +7136,10 @@ impl RuntimeState {
             // does not turn an idempotent replay into a stale refusal.
             return Ok(current);
         }
-        if validator.schema_identity() != expected_schema {
-            return Err(TableActivationError::Runtime(
-                RuntimeError::StaleTableSchema,
-            ));
-        }
+        // First read, inside the writer transaction and before the candidate is
+        // validated.
+        require_live_table_schema(validator, expected_schema.as_ref())
+            .map_err(TableActivationError::Runtime)?;
         if !transfers.is_empty() {
             let Some(expected_graph_repository_id) = self.graph_repository_id.as_ref() else {
                 return Err(TableActivationError::Runtime(
@@ -7266,6 +7276,11 @@ impl RuntimeState {
                 return Err(TableActivationError::Runtime(RuntimeError::RecoveryInvalid));
             }
         }
+        // Second read, after every write this commit publishes and immediately
+        // before COMMIT. A committed schema change that landed since the first
+        // read is refused here, and dropping the transaction rolls it back.
+        require_live_table_schema(validator, expected_schema.as_ref())
+            .map_err(TableActivationError::Runtime)?;
         transaction
             .commit()
             .await
@@ -20471,6 +20486,20 @@ fn validate_table_candidate_scope(
     validate_mutation_identities(mutations, table_object_ids)
 }
 
+/// Compares the validator's live table schema identity with the identity a
+/// save was admitted under (ORNA-VFS-019). Callers run it inside the writer
+/// transaction; a mismatch is `StaleTableSchema`, and the caller's early return
+/// drops the transaction so no row or checkpoint is published.
+fn require_live_table_schema(
+    validator: &mut dyn TableActivationCandidateValidator,
+    expected_schema: Option<&TableSchemaIdentity>,
+) -> Result<(), RuntimeError> {
+    if validator.schema_identity().as_ref() != expected_schema {
+        return Err(RuntimeError::StaleTableSchema);
+    }
+    Ok(())
+}
+
 /// Requires every mutation for an identity-admitted table to address that
 /// exact committed table identity. Name-only mutations for such a table, and
 /// mutations carrying a different identity, fail before any row is applied.
@@ -22970,6 +22999,109 @@ mod tests {
                 .expect("the first commit publishes its checkpoint")
                 .generation,
             generation
+        );
+    }
+
+    /// ORNA-VFS-019 (ornadb-eufo.2.2): a committed schema change lands after
+    /// the save's first identity check and before the writer transaction
+    /// commits. The second in-transaction read refuses the save with
+    /// `StaleTableSchema`; the dropped transaction rolls the candidate back and
+    /// no checkpoint is published.
+    #[tokio::test]
+    async fn schema_commit_landing_before_commit_refuses_the_save() {
+        /// Commits the schema change at the mutation fault point, which runs
+        /// inside the writer transaction after the first identity check.
+        struct CommitSchemaChangeAfterMutation {
+            schema_changed: Arc<AtomicBool>,
+        }
+
+        impl FaultInjector for CommitSchemaChangeAfterMutation {
+            fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+                if point == FaultPoint::AfterMutation {
+                    self.schema_changed.store(true, Ordering::SeqCst);
+                }
+                Ok(())
+            }
+        }
+
+        /// A schema-scoped validator whose live identity is the admitted schema
+        /// until the committed schema changes.
+        struct RacingSchemaValidator {
+            tables: Vec<String>,
+            admitted: TableSchemaIdentity,
+            schema_changed: Arc<AtomicBool>,
+        }
+
+        impl TableActivationCandidateValidator for RacingSchemaValidator {
+            fn tables(&self) -> &[String] {
+                &self.tables
+            }
+
+            fn cwd_generation(&self) -> Option<&CwdGeneration> {
+                None
+            }
+
+            fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+                if self.schema_changed.load(Ordering::SeqCst) {
+                    Some(TableSchemaIdentity::new([8; 32]))
+                } else {
+                    Some(self.admitted.clone())
+                }
+            }
+
+            fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+                Ok(())
+            }
+        }
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let mutations = [table_mutation(5, 1, Some(9))];
+        let admitted = activation_test_schema();
+        let schema_changed = Arc::new(AtomicBool::new(false));
+        let before = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .map(|checkpoint| checkpoint.generation);
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = RacingSchemaValidator {
+            tables: vec!["books".into()],
+            admitted: admitted.clone(),
+            schema_changed: Arc::clone(&schema_changed),
+        };
+        let faults = CommitSchemaChangeAfterMutation {
+            schema_changed: Arc::clone(&schema_changed),
+        };
+        let result = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &faults,
+            })
+            .await;
+        assert!(
+            schema_changed.load(Ordering::SeqCst),
+            "the committed schema must change inside the writer transaction"
+        );
+        assert!(matches!(
+            result,
+            Err(TableActivationError::Runtime(RuntimeError::StaleTableSchema))
+        ));
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .map(|checkpoint| checkpoint.generation),
+            before
         );
     }
 
