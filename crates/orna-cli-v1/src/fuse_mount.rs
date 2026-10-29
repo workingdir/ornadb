@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -1580,17 +1580,14 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
-    /// The save for one document commit. `opened` is the CWD generation captured when the
-    /// handle opened (profiles/vfs-1.md:91-92); a generation that moved since is stale
-    /// (profiles/vfs-1.md:138 EAGAIN) and is refused before any admission.
+    /// The save for one document commit, carrying the CWD generation the handle captured
+    /// when it opened or when its last accepted save captured the live one
+    /// (profiles/vfs-1.md:91-92). The stale check runs inside admission, after the
+    /// NoCandidate and baseline checks (profiles/vfs-1.md:138 EAGAIN).
     fn durable_document_save(
         &self,
         opened: &orna_repository_v1::CwdGeneration,
     ) -> Result<VfsDurableSave, DocumentCommitError> {
-        let live = self.writer.cwd_generation().map_err(DocumentCommitError::Failed)?;
-        if &live != opened {
-            return Err(DocumentCommitError::Stale);
-        }
         let key = runtime_table_key_bytes(&self.key).map_err(DocumentCommitError::Failed)?;
         Ok(VfsDurableSave::new(
             self.writer.owner_id,
@@ -1735,6 +1732,14 @@ impl RowSaveContext {
         record_baseline: bool,
         opened: &orna_repository_v1::CwdGeneration,
     ) -> Result<(), DocumentCommitError> {
+        // The live generation is read outside the runtime's locks: admission runs inside the
+        // runtime and cannot block on it. A generation that moved since the handle captured it
+        // is stale (profiles/vfs-1.md:138 EAGAIN). Admission refuses it only after the
+        // NoCandidate, idempotent and baseline checks, so a clean handle still syncs.
+        let live = self.writer.cwd_generation().map_err(DocumentCommitError::Failed)?;
+        let moved = &live != opened;
+        let refused = Arc::new(AtomicBool::new(false));
+        let refused_flag = Arc::clone(&refused);
         let save = self.durable_document_save(opened)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
@@ -1747,6 +1752,12 @@ impl RowSaveContext {
                 &self.writer.state,
                 save,
                 move |coordinates, bytes| async move {
+                    if moved {
+                        refused_flag.store(true, Ordering::SeqCst);
+                        return Err(orna_runtime_v1::TableActivationError::Runtime(
+                            orna_runtime_v1::RuntimeError::InvalidTableMutation,
+                        ));
+                    }
                     let (candidate, row_bytes) =
                         row_context
                             .writer
@@ -1773,6 +1784,7 @@ impl RowSaveContext {
                 "mounted row document was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
+            Err(_) if refused.load(Ordering::SeqCst) => Err(DocumentCommitError::Stale),
             Err(error) => Err(save_failure("mounted row save failed", error)),
         }
     }
@@ -2649,7 +2661,8 @@ enum OpenFile {
     Document(
         Arc<RowSaveContext>,
         Arc<EditDraft<RowMapSnapshot>>,
-        orna_repository_v1::CwdGeneration,
+        // The generation the handle's next save is based on. Duplicated descriptors share it.
+        Arc<Mutex<orna_repository_v1::CwdGeneration>>,
     ),
     Temporary(
         Arc<RowSaveContext>,
@@ -3306,7 +3319,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
-        opened: &orna_repository_v1::CwdGeneration,
+        opened: &Arc<Mutex<orna_repository_v1::CwdGeneration>>,
     ) -> Result<(), DocumentCommitError> {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
@@ -3322,7 +3335,11 @@ impl WorkspaceFilesystem {
                 })?;
             draft_state.pending_truncates.remove(&inode);
         }
-        if let Err(error) = save.commit_document(draft, true, opened) {
+        let based_on = opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Err(error) = save.commit_document(draft, true, &based_on) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
             if matches!(error, DocumentCommitError::NoCandidate) {
@@ -3337,6 +3354,18 @@ impl WorkspaceFilesystem {
                 },
                 None => error,
             });
+        }
+        // The accepted save moved the CWD generation. The handle's next save is based on the
+        // accepted state, so it captures the live generation (profiles/vfs-1.md:100).
+        match save.writer.cwd_generation() {
+            Ok(generation) => {
+                *opened
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = generation;
+            }
+            Err(error) => eprintln!(
+                "mounted document could not capture the CWD generation after its save: {error}"
+            ),
         }
         let bytes = save
             .writer
@@ -4622,7 +4651,7 @@ impl Filesystem for WorkspaceFilesystem {
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle, OpenFile::Document(save, draft, opened));
+            .insert(handle, OpenFile::Document(save, draft, Arc::new(Mutex::new(opened))));
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
