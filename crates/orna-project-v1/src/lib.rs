@@ -17,11 +17,12 @@ use orna_repository_v1::{
     CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
     GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
 };
+use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
-    Analysis, Catalogue, ModuleInput, Namespace, RowUnitInput, StandardCatalogueError,
+    Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput, StandardCatalogueError,
     StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_data_expression, lower_row_unit_with_owner_fields,
+    lower_data_expression, lower_row_unit_with_key_spelling,
 };
 use orna_syntax_v1::{
     Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file, parse_row,
@@ -627,6 +628,7 @@ pub fn admit_source_row(
         context,
         blob_bindings,
         Vec::new(),
+        &[],
         mutation_id,
     )
 }
@@ -641,6 +643,7 @@ pub fn admit_source_row_with_owner_fields(
     context: &Format3Context,
     blob_bindings: Vec<(String, OrpBlobBinding)>,
     owner_field_values: Vec<(String, Raw)>,
+    key_components: &[KeyComponentText],
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
     admit_source_row_with_owner_fields_inner(
@@ -651,6 +654,7 @@ pub fn admit_source_row_with_owner_fields(
         context,
         blob_bindings,
         owner_field_values,
+        key_components,
         mutation_id,
     )
 }
@@ -663,6 +667,7 @@ fn admit_source_row_with_owner_fields_inner(
     context: &Format3Context,
     blob_bindings: Vec<(String, OrpBlobBinding)>,
     owner_field_values: Vec<(String, Raw)>,
+    key_components: &[KeyComponentText],
     mutation_id: [u8; 16],
 ) -> Result<AdmittedSourceRow, ProjectLoadError> {
     if project.source_commit() != Some(schema.source_commit())
@@ -743,8 +748,15 @@ fn admit_source_row_with_owner_fields_inner(
         .map(|(name, _)| name.clone())
         .collect::<Vec<_>>();
     reserved_field_names.extend(owner_field_names.iter().cloned());
-    let lowered = lower_row_unit_with_owner_fields(&analysis, &input, &reserved_field_names)
-        .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+    let decoded_key = decode_source_key_path(&key_path, key_components)
+        .ok_or(ProjectLoadError::InvalidSourceRow)?;
+    let lowered = lower_row_unit_with_key_spelling(
+        &analysis,
+        &input,
+        &reserved_field_names,
+        RowKeySpelling::VerifiedVfs1(&decoded_key),
+    )
+    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
     if lowered.owner != table_path {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
@@ -765,6 +777,40 @@ fn admit_source_row_with_owner_fields_inner(
         owner_field_values,
         mutation_id,
     )
+}
+
+/// One key component of a source row: its canonical text and its canonical
+/// OVB-1 encoding (`TypedKey::canonical_bytes`). A `~key-` long alias digests
+/// the encoding and cannot be reversed to its text, so admission needs the pair
+/// to name the row's key (profiles/vfs-1.md:52-56, ORNA-VFS-016).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeyComponentText {
+    pub text: String,
+    pub canonical_encoding: Vec<u8>,
+}
+
+/// Decodes the VFS-1 projected key components of a logical source row path to
+/// canonical key text. Each component must re-project to exactly its spelling
+/// (profiles/vfs-1.md:44-50); a `~key-` alias resolves only through a supplied
+/// pair whose projection is that alias.
+fn decode_source_key_path(
+    key_path: &[String],
+    key_components: &[KeyComponentText],
+) -> Option<Vec<String>> {
+    let (last, parents) = key_path.split_last()?;
+    let last = last.strip_suffix(".orna")?;
+    parents
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(last))
+        .map(|component| match unproject_component(component).ok()? {
+            VfsComponent::Canonical(text) => Some(text),
+            VfsComponent::LongAlias { .. } => key_components
+                .iter()
+                .find(|key| project_key_component(&key.text, &key.canonical_encoding) == component)
+                .map(|key| key.text.clone()),
+        })
+        .collect()
 }
 
 /// The closed constant insert-time defaults of `table` in `module_name`, as
