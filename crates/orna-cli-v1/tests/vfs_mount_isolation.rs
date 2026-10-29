@@ -172,6 +172,7 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
         fixture._repository_directory.path(),
         &mountpoint,
     ));
+    fixture._mounted.await_path(&fixture.data_path);
     assert_eq!(
         fresh_view(&fixture),
         original,
