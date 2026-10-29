@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -31,9 +31,10 @@ use orna_runtime_v1::{
     TableObjectId,
     TableSchemaIdentity,
     vfs::{
-        CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        CANDIDATE_CHUNK_BYTES, CandidateSnapshot, EditDraft, EditDraftError, ManagedFile,
+        SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
-        DraftQuota, QuotaCharge,
+        DraftQuota, QuotaCharge, VfsBlobReplacementError,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
         project_colliding_table_component, project_component, project_key_component,
         unproject_component,
@@ -108,7 +109,15 @@ struct TemporaryScratchIdentity {
 struct PersistedTemporaryScratch {
     identity: TemporaryScratchIdentity,
     baseline: Option<Vec<u8>>,
-    bytes: Vec<u8>,
+    candidate: RecordedCandidate,
+}
+
+/// Where a record's candidate lies inside its record file. The candidate is
+/// copied from here in [`CANDIDATE_CHUNK_BYTES`] slices at restore.
+struct RecordedCandidate {
+    record: PathBuf,
+    offset: u64,
+    len: u64,
 }
 
 struct VfsScratchStore {
@@ -147,7 +156,7 @@ impl VfsScratchStore {
         &self,
         identity: &TemporaryScratchIdentity,
         baseline: Option<&[u8]>,
-        bytes: &[u8],
+        candidate: &CandidateSnapshot,
     ) -> Result<(), String> {
         Self::validate_identity(identity)?;
         let mut staged = tempfile::Builder::new()
@@ -159,7 +168,7 @@ impl VfsScratchStore {
             .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
         Self::write_identity(staged.as_file_mut(), identity)?;
         Self::write_optional(staged.as_file_mut(), baseline)?;
-        Self::write_bytes(staged.as_file_mut(), bytes)?;
+        Self::write_candidate(staged.as_file_mut(), candidate)?;
         staged.as_file().sync_all().map_err(|error| {
             format!("temporary scratch record could not be synchronized: {error}")
         })?;
@@ -351,6 +360,31 @@ impl VfsScratchStore {
             .map_err(|error| format!("temporary scratch record could not be written: {error}"))
     }
 
+    /// Writes the candidate as one length-prefixed field, copying it through
+    /// [`CANDIDATE_CHUNK_BYTES`]-sized reads so the record never holds the whole
+    /// candidate in memory. The layout is identical to [`Self::write_bytes`].
+    fn write_candidate(file: &mut File, candidate: &CandidateSnapshot) -> Result<(), String> {
+        file.write_all(&candidate.len().to_le_bytes())
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+        let length = candidate.len();
+        let mut offset = 0_u64;
+        while offset < length {
+            let wanted = usize::try_from(length - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let chunk = candidate.read_range(offset, wanted).map_err(|error| {
+                format!("temporary scratch candidate could not be read: {error}")
+            })?;
+            if chunk.is_empty() {
+                return Err("temporary scratch candidate ended before its recorded length".into());
+            }
+            file.write_all(&chunk)
+                .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+            offset += chunk.len() as u64;
+        }
+        Ok(())
+    }
+
     fn read_record(path: &Path) -> Result<PersistedTemporaryScratch, String> {
         let mut file = File::open(path)
             .map_err(|error| format!("temporary scratch record could not be opened: {error}"))?;
@@ -362,7 +396,7 @@ impl VfsScratchStore {
         }
         let identity = Self::read_identity(&mut file)?;
         let baseline = Self::read_optional(&mut file)?;
-        let bytes = Self::read_bytes(&mut file)?;
+        let candidate = Self::locate_candidate(&mut file, path)?;
         let mut trailing = [0];
         if file
             .read(&mut trailing)
@@ -374,7 +408,34 @@ impl VfsScratchStore {
         Ok(PersistedTemporaryScratch {
             identity,
             baseline,
-            bytes,
+            candidate,
+        })
+    }
+
+    /// Skips the candidate field and records where it lies, so restore can stream
+    /// it from the record file without holding it in memory.
+    fn locate_candidate(file: &mut File, path: &Path) -> Result<RecordedCandidate, String> {
+        let mut encoded_length = [0; 8];
+        file.read_exact(&mut encoded_length).map_err(|error| {
+            format!("temporary scratch record field length is incomplete: {error}")
+        })?;
+        let len = u64::from_le_bytes(encoded_length);
+        let offset = file
+            .stream_position()
+            .map_err(|error| format!("temporary scratch record could not be read: {error}"))?;
+        let file_len = file
+            .metadata()
+            .map_err(|error| format!("temporary scratch record size could not be read: {error}"))?
+            .len();
+        if offset.checked_add(len).is_none_or(|end| end > file_len) {
+            return Err("temporary scratch record field exceeds its file size".into());
+        }
+        file.seek(SeekFrom::Start(offset + len))
+            .map_err(|error| format!("temporary scratch record could not be read: {error}"))?;
+        Ok(RecordedCandidate {
+            record: path.to_path_buf(),
+            offset,
+            len,
         })
     }
 
@@ -1250,6 +1311,13 @@ impl MountWriter {
     }
 }
 
+/// Outcome of one Blob commit attempt: settled, or refused because the scratch
+/// candidate changed between hashing and admission (no row was touched).
+enum BlobAttempt {
+    Settled(Option<Vec<u8>>),
+    RacingWrite,
+}
+
 #[derive(Clone)]
 struct BlobField {
     name: String,
@@ -1573,18 +1641,6 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
-    fn durable_save(
-        &self,
-        schema_identity: TableSchemaIdentity,
-    ) -> Result<VfsDurableSave, String> {
-        let expected_baseline_row = self
-            .expected_baseline_row
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        self.durable_save_at(expected_baseline_row, schema_identity)
-    }
-
     /// The committed schema identity of the row's table right now. Operations capture it when
     /// they open their handle or scratch and pass that captured value to the commit (ORNA-VFS-019).
     fn live_schema_identity(&self) -> Result<TableSchemaIdentity, String> {
@@ -1594,7 +1650,7 @@ impl RowSaveContext {
         )
     }
 
-    fn durable_save_at(
+    fn durable_save_with_baseline(
         &self,
         expected_baseline_row: Option<Vec<u8>>,
         schema_identity: TableSchemaIdentity,
@@ -1654,6 +1710,19 @@ impl RowSaveContext {
             .clone()
     }
 
+    /// The CAS baseline an explicit `orna edit` saves against (41-vfs.md:75-77). A grouped
+    /// `edit --row` is this mount's own row save and compares against the row the mount recorded
+    /// (stale when another writer advanced it). A plain `edit PATH` reads the durable row at commit:
+    /// a plain owner-routed edit leaves the recorded baseline at the row before it, so a later
+    /// plain edit would be refused against its own predecessor.
+    fn explicit_edit_baseline(&self, grouped_row: bool) -> Result<Option<Vec<u8>>, String> {
+        if grouped_row {
+            return Ok(self.recorded_baseline());
+        }
+        let key = runtime_table_key_bytes(&self.key)?;
+        self.temporary_baseline(&key)
+    }
+
     fn temporary_target(
         &self,
         blob_field: Option<&BlobField>,
@@ -1687,18 +1756,24 @@ impl RowSaveContext {
             .runtime
             .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES));
         let len = self.writer.runtime.block_on(scratch.candidate_len());
-        if len > 0 {
-            let length = usize::try_from(len)
-                .map_err(|_| "scratch candidate exceeds addressable memory".to_owned())?;
+        let mut offset = 0_u64;
+        while offset < len {
+            let wanted = usize::try_from(len - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
             let bytes = self
                 .writer
                 .runtime
-                .block_on(scratch.read_range(0, length))
+                .block_on(scratch.read_range(offset, wanted))
                 .map_err(|error| format!("scratch candidate could not be read: {error:?}"))?;
+            if bytes.is_empty() {
+                return Err("scratch candidate ended before its length".to_owned());
+            }
             self.writer
                 .runtime
-                .block_on(retargeted.write_at(0, &bytes))
+                .block_on(retargeted.write_at(offset, &bytes))
                 .map_err(|error| format!("scratch candidate could not be moved: {error:?}"))?;
+            offset += bytes.len() as u64;
         }
         Ok((target, Arc::new(retargeted)))
     }
@@ -1712,8 +1787,8 @@ impl RowSaveContext {
         let store = &self.writer.scratch_store;
         self.writer
             .runtime
-            .block_on(scratch.fsync_scratch_with(|_, bytes| async move {
-                store.persist(identity, baseline, bytes.as_ref())
+            .block_on(scratch.fsync_scratch_with(|_, snapshot| async move {
+                store.persist(identity, baseline, &snapshot)
             }))
             .map(|_| ())
             .map_err(|failure| match failure {
@@ -1728,7 +1803,20 @@ impl RowSaveContext {
         record_baseline: bool,
         opened: &TableSchemaIdentity,
     ) -> Result<(), DocumentCommitError> {
-        let save = self.durable_save(opened.clone()).map_err(DocumentCommitError::Failed)?;
+        self.commit_document_against(draft, record_baseline, self.recorded_baseline(), opened)
+    }
+
+    /// Commits `draft` against `expected_baseline_row`, the durable row the save compares (CAS).
+    fn commit_document_against(
+        self: &Arc<Self>,
+        draft: &EditDraft<RowMapSnapshot>,
+        record_baseline: bool,
+        expected_baseline_row: Option<Vec<u8>>,
+        opened: &TableSchemaIdentity,
+    ) -> Result<(), DocumentCommitError> {
+        let save = self
+            .durable_save_with_baseline(expected_baseline_row, opened.clone())
+            .map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -1792,7 +1880,7 @@ impl RowSaveContext {
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
         let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
-        let save = self.durable_save_at(expected_baseline_row, schema_identity)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
         let admitted_text = Arc::clone(&replacement_bytes);
@@ -1824,7 +1912,7 @@ impl RowSaveContext {
             outcome,
             &accepted_row,
             field,
-            replacement_bytes,
+            Some(replacement_bytes),
             record_baseline,
         )
     }
@@ -1839,11 +1927,14 @@ impl RowSaveContext {
         >,
         accepted_row: &Mutex<Option<Vec<u8>>>,
         field: &BlobField,
-        replacement_bytes: Arc<[u8]>,
+        replacement_bytes: Option<Arc<[u8]>>,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         match outcome {
             Ok(TemporaryRenameOutcome::Applied { .. }) => {
+                let replacement_bytes = replacement_bytes.ok_or_else(|| {
+                    DocumentCommitError::Failed("replacement Blob bytes were not admitted".into())
+                })?;
                 if let Some(field) = self
                     .blob_fields
                     .lock()
@@ -1883,12 +1974,12 @@ impl RowSaveContext {
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
-        let replacement_bytes = self
-            .writer
-            .runtime
-            .block_on(scratch.candidate_bytes())
-            .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
         if field.text {
+            let replacement_bytes = self
+                .writer
+                .runtime
+                .block_on(scratch.candidate_bytes())
+                .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
             return self.commit_text_temporary(
                 target,
                 scratch,
@@ -1899,11 +1990,76 @@ impl RowSaveContext {
                 record_baseline,
             );
         }
-        let length = u64::try_from(replacement_bytes.len())
-            .map_err(|_| "replacement Blob length is invalid".to_owned())?;
-        let digest: [u8; 32] = Sha256::digest(&replacement_bytes).into();
-        let expected_identity = ContentIdentity::new(length, digest)
-            .map_err(|error| format!("replacement Blob identity is invalid: {error:?}"))?;
+        // The digest is streamed outside the vfs operation lock. A write that
+        // lands before admission makes the vfs identity check refuse the attempt
+        // before any row is touched; that refusal is retried once against a fresh
+        // digest, and a second refusal is reported instead of publishing bytes.
+        let mut retried = false;
+        loop {
+            let expected_identity = self.scratch_identity(scratch)?;
+            match self.commit_blob_attempt(
+                target,
+                scratch,
+                field,
+                expected_identity,
+                expected_baseline_row.clone(),
+                schema_identity.clone(),
+                record_baseline,
+            )? {
+                BlobAttempt::Settled(row) => return Ok(row),
+                BlobAttempt::RacingWrite if !retried => retried = true,
+                BlobAttempt::RacingWrite => {
+                    return Err(DocumentCommitError::Failed(
+                        "scratch changed during Blob commit; save again".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Streams the scratch candidate in bounded ranges to its SHA-256 identity,
+    /// so hashing never holds the whole Blob.
+    fn scratch_identity(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+    ) -> Result<ContentIdentity, DocumentCommitError> {
+        let length = self.writer.runtime.block_on(scratch.candidate_len());
+        let mut hasher = Sha256::new();
+        let mut offset = 0_u64;
+        while offset < length {
+            let wanted = usize::try_from(length - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let chunk = self
+                .writer
+                .runtime
+                .block_on(scratch.read_range(offset, wanted))
+                .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
+            if chunk.is_empty() {
+                return Err(DocumentCommitError::Failed(
+                    "scratch candidate ended before its length".into(),
+                ));
+            }
+            hasher.update(&chunk);
+            offset += chunk.len() as u64;
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
+        ContentIdentity::new(length, digest)
+            .map_err(|error| format!("replacement Blob identity is invalid: {error:?}").into())
+    }
+
+    /// One capture-and-commit attempt against `expected_identity`. A racing
+    /// scratch write is reported as `RacingWrite`; no row was touched by then.
+    fn commit_blob_attempt(
+        self: &Arc<Self>,
+        target: &Arc<ManagedFile<RowMapSnapshot>>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        field: &BlobField,
+        expected_identity: ContentIdentity,
+        expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
+        record_baseline: bool,
+    ) -> Result<BlobAttempt, DocumentCommitError> {
         let capture = self
             .writer
             .repository
@@ -1913,11 +2069,13 @@ impl RowSaveContext {
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
         let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
-        let save = self.durable_save_at(expected_baseline_row, schema_identity)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
+        let blob_slot: Arc<Mutex<Option<Arc<[u8]>>>> = Arc::new(Mutex::new(None));
+        let blob_output = Arc::clone(&blob_slot);
         let outcome = self
             .writer
             .runtime
@@ -1930,7 +2088,10 @@ impl RowSaveContext {
                 expected_identity,
                 &field.media_type,
                 field.suffix.as_deref(),
-                move |coordinates, _blob_bytes, binding| async move {
+                move |coordinates, blob_bytes, binding| async move {
+                    *blob_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(blob_bytes);
                     let (candidate, row_bytes) = row_context.writer.candidate(
                         &row_context,
                         &coordinates,
@@ -1945,13 +2106,25 @@ impl RowSaveContext {
                 },
                 &NoFault,
             ));
+        if matches!(
+            outcome,
+            Err(VfsSaveError::BlobCapture(
+                VfsBlobReplacementError::IdentityMismatch { .. }
+            ))
+        ) {
+            return Ok(BlobAttempt::RacingWrite);
+        }
         self.settle_replacement(
             outcome,
             &accepted_row,
             field,
-            replacement_bytes,
+            blob_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
             record_baseline,
         )
+        .map(BlobAttempt::Settled)
     }
 
     fn commit_temporary(
@@ -1961,7 +2134,7 @@ impl RowSaveContext {
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
-        let save = self.durable_save_at(expected_baseline_row, schema_identity)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -2240,11 +2413,6 @@ impl WorkspaceFilesystem {
                         save.table.object_id(),
                     )
                     .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
-                    let expected = save
-                        .expected_baseline_row
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
                     let image = Arc::new(VfsFileSnapshot::new(
                         row_image_pin(&save.source.rows),
                         Arc::<[u8]>::from([]),
@@ -2261,7 +2429,7 @@ impl WorkspaceFilesystem {
                     (
                         save,
                         initial,
-                        Some((target, scratch, field, expected, schema_identity)),
+                        Some((target, scratch, field, schema_identity)),
                     )
                 }
                 _ => {
@@ -2275,7 +2443,7 @@ impl WorkspaceFilesystem {
         };
         let reproject = blob_edit.is_none().then(|| (inode, Arc::clone(&save)));
         let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
-            Some((target, scratch, field, expected, schema_identity)) => Box::new(move |candidate, draft_path, record_baseline| {
+            Some((target, scratch, field, schema_identity)) => Box::new(move |candidate, draft_path, record_baseline| {
                 writer
                     .runtime
                     .block_on(async {
@@ -2286,6 +2454,9 @@ impl WorkspaceFilesystem {
                             format!("Blob candidate exceeds draft limits: {error:?}")
                         })
                     })
+                    .map_err(|error| retained_edit_error(&error, draft_path))?;
+                let expected = save
+                    .explicit_edit_baseline(grouped_row)
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
                     save.commit_blob_temporary(
@@ -2323,8 +2494,11 @@ impl WorkspaceFilesystem {
                             })
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
+                    let expected = save
+                        .explicit_edit_baseline(grouped_row)
+                        .map_err(|error| retained_edit_error(&error, draft_path))?;
                     admit_edit_result(
-                        save.commit_document(&draft, record_baseline, &opened),
+                        save.commit_document_against(&draft, record_baseline, expected, &opened),
                         draft_path,
                     )
                 })
@@ -2367,12 +2541,12 @@ impl WorkspaceFilesystem {
     }
 
     /// Commits an explicit edit requested through the `user.orna.edit-commit`
-    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft`; the draft
+    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft NUL digest`; the draft
     /// must be a regular editor draft in this repository's recovery store.
     fn commit_requested_edit(&self, request: &[u8]) -> Result<(), EditError> {
         use std::os::unix::ffi::OsStrExt as _;
         let fields: Vec<&[u8]> = request.split(|byte| *byte == 0).collect();
-        let [mode, path, draft_bytes] = fields.as_slice() else {
+        let [mode, path, draft_bytes, digest] = fields.as_slice() else {
             return Err("edit request is malformed".into());
         };
         let grouped_row = match *mode {
@@ -2403,12 +2577,18 @@ impl WorkspaceFilesystem {
             return Err("edit draft is outside the editor draft store".into());
         }
         let candidate = read_regular_draft(draft)?;
-        // ORNA-VFS-015: `edit --row` is this mount's own grouped row save, so the
-        // mount records the row it accepted and its next save compares against it
-        // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
-        // `edit PATH` owner-routed by another writer leaves the mounted baseline
-        // unchanged, so the mount's next save is stale against that writer's row.
+        // ORNA-VFS-015: `edit --row` records the row it accepted as this mount's own grouped save.
+        // An explicit edit CASes against the durable row read at commit, not the mount's recorded
+        // baseline, which a plain owner-routed edit leaves at the row before it (41-vfs.md:75-77).
         let prepared = self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?;
+        // 41-vfs.md:75-77: the editor was seeded from the bytes the CLI read. If the mounted row
+        // moved since, that read is stale: nothing is written and the draft stays retained.
+        if edit_view_digest(&prepared.initial_bytes).as_bytes() != *digest {
+            return Err(EditError::Stale(format!(
+                "the mounted row changed after orna edit read it; nothing was written; draft retained at {}",
+                draft.display()
+            )));
+        }
         let reproject = prepared.reproject.clone();
         prepared.commit(&candidate, draft, grouped_row)?;
         if let Some((inode, save)) = reproject {
@@ -2433,6 +2613,12 @@ impl WorkspaceFilesystem {
             eprintln!("the accepted row document could not be re-projected: {error}");
         }
     }
+}
+
+/// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
+/// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
+pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Reads an editor draft through one descriptor opened without following a
@@ -3258,16 +3444,11 @@ impl WorkspaceFilesystem {
                 .runtime
                 .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
-        writer
-            .runtime
-            .block_on(scratch.write_at(0, &record.bytes))
-            .map_err(|error| {
-                format!("persisted temporary scratch bytes could not be restored: {error:?}")
-            })?;
+        Self::restore_candidate(writer, &scratch, &record.candidate)?;
         let PersistedTemporaryScratch {
             identity,
             baseline,
-            bytes,
+            candidate,
         } = record;
         // A persisted scratch record stores no schema identity, so a restored scratch binds to the
         // schema committed at restore time; a schema change before this remount is not detected for it.
@@ -3277,7 +3458,7 @@ impl WorkspaceFilesystem {
             parent,
             &name,
             NodeKind::Temporary {
-                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                len: candidate.len,
                 save,
                 target,
                 scratch,
@@ -3287,6 +3468,42 @@ impl WorkspaceFilesystem {
                 schema_identity,
             },
         )
+    }
+
+    /// Copies a recorded candidate into `scratch` in [`CANDIDATE_CHUNK_BYTES`]
+    /// slices read from the record file, so restore never holds the whole
+    /// candidate in memory.
+    fn restore_candidate(
+        writer: &Arc<MountWriter>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        candidate: &RecordedCandidate,
+    ) -> Result<(), String> {
+        let mut file = File::open(&candidate.record).map_err(|error| {
+            format!("persisted temporary scratch record could not be reopened: {error}")
+        })?;
+        file.seek(SeekFrom::Start(candidate.offset)).map_err(|error| {
+            format!("persisted temporary scratch bytes could not be read: {error}")
+        })?;
+        let buffer_len = candidate.len.min(CANDIDATE_CHUNK_BYTES as u64);
+        let mut buffer = vec![0_u8; usize::try_from(buffer_len).unwrap_or(CANDIDATE_CHUNK_BYTES)];
+        let mut offset = 0_u64;
+        while offset < candidate.len {
+            let wanted = usize::try_from(candidate.len - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let slice = &mut buffer[..wanted];
+            file.read_exact(slice).map_err(|error| {
+                format!("persisted temporary scratch bytes could not be read: {error}")
+            })?;
+            writer
+                .runtime
+                .block_on(scratch.write_at(offset, slice))
+                .map_err(|error| {
+                    format!("persisted temporary scratch bytes could not be restored: {error:?}")
+                })?;
+            offset += wanted as u64;
+        }
+        Ok(())
     }
 
     fn update_writable_len(&self, inode: u64, len: u64) {
@@ -4561,6 +4778,7 @@ impl Filesystem for WorkspaceFilesystem {
                         reply.error(refuse_unsupported("open for write"));
                         return;
                     }
+                    state.track_blob_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -5793,7 +6011,6 @@ impl Filesystem for WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let start = usize::try_from(offset).unwrap_or(usize::MAX);
         let parent = match state.nodes.get(&inode.0) {
             Some(node) => node.parent,
             None => {
@@ -5805,21 +6022,21 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::ENOTDIR);
             return;
         }
-        if start == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
+        if offset == 0 && reply.add(INodeNo(inode.0), 1, FileType::Directory, OsStr::new(".")) {
             reply.ok();
             return;
         }
-        if start <= 1
+        if offset <= 1
             && reply.add(INodeNo(parent), 2, FileType::Directory, OsStr::new(".."))
         {
             reply.ok();
             return;
         }
         if state
-            .readdir_page(inode.0, start, |index, entry| {
+            .readdir_page(inode.0, offset, |entry_offset, entry| {
                 !reply.add(
                     INodeNo(entry.inode),
-                    u64::try_from(index.saturating_add(3)).unwrap_or(u64::MAX),
+                    entry_offset,
                     entry.kind,
                     entry.name.as_os_str(),
                 )
@@ -6175,7 +6392,7 @@ impl FsBuilder {
         Ok(Some(inode))
     }
 
-    fn ensure_readdir(&mut self, inode: u64, start: usize) -> Result<(), String> {
+    fn ensure_readdir(&mut self, inode: u64, start: u64) -> Result<(), String> {
         self.load_nested_children(inode)?;
         if matches!(
             self.nodes.get(&inode).map(|node| &node.kind),
@@ -6191,22 +6408,13 @@ impl FsBuilder {
         let Some(table_inode) = table_inode else {
             return Ok(());
         };
-        let child_start = start.saturating_sub(2);
-        let loaded = self
-            .directory(inode)
-            .ok_or_else(|| "mount directory is missing".to_owned())?
-            .entries
-            .len();
-        if child_start > loaded {
-            return Ok(());
-        }
-        let target = child_start.saturating_add(ROW_PAGE_LIMIT);
         loop {
-            let loaded = self
+            let directory = self
                 .directory(inode)
-                .ok_or_else(|| "mount directory is missing".to_owned())?
-                .entries
-                .len();
+                .ok_or_else(|| "mount directory is missing".to_owned())?;
+            // Loading pages moves the cursor's index, so the target is recomputed each round.
+            let target = directory.resume_index(start).saturating_add(ROW_PAGE_LIMIT);
+            let loaded = directory.entries.len();
             let (exhausted, error) = match self.nodes.get(&table_inode).map(|node| &node.kind) {
                 Some(NodeKind::Table(table)) => (table.exhausted, table.error.clone()),
                 _ => return Err("mount table directory is missing".into()),
@@ -6221,23 +6429,19 @@ impl FsBuilder {
         }
     }
 
+    /// Visits the entries after the kernel cursor `start`, loading table pages as needed.
     fn readdir_page(
         &mut self,
         inode: u64,
-        start: usize,
-        mut visit: impl FnMut(usize, &DirectoryEntry) -> bool,
+        start: u64,
+        mut visit: impl FnMut(u64, &DirectoryEntry) -> bool,
     ) -> Result<(), String> {
         self.ensure_readdir(inode, start)?;
         let directory = self
             .directory(inode)
             .ok_or_else(|| "mount directory is missing".to_owned())?;
-        for (index, entry) in directory
-            .entries
-            .iter()
-            .enumerate()
-            .skip(start.saturating_sub(2))
-        {
-            if !visit(index, entry) {
+        for entry in &directory.entries[directory.resume_index(start)..] {
+            if !visit(entry.offset(), entry) {
                 break;
             }
         }
@@ -6417,14 +6621,7 @@ impl FsBuilder {
             let directory = self
                 .directory_mut(parent)
                 .ok_or_else(|| "mount row parent is not a directory".to_owned())?;
-            let entry_name = OsString::from(name);
-            let index = directory.entries.len();
-            directory.by_name.insert(entry_name.clone(), index);
-            directory.entries.push(DirectoryEntry {
-                inode,
-                name: entry_name,
-                kind: FileType::Directory,
-            });
+            directory.push(OsString::from(name), inode, FileType::Directory);
             return Ok(inode);
         }
         self.insert_node(
@@ -6866,8 +7063,8 @@ impl FsBuilder {
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
         // data.orna keeps its node, so handles opened earlier keep their captured baseline. Pending
         // scratch files keep their entries: their saves belong to the user, not the row. The row's
-        // other projected files, nested directories included, are replaced as one set so every view
-        // agrees on the new row. Replaced nodes stay in `nodes` for handles opened earlier.
+        // other projected files are reconciled by name, in place, so every view agrees on the new
+        // row and held listings keep their positions. Files the row no longer projects are retired.
         let (kept_inodes, kept_names): (HashSet<u64>, HashSet<OsString>) = {
             let directory = self
                 .directory(row_inode)
@@ -6893,11 +7090,38 @@ impl FsBuilder {
                 "the refreshed row entry {name} collides with a pending scratch file"
             ));
         }
-        self.directory_mut(row_inode)
+        // Reconcile by name so a surviving row file keeps its readdir position and cookie: a file
+        // the refreshed row still projects is swapped in place, a new one is appended, and a file
+        // the row no longer projects leaves. Pending scratch files were kept above.
+        let vanished: Vec<(OsString, u64)> = self
+            .directory(row_inode)
             .ok_or_else(|| "the refreshed row is not a directory".to_owned())?
-            .retain_entries(|entry| kept_inodes.contains(&entry.inode));
+            .entries
+            .iter()
+            .filter(|entry| {
+                !kept_inodes.contains(&entry.inode)
+                    && !others
+                        .iter()
+                        .any(|(name, _)| name.as_str() == entry.name.as_os_str())
+            })
+            .map(|entry| (entry.name.clone(), entry.inode))
+            .collect();
+        for (name, inode) in vanished {
+            self.directory_mut(row_inode)
+                .and_then(|directory| directory.remove_entry(&name))
+                .ok_or_else(|| "a vanished row entry had already left its directory".to_owned())?;
+            self.retire_node(inode);
+        }
         for (name, kind) in others {
-            self.add_file(row_inode, &name, kind)?;
+            let listed = self
+                .directory(row_inode)
+                .and_then(|directory| directory.entry(OsStr::new(name.as_str())))
+                .is_some();
+            if listed {
+                self.replace_child(row_inode, OsStr::new(name.as_str()), kind)?;
+            } else {
+                self.add_file(row_inode, &name, kind)?;
+            }
         }
         self.nodes
             .get_mut(&document_inode)
@@ -7012,7 +7236,8 @@ impl FsBuilder {
     }
 
     /// Swaps the child `name` of `parent` for a new node at the same readdir position, so
-    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles.
+    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles,
+    /// and a superseded directory stays loaded for a held listing.
     fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<(), String> {
         let inode = self.next_inode;
         self.next_inode = inode
@@ -7027,7 +7252,10 @@ impl FsBuilder {
             .by_name
             .get(name)
             .ok_or_else(|| "the mount child to replace is missing".to_owned())?;
-        let superseded = std::mem::replace(&mut directory.entries[index].inode, inode);
+        let file_type = kind.file_type();
+        let entry = &mut directory.entries[index];
+        let superseded = std::mem::replace(&mut entry.inode, inode);
+        entry.kind = file_type;
         self.nodes.insert(inode, FsNode { parent, kind });
         self.retire_node(superseded);
         Ok(())
@@ -7051,19 +7279,7 @@ impl FsBuilder {
         {
             return Err(format!("mount path contains a duplicate file name: {name}"));
         }
-        let file_type = match &kind {
-            NodeKind::Directory(_)
-            | NodeKind::Table(_)
-            | NodeKind::KeyDirectory(_)
-            | NodeKind::Row(_)
-            | NodeKind::NestedDirectory(_) => FileType::Directory,
-            NodeKind::Bytes(_)
-            | NodeKind::BlobBytes(_)
-            | NodeKind::Text { .. }
-            | NodeKind::Document { .. }
-            | NodeKind::Temporary { .. }
-            | NodeKind::Blob { .. } => FileType::RegularFile,
-        };
+        let file_type = kind.file_type();
         self.insert_node(parent, name, kind, file_type)
     }
 
@@ -7146,13 +7362,7 @@ impl FsBuilder {
         if directory.entry(name.as_os_str()).is_some() {
             return Err("mount directory contains a duplicate entry".into());
         }
-        let index = directory.entries.len();
-        directory.by_name.insert(name.clone(), index);
-        directory.entries.push(DirectoryEntry {
-            inode,
-            name,
-            kind: file_type,
-        });
+        directory.push(name, inode, file_type);
         self.next_inode = next_inode;
         self.nodes.insert(inode, FsNode { parent, kind });
         Ok(inode)
@@ -7182,12 +7392,20 @@ impl FsBuilder {
     /// Drops a generation that is no longer reachable by name. Open handles keep it
     /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
     ///
+    /// A directory is never dropped here: a held directory handle keeps enumerating its
+    /// listing, and a refresh never makes that listing fail with ENOENT (41-vfs.md:39-40).
+    /// Directories are dropped only at remount. The children of a retired directory are not
+    /// reclaimed with it.
+    ///
     /// Accepted FUSE nodeid-lifetime deviation: retention follows tracked open handles, not
     /// kernel lookup counts. `forget` and `batch_forget` keep fuser's no-op defaults, so a
     /// retired generation is removed once no handle holds it, even if the kernel still
     /// caches its nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes
     /// on use; a stale nodeid then fails with ENOENT instead of serving retired bytes.
     fn retire_node(&mut self, inode: u64) {
+        if self.directory(inode).is_some() {
+            return;
+        }
         if self.open_blobs.contains_key(&inode) {
             self.superseded_blobs.insert(inode);
         } else {
@@ -7359,11 +7577,31 @@ impl NodeKind {
     fn is_directory(&self) -> bool {
         self.directory().is_some()
     }
+
+    /// The readdir file type of a node of this kind.
+    fn file_type(&self) -> FileType {
+        match self {
+            Self::Directory(_)
+            | Self::Table(_)
+            | Self::KeyDirectory(_)
+            | Self::Row(_)
+            | Self::NestedDirectory(_) => FileType::Directory,
+            Self::Bytes(_)
+            | Self::BlobBytes(_)
+            | Self::Text { .. }
+            | Self::Document { .. }
+            | Self::Temporary { .. }
+            | Self::Blob { .. } => FileType::RegularFile,
+        }
+    }
 }
 
 struct Directory {
     entries: Vec<DirectoryEntry>,
     by_name: HashMap<OsString, usize>,
+    /// Cookie the next pushed entry takes. Cookies only grow, so removing or replacing a sibling
+    /// never changes an existing entry's readdir offset.
+    next_cookie: u64,
 }
 
 impl Directory {
@@ -7371,7 +7609,28 @@ impl Directory {
         Self {
             entries: Vec::new(),
             by_name: HashMap::new(),
+            next_cookie: 0,
         }
+    }
+
+    /// Appends `name` in readdir order under a fresh cookie.
+    fn push(&mut self, name: OsString, inode: u64, kind: FileType) {
+        let cookie = self.next_cookie;
+        self.next_cookie += 1;
+        self.by_name.insert(name.clone(), self.entries.len());
+        self.entries.push(DirectoryEntry {
+            inode,
+            name,
+            kind,
+            cookie,
+        });
+    }
+
+    /// Index of the first entry whose readdir offset is past `start`, the offset the kernel
+    /// hands back for the last entry it received. Offsets are cookies, so removing an entry
+    /// before a held cursor shifts indexes but not offsets, and the listing resumes after it.
+    fn resume_index(&self, start: u64) -> usize {
+        self.entries.partition_point(|entry| entry.offset() <= start)
     }
 
     fn entry(&self, name: &OsStr) -> Option<&DirectoryEntry> {
@@ -7381,7 +7640,7 @@ impl Directory {
     }
     fn remove_entry(&mut self, name: &OsStr) -> Option<DirectoryEntry> {
         let index = self.by_name.remove(name)?;
-        // Order-preserving: readdir offsets index `entries`, so siblings keep their positions.
+        // Order-preserving: siblings keep their readdir order and cookies, so offsets hold.
         let removed = self.entries.remove(index);
         for (position, entry) in self.entries.iter().enumerate().skip(index) {
             self.by_name.insert(entry.name.clone(), position);
@@ -7475,10 +7734,22 @@ struct TableSource {
     runtime_table: Option<RuntimeTableIdentity>,
     runtime_field_layout: Option<StoredFieldLayout>,
 }
+
+/// Readdir offsets of entries begin after `.` (1) and `..` (2).
+const READDIR_ENTRY_BASE: u64 = 3;
+
 struct DirectoryEntry {
     inode: u64,
     name: OsString,
     kind: FileType,
+    /// Assigned when the entry is pushed and never reused within its directory.
+    cookie: u64,
+}
+
+impl DirectoryEntry {
+    fn offset(&self) -> u64 {
+        self.cookie.saturating_add(READDIR_ENTRY_BASE)
+    }
 }
 
 fn flatten_key_components(key: &TypedKey, components: &mut Vec<TypedKey>) -> Result<(), String> {
@@ -8949,8 +9220,9 @@ mod tests {
         assert!(!table.exhausted, "a full page does not prove that another page is absent");
 
         let mut next_page = Vec::new();
+        let resume = u64::try_from(ROW_PAGE_LIMIT + 2).expect("the page limit fits a cursor");
         builder
-            .readdir_page(table_inode, ROW_PAGE_LIMIT + 2, |_, entry| {
+            .readdir_page(table_inode, resume, |_, entry| {
                 next_page.push(entry.name.to_string_lossy().into_owned());
                 true
             })
@@ -9157,23 +9429,13 @@ mod hardening_tests {
 mod directory_removal_tests {
     use std::ffi::{OsStr, OsString};
 
-    use super::{Directory, DirectoryEntry, FileType};
-
-    fn entry(inode: u64, name: &str) -> DirectoryEntry {
-        DirectoryEntry {
-            inode,
-            name: OsString::from(name),
-            kind: FileType::RegularFile,
-        }
-    }
+    use super::{Directory, FileType};
 
     /// A directory whose entries sit in the given order, laid out as `insert_node` does.
     fn directory_of(entries: &[(u64, &str)]) -> Directory {
         let mut directory = Directory::new();
         for &(inode, name) in entries {
-            let index = directory.entries.len();
-            directory.by_name.insert(OsString::from(name), index);
-            directory.entries.push(entry(inode, name));
+            directory.push(OsString::from(name), inode, FileType::RegularFile);
         }
         directory
     }
@@ -9230,6 +9492,117 @@ mod directory_removal_tests {
             directory.entry(OsStr::new("b")).map(|entry| entry.inode),
             Some(3)
         );
+    }
+}
+
+#[cfg(test)]
+mod readdir_cursor_tests {
+    use std::ffi::OsStr;
+
+    use super::{Directory, FileType, FsBuilder, NodeKind, ROOT_INODE};
+
+    /// A builder whose directory `dir` lists `names` in order; returns the builder and `dir`.
+    fn directory_with(names: &[&str]) -> (FsBuilder, u64) {
+        let mut builder = FsBuilder::new();
+        let dir = builder
+            .insert_node(
+                ROOT_INODE,
+                "dir",
+                NodeKind::Directory(Directory::new()),
+                FileType::Directory,
+            )
+            .expect("create the test directory");
+        for name in names {
+            builder
+                .add_file(dir, name, NodeKind::Bytes(Vec::new()))
+                .expect("add a test entry");
+        }
+        (builder, dir)
+    }
+
+    /// Lists `dir` from the kernel cursor `start`, keeping at most `limit` entries. Each item is
+    /// the offset the kernel passes back for that entry and its name.
+    fn list(builder: &mut FsBuilder, dir: u64, start: u64, limit: usize) -> Vec<(u64, String)> {
+        let mut seen = Vec::new();
+        builder
+            .readdir_page(dir, start, |offset, entry| {
+                seen.push((offset, entry.name.to_string_lossy().into_owned()));
+                seen.len() < limit
+            })
+            .expect("list the test directory");
+        seen
+    }
+
+    fn names(listing: &[(u64, String)]) -> Vec<&str> {
+        listing.iter().map(|(_, name)| name.as_str()).collect()
+    }
+
+    fn offset_of(listing: &[(u64, String)], name: &str) -> u64 {
+        listing
+            .iter()
+            .find(|(_, listed)| listed == name)
+            .map(|(offset, _)| *offset)
+            .expect("the entry is listed")
+    }
+
+    /// ORNA-VFS-017: a listing held across a removal resumes after its cursor. Positional
+    /// offsets would skip `c` here, because removing `a` shifts every later index down.
+    #[test]
+    fn held_listing_resumes_after_its_cursor_when_an_earlier_entry_is_removed() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c", "d"]);
+        let first = list(&mut builder, dir, 0, 2);
+        assert_eq!(names(&first), ["a", "b"]);
+        let cursor = first.last().expect("two entries are listed").0;
+        builder
+            .directory_mut(dir)
+            .and_then(|directory| directory.remove_entry(OsStr::new("a")))
+            .expect("a is present before removal");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(
+            names(&rest),
+            ["c", "d"],
+            "entries after the cursor are neither skipped nor repeated"
+        );
+    }
+
+    /// ORNA-VFS-017: a surviving entry keeps the offset it was listed with.
+    #[test]
+    fn surviving_entries_keep_their_offsets_after_an_earlier_removal() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c", "d"]);
+        let before = list(&mut builder, dir, 0, usize::MAX);
+        builder
+            .directory_mut(dir)
+            .and_then(|directory| directory.remove_entry(OsStr::new("a")))
+            .expect("a is present before removal");
+        let after = list(&mut builder, dir, 0, usize::MAX);
+        assert_eq!(offset_of(&after, "c"), offset_of(&before, "c"), "c keeps its offset");
+        assert_eq!(offset_of(&after, "d"), offset_of(&before, "d"), "d keeps its offset");
+    }
+
+    /// A child replaced in place (refresh, Blob generation) keeps its position in a held listing.
+    #[test]
+    fn replaced_child_keeps_its_position_for_a_held_listing() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c"]);
+        let first = list(&mut builder, dir, 0, 1);
+        let cursor = first.last().expect("one entry is listed").0;
+        builder
+            .replace_child(dir, OsStr::new("b"), NodeKind::Bytes(vec![1]))
+            .expect("replace b");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(names(&rest), ["b", "c"]);
+    }
+
+    /// A directory retired while a listing is held keeps its loaded entries, so the held
+    /// cursor still enumerates the entries after it (ORNA-VFS-017, 41-vfs.md:39-40).
+    #[test]
+    fn directory_retired_after_a_listing_opened_still_enumerates() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c"]);
+        let first = list(&mut builder, dir, 0, 1);
+        let cursor = first.last().expect("one entry is listed").0;
+        builder.retire_node(dir);
+        assert!(builder.directory(dir).is_some(), "a retired directory stays loaded");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(names(&rest), ["b", "c"]);
     }
 }
 
