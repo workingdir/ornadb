@@ -1580,13 +1580,25 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
-    fn durable_save(&self) -> Result<VfsDurableSave, String> {
-        let expected_baseline_row = self
-            .expected_baseline_row
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        self.durable_save_with_baseline(expected_baseline_row)
+    /// The save for one document commit. `opened` is the CWD generation captured when the
+    /// handle opened (profiles/vfs-1.md:91-92); a generation that moved since is stale
+    /// (profiles/vfs-1.md:138 EAGAIN) and is refused before any admission.
+    fn durable_document_save(
+        &self,
+        opened: &orna_repository_v1::CwdGeneration,
+    ) -> Result<VfsDurableSave, DocumentCommitError> {
+        let live = self.writer.cwd_generation().map_err(DocumentCommitError::Failed)?;
+        if &live != opened {
+            return Err(DocumentCommitError::Stale);
+        }
+        let key = runtime_table_key_bytes(&self.key).map_err(DocumentCommitError::Failed)?;
+        Ok(VfsDurableSave::new(
+            self.writer.owner_id,
+            opened.clone(),
+            self.table.clone(),
+            key,
+        )
+        .with_expected_baseline_row(self.recorded_baseline()))
     }
 
     fn durable_save_with_baseline(
@@ -1721,8 +1733,9 @@ impl RowSaveContext {
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
+        opened: &orna_repository_v1::CwdGeneration,
     ) -> Result<(), DocumentCommitError> {
-        let save = self.durable_save().map_err(DocumentCommitError::Failed)?;
+        let save = self.durable_document_save(opened)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -2275,6 +2288,9 @@ impl WorkspaceFilesystem {
                 )
             }),
             None => {
+                let opened = writer.cwd_generation().map_err(|error| {
+                    format!("edit could not capture the CWD generation: {error}")
+                })?;
                 let draft = Arc::new(
                     writer
                         .runtime
@@ -2292,7 +2308,7 @@ impl WorkspaceFilesystem {
                             })
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    admit_edit_result(save.commit_document(&draft, record_baseline), draft_path)
+                    admit_edit_result(save.commit_document(&draft, record_baseline, &opened), draft_path)
                 })
             }
         };
@@ -2630,7 +2646,11 @@ fn fusermount_program() -> OsString {
 
 #[derive(Clone)]
 enum OpenFile {
-    Document(Arc<RowSaveContext>, Arc<EditDraft<RowMapSnapshot>>),
+    Document(
+        Arc<RowSaveContext>,
+        Arc<EditDraft<RowMapSnapshot>>,
+        orna_repository_v1::CwdGeneration,
+    ),
     Temporary(
         Arc<RowSaveContext>,
         Arc<ManagedFile<RowMapSnapshot>>,
@@ -3286,6 +3306,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
+        opened: &orna_repository_v1::CwdGeneration,
     ) -> Result<(), DocumentCommitError> {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
@@ -3301,7 +3322,7 @@ impl WorkspaceFilesystem {
                 })?;
             draft_state.pending_truncates.remove(&inode);
         }
-        if let Err(error) = save.commit_document(draft, true) {
+        if let Err(error) = save.commit_document(draft, true, opened) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
             if matches!(error, DocumentCommitError::NoCandidate) {
@@ -3366,8 +3387,8 @@ impl WorkspaceFilesystem {
             .get(&handle)
             .cloned();
         match open_file {
-            Some(OpenFile::Document(save, draft)) => {
-                self.accept_document(draft_state, handle, inode.0, &save, &draft)
+            Some(OpenFile::Document(save, draft, opened)) => {
+                self.accept_document(draft_state, handle, inode.0, &save, &draft, &opened)
             }
             Some(OpenFile::Temporary(save, target, scratch, Some(field)))
                 if draft_state.blob_handles.contains_key(&handle) =>
@@ -3822,7 +3843,7 @@ impl WorkspaceFilesystem {
                     .iter()
                     .filter(|(_, dirty_inode)| **dirty_inode == *inode)
                     .filter_map(|(handle, _)| match open_files.get(handle) {
-                        Some(OpenFile::Document(_, draft)) => Some((*handle, Arc::clone(draft))),
+                        Some(OpenFile::Document(_, draft, _)) => Some((*handle, Arc::clone(draft))),
                         _ => None,
                     })
                     .max_by_key(|(handle, _)| *handle)
@@ -3837,7 +3858,7 @@ impl WorkspaceFilesystem {
             }
         }
         for (handle, inode) in &draft_state.unresolved_handles {
-            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
+            if let Some(OpenFile::Document(save, draft, _)) = open_files.get(handle) {
                 let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
                     *truncated == *inode
                         && latest.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, draft))
@@ -4271,7 +4292,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .get(&handle)
                 .cloned()?;
             Some(match &open_file {
-                OpenFile::Document(save, draft) => {
+                OpenFile::Document(save, draft, _) => {
                     save.writer.runtime.block_on(draft.candidate_len())
                 }
                 OpenFile::Temporary(save, _, scratch, _) => {
@@ -4576,6 +4597,15 @@ impl Filesystem for WorkspaceFilesystem {
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
+        let opened = match save.writer.cwd_generation() {
+            Ok(generation) => generation,
+            Err(error) => {
+                eprintln!("mounted document open could not capture the CWD generation: {error}");
+                draft_state.unresolved_handles.remove(&handle);
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
         let draft = Arc::new(
             save.writer
                 .runtime
@@ -4592,7 +4622,7 @@ impl Filesystem for WorkspaceFilesystem {
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle, OpenFile::Document(save, draft));
+            .insert(handle, OpenFile::Document(save, draft, opened));
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
@@ -5154,7 +5184,7 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let private_read = match open_file {
-            Some(OpenFile::Document(save, draft)) => Some(read_candidate_range(
+            Some(OpenFile::Document(save, draft, _)) => Some(read_candidate_range(
                 |offset, length| save.writer.runtime.block_on(draft.read_range(offset, length)),
                 offset,
                 reply_read_size(size),
@@ -5331,7 +5361,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
         }
         let (result, candidate_len) = match open_file {
-            Some(OpenFile::Document(save, draft)) => (
+            Some(OpenFile::Document(save, draft, _)) => (
                 save.writer.runtime.block_on(draft.write_at(offset, data)),
                 None,
             ),
@@ -5529,7 +5559,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
             // Release is cleanup only (EDIT-1 step 4): an unsynced document is
             // retained as a draft, never accepted here.
-            (Some(inode), Some(OpenFile::Document(save, draft))) => {
+            (Some(inode), Some(OpenFile::Document(save, draft, _))) => {
                 self.retain_unsynced_document(&mut draft_state, inode, handle.0, &save, &draft);
             }
             _ => {}
@@ -5609,7 +5639,7 @@ impl Filesystem for WorkspaceFilesystem {
                     }
                 }
                 let (result, candidate_len) = match open_file {
-                    OpenFile::Document(save, draft) => {
+                    OpenFile::Document(save, draft, _) => {
                         (save.writer.runtime.block_on(draft.truncate(size)), None)
                     }
                     OpenFile::Temporary(save, _, scratch, _) => {
