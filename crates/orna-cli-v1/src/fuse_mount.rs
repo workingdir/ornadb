@@ -32,6 +32,7 @@ use orna_runtime_v1::{
     vfs::{
         CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
+        DraftQuota, QuotaCharge,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
         project_component, project_key_component, unproject_component,
         FsyncFailure,
@@ -606,9 +607,8 @@ fn reply_read_size(size: u32) -> u32 {
     size.min(u32::try_from(CANDIDATE_CHUNK_BYTES).unwrap_or(u32::MAX))
 }
 
-/// Where a candidate the mount did not accept reads its bytes from. Retention
-/// streams a live draft or a truncation by range; only a stash whose retention
-/// was refused holds materialised bytes.
+/// Where a candidate the mount did not accept reads its bytes from.
+/// Retention streams a live draft or a truncation by range; nothing is copied whole.
 #[derive(Clone)]
 enum CandidateSource {
     /// A live draft, read through its spool by range.
@@ -616,8 +616,6 @@ enum CandidateSource {
     /// The newest writer draft of the file when one is open or was released
     /// unretained, else its accepted baseline; either is cut or zero-extended to `size`.
     Truncated { size: u64, latest: Option<Arc<EditDraft<RowMapSnapshot>>> },
-    /// Bytes already held in memory for a candidate whose retention was refused.
-    Stashed(Arc<[u8]>),
 }
 
 /// Reads up to `length` bytes at `offset` of the candidate that results from
@@ -677,13 +675,71 @@ fn retain_scratch_candidate(
 /// after its handle, scratch name or mount is gone.
 struct VfsRetainedDraftStore {
     directory: PathBuf,
+    /// The aggregate draft budget every retained record is charged to.
+    quota: Arc<DraftQuota>,
+    /// One charge per record on disk, keyed by draft ID. A record's charge is
+    /// released when the record is removed.
+    records: Mutex<BTreeMap<String, QuotaCharge>>,
 }
 
 impl VfsRetainedDraftStore {
-    fn new(runtime_root: &Path) -> Self {
-        Self {
-            directory: runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY),
+    /// Opens recovery storage under `runtime_root`. Every record already on disk
+    /// is charged to `quota` as it is found, even past the limit, so a restart
+    /// cannot grow past the budget; only new retention is refused.
+    fn open(runtime_root: &Path, quota: Arc<DraftQuota>) -> Result<Self, String> {
+        let directory = runtime_root.join(VFS_RETAINED_DRAFT_DIRECTORY);
+        let mut records = BTreeMap::new();
+        match fs::read_dir(&directory) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry.map_err(|error| {
+                        format!("VFS recovery storage could not be listed: {error}")
+                    })?;
+                    let name = entry.file_name().to_string_lossy().into_owned();
+                    let Some(id) = name.strip_suffix(".draft") else {
+                        continue;
+                    };
+                    let metadata = entry.metadata().map_err(|error| {
+                        format!("VFS recovery record {name} could not be inspected: {error}")
+                    })?;
+                    if metadata.is_file() {
+                        records.insert(id.to_owned(), QuotaCharge::restore(&quota, metadata.len()));
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "VFS recovery storage could not be listed: {error}"
+                ));
+            }
         }
+        Ok(Self {
+            directory,
+            quota,
+            records: Mutex::new(records),
+        })
+    }
+
+    /// Removes the record `id` and releases its quota charge. A record that is
+    /// already gone is not an error.
+    fn remove(&self, id: &str) -> Result<(), RetentionError> {
+        let record = self.directory.join(format!("{id}.draft"));
+        match fs::remove_file(&record) {
+            Ok(()) => VfsScratchStore::sync_directory(&self.directory)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(RetentionError::io(
+                    format!("retained draft {id} could not be removed: {error}"),
+                    &error,
+                ));
+            }
+        }
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
+        Ok(())
     }
 
     /// Retains `bytes` as a candidate for the projected `path`. Retaining the
@@ -710,6 +766,13 @@ impl VfsRetainedDraftStore {
         let id = hex_bytes(&digest[..16]);
         let record = self.directory.join(format!("{id}.draft"));
         if record.is_file() {
+            // A record already on disk, written by another process, counts too.
+            let on_disk = fs::metadata(&record).map_or(0, |metadata| metadata.len());
+            self.records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .entry(id.clone())
+                .or_insert_with(|| QuotaCharge::restore(&self.quota, on_disk));
             return Ok(RetainedDraft { id, record });
         }
         match fs::create_dir(&self.directory) {
@@ -745,15 +808,25 @@ impl VfsRetainedDraftStore {
                 ),
             });
         }
+        let header = format!(
+            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
+        );
+        // The whole record is charged before any byte is staged, so a refused
+        // reservation (EDQUOT) leaves nothing behind.
+        let charge = QuotaCharge::reserve(&self.quota, header.len() as u64 + len).map_err(|_| {
+            RetentionError {
+                errno: Errno::EDQUOT,
+                message: format!(
+                    "VFS recovery storage quota is exhausted; a {len}-byte candidate cannot be retained; remove recovered records first"
+                ),
+            }
+        })?;
         let mut staged = tempfile::Builder::new()
             .prefix(".retain-")
             .tempfile_in(&self.directory)
             .map_err(|error| {
                 RetentionError::io(format!("retained draft could not be staged: {error}"), &error)
             })?;
-        let header = format!(
-            "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
-        );
         let written = |error: std::io::Error| {
             RetentionError::io(format!("retained draft could not be written: {error}"), &error)
         };
@@ -777,6 +850,10 @@ impl VfsRetainedDraftStore {
                 &error.error,
             )
         })?;
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id.clone(), charge);
         VfsScratchStore::sync_directory(&self.directory)?;
         Ok(RetainedDraft { id, record })
     }
@@ -848,6 +925,12 @@ impl MountWriter {
             .load_committed_snapshot(repository, commit)
             .map_err(|error| format!("committed source project could not be loaded: {error:?}"))?;
         let scratch_store = VfsScratchStore::open(repository.runtime_paths().root())?;
+        let cache = Arc::new(
+            VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
+                .map_err(|error| format!("draft spool unavailable: {error}"))?,
+        );
+        let retained_drafts =
+            VfsRetainedDraftStore::open(repository.runtime_paths().root(), cache.draft_quota())?;
         Ok(Arc::new(Self {
             runtime,
             state,
@@ -856,12 +939,9 @@ impl MountWriter {
             project: Arc::new(project),
             runtime_commit,
             mount_snapshot: OnceLock::new(),
-            cache: Arc::new(
-                VfsRepositoryCache::in_runtime_root(repository.runtime_paths().root())
-                    .map_err(|error| format!("draft spool unavailable: {error}"))?,
-            ),
+            cache,
             scratch_store,
-            retained_drafts: VfsRetainedDraftStore::new(repository.runtime_paths().root()),
+            retained_drafts,
             owner_id,
             row_baselines,
         }))
@@ -2344,7 +2424,7 @@ enum OpenFile {
 /// Why a submitted candidate was not accepted, for the unmount listing and
 /// the stop-time report. `draft` is its recovery record once retained. While
 /// recovery storage refuses the candidate, `unretained` holds its save context
-/// and bytes so a later retention attempt can still write them.
+/// and its live source so a later retention attempt can still write it.
 struct DraftRefusal {
     cause: &'static str,
     draft: Option<String>,
@@ -2353,7 +2433,7 @@ struct DraftRefusal {
     /// The released or refused writer's draft: the base a path truncate that
     /// arrives before retention cuts (ORNA-VFS-009).
     candidate: Option<Arc<EditDraft<RowMapSnapshot>>>,
-    unretained: Option<(Arc<RowSaveContext>, Arc<[u8]>)>,
+    unretained: Option<(Arc<RowSaveContext>, CandidateSource)>,
 }
 
 /// A replacement candidate whose rename was refused. `kept` records that its
@@ -2925,6 +3005,20 @@ impl WorkspaceFilesystem {
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
     ) -> Result<(), DocumentCommitError> {
+        // A path truncate issued while this writer was open is recorded, not applied to
+        // the draft. It is applied before the candidate is judged, so the accepted or
+        // refused candidate reflects the cut (ORNA-VFS-009; POSIX arrival order).
+        if let Some(size) = draft_state.pending_truncates.get(&inode).copied() {
+            save.writer
+                .runtime
+                .block_on(draft.truncate(size))
+                .map_err(|error| {
+                    DocumentCommitError::Failed(format!(
+                        "candidate could not be cut to {size} bytes: {error:?}"
+                    ))
+                })?;
+            draft_state.pending_truncates.remove(&inode);
+        }
         if let Err(error) = save.commit_document(draft, true) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
@@ -3203,20 +3297,13 @@ impl WorkspaceFilesystem {
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
-                // Recovery storage refused the candidate, so the in-memory stash is the
-                // only copy left. It is the sole whole-candidate copy on this path and
-                // exists only while retention is refused (follow-up bead).
-                match save.writer.runtime.block_on(draft.candidate_bytes()) {
-                    Ok(bytes) => (None, Some((Arc::clone(save), bytes)), Some(retain_error.errno)),
-                    Err(error) => {
-                        // Nothing can be retained without the bytes; the refusal stays recorded.
-                        eprintln!(
-                            "{path}: not accepted ({cause}); candidate could not be read: {}",
-                            candidate_unreadable(error)
-                        );
-                        (None, None, Some(Errno::EIO))
-                    }
-                }
+                // Recovery storage refused the candidate: the live draft is the only copy
+                // left, so it stays unresolved and is retried at the next retention.
+                (
+                    None,
+                    Some((Arc::clone(save), CandidateSource::Draft(Arc::clone(draft)))),
+                    Some(retain_error.errno),
+                )
             }
         };
         if let Some(superseded) = draft_state.rejected_documents.insert(
@@ -3381,17 +3468,10 @@ impl WorkspaceFilesystem {
             Arc<RowSaveContext>,
             CandidateSource,
         )> = Vec::new();
-        for (handle, inode) in &draft_state.unresolved_handles {
-            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
-                candidates.push((
-                    *inode,
-                    Some(*handle),
-                    "unsynced",
-                    Arc::clone(save),
-                    CandidateSource::Draft(Arc::clone(draft)),
-                ));
-            }
-        }
+        // A path truncate cuts the newest writer draft of its inode. That cut is
+        // the record the draft is retained as, so the same draft's untruncated
+        // copy is superseded and is not retained a second time.
+        let mut truncations = Vec::new();
         for (inode, size) in &draft_state.pending_truncates {
             if let Some(NodeKind::Document { save, .. }) =
                 state.nodes.get(inode).map(|node| &node.kind)
@@ -3414,34 +3494,70 @@ impl WorkspaceFilesystem {
                             .get(inode)
                             .and_then(|refusal| refusal.candidate.clone())
                     });
+                truncations.push((*inode, *size, Arc::clone(save), latest));
+            }
+        }
+        for (handle, inode) in &draft_state.unresolved_handles {
+            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
+                let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
+                    *truncated == *inode
+                        && latest.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, draft))
+                });
+                if cut_by_truncate {
+                    continue;
+                }
                 candidates.push((
                     *inode,
-                    None,
+                    Some(*handle),
                     "unsynced",
                     Arc::clone(save),
-                    CandidateSource::Truncated { size: *size, latest },
+                    CandidateSource::Draft(Arc::clone(draft)),
                 ));
             }
         }
+        for (inode, size, save, latest) in &truncations {
+            candidates.push((
+                *inode,
+                None,
+                "unsynced",
+                Arc::clone(save),
+                CandidateSource::Truncated { size: *size, latest: latest.clone() },
+            ));
+        }
         let mut unresolved = HashMap::new();
         let mut refused: Option<Errno> = None;
+        let mut superseded: HashMap<u64, (String, String)> = HashMap::new();
         for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
+            // A refusal whose candidate a path truncate cuts is superseded by the
+            // truncated record once that record is retained.
+            let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
+                *truncated == inode
+                    && latest
+                        .as_ref()
+                        .zip(refusal.candidate.as_ref())
+                        .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
+            });
             match (refusal.draft, refusal.unretained) {
-                (_, Some((save, bytes))) => {
+                (_, Some((save, source))) => {
                     candidates.push((
                         inode,
                         refusal.handle,
                         refusal.cause,
                         save,
-                        CandidateSource::Stashed(bytes),
+                        source,
                     ));
                 }
                 (Some(draft), None) => {
                     let path = state.display_path(inode);
-                    reports.insert(format!(
+                    let report = format!(
                         "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
                         refusal.cause
-                    ));
+                    );
+                    if cut_by_truncate {
+                        superseded.insert(inode, (draft, report));
+                    } else {
+                        reports.insert(report);
+                    }
                 }
                 (None, None) => {}
             }
@@ -3451,8 +3567,8 @@ impl WorkspaceFilesystem {
             let len = match &source {
                 CandidateSource::Draft(draft) => save.writer.runtime.block_on(draft.candidate_len()),
                 CandidateSource::Truncated { size, .. } => *size,
-                CandidateSource::Stashed(bytes) => bytes.len() as u64,
             };
+            let truncated = matches!(source, CandidateSource::Truncated { .. });
             let mut read_chunk = |offset: u64, length: usize| match &source {
                 CandidateSource::Draft(draft) => save
                     .writer
@@ -3483,7 +3599,6 @@ impl WorkspaceFilesystem {
                         ))),
                     },
                 },
-                CandidateSource::Stashed(bytes) => Ok(stashed_range(bytes, offset, length)),
             };
             match save
                 .writer
@@ -3496,25 +3611,30 @@ impl WorkspaceFilesystem {
                         retained.id,
                         retained.record.display()
                     ));
+                if truncated {
+                    if let Some((old, _)) = superseded.remove(&inode) {
+                        if old != retained.id {
+                            if let Err(error) = save.writer.retained_drafts.remove(&old) {
+                                reports.insert(format!(
+                                    "superseded draft {old} for {path} could not be removed: {error}"
+                                ));
+                            }
+                        }
+                    }
+                }
                 }
                 Err(error) => {
                     refused = worst_retention_errno(refused, error.errno);
                     reports.insert(format!(
                         "draft for {path} ({cause}) could not be retained: {error}"
                     ));
-                    // The stash is the only copy left while retention is refused; it is
-                    // materialised here alone (follow-up bead bounds it).
-                    let stash = match &source {
-                        CandidateSource::Stashed(bytes) => Ok(Arc::clone(bytes)),
-                        _ => {
-                            let mut whole = Vec::new();
-                            VfsRetainedDraftStore::stream_candidate(len, &mut read_chunk, |chunk| {
-                                whole.extend_from_slice(chunk);
-                                Ok(())
-                            })
-                            .map(|()| Arc::from(whole))
+                    if truncated {
+                        if let Some((_, report)) = superseded.remove(&inode) {
+                            reports.insert(report);
                         }
-                    };
+                    }
+                    // Recovery storage refused the candidate: it stays unresolved, and its
+                    // live source is retried at the next retention rather than copied here.
                     unresolved.insert(
                         inode,
                         DraftRefusal {
@@ -3522,7 +3642,7 @@ impl WorkspaceFilesystem {
                             draft: None,
                             handle,
                             candidate: None,
-                            unretained: stash.ok().map(|bytes| (save, bytes)),
+                            unretained: Some((save, source)),
                         },
                     );
                 }
@@ -7723,7 +7843,8 @@ mod hardening_tests {
     fn retained_candidate_streams_in_bounded_chunks() {
         const LEN: u64 = 64 * 1024 * 1024;
         let runtime = tempfile::tempdir().unwrap();
-        let store = super::VfsRetainedDraftStore::new(runtime.path());
+        let quota = std::sync::Arc::new(orna_runtime_v1::vfs::DraftQuota::new(1 << 30));
+        let store = super::VfsRetainedDraftStore::open(runtime.path(), quota).unwrap();
         let largest_read = std::cell::Cell::new(0_usize);
         let total_read = std::cell::Cell::new(0_u64);
         let mut read_chunk = |offset: u64, length: usize| -> Result<Vec<u8>, super::RetentionError> {
