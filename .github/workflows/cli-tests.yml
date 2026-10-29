@@ -55,7 +55,7 @@ jobs:
       # publication_crash_matrix needs the crash-barriers feature. Its job below runs it with
       # that feature, so this step skips it and names that job (--covered-by).
       - name: Test the orna-cli-v1 integration suite
-        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --skip-test cwd_mount_64_mib_wav_blob_serves_media_reader_patterns_byte_exact --skip-test cwd_mount_concurrent_readers_get_exact_ranges_from_one_blob --skip-test cwd_mount_stat_and_readdir_do_not_fetch_corrupt_blob_payload --covered-by test:publication_crash_matrix=publication-crash-matrix
+        run: python3 scripts/gate_evidence.py test -p orna-cli-v1 --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --covered-by test:publication_crash_matrix=publication-crash-matrix
 
       # Gate E evidence: the media reader suite runs under its own record (command, environment,
       # kernel, FUSE, mpv and editor versions) and is kept as an uploaded artifact.
