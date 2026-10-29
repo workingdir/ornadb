@@ -350,14 +350,14 @@ impl WorkspaceFilesystem {
         keep_dirty: bool,
     ) -> Option<Errno> {
         let Some(draft) = draft_state.source_drafts.get_mut(&inode) else {
-            eprintln!("{path}: not accepted ({cause}); no candidate is held to retain");
+            eprintln!("[vfs] {path}: not accepted ({cause}); no candidate is held to retain");
             return Some(Errno::EIO);
         };
         let (draft_id, failure) = match retain_source_candidate(writer, path, cause, &draft.candidate) {
             Ok(id) => (Some(id), None),
             Err(error) => {
                 eprintln!(
-                    "{path}: not accepted ({cause}); candidate not retained: {}",
+                    "[vfs] {path}: not accepted ({cause}); candidate not retained: {}",
                     error.message
                 );
                 (None, Some(error.errno))
@@ -571,7 +571,12 @@ impl WorkspaceFilesystem {
         }
         let (dirty, refused) = match draft_state.source_drafts.get(&inode) {
             Some(draft) => (draft.dirty, draft.refusal.is_some()),
-            None => return,
+            None => {
+                eprintln!(
+                    "[vfs] source module {inode}: closed with no candidate; nothing to retain"
+                );
+                return;
+            }
         };
         if !dirty && !refused {
             draft_state.source_drafts.remove(&inode);
@@ -585,7 +590,7 @@ impl WorkspaceFilesystem {
                 _ => {
                     // Nothing can keep the candidate, so it is recorded as refused and unretained.
                     eprintln!(
-                        "source module {inode}: candidate not retained at release (no writer or path)"
+                        "[vfs] source module {inode}: not retained at release (no writer or path)"
                     );
                     if let Some(draft) = draft_state.source_drafts.get_mut(&inode) {
                         draft.dirty = false;
