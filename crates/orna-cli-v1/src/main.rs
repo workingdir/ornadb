@@ -3284,13 +3284,26 @@ fn repl_lease_failure(error: &RuntimeError, state: &RuntimeState) -> repl::ReplF
     if *error != RuntimeError::LeaseHeld {
         return repl::ReplFailure::from("ORNA-REPL-EFFECT".to_owned());
     }
-    let remedy = "unmount the editor mount with `orna unmount DIR` and rerun this REPL, or write files while it is mounted with `orna edit`";
-    let message = if state.holds_runtime_owner_lock() {
-        "another writer owns the repository writer lease for this runtime owner lock"
-    } else {
-        "the repository writer lease is held by a live writer: the runtime owner lock is held by another live process (such as a mounted editor), so this REPL cannot take the writer lease"
-    };
-    repl_effect_failure(message, remedy)
+    if state.holds_runtime_owner_lock() {
+        // This process holds the runtime owner lock, so no mount is implicated
+        // on this path and no remedy is offered for it.
+        return repl::ReplFailure {
+            code: "ORNA-REPL-EFFECT".to_owned(),
+            detail: Some(orna_evaluator_v1::ReplDetail {
+                code: "ORNA-REPL-EFFECT".to_owned(),
+                message:
+                    "another writer owns the repository writer lease for this runtime owner lock"
+                        .to_owned(),
+                span: None,
+                notes: Vec::new(),
+                help: Vec::new(),
+            }),
+        };
+    }
+    repl_effect_failure(
+        "the repository writer lease is held by a live writer: the runtime owner lock is held by another live process (such as a mounted editor), so this REPL cannot take the writer lease",
+        "REPL database writes need the mount stopped: run `orna unmount DIR`, then rerun this REPL. File writes while it is mounted go through `orna edit`",
+    )
 }
 
 /// Binds one REPL request row to its session, query, source text and the
