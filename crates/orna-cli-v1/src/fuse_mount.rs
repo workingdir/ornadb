@@ -6199,7 +6199,7 @@ impl FsBuilder {
                     field_name.clone(),
                     render_stored_source_value(&value)?,
                 ));
-                if nested_children(&value).is_some() {
+                if has_nested_children(&value) {
                     nested_trees.push((
                         field_name.clone(),
                         NodeKind::NestedDirectory(NestedDirectory::new(Arc::new(value), Vec::new())),
@@ -6426,6 +6426,8 @@ impl FsBuilder {
 
     /// Lists one level of a nested directory from its pinned value (profiles/vfs-1.md:75).
     /// Container children become unloaded directories; other children become read-only leaves.
+    /// The directory is marked loaded only after every child is inserted; a failed insert removes
+    /// the children it added, so a later lookup lists the level again.
     fn load_nested_children(&mut self, inode: u64) -> Result<(), String> {
         let (root, path) = match self.nodes.get(&inode).map(|node| &node.kind) {
             Some(NodeKind::NestedDirectory(nested)) if !nested.loaded => {
@@ -6435,26 +6437,44 @@ impl FsBuilder {
         };
         let value = nested_value_at(&root, &path)
             .ok_or_else(|| "a nested value is no longer present in the pinned row".to_owned())?;
-        let children = nested_children(value)
+        let count = nested_entries(value)
+            .map(NestedEntries::child_count)
             .ok_or_else(|| "a nested directory no longer holds a container value".to_owned())?;
-        let mut files = Vec::with_capacity(children.len());
-        for (index, (name, child)) in children.into_iter().enumerate() {
-            let kind = if nested_children(child).is_some() {
+        let mut files = Vec::with_capacity(count);
+        for index in 0..count {
+            let (name, child) = nested_entry(value, index)
+                .ok_or_else(|| "a nested directory entry is malformed".to_owned())?;
+            let kind = if has_nested_children(child) {
                 let mut child_path = path.clone();
                 child_path.push(index);
                 NodeKind::NestedDirectory(NestedDirectory::new(Arc::clone(&root), child_path))
             } else {
                 NodeKind::Bytes(nested_leaf_text(child)?.into_bytes())
             };
-            files.push((name, kind));
+            files.push((name.project(index), kind));
+        }
+        {
+            let mut seen = std::collections::HashSet::with_capacity(files.len());
+            if let Some((name, _)) = files.iter().find(|(name, _)| !seen.insert(name.as_str())) {
+                return Err(format!("nested directory projects two children as {name}"));
+            }
+        }
+        for (name, kind) in files {
+            if let Err(error) = self.add_file(inode, &name, kind) {
+                if let Some(directory) = self
+                    .nodes
+                    .get_mut(&inode)
+                    .and_then(|node| node.kind.directory_mut())
+                {
+                    directory.retain_entries(|_| false);
+                }
+                return Err(error);
+            }
         }
         if let Some(NodeKind::NestedDirectory(nested)) =
             self.nodes.get_mut(&inode).map(|node| &mut node.kind)
         {
             nested.loaded = true;
-        }
-        for (name, kind) in files {
-            self.add_file(inode, &name, kind)?;
         }
         Ok(())
     }
@@ -7094,12 +7114,31 @@ fn optional_state(value: &Raw) -> Option<Option<&Raw>> {
     }
 }
 
-/// The children of a nested record, tuple, list or text-keyed map, in directory order
-/// (profiles/vfs-1.md:71-75): record fields and map keys are escaped names, tuple and list
-/// elements are decimal positions. A present optional projects its payload; an absent one has
-/// no children. `None` for scalars and for maps with non-text keys, which stay inside
-/// `data.orna` as values rather than directories.
-fn nested_children(value: &Raw) -> Option<Vec<(String, &Raw)>> {
+/// The stored children of a nested container, borrowed from the value (profiles/vfs-1.md:71-75).
+/// Record fields and map keys are escaped names, tuple and list elements are decimal positions.
+/// A present optional projects its payload; an absent one has no children.
+#[derive(Clone, Copy)]
+enum NestedEntries<'a> {
+    /// Tuple or list elements, listed by decimal position.
+    Positional(&'a [Raw]),
+    /// Stored record fields: `[field, value]` pairs in encoded-key order.
+    Record(&'a [Raw]),
+    /// Text-keyed map entries, listed by escaped key.
+    Map(&'a [(Raw, Raw)]),
+}
+
+impl NestedEntries<'_> {
+    fn child_count(self) -> usize {
+        match self {
+            Self::Positional(items) | Self::Record(items) => items.len(),
+            Self::Map(entries) => entries.len(),
+        }
+    }
+}
+
+/// The container head of a nested value. `None` for an absent optional and for non-container
+/// values, which stay inside `data.orna` as values rather than directories.
+fn nested_entries(value: &Raw) -> Option<NestedEntries<'_>> {
     let value = match optional_state(value) {
         Some(Some(payload)) => payload,
         Some(None) => return None,
@@ -7107,56 +7146,80 @@ fn nested_children(value: &Raw) -> Option<Vec<(String, &Raw)>> {
     };
     match value {
         // Stored records are `Tag(RECORD, [type-or-null, [[field, value], ...]])` (typed_row.rs).
-        Raw::Tag(60009, body) => {
-            let Raw::Array(parts) = body.as_ref() else {
-                return None;
-            };
-            let [_, Raw::Array(entries)] = parts.as_slice() else {
-                return None;
-            };
-            entries
-                .iter()
-                .map(|entry| match entry {
-                    Raw::Array(pair) => match pair.as_slice() {
-                        [Raw::Text(name), child] => {
-                            Some((orna_runtime_v1::vfs::project_field_name(name), child))
-                        }
-                        _ => None,
-                    },
-                    _ => None,
-                })
-                .collect()
-        }
-        Raw::Tag(60015, body) => match body.as_ref() {
-            Raw::Array(items) => Some(positional(items)),
+        Raw::Tag(60009, body) => match body.as_ref() {
+            Raw::Array(parts) => match parts.as_slice() {
+                [_, Raw::Array(entries)] => Some(NestedEntries::Record(entries)),
+                _ => None,
+            },
             _ => None,
         },
-        Raw::Array(items) => Some(positional(items)),
-        Raw::Map(entries) => entries
-            .iter()
-            .map(|(key, child)| match key {
-                Raw::Text(name) => Some((project_component(name), child)),
-                _ => None,
-            })
-            .collect(),
+        Raw::Tag(60015, body) => match body.as_ref() {
+            Raw::Array(items) => Some(NestedEntries::Positional(items)),
+            _ => None,
+        },
+        Raw::Array(items) => Some(NestedEntries::Positional(items)),
+        Raw::Map(entries) => Some(NestedEntries::Map(entries)),
         _ => None,
     }
 }
 
-fn positional(items: &[Raw]) -> Vec<(String, &Raw)> {
-    items
-        .iter()
-        .enumerate()
-        .map(|(index, child)| (index.to_string(), child))
-        .collect()
+/// How a child is named before projection; the projected name is built only when inserted.
+enum NestedName<'a> {
+    Position,
+    Field(&'a str),
+    Key(&'a str),
 }
 
-/// The value at `path` below `root`; each step is a position in `nested_children`.
+impl NestedName<'_> {
+    fn project(self, index: usize) -> String {
+        match self {
+            Self::Position => index.to_string(),
+            Self::Field(name) => orna_runtime_v1::vfs::project_field_name(name),
+            Self::Key(name) => project_component(name),
+        }
+    }
+}
+
+/// Child `index` of a nested container: its unprojected name and its value. Builds no vector;
+/// `None` for an out-of-range index, a malformed entry, or a non-container value.
+fn nested_entry(value: &Raw, index: usize) -> Option<(NestedName<'_>, &Raw)> {
+    match nested_entries(value)? {
+        NestedEntries::Positional(items) => {
+            items.get(index).map(|child| (NestedName::Position, child))
+        }
+        NestedEntries::Record(entries) => match entries.get(index)? {
+            Raw::Array(pair) => match pair.as_slice() {
+                [Raw::Text(name), child] => Some((NestedName::Field(name.as_str()), child)),
+                _ => None,
+            },
+            _ => None,
+        },
+        NestedEntries::Map(entries) => match entries.get(index)? {
+            (Raw::Text(name), child) => Some((NestedName::Key(name.as_str()), child)),
+            _ => None,
+        },
+    }
+}
+
+/// Whether a value is a directory rather than a leaf: its stored shape holds children and every
+/// entry is well formed. Names nothing, so classifying each level costs no allocation.
+fn has_nested_children(value: &Raw) -> bool {
+    match nested_entries(value) {
+        None => false,
+        Some(NestedEntries::Positional(_)) => true,
+        Some(NestedEntries::Record(entries)) => entries.iter().all(|entry| {
+            matches!(entry, Raw::Array(pair) if matches!(pair.as_slice(), [Raw::Text(_), _]))
+        }),
+        Some(NestedEntries::Map(entries)) => {
+            entries.iter().all(|(key, _)| matches!(key, Raw::Text(_)))
+        }
+    }
+}
+
+/// The value at `path` below `root`; each step is a child position from `nested_entry`.
 fn nested_value_at<'a>(root: &'a Raw, path: &[usize]) -> Option<&'a Raw> {
     path.iter().try_fold(root, |value, index| {
-        nested_children(value)?
-            .get(*index)
-            .map(|(_, child)| *child)
+        nested_entry(value, *index).map(|(_, child)| child)
     })
 }
 
@@ -8316,7 +8379,9 @@ mod dirty_handle_ack_tests {
 mod nested_projection_tests {
     use orna_value_v1::Raw;
 
-    use super::{nested_children, nested_leaf_text, nested_value_at};
+    use super::{
+        has_nested_children, nested_entries, nested_entry, nested_leaf_text, nested_value_at,
+    };
 
     fn text(value: &str) -> Raw {
         Raw::Text(value.to_owned())
@@ -8342,7 +8407,10 @@ mod nested_projection_tests {
     }
 
     fn names(value: &Raw) -> Option<Vec<String>> {
-        nested_children(value).map(|children| children.into_iter().map(|(name, _)| name).collect())
+        let entries = nested_entries(value)?;
+        (0..entries.child_count())
+            .map(|index| nested_entry(value, index).map(|(name, _)| name.project(index)))
+            .collect()
     }
 
     #[test]
@@ -8405,5 +8473,36 @@ mod nested_projection_tests {
             nested_leaf_text(&optional(true, Raw::Int(7.into()))),
             Ok("7".to_owned())
         );
+    }
+
+    #[test]
+    fn has_nested_children_agrees_with_the_listing() {
+        let cases = [
+            record(&[("a", text("x"))]),
+            Raw::Tag(60015, Box::new(Raw::Array(vec![text("p")]))),
+            Raw::Array(Vec::new()),
+            Raw::Map(vec![(text("k"), text("v"))]),
+            Raw::Map(vec![(Raw::Int(1.into()), text("v"))]),
+            optional(true, record(&[("a", text("x"))])),
+            optional(false, Raw::Null),
+            text("plain"),
+        ];
+        for value in &cases {
+            assert_eq!(has_nested_children(value), names(value).is_some());
+        }
+    }
+
+    #[test]
+    fn a_large_list_is_indexed_without_listing_it() {
+        let items = (0_i64..100_000)
+            .map(|index| Raw::Int(index.into()))
+            .collect();
+        let list = Raw::Array(items);
+        assert!(has_nested_children(&list));
+        assert_eq!(
+            nested_value_at(&list, &[99_999]),
+            Some(&Raw::Int(99_999_i64.into()))
+        );
+        assert!(nested_value_at(&list, &[100_000]).is_none());
     }
 }
