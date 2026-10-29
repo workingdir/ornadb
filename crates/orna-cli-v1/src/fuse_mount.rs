@@ -33,7 +33,7 @@ use orna_runtime_v1::{
         CANDIDATE_CHUNK_BYTES, CandidateSnapshot, EditDraft, EditDraftError, ManagedFile,
         SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
-        DraftQuota, QuotaCharge,
+        DraftQuota, QuotaCharge, VfsBlobReplacementError,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
         project_colliding_table_component, project_component, project_key_component,
         unproject_component,
@@ -1318,6 +1318,13 @@ impl MountWriter {
     }
 }
 
+/// Outcome of one Blob commit attempt: settled, or refused because the scratch
+/// candidate changed between hashing and admission (no row was touched).
+enum BlobAttempt {
+    Settled(Option<Vec<u8>>),
+    RacingWrite,
+}
+
 #[derive(Clone)]
 struct BlobField {
     name: String,
@@ -1960,9 +1967,38 @@ impl RowSaveContext {
                 record_baseline,
             );
         }
-        // The digest streams the candidate in bounded ranges, so hashing never
-        // holds the whole Blob; the admitted bytes are the one copy the commit
-        // publishes and are taken from the admission below.
+        // The digest is streamed outside the vfs operation lock. A write that
+        // lands before admission makes the vfs identity check refuse the attempt
+        // before any row is touched; that refusal is retried once against a fresh
+        // digest, and a second refusal is reported instead of publishing bytes.
+        let mut retried = false;
+        loop {
+            let expected_identity = self.scratch_identity(scratch)?;
+            match self.commit_blob_attempt(
+                target,
+                scratch,
+                field,
+                expected_identity,
+                expected_baseline_row.clone(),
+                record_baseline,
+            )? {
+                BlobAttempt::Settled(row) => return Ok(row),
+                BlobAttempt::RacingWrite if !retried => retried = true,
+                BlobAttempt::RacingWrite => {
+                    return Err(DocumentCommitError::Failed(
+                        "scratch changed during Blob commit; save again".into(),
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Streams the scratch candidate in bounded ranges to its SHA-256 identity,
+    /// so hashing never holds the whole Blob.
+    fn scratch_identity(
+        self: &Arc<Self>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+    ) -> Result<ContentIdentity, DocumentCommitError> {
         let length = self.writer.runtime.block_on(scratch.candidate_len());
         let mut hasher = Sha256::new();
         let mut offset = 0_u64;
@@ -1984,8 +2020,21 @@ impl RowSaveContext {
             offset += chunk.len() as u64;
         }
         let digest: [u8; 32] = hasher.finalize().into();
-        let expected_identity = ContentIdentity::new(length, digest)
-            .map_err(|error| format!("replacement Blob identity is invalid: {error:?}"))?;
+        ContentIdentity::new(length, digest)
+            .map_err(|error| format!("replacement Blob identity is invalid: {error:?}").into())
+    }
+
+    /// One capture-and-commit attempt against `expected_identity`. A racing
+    /// scratch write is reported as `RacingWrite`; no row was touched by then.
+    fn commit_blob_attempt(
+        self: &Arc<Self>,
+        target: &Arc<ManagedFile<RowMapSnapshot>>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        field: &BlobField,
+        expected_identity: ContentIdentity,
+        expected_baseline_row: Option<Vec<u8>>,
+        record_baseline: bool,
+    ) -> Result<BlobAttempt, DocumentCommitError> {
         let capture = self
             .writer
             .repository
@@ -2032,6 +2081,14 @@ impl RowSaveContext {
                 },
                 &NoFault,
             ));
+        if matches!(
+            outcome,
+            Err(VfsSaveError::BlobCapture(
+                VfsBlobReplacementError::IdentityMismatch { .. }
+            ))
+        ) {
+            return Ok(BlobAttempt::RacingWrite);
+        }
         self.settle_replacement(
             outcome,
             &accepted_row,
@@ -2042,6 +2099,7 @@ impl RowSaveContext {
                 .take(),
             record_baseline,
         )
+        .map(BlobAttempt::Settled)
     }
 
     fn commit_temporary(

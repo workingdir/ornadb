@@ -2680,6 +2680,16 @@ fn take_child_stderr(child: &mut Child) -> String {
     stderr
 }
 
+/// Stops the mount process with SIGTERM without a clean unmount, retaining unresolved drafts.
+fn stop_mount_retaining_drafts(mounted: &mut MountedProcess) {
+    let status = Command::new("kill")
+        .args(["-TERM", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to the mount process");
+    assert!(status.success(), "SIGTERM is delivered to the mount process");
+    let _ = mounted.child.wait().unwrap();
+}
+
 /// Unmounts through `orna unmount` and requires the mount process to exit cleanly.
 fn unmount_and_reap(repository: &Path, mounted: &mut MountedProcess) {
     run_unmount(repository, &mounted.mountpoint);
@@ -2721,11 +2731,21 @@ async fn mount_captured_media(
     media_type: &str,
     mounted_name: &str,
 ) -> Option<MountedBlobRow> {
+    mount_captured_media_with_limit(original, file_name, media_type, mounted_name, 4 << 20).await
+}
+
+/// Captures `original` from `file_name` with a host cap of `capture_limit`, which must admit the whole fixture.
+/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_captured_media_with_limit(
+    original: &[u8],
+    file_name: &str,
+    media_type: &str,
+    mounted_name: &str,
+    capture_limit: usize,
+) -> Option<MountedBlobRow> {
     if !fuse_test_available() {
         return None;
     }
-    // The host cap bounds the source; it must admit the whole fixture, so it matches the provider limit.
-    let capture_limit: usize = 4 << 20;
     let media_root = TempDir::new().unwrap();
     std::fs::write(media_root.path().join(file_name), original).unwrap();
     let source = "pub table Music(id: Str) { content: Blob, }\n";
@@ -3394,6 +3414,117 @@ async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
         String::from_utf8_lossy(&refused.stderr)
     );
     drop(row);
+}
+
+#[tokio::test]
+/// ORNA-VFS-011 / EDIT-1 (ornadb-5il1.366.1 M1): sibling handles opened before any accept race to sync
+/// distinct candidates for one Blob. Each accepted sync commits one whole candidate, so the final bytes
+/// must equal an accepted candidate or the untouched original, never a mix of two candidates.
+async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
+    const HANDLES: u64 = 4;
+    const LEN: usize = 64 * 1024;
+    let original = lcg_bytes(0x5555_0000_0000_0001, LEN);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    // Every handle opens and writes its candidate before any sync. A Blob refuses write-mode opens
+    // once a candidate is accepted (its node becomes a read-only BlobBytes), so the race is between
+    // syncs of handles that already hold a write baseline.
+    let staged: Vec<(Vec<u8>, std::fs::File)> = (0..HANDLES)
+        .map(|handle| {
+            let bytes = lcg_bytes(0x5555_0000_1000_0000 + handle, LEN);
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&blob_path)
+                .expect("write-mode open of a projected Blob must succeed before any accept");
+            file.write_all(&bytes).expect("write a candidate");
+            (bytes, file)
+        })
+        .collect();
+    let barrier = std::sync::Barrier::new(staged.len());
+    let accepted: Vec<Vec<u8>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = staged
+            .into_iter()
+            .map(|(bytes, file)| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    barrier.wait();
+                    file.sync_all().is_ok().then_some(bytes)
+                })
+            })
+            .collect();
+        workers
+            .into_iter()
+            .filter_map(|worker| worker.join().unwrap())
+            .collect()
+    });
+    let final_bytes = std::fs::read(&blob_path).unwrap();
+    // Siblings that lost the race leave `sys.vfs.stale_edit` drafts, which correctly refuse a clean
+    // unmount (ORNA-VFS-009). Stop the mount process instead; E2000 help says this retains every draft
+    // in recovery storage. The `MountedProcess` drop then detaches the FUSE mountpoint.
+    stop_mount_retaining_drafts(&mut row.mounted);
+    assert!(
+        !accepted.is_empty(),
+        "at least one candidate is accepted: the first sync has no sibling accept before its fsync"
+    );
+    assert!(
+        final_bytes == original || accepted.iter().any(|candidate| *candidate == final_bytes),
+        "the committed Blob must equal one whole accepted candidate or the original, never a mix"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-1 (41-vfs.md; ornadb-5il1.366.1 M3): a committed 64 MiB Blob served by a freshly started mount
+/// is read back in 1 MiB ranges. The restarted daemon's RSS growth past its post-mount high-water mark
+/// bounds the ranged read path for restored content.
+async fn cwd_mount_blob_64_mib_committed_restore_streams_in_bounded_rss() {
+    const CHUNK_BYTES: usize = 1 << 20;
+    const CHUNKS: usize = 64;
+    const CAPTURE_LIMIT: usize = 65 << 20;
+    const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    let original = lcg_bytes(0x0064_0000_2000_0001, CHUNK_BYTES * CHUNKS);
+    let Some(mut first) = mount_captured_media_with_limit(
+        &original,
+        "tone.mp3",
+        "audio/mpeg",
+        "content.mp3",
+        CAPTURE_LIMIT,
+    )
+    .await
+    else {
+        return;
+    };
+    unmount_and_reap(first.repository_directory.path(), &mut first.mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut restored = spawn_cwd_mount(first.repository_directory.path(), &remount_point);
+    let restored_blob = remount_point.join("Music/london/content.mp3");
+    assert!(
+        wait_for_mount_paths(&mut restored, &[restored_blob.as_path()]),
+        "FUSE remount must expose the committed 64 MiB Blob"
+    );
+    // The restarted daemon's high-water mark starts at its post-mount level, so growth is what the reads add.
+    let baseline = peak_rss_bytes(restored.child.id());
+    let mut handle = File::open(&restored_blob).unwrap();
+    let mut read_back = vec![0u8; CHUNK_BYTES];
+    for chunk in 0..CHUNKS {
+        handle.read_exact(&mut read_back).expect("read a 1 MiB range of the restored Blob");
+        let range = &original[chunk * CHUNK_BYTES..(chunk + 1) * CHUNK_BYTES];
+        assert!(read_back == range, "chunk {chunk} reads back from the restored Blob");
+    }
+    let growth = peak_rss_bytes(restored.child.id()).saturating_sub(baseline);
+    eprintln!("mount daemon peak RSS growth during 64 MiB restored Blob read-back: {growth} bytes");
+    assert!(
+        growth < RSS_GROWTH_BOUND_BYTES,
+        "restored mount daemon peak RSS grew {growth} bytes reading the Blob, reaching the bound {RSS_GROWTH_BOUND_BYTES} bytes"
+    );
+    drop(handle);
+    unmount_and_reap(first.repository_directory.path(), &mut restored);
 }
 
 #[tokio::test]
