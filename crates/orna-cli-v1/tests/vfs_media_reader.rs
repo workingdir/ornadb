@@ -12,6 +12,7 @@ use std::{
     os::unix::fs::{FileExt, PermissionsExt},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::Barrier,
     time::Duration,
 };
 
@@ -230,6 +231,11 @@ fn play_with_mpv(blob: &Path) {
         output.status,
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(
+        output.stderr.is_empty(),
+        "mpv reported errors while it played the mounted WAV; stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -320,7 +326,8 @@ async fn cwd_mount_64_mib_wav_blob_serves_media_reader_patterns_byte_exact() {
         assert_range(&mut file, &original, 12_345_678, 65_536);
     }
 
-    // The mount daemon keeps no whole-Blob copy: its peak resident set stays well below the Blob.
+    // The mount daemon keeps no whole-Blob copy: its peak resident set stays below the Blob size.
+    // One Blob size is measured, so this bounds the peak at 64 MiB and does not show size independence.
     let peak_kib = peak_rss_kib(mounted.pid());
     eprintln!("mount daemon peak RSS after 64 MiB of reads: {peak_kib} KiB");
     assert!(
@@ -344,12 +351,15 @@ async fn cwd_mount_concurrent_readers_get_exact_ranges_from_one_blob() {
     let mount_parent = TempDir::new().unwrap();
     let (mut mounted, blob) = mount_blob(&captured, mount_parent.path());
 
+    let start = Barrier::new(4);
     std::thread::scope(|scope| {
         for reader in 0..4u64 {
             let original = original.as_slice();
             let blob = blob.as_path();
+            let start = &start;
             scope.spawn(move || {
                 let file = File::open(blob).unwrap();
+                start.wait();
                 let mut entropy = 0xc0ff_ee00_u64 ^ reader;
                 for _ in 0..128 {
                     entropy = next_entropy(entropy);
