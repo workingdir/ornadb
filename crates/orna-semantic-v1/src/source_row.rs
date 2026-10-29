@@ -4,9 +4,9 @@ use orna_syntax_v1::{Expr, LiteralKind};
 use orna_value_v1::{Decimal, Raw, Value};
 
 use super::{
-    Analysis, DIAG_TYPE, DIAG_UNRESOLVED, RowUnitAdmission, RowUnitInput, SymbolKind, Type,
-    admit_row_unit_with_owner_fields, analysis_named_symbol, canonical_date, canonical_instant,
-    diag, row_key_component_types,
+    Analysis, DIAG_TYPE, DIAG_UNRESOLVED, RowKeySpelling, RowUnitAdmission, RowUnitInput,
+    SymbolKind, Type, admit_row_unit_with_key_spelling, analysis_named_symbol, canonical_date,
+    canonical_instant, diag, row_key_component_types,
 };
 /// Source-authored row values after schema admission and canonical key lowering.
 /// Blob and owner-supplied fields are absent: their owner must supply pinned
@@ -49,7 +49,17 @@ pub fn lower_row_unit_with_owner_fields(
     input: &RowUnitInput<'_>,
     owner_fields: &[String],
 ) -> Result<LoweredRowUnit, RowUnitAdmission> {
-    let mut admission = admit_row_unit_with_owner_fields(analysis, input, owner_fields);
+    lower_row_unit_with_key_spelling(analysis, input, owner_fields, RowKeySpelling::LegacyPathV1)
+}
+
+/// Lowers a row with an explicit key spelling. See [`RowKeySpelling`].
+pub fn lower_row_unit_with_key_spelling(
+    analysis: &Analysis,
+    input: &RowUnitInput<'_>,
+    owner_fields: &[String],
+    spelling: RowKeySpelling<'_>,
+) -> Result<LoweredRowUnit, RowUnitAdmission> {
+    let mut admission = admit_row_unit_with_key_spelling(analysis, input, owner_fields, spelling);
     if !admission.is_ok() {
         return Err(admission);
     }
