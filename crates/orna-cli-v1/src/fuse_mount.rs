@@ -95,9 +95,11 @@ fn refuse_unsupported(operation: &str) -> Errno {
 
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
-/// ORNAVFS2 records carry the schema identity captured when the scratch was created (ORNA-VFS-019);
-/// ORNAVFS1 records lack it and are refused as an unsupported format.
+/// ORNAVFS2 records carry the schema identity captured when the scratch was created (ORNA-VFS-019).
+/// ORNAVFS1 records predate that identity; they are read as legacy records and rewritten as
+/// ORNAVFS2 on the next persist.
 const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS2";
+const VFS_SCRATCH_RECORD_MAGIC_V1: &[u8; 8] = b"ORNAVFS1";
 
 #[derive(Clone, Debug)]
 struct TemporaryScratchIdentity {
@@ -110,9 +112,22 @@ struct TemporaryScratchIdentity {
 
 struct PersistedTemporaryScratch {
     identity: TemporaryScratchIdentity,
-    schema_identity: TableSchemaIdentity,
+    /// `None` for a legacy ORNAVFS1 record, which has no creation identity to keep.
+    schema_identity: Option<TableSchemaIdentity>,
     baseline: Option<Vec<u8>>,
     candidate: RecordedCandidate,
+}
+
+/// The persisted scratch records read at mount open, and the records that could not be read.
+struct ScratchLoad {
+    records: Vec<PersistedTemporaryScratch>,
+    unreadable: Vec<UnreadableScratch>,
+}
+
+/// A scratch record left on disk because it could not be read; the mount still opens.
+struct UnreadableScratch {
+    path: PathBuf,
+    reason: String,
 }
 
 /// Where a record's candidate lies inside its record file. The candidate is
@@ -190,8 +205,12 @@ impl VfsScratchStore {
         Self::sync_directory(&self.directory)
     }
 
-    fn load(&self) -> Result<Vec<PersistedTemporaryScratch>, String> {
+    /// Loads every persisted record. A record that cannot be read, or whose identity does not
+    /// match its name, is returned as unreadable and left on disk untouched so one bad record
+    /// cannot stop the mount from opening. Store-level failures still fail the load.
+    fn load(&self) -> Result<ScratchLoad, String> {
         let mut records = Vec::new();
+        let mut unreadable = Vec::new();
         let mut removed_staging = false;
         for entry in fs::read_dir(&self.directory)
             .map_err(|error| format!("temporary scratch records could not be listed: {error}"))?
@@ -199,30 +218,49 @@ impl VfsScratchStore {
             let entry = entry.map_err(|error| {
                 format!("temporary scratch record could not be inspected: {error}")
             })?;
+            let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
                 format!("temporary scratch record type could not be read: {error}")
             })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
             if !file_type.is_file() {
-                return Err("temporary scratch store contains a non-file entry".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch store contains a non-file entry".into(),
+                });
+                continue;
             }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| "temporary scratch record name is not UTF-8".to_owned())?;
             if name.starts_with(VFS_SCRATCH_TEMP_PREFIX) {
-                fs::remove_file(entry.path()).map_err(|error| {
+                fs::remove_file(&path).map_err(|error| {
                     format!("stale temporary scratch staging file could not be removed: {error}")
                 })?;
                 removed_staging = true;
                 continue;
             }
             if !name.ends_with(".scratch") {
-                return Err("temporary scratch store contains an unknown file".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch store contains an unknown file".into(),
+                });
+                continue;
             }
-            let record = Self::read_record(&entry.path())?;
-            Self::validate_identity(&record.identity)?;
+            let record = match Self::read_record(&path) {
+                Ok(record) => record,
+                Err(reason) => {
+                    unreadable.push(UnreadableScratch { path, reason });
+                    continue;
+                }
+            };
+            if let Err(reason) = Self::validate_identity(&record.identity) {
+                unreadable.push(UnreadableScratch { path, reason });
+                continue;
+            }
             if Self::record_name(&record.identity) != name {
-                return Err("temporary scratch record identity does not match its filename".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch record identity does not match its filename".into(),
+                });
+                continue;
             }
             records.push(record);
         }
@@ -235,7 +273,8 @@ impl VfsScratchStore {
                 .cmp(&right.identity.logical_path)
                 .then_with(|| left.identity.name.cmp(&right.identity.name))
         });
-        Ok(records)
+        unreadable.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(ScratchLoad { records, unreadable })
     }
 
     fn remove(&self, identity: &TemporaryScratchIdentity) -> Result<(), String> {
@@ -398,15 +437,21 @@ impl VfsScratchStore {
         let mut magic = [0; 8];
         file.read_exact(&mut magic)
             .map_err(|error| format!("temporary scratch record header is incomplete: {error}"))?;
-        if &magic != VFS_SCRATCH_RECORD_MAGIC {
-            return Err("temporary scratch record has an unsupported format".into());
-        }
+        let legacy = match &magic {
+            VFS_SCRATCH_RECORD_MAGIC => false,
+            VFS_SCRATCH_RECORD_MAGIC_V1 => true,
+            _ => return Err("temporary scratch record has an unsupported format".into()),
+        };
         let identity = Self::read_identity(&mut file)?;
-        let mut schema_bytes = [0; 32];
-        file.read_exact(&mut schema_bytes).map_err(|error| {
-            format!("temporary scratch record schema identity is incomplete: {error}")
-        })?;
-        let schema_identity = TableSchemaIdentity::new(schema_bytes);
+        let schema_identity = if legacy {
+            None
+        } else {
+            let mut schema_bytes = [0; 32];
+            file.read_exact(&mut schema_bytes).map_err(|error| {
+                format!("temporary scratch record schema identity is incomplete: {error}")
+            })?;
+            Some(TableSchemaIdentity::new(schema_bytes))
+        };
         let baseline = Self::read_optional(&mut file)?;
         let candidate = Self::locate_candidate(&mut file, path)?;
         let mut trailing = [0];
@@ -3356,7 +3401,18 @@ impl WorkspaceFilesystem {
         }
         let mut retained_scratch = HashSet::new();
         if let Some(writer) = &writer {
-            for record in writer.scratch_store.load()? {
+            let ScratchLoad {
+                records,
+                unreadable,
+            } = writer.scratch_store.load()?;
+            for record in &unreadable {
+                eprintln!(
+                    "unreadable persisted temporary scratch {} left on disk: {}",
+                    record.path.display(),
+                    record.reason
+                );
+            }
+            for record in records {
                 let logical_path = record.identity.logical_path.clone();
                 match Self::restore_temporary_scratch(&mut builder, writer, record) {
                     Ok(inode) => {
@@ -3465,6 +3521,20 @@ impl WorkspaceFilesystem {
             candidate,
             schema_identity,
         } = record;
+        // A legacy ORNAVFS1 record has no creation identity, so it binds to the schema committed
+        // now, as it did before ORNAVFS2. The next persist rewrites it as ORNAVFS2 with that
+        // identity. This is the flagged legacy rule: a schema change before the remount is not
+        // detected for such a record.
+        let schema_identity = match schema_identity {
+            Some(identity) => identity,
+            None => {
+                eprintln!(
+                    "legacy persisted temporary scratch {} binds to the live schema",
+                    identity.logical_path
+                );
+                save.live_schema_identity()?
+            }
+        };
         let name = identity.name.clone();
         builder.add_file(
             parent,
@@ -4409,7 +4479,7 @@ impl Filesystem for WorkspaceFilesystem {
                 Ok(()) => reply.ok(),
                 Err(EditError::Stale(message)) => {
                     eprintln!("explicit edit refused: {message}");
-                    reply.error(Errno::ESTALE);
+                    reply.error(Errno::EAGAIN);
                 }
                 Err(EditError::Failed(message)) => {
                     eprintln!("explicit edit failed: {message}");
@@ -9463,19 +9533,49 @@ mod hardening_tests {
         drop(file);
 
         let record = VfsScratchStore::read_record(&path).expect("ORNAVFS2 record");
-        assert_eq!(record.schema_identity.bytes(), schema.bytes());
+        assert_eq!(record.schema_identity.as_ref().map(TableSchemaIdentity::bytes), Some(schema.bytes()));
         assert_eq!(record.identity.logical_path, "table/row/field.txt");
         assert!(record.baseline.is_none());
     }
 
     #[test]
-    fn scratch_record_without_schema_identity_is_refused() {
-        use super::VfsScratchStore;
+    fn legacy_scratch_record_is_read_without_schema_identity() {
+        use super::{TemporaryScratchIdentity, VFS_SCRATCH_RECORD_MAGIC_V1, VfsScratchStore};
+        use std::io::Write as _;
         let directory = tempfile::tempdir().expect("temporary directory");
         let path = directory.path().join("record");
-        std::fs::write(&path, b"ORNAVFS1").expect("legacy record");
-        let error = VfsScratchStore::read_record(&path).err().expect("ORNAVFS1 is refused");
-        assert!(error.contains("unsupported format"), "{error}");
+        let identity = TemporaryScratchIdentity {
+            logical_path: "table/row/field.txt".into(),
+            relation_id: [7; 16],
+            key: b"key".to_vec(),
+            name: "field.txt".into(),
+            blob_field_name: None,
+        };
+        let mut file = std::fs::File::create(&path).expect("record file");
+        file.write_all(VFS_SCRATCH_RECORD_MAGIC_V1).expect("magic");
+        VfsScratchStore::write_identity(&mut file, &identity).expect("identity");
+        VfsScratchStore::write_optional(&mut file, None).expect("baseline");
+        file.write_all(&0_u64.to_le_bytes()).expect("empty candidate");
+        drop(file);
+
+        let record = VfsScratchStore::read_record(&path).expect("ORNAVFS1 record is read");
+        assert!(record.schema_identity.is_none(), "a legacy record has no creation identity");
+        assert_eq!(record.identity.logical_path, "table/row/field.txt");
+    }
+
+    #[test]
+    fn corrupt_scratch_record_is_reported_and_left_on_disk() {
+        use super::VfsScratchStore;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let store = VfsScratchStore::open(root.path()).expect("scratch store");
+        let corrupt = store.directory.join("0000.scratch");
+        std::fs::write(&corrupt, b"not a record").expect("corrupt record");
+
+        let loaded = store.load().expect("a bad record does not fail the load");
+        assert!(loaded.records.is_empty());
+        assert_eq!(loaded.unreadable.len(), 1);
+        assert_eq!(loaded.unreadable[0].path, corrupt);
+        assert!(corrupt.exists(), "an unreadable record is left on disk");
     }
 }
 

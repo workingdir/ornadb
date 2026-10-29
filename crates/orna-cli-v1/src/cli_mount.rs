@@ -419,7 +419,7 @@ fn edit_via_owner(
 /// Settles the owner's reply to `user.orna.edit-commit`.
 ///
 /// The owner answers a refused request with a definite errno (`EBUSY`,
-/// `ESTALE`, `EIO`, `EINVAL`, `ENODATA`) and retains the draft. Any other
+/// `EAGAIN`, `EIO`, `EINVAL`, `ENODATA`) and retains the draft. Any other
 /// errno means the reply never arrived, so the owner may have committed before
 /// it ended. The retained draft is the request identity: the owner removes it
 /// only after an accepted commit (ORNA-ADMIN-003). A missing draft therefore
@@ -433,7 +433,7 @@ fn settle_owner_reply(
         Ok(()) => return Ok(()),
         Err(error) => error,
     };
-    if error == rustix::io::Errno::STALE {
+    if error == rustix::io::Errno::AGAIN {
         return Err(edit_refusal(crate::fuse_mount::EditError::Stale(format!(
             "the mounted baseline is stale against the durable row; nothing was written; draft retained at {}",
             draft.display()
@@ -1825,7 +1825,7 @@ mod tests {
         fn stale_reply_is_a_stale_refusal() {
             let directory = tempfile::tempdir().unwrap();
             let draft = retained_draft(directory.path());
-            let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
+            let diagnostic = settle_owner_reply(Err(Errno::AGAIN), &draft)
                 .expect_err("a stale baseline is refused");
             assert_eq!(diagnostic.code, "E2000");
             assert_eq!(&*diagnostic.title, "Edit is stale against the mounted baseline");
