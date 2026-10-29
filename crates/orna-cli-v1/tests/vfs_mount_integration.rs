@@ -840,7 +840,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
             "--cwd",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("start mount --cwd");
     let mut mounted = MountedProcess {
@@ -2648,7 +2648,7 @@ fn wait_for_mount_paths(mounted: &mut MountedProcess, paths: &[&Path]) -> bool {
     while !(mountinfo_contains(&mounted.mountpoint) && paths.iter().all(|path| path.exists())) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             let stderr = take_child_stderr(&mut mounted.child);
-            if is_optional_fuse_setup_failure(&stderr) {
+            if !fuse_test_required() && is_optional_fuse_setup_failure(&stderr) {
                 eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
                 return false;
             }
@@ -3943,7 +3943,7 @@ async fn mount_case_distinct_keys_project_to_distinct_rows() {
 }
 
 #[tokio::test]
-/// A Str far above the 64 KiB inline bound saves through the document; the stored row holds the full text and the document read contains it. This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
+/// A Str over the 64 KiB inline bound is projected as a `.txt` file beside `data.orna`, and the document names it as `{text: "./title.txt", encoding: "utf-8"}` (profiles/vfs-1.md:76-80). This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
 async fn cwd_mount_large_str_round_trips_through_document() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
@@ -3957,9 +3957,58 @@ async fn cwd_mount_large_str_round_trips_through_document() {
     );
     let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
     assert!(
-        document.contains(&large),
-        "the document read returns the full large Str"
+        document.contains("./title.txt") && document.contains("utf-8"),
+        "data.orna names the title.txt projection: {document}"
+    );
+    assert!(
+        !document.contains(&large),
+        "data.orna does not inline a Str over 64 KiB"
+    );
+    assert_eq!(
+        std::fs::read_to_string(row.row_path.join("title.txt")).unwrap(),
+        large,
+        "title.txt holds the full large Str"
     );
     row.unmount();
     assert_title(&row.stored_row().await, &large);
+}
+
+#[tokio::test]
+/// A save that shrinks a large Str to the 64 KiB bound or below returns it inline and removes its `.txt` sibling (profiles/vfs-1.md:76-79). A handle opened on the old `.txt` keeps reading the bytes it captured.
+async fn cwd_mount_shrunk_str_drops_its_text_sibling() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let large: String = (0..300_000u32)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{large}\", }}")),
+        "large Str save",
+    );
+    let text_path = row.row_path.join("title.txt");
+    let mut pinned = std::fs::File::open(&text_path).unwrap();
+    assert_saved(
+        &row.save("small", "{ title: \"small\", }"),
+        "shrinking Str save",
+    );
+    assert!(
+        !text_path.exists(),
+        "the stale title.txt leaves the row directory once the Str is inline again"
+    );
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains("\"small\""),
+        "data.orna inlines the shrunk Str: {document}"
+    );
+    use std::io::Read as _;
+    let mut captured = String::new();
+    pinned.read_to_string(&mut captured).unwrap();
+    drop(pinned);
+    assert_eq!(
+        captured, large,
+        "an open handle keeps reading the pinned title.txt bytes"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "small");
 }
