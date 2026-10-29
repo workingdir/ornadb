@@ -50,23 +50,10 @@ use sha2::{Digest, Sha256};
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
 
-/// Bound on unbound editor scratch files held per mount (41-vfs.md Temporary-save replacement).
-/// Unbound scratch is recovery state, so an editor cannot grow it without limit.
+/// Bound on unbound editor scratch files one mount may create (41-vfs.md Temporary-save
+/// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
+/// Records restored from earlier mounts are not counted (`VfsScratchStore::reserve_unbound`).
 const MAX_UNBOUND_SCRATCH: usize = 16;
-
-/// Whether the mount already holds `MAX_UNBOUND_SCRATCH` unbound scratch records.
-fn unbound_scratch_full(store: &VfsScratchStore) -> bool {
-    store
-        .load()
-        .map(|records| {
-            records
-                .iter()
-                .filter(|record| record.identity.blob_field_name.is_none())
-                .count()
-                >= MAX_UNBOUND_SCRATCH
-        })
-        .unwrap_or(true)
-}
 
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
@@ -120,6 +107,8 @@ struct PersistedTemporaryScratch {
 
 struct VfsScratchStore {
     directory: PathBuf,
+    /// Unbound scratch record names this mount created; restored records are never counted.
+    unbound_created: Mutex<HashSet<String>>,
 }
 
 impl VfsScratchStore {
@@ -142,7 +131,10 @@ impl VfsScratchStore {
         }
         ensure_private_directory(&directory, "temporary scratch directory")?;
         Self::sync_directory(&directory)?;
-        Ok(Self { directory })
+        Ok(Self {
+            directory,
+            unbound_created: Mutex::new(HashSet::new()),
+        })
     }
 
     fn persist(
@@ -233,6 +225,34 @@ impl VfsScratchStore {
                 "temporary scratch record could not be removed: {error}"
             )),
         }
+    }
+
+    /// Reserves one of this mount's unbound scratch slots for `identity`. A slot this mount
+    /// already holds stays admitted; a new one past `MAX_UNBOUND_SCRATCH` is refused.
+    fn reserve_unbound(&self, identity: &TemporaryScratchIdentity) -> bool {
+        let name = Self::record_name(identity);
+        let mut created = self
+            .unbound_created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if created.contains(&name) {
+            return true;
+        }
+        if created.len() >= MAX_UNBOUND_SCRATCH {
+            return false;
+        }
+        created.insert(name);
+        true
+    }
+
+    /// Releases the slot of a record this mount removed. Restored records were never reserved,
+    /// so releasing them is a no-op.
+    fn release_unbound(&self, identity: &TemporaryScratchIdentity) {
+        let name = Self::record_name(identity);
+        self.unbound_created
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&name);
     }
 
     fn record_path(&self, identity: &TemporaryScratchIdentity) -> PathBuf {
@@ -1484,6 +1504,36 @@ impl RowSaveContext {
             .map_err(|error| {
                 format!("mounted replacement scratch target could not be admitted: {error:?}")
             })
+    }
+
+    /// Re-admits an unbound scratch's candidate under the Blob `blob_field` target, the same
+    /// target a Blob-bound create uses, so the rename commits through that target.
+    fn retarget_unbound_scratch(
+        &self,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        blob_field: &BlobField,
+    ) -> Result<(Arc<ManagedFile<RowMapSnapshot>>, Arc<TemporarySave<RowMapSnapshot>>), String>
+    {
+        let target = self.temporary_target(Some(blob_field))?;
+        let retargeted = self
+            .writer
+            .runtime
+            .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES));
+        let len = self.writer.runtime.block_on(scratch.candidate_len());
+        if len > 0 {
+            let length = usize::try_from(len)
+                .map_err(|_| "scratch candidate exceeds addressable memory".to_owned())?;
+            let bytes = self
+                .writer
+                .runtime
+                .block_on(scratch.read_range(0, length))
+                .map_err(|error| format!("scratch candidate could not be read: {error:?}"))?;
+            self.writer
+                .runtime
+                .block_on(retargeted.write_at(0, &bytes))
+                .map_err(|error| format!("scratch candidate could not be moved: {error:?}"))?;
+        }
+        Ok((target, Arc::new(retargeted)))
     }
 
     fn fsync_temporary(
@@ -3881,8 +3931,7 @@ impl Filesystem for WorkspaceFilesystem {
             };
             // 41-vfs.md Temporary-save replacement: an unknown file inside a row directory is
             // private editor scratch, not a new column. A replacement name of a Blob field binds
-            // to that field; any other unknown name stays unbound until renamed. Unbound scratch
-            // is bounded per mount (MAX_UNBOUND_SCRATCH); a create past the bound is refused EDQUOT.
+            // to that field; any other unknown name stays unbound until renamed.
             let blob_field = save
                 .blob_fields
                 .lock()
@@ -3890,10 +3939,6 @@ impl Filesystem for WorkspaceFilesystem {
                 .iter()
                 .find(|field| is_replacement_scratch_for(name, &field.file_name))
                 .cloned();
-            if blob_field.is_none() && unbound_scratch_full(&save.writer.scratch_store) {
-                reply.error(Errno::EDQUOT);
-                return;
-            }
             let Ok(key) = runtime_table_key_bytes(&save.key) else {
                 reply.error(Errno::EIO);
                 return;
@@ -3918,6 +3963,16 @@ impl Filesystem for WorkspaceFilesystem {
                     .runtime
                     .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
             );
+            if blob_field.is_none() {
+                if matches!(state.lookup_child(parent.0, std::ffi::OsStr::new(name)), Ok(Some(_))) {
+                    reply.error(Errno::EEXIST);
+                    return;
+                }
+                if !save.writer.scratch_store.reserve_unbound(&identity) {
+                    reply.error(Errno::EDQUOT);
+                    return;
+                }
+            }
             let inode = match state.add_file(
                 parent.0,
                 name,
@@ -3933,6 +3988,7 @@ impl Filesystem for WorkspaceFilesystem {
             ) {
                 Ok(inode) => inode,
                 Err(_) => {
+                    save.writer.scratch_store.release_unbound(&identity);
                     reply.error(Errno::EEXIST);
                     return;
                 }
@@ -4095,6 +4151,21 @@ impl Filesystem for WorkspaceFilesystem {
                 identity,
             )
         };
+        // An unbound scratch renamed onto a Blob moves its candidate into a scratch of that Blob's
+        // own target, the target a Blob-bound create uses, so it commits through that target.
+        let (target, scratch) = match &blob_field {
+            Some(field) if identity.blob_field_name.is_none() => {
+                match save.retarget_unbound_scratch(&scratch, field) {
+                    Ok(retargeted) => retargeted,
+                    Err(error) => {
+                        eprintln!("mounted replacement scratch retarget failed: {error}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                }
+            }
+            _ => (target, scratch),
+        };
         let committed = match &blob_field {
             Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
             None => save.commit_temporary(&scratch, baseline, true).map(|()| None),
@@ -4221,6 +4292,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        save.writer.scratch_store.release_unbound(&identity);
         let removed = state
             .nodes
             .get_mut(&parent.0)
@@ -4334,6 +4406,7 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EIO);
             return;
         }
+        save.writer.scratch_store.release_unbound(&identity);
         if state
             .directory_mut(parent.0)
             .and_then(|directory| directory.remove_entry(OsStr::new(name)))
