@@ -2784,6 +2784,107 @@ async fn mount_captured_media(
     })
 }
 
+/// Mounts `Music/london` over a repository whose row has a `title` Str, a required Blob `content`
+/// (`tone.mp3`) and an optional Blob `cover` (`cover.png`), both captured from a media root.
+/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+async fn mount_titled_cover_row(content: &[u8], cover: &[u8]) -> Option<MountedBlobRow> {
+    if !fuse_test_available() {
+        return None;
+    }
+    let media_root = TempDir::new().unwrap();
+    std::fs::write(media_root.path().join("tone.mp3"), content).unwrap();
+    std::fs::write(media_root.path().join("cover.png"), cover).unwrap();
+    let source = "pub table Music(id: Str) { title: Str, content: Blob, cover: Blob?, }\n";
+    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
+    let content_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
+    );
+    let cover_capture = format!(
+        "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 4194304), \"image/png\")"
+    );
+    let row_source = format!(
+        "{{\n    title: \"before\",\n    content: {content_capture},\n    cover: {cover_capture},\n}}\n"
+    );
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(source, "Music");
+    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
+    filesystem.allow_root(media_root.path()).unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+    let blob_captures = [
+        ("content", content_capture.as_str()),
+        ("cover", cover_capture.as_str()),
+    ];
+    let capture_rows = [media_commit::SourceCaptureRow {
+        key: "london",
+        blob_fields: &blob_captures,
+        source_row: &row_source,
+        ordinal: 0x97,
+        insert_only: true,
+    }];
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &capture_rows,
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let cover_path = mountpoint.join("Music/london/cover.png");
+    if !wait_for_mount_paths(&mut mounted, &[cover_path.as_path()]) {
+        return None;
+    }
+    Some(MountedBlobRow {
+        mounted,
+        repository_directory,
+        _repository: repository,
+        relation_id,
+        _media_root: media_root,
+        _mount_parent: mount_parent,
+    })
+}
+
+/// Advances the row through the mount owner's `orna edit`, replacing `from` with `to` in the
+/// document the editor receives. The Blob descriptors the mount wrote stay as they are, so the
+/// owner commits a row another writer changed while the mount's captured baseline stays behind.
+fn owner_edit_row_text(repository: &Path, from: &str, to: &str) {
+    let scripts = TempDir::new().unwrap();
+    let editor = scripts.path().join("owner-text-edit");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\nsed -i 's/{from}/{to}/' \"$1\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(repository)
+        .args(["edit", "Music/london/data.orna"])
+        .env("EDITOR", &editor)
+        .output()
+        .expect("run orna edit through the mount owner");
+    assert_saved(&output, "owner-routed row edit");
+}
+
 #[tokio::test]
 /// profiles/vfs-1.md Blob fields and ACCEPTANCE Gate E: a rename-over replacement gives new opens the new generation while a handle opened earlier keeps the captured bytes.
 async fn cwd_mount_open_blob_handle_keeps_captured_generation_across_replacement() {
@@ -3421,80 +3522,34 @@ async fn cwd_mount_optional_blob_unlink_commits_null_and_survives_remount() {
     if !fuse_test_available() {
         return;
     }
-    let media_root = TempDir::new().unwrap();
     let content = lcg_bytes(0x0123_4567_89ab_cdef, 64 * 1024 + 5);
     let cover = lcg_bytes(0xfedc_ba98_7654_3210, 8 * 1024 + 9);
-    std::fs::write(media_root.path().join("tone.mp3"), &content).unwrap();
-    std::fs::write(media_root.path().join("cover.png"), &cover).unwrap();
-    let source = "pub table Music(id: Str) { content: Blob, cover: Blob?, }\n";
-    let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
-    let content_capture = format!(
-        "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
-    );
-    let cover_capture = format!(
-        "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 4194304), \"image/png\")"
-    );
-    let row_source = format!("{{\n    content: {content_capture},\n    cover: {cover_capture},\n}}\n");
-    let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_with_context(source, "Music");
-    let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
-        .await
-        .unwrap();
-    let writer = state
-        .acquire_lease(runtime_identity.repository_id)
-        .await
-        .unwrap();
-    let capability = repository.capture_capability(relation_id).unwrap();
-    let mut filesystem = FilesystemProvider::with_limits(4 << 20, 16).unwrap();
-    filesystem.allow_root(media_root.path()).unwrap();
-    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
-        .with_filesystem_provider(filesystem)
-        .with_repository_capture_capability(capability);
-    let blob_captures = [
-        ("content", content_capture.as_str()),
-        ("cover", cover_capture.as_str()),
-    ];
-    let capture_rows = [media_commit::SourceCaptureRow {
-        key: "london",
-        blob_fields: &blob_captures,
-        source_row: &row_source,
-        ordinal: 0x97,
-        insert_only: true,
-    }];
-    media_commit::commit_source_captures_for_table(
-        &repository,
-        &state,
-        writer,
-        &mut bindings,
-        relation_id,
-        &format_context,
-        "Music",
-        &capture_rows,
-    )
-    .await;
-    drop(state);
-
-    let mount_parent = TempDir::new().unwrap();
-    let mountpoint = mount_parent.path().join("library");
-    std::fs::create_dir(&mountpoint).unwrap();
-    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
-    let row_path = mountpoint.join("Music/london");
-    let cover_path = row_path.join("cover.png");
-    if !wait_for_mount_paths(&mut mounted, &[cover_path.as_path()]) {
+    let Some(mut row) = mount_titled_cover_row(&content, &cover).await else {
         return;
-    }
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let cover_path = row_path.join("cover.png");
     std::fs::remove_file(&cover_path).expect("unlinking an optional Blob is accepted");
-    assert!(!cover_path.exists(), "the unlinked optional Blob has no file");
-    assert_eq!(std::fs::read(row_path.join("content.mp3")).unwrap(), content);
+    assert!(
+        !cover_path.exists(),
+        "the unlinked optional Blob has no file"
+    );
+    assert_eq!(
+        std::fs::read(row_path.join("content.mp3")).unwrap(),
+        content
+    );
     let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
-    assert!(document.contains("cover: null"), "data.orna commits the optional Blob as null: {document}");
-    unmount_and_reap(repository_directory.path(), &mut mounted);
+    assert!(
+        document.contains("cover: null"),
+        "data.orna commits the optional Blob as null: {document}"
+    );
+    unmount_and_reap(&repository, &mut row.mounted);
 
     let remount_parent = TempDir::new().unwrap();
     let remount_point = remount_parent.path().join("library");
     std::fs::create_dir(&remount_point).unwrap();
-    let mut remounted = spawn_cwd_mount(repository_directory.path(), &remount_point);
+    let mut remounted = spawn_cwd_mount(&repository, &remount_point);
     let remounted_content = remount_point.join("Music/london/content.mp3");
     assert!(
         wait_for_mount_paths(&mut remounted, &[remounted_content.as_path()]),
@@ -3505,7 +3560,143 @@ async fn cwd_mount_optional_blob_unlink_commits_null_and_survives_remount() {
         "the removal survives a remount"
     );
     assert_eq!(std::fs::read(&remounted_content).unwrap(), content);
-    unmount_and_reap(repository_directory.path(), &mut remounted);
+    unmount_and_reap(&repository, &mut remounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-009/012 and 41-vfs.md EDIT-1: after another writer advances the row, a Blob rename to a compatible suffix is refused with EAGAIN and keeps the Blob. The refusal refreshes the document to the current row, so the retried rename commits against the durable row.
+async fn cwd_mount_blob_rename_after_owner_advances_row_is_stale_then_retries() {
+    let content = lcg_bytes(0x6161_0000_0000_0001, 48 * 1024 + 11);
+    let cover = lcg_bytes(0x6161_0000_0000_0002, 4 * 1024 + 3);
+    let Some(mut row) = mount_titled_cover_row(&content, &cover).await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let blob_path = row_path.join("content.mp3");
+    let mp1_path = row_path.join("content.mp1");
+
+    owner_edit_row_text(&repository, "title: \"before\"", "title: \"other\"");
+
+    let stale = std::fs::rename(&blob_path, &mp1_path)
+        .expect_err("a rename against a row another writer advanced is stale");
+    assert_eq!(stale.raw_os_error(), Some(EAGAIN));
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        content,
+        "a stale rename keeps the Blob"
+    );
+
+    std::fs::rename(&blob_path, &mp1_path)
+        .expect("the retried rename commits against the refreshed row");
+    assert!(!blob_path.exists(), "the old suffix name is gone");
+    assert_eq!(
+        std::fs::read(&mp1_path).unwrap(),
+        content,
+        "the bytes are not transcoded"
+    );
+    let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
+    assert!(
+        document.contains("title: \"other\""),
+        "the retried commit keeps the other writer's title: {document}"
+    );
+    assert!(
+        document.contains("content: { path: \"./content.mp1\", media_type: \"audio/mpeg\" }"),
+        "data.orna names the renamed sibling: {document}"
+    );
+    unmount_and_reap(&repository, &mut row.mounted);
+
+    let remount_parent = TempDir::new().unwrap();
+    let remount_point = remount_parent.path().join("library");
+    std::fs::create_dir(&remount_point).unwrap();
+    let mut remounted = spawn_cwd_mount(&repository, &remount_point);
+    let remounted_blob = remount_point.join("Music/london/content.mp1");
+    assert!(
+        wait_for_mount_paths(&mut remounted, &[remounted_blob.as_path()]),
+        "a remount exposes the committed rename"
+    );
+    assert_eq!(std::fs::read(&remounted_blob).unwrap(), content);
+    unmount_and_reap(&repository, &mut remounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-009/013 and profiles/vfs-1.md: after another writer advances the row, unlinking an optional Blob is refused with EAGAIN and keeps the file. A handle opened before the successful unlink still reads the captured bytes, and the retried unlink commits `null` against the refreshed row.
+async fn cwd_mount_optional_blob_unlink_after_owner_advances_row_is_stale_then_retries() {
+    let content = lcg_bytes(0x6262_0000_0000_0001, 16 * 1024 + 5);
+    let cover = lcg_bytes(0x6262_0000_0000_0002, 8 * 1024 + 9);
+    let Some(mut row) = mount_titled_cover_row(&content, &cover).await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let cover_path = row_path.join("cover.png");
+    let mut held = std::fs::File::open(&cover_path).expect("open the optional Blob before unlink");
+
+    owner_edit_row_text(&repository, "title: \"before\"", "title: \"other\"");
+
+    let stale = std::fs::remove_file(&cover_path)
+        .expect_err("an unlink against a row another writer advanced is stale");
+    assert_eq!(stale.raw_os_error(), Some(EAGAIN));
+    assert_eq!(
+        std::fs::read(&cover_path).unwrap(),
+        cover,
+        "a stale unlink keeps the file"
+    );
+
+    std::fs::remove_file(&cover_path)
+        .expect("the retried unlink commits against the refreshed row");
+    assert!(
+        !cover_path.exists(),
+        "the unlinked optional Blob has no file"
+    );
+    let mut held_bytes = Vec::new();
+    held.read_to_end(&mut held_bytes)
+        .expect("an open handle reads after unlink");
+    assert_eq!(
+        held_bytes, cover,
+        "the open handle keeps the captured bytes"
+    );
+    drop(held);
+    let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
+    assert!(
+        document.contains("title: \"other\""),
+        "the retried commit keeps the other writer's title: {document}"
+    );
+    assert!(
+        document.contains("cover: null"),
+        "data.orna commits the optional Blob as null: {document}"
+    );
+    unmount_and_reap(&repository, &mut row.mounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-012 and profiles/vfs-1.md: a Blob renamed to a compatible suffix and renamed back keeps its bytes through each step, and the document names the suffix it has at the end.
+async fn cwd_mount_blob_suffix_round_trip_keeps_bytes() {
+    let original = lcg_bytes(0x6363_0000_0000_0001, 32 * 1024 + 7);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let mp3_path = row_path.join("content.mp3");
+    let mp1_path = row_path.join("content.mp1");
+
+    std::fs::rename(&mp3_path, &mp1_path).expect("renaming to a compatible suffix is accepted");
+    assert_eq!(std::fs::read(&mp1_path).unwrap(), original);
+    std::fs::rename(&mp1_path, &mp3_path)
+        .expect("renaming back to the original suffix is accepted");
+    assert!(!mp1_path.exists(), "the intermediate suffix name is gone");
+    assert_eq!(
+        std::fs::read(&mp3_path).unwrap(),
+        original,
+        "the bytes survive the round trip"
+    );
+    let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
+    assert!(
+        document.contains("content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"),
+        "data.orna names the restored suffix: {document}"
+    );
+    unmount_and_reap(&repository, &mut row.mounted);
 }
 
 #[tokio::test]
