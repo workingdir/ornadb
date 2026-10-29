@@ -684,9 +684,14 @@ fn retain_refused_scratch(
     error: DocumentCommitError,
 ) -> DocumentCommitError {
     let cause = error.cause();
-    draft_state
-        .rejected_scratch
-        .insert(inode, ScratchRefusal { cause, kept: false });
+    draft_state.rejected_scratch.insert(
+        inode,
+        ScratchRefusal {
+            cause,
+            kept: false,
+            path: path.to_owned(),
+        },
+    );
     let len = save.writer.runtime.block_on(scratch.candidate_len());
     let retained = retain_scratch_candidate(save, path, cause, len, &mut |offset, length| {
         save.writer
@@ -2640,6 +2645,8 @@ enum OpenFile {
 /// and its live source so a later retention attempt can still write it.
 struct DraftRefusal {
     cause: &'static str,
+    /// The row path the candidate was refused for; an accepted save of that path supersedes it.
+    path: String,
     draft: Option<String>,
     /// The handle whose candidate this refusal describes; a write by that handle clears it.
     handle: Option<u64>,
@@ -2651,10 +2658,12 @@ struct DraftRefusal {
 
 /// A replacement candidate whose rename was refused. `kept` records that its
 /// candidate reached recovery storage, so the draft list reports it as retained.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct ScratchRefusal {
     cause: &'static str,
     kept: bool,
+    /// The row path the candidate was refused for; an accepted save of that path supersedes it.
+    path: String,
 }
 
 /// Unsynced Document drafts are retained on release with cause `unsynced`; a
@@ -2692,6 +2701,43 @@ impl DraftState {
             }
         }
     }
+
+    /// An accepted save of `inode` at row `path` supersedes the refusals it replaces: the one
+    /// recorded under its own node, and those of the same row path recorded under a node the
+    /// re-projection has since replaced. A refusing handle whose candidate is unchanged holds
+    /// only obsolete bytes, so its unresolved state ends here.
+    fn supersede_refusals(&mut self, inode: u64, path: &str) {
+        let mut superseded = HashSet::new();
+        let documents = self
+            .rejected_documents
+            .iter()
+            .filter(|(candidate, refusal)| **candidate == inode || refusal.path == path)
+            .map(|(candidate, _)| *candidate)
+            .collect::<Vec<_>>();
+        for candidate in documents {
+            if let Some(DraftRefusal {
+                handle: Some(refused),
+                ..
+            }) = self.rejected_documents.remove(&candidate)
+            {
+                self.unresolved_handles.remove(&refused);
+            }
+            if candidate != inode {
+                superseded.insert(candidate);
+            }
+        }
+        self.rejected_scratch.retain(|candidate, refusal| {
+            let keep = *candidate != inode && refusal.path != path;
+            if !keep && *candidate != inode {
+                superseded.insert(*candidate);
+            }
+            keep
+        });
+        self.unresolved_handles
+            .retain(|_, candidate| !superseded.contains(candidate));
+        self.retained_scratch
+            .retain(|candidate| !superseded.contains(candidate));
+    }
 }
 
 /// A write-open Blob handle's candidate generation and the row baseline it captured at open
@@ -2699,6 +2745,8 @@ impl DraftState {
 struct BlobHandle {
     generation: u64,
     baseline: Option<Vec<u8>>,
+    /// The mount-relative path captured at open; a refusal keeps it after the row leaves the mount.
+    path: String,
 }
 
 /// Decides the acknowledgement for a commit that found no candidate. A clean
@@ -3294,19 +3342,12 @@ impl WorkspaceFilesystem {
         if let Err(error) = state.project_accepted_document(inode, save) {
             eprintln!("the accepted row document could not be re-projected: {error}");
         }
+        let accepted_path = state.display_path(inode);
         drop(state);
         draft_state.unresolved_handles.remove(&handle);
         draft_state.dirty_handles.remove(&handle);
-        // The accepted save supersedes the refusal it replaces. A refusing handle
-        // whose candidate is unchanged holds only obsolete bytes, so its unresolved
-        // state ends here and its later RELEASE retains nothing.
-        if let Some(DraftRefusal {
-            handle: Some(refused),
-            ..
-        }) = draft_state.rejected_documents.remove(&inode)
-        {
-            draft_state.unresolved_handles.remove(&refused);
-        }
+        // The accepted save supersedes the refusals it replaces (ORNA-VFS-009, ORNA-VFS-024).
+        draft_state.supersede_refusals(inode, &accepted_path);
         Ok(())
     }
 
@@ -3380,6 +3421,7 @@ impl WorkspaceFilesystem {
         };
         let inode = blob.generation;
         let baseline = blob.baseline.clone();
+        let path = blob.path.clone();
         let (parent, text_field) = {
             let state = self
                 .state
@@ -3406,12 +3448,14 @@ impl WorkspaceFilesystem {
             }
         };
         if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
-            let path = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .display_path(inode);
-            return Err(retain_refused_scratch(draft_state, save, scratch, inode, &path, error));
+            return Err(retain_refused_scratch(
+                draft_state,
+                save,
+                scratch,
+                inode,
+                &path,
+                error,
+            ));
         }
         let bytes = save
             .writer
@@ -3438,6 +3482,7 @@ impl WorkspaceFilesystem {
         // The accepted candidate is no longer draft state (same as an accepted rename).
         draft_state.retained_scratch.remove(&inode);
         draft_state.rejected_scratch.remove(&inode);
+        draft_state.supersede_refusals(inode, &path);
         // The next candidate starts from the accepted bytes, and its baseline is the accepted row.
         let accepted_baseline = save
             .expected_baseline_row
@@ -3462,14 +3507,15 @@ impl WorkspaceFilesystem {
                     ))
                 })?;
         }
-        {
+        let next_path = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             state.track_blob_open(generation);
             state.track_blob_release(inode);
-        }
+            state.display_path(generation)
+        };
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3487,6 +3533,7 @@ impl WorkspaceFilesystem {
             BlobHandle {
                 generation,
                 baseline: accepted_baseline,
+                path: next_path,
             },
         );
         Ok(())
@@ -3564,6 +3611,7 @@ impl WorkspaceFilesystem {
             inode,
             DraftRefusal {
                 cause,
+                path: path.clone(),
                 handle: Some(handle),
                 candidate: Some(Arc::clone(draft)),
                 draft: retained_draft,
@@ -3642,11 +3690,6 @@ impl WorkspaceFilesystem {
             unresolved.entry(*inode).or_insert((code, draft, detail));
         }
         for (inode, refusal) in &draft_state.rejected_scratch {
-            // A kept candidate whose node was retired has no scratch left in the mount, and its
-            // bytes are in recovery storage (ORNA-VFS-009), so it has nothing left to resolve.
-            if refusal.kept && state.path_of(*inode).is_none() {
-                continue;
-            }
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
                 .unwrap_or("");
@@ -3655,13 +3698,6 @@ impl WorkspaceFilesystem {
             });
         }
         for inode in &draft_state.retained_scratch {
-            // A candidate already kept in recovery storage whose node left the mount has
-            // nothing left to resolve (ORNA-VFS-009).
-            let kept_outside_mount = state.path_of(*inode).is_none()
-                && draft_state.rejected_scratch.get(inode).is_some_and(|refusal| refusal.kept);
-            if kept_outside_mount {
-                continue;
-            }
             unresolved.entry(*inode).or_insert_with(|| {
                 (DRAFT_RETAINED, String::new(), "scratch file not renamed".to_owned())
             });
@@ -3942,6 +3978,7 @@ impl WorkspaceFilesystem {
                         inode,
                         DraftRefusal {
                             cause,
+                            path,
                             draft: None,
                             handle,
                             candidate: None,
@@ -4506,15 +4543,20 @@ impl Filesystem for WorkspaceFilesystem {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                self.state
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .track_blob_open(inode.0);
+                let path = {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.track_blob_open(inode.0);
+                    state.display_path(inode.0)
+                };
                 draft_state.blob_handles.insert(
                     handle,
                     BlobHandle {
                         generation: inode.0,
                         baseline,
+                        path,
                     },
                 );
             }
@@ -5054,9 +5096,7 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
         };
-        if let Some(ScratchRefusal { cause, .. }) =
-            draft_state.rejected_scratch.get(&inode).copied()
-        {
+        if let Some(cause) = draft_state.rejected_scratch.get(&inode).map(|refusal| refusal.cause) {
             // A refused replacement stays recoverable (ORNA-VFS-009): its
             // candidate moves to recovery storage before its name goes away. A
             // candidate recovery storage cannot keep fails with its retention
@@ -7499,8 +7539,7 @@ fn render_stored_source_value(value: &Raw) -> Result<String, String> {
             }
             Ok(format!("{value:?}f"))
         }
-        Raw::Text(value) => serde_json::to_string(value)
-            .map_err(|error| format!("stored string could not be rendered: {error}")),
+        Raw::Text(value) => Ok(orna_str_literal(value)),
         Raw::Bytes(_) => {
             Err("committed row contains a byte value without a source spelling".into())
         }
@@ -7895,11 +7934,9 @@ fn validate_text_descriptor(value: &Expr, field: &BlobField) -> Result<(), Strin
     Ok(())
 }
 
-/// The Orna string literal whose value is `bytes`, which must be UTF-8. `{` is escaped so the
+/// The Orna string literal whose value is `text`. `{` is escaped so the
 /// literal never opens an interpolation, and other control characters use `\u{..}`.
-fn orna_string_literal(bytes: &[u8]) -> Result<String, String> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| "text field content is not valid UTF-8".to_owned())?;
+fn orna_str_literal(text: &str) -> String {
     let mut literal = String::with_capacity(text.len() + 2);
     literal.push('"');
     for character in text.chars() {
@@ -7918,7 +7955,14 @@ fn orna_string_literal(bytes: &[u8]) -> Result<String, String> {
         }
     }
     literal.push('"');
-    Ok(literal)
+    literal
+}
+
+/// The Orna string literal whose value is `bytes`, which must be UTF-8.
+fn orna_string_literal(bytes: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "text field content is not valid UTF-8".to_owned())?;
+    Ok(orna_str_literal(text))
 }
 
 /// Removes projected Blob summary fields from a source row before row admission.
@@ -8653,6 +8697,7 @@ mod hardening_tests {
     fn release_names_an_unrefused_candidate_unsynced_and_keeps_a_refusal_cause() {
         assert_eq!(super::release_retention_cause(None), "unsynced");
         let refusal = super::DraftRefusal {
+            path: String::new(),
             cause: "sys.vfs.stale_edit",
             handle: None,
             candidate: None,
