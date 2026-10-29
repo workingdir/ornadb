@@ -332,7 +332,7 @@ gate = "E"
 id = "E6"
 title = "Demonstrate blind replacement's limitation"
 select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses" }]
-limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119). The orna edit refusal is asserted as E2000 with the stale detail and a retained draft; the spec cause sys.vfs.stale_edit (Orna-1.1.0.md:8674) is not in this command's output or in mount status for this path."]
+limitations = ["The test pins the blind replacement as current behaviour; it demonstrates the limitation and is not a protection. The protected path is orna edit (profiles/vfs-1.md:118-119). The orna edit refusal is asserted as E2000 with the stale detail and the retained-draft help line. [INFERENCE] from reading fuse_mount.rs:3893: the spec cause sys.vfs.stale_edit (Orna-1.1.0.md:8674) is not in this command's output or in the mount's unresolved-draft fields for this path; the test does not assert that absence."]
 
 [[item]]
 gate = "E"
