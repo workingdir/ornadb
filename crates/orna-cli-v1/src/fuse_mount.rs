@@ -6349,12 +6349,38 @@ impl FsBuilder {
             .get(&document_inode)
             .map(|node| node.parent)
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
-        // data.orna keeps its node, so handles opened earlier keep their captured baseline. The
-        // row's other files, nested directories included, are replaced as one set so every view
+        // data.orna keeps its node, so handles opened earlier keep their captured baseline. Pending
+        // scratch files keep their entries: their saves belong to the user, not the row. The row's
+        // other projected files, nested directories included, are replaced as one set so every view
         // agrees on the new row. Replaced nodes stay in `nodes` for handles opened earlier.
+        let (kept_inodes, kept_names): (HashSet<u64>, HashSet<OsString>) = {
+            let directory = self
+                .directory(row_inode)
+                .ok_or_else(|| "the refreshed row is not a directory".to_owned())?;
+            directory
+                .entries
+                .iter()
+                .filter(|entry| {
+                    entry.name.as_os_str() == OsStr::new("data.orna")
+                        || matches!(
+                            self.nodes.get(&entry.inode).map(|node| &node.kind),
+                            Some(NodeKind::Temporary { .. })
+                        )
+                })
+                .map(|entry| (entry.inode, entry.name.clone()))
+                .unzip()
+        };
+        if let Some((name, _)) = others
+            .iter()
+            .find(|(name, _)| kept_names.contains(OsStr::new(name.as_str())))
+        {
+            return Err(format!(
+                "the refreshed row entry {name} collides with a pending scratch file"
+            ));
+        }
         self.directory_mut(row_inode)
             .ok_or_else(|| "the refreshed row is not a directory".to_owned())?
-            .retain_only(OsStr::new("data.orna"));
+            .retain_entries(|entry| kept_inodes.contains(&entry.inode));
         for (name, kind) in others {
             self.add_file(row_inode, &name, kind)?;
         }
@@ -6693,10 +6719,9 @@ impl Directory {
         true
     }
 
-    /// Drops every entry but `keep`, which stays in place.
-    fn retain_only(&mut self, keep: &OsStr) {
-        self.entries
-            .retain(|entry| entry.name.as_os_str() == keep);
+    /// Drops every entry `keep` rejects; kept entries stay in place.
+    fn retain_entries(&mut self, keep: impl Fn(&DirectoryEntry) -> bool) {
+        self.entries.retain(|entry| keep(entry));
         self.by_name = self
             .entries
             .iter()
