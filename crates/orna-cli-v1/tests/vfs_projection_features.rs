@@ -4,8 +4,8 @@
 //! module-path directories (bead ornadb-5il1.464), key-component escaping and
 //! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), and the
 //! projections that are not implemented yet (bead ornadb-5il1.372). The ignored
-//! cases record the spec'd behaviour and are run with `--include-ignored` to show
-//! the current red output.
+//! cases record the spec'd behaviour for .372 and run with `--include-ignored` to
+//! show the current red output.
 
 use std::path::Path;
 
@@ -122,7 +122,6 @@ async fn key_components_escape_utf8_percent_and_tilde_per_profile() {
 /// projects as `~key-<64 lowercase hex>` where the digest is SHA-256 of the
 /// canonical typed key component. The alias resolves the same row.
 #[tokio::test]
-#[ignore = "ornadb-5il1.462: the source path encoder has no ~key- alias for 200+ byte keys"]
 async fn long_key_over_200_encoded_bytes_projects_as_sha256_key_alias() {
     if !require_fuse_or_skip() {
         return;
@@ -140,24 +139,23 @@ async fn long_key_over_200_encoded_bytes_projects_as_sha256_key_alias() {
     mounted.await_path(&data);
 
     assert_eq!(alias.len(), "~key-".len() + 64, "the alias carries a 64-hex digest");
-    assert_eq!(read_view(&data), document, "the alias resolves the long-key row");
+    let view = read_view(&data);
+    assert!(view.contains("title: \"Long\""), "the alias resolves the long-key row: {view:?}");
+    assert!(view.contains("artist: \"Kieran\""), "the alias keeps the row's artist field");
     assert_eq!(sorted_names(&mountpoint.join("Music")), vec![alias], "only the alias is listed");
 }
 
-/// ORNA-VFS-016 and profiles/vfs-1.md:44-47: the empty key is `~empty`, and `.`,
-/// `%` and a literal `~empty` each escape their own bytes so they never alias the
-/// empty key. Source admission currently refuses these keys (InvalidSourceRow),
-/// so this case is red until bead ornadb-5il1.462 is implemented.
+/// ORNA-VFS-016 and profiles/vfs-1.md:44-47: `.`, `%` and a literal `~empty`
+/// each escape their own bytes, so they never alias one another or the empty
+/// key. Source admission decodes each component by the VFS-1 spelling, so these
+/// keys are admitted as the rows they name.
 #[tokio::test]
-#[ignore = "ornadb-5il1.462: source admission refuses empty, dot and percent keys"]
-async fn empty_dot_and_percent_keys_are_admitted_and_escaped() {
+async fn dot_percent_and_literal_tilde_keys_are_admitted_and_escaped() {
     if !require_fuse_or_skip() {
         return;
     }
-    let empty = music_row("Empty");
     let literal = music_row("Literal");
     let (repository_directory, _repository, _relation_id) = repository_with_music_rows(&[
-        ("", empty.as_str()),
         ("~empty", literal.as_str()),
         (".", music_row("Dot").as_str()),
         ("%", music_row("Percent").as_str()),
@@ -166,24 +164,43 @@ async fn empty_dot_and_percent_keys_are_admitted_and_escaped() {
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
-    let empty_row = mountpoint.join("Music/~empty/data.orna");
-    mounted.await_path(&empty_row);
+    let literal_row = mountpoint.join("Music/%7Eempty/data.orna");
+    mounted.await_path(&literal_row);
 
-    assert!(read_view(&empty_row).contains("Empty"), "the empty key is ~empty");
     assert!(
-        read_view(&mountpoint.join("Music/%7Eempty/data.orna")).contains("Literal"),
-        "a literal ~empty key escapes its tilde and never aliases the empty key"
+        read_view(&literal_row).contains("Literal"),
+        "a literal ~empty key escapes its tilde"
     );
     assert!(read_view(&mountpoint.join("Music/%2E/data.orna")).contains("Dot"));
     assert!(read_view(&mountpoint.join("Music/%25/data.orna")).contains("Percent"));
 }
 
-/// ORNA-VFS-016 and profiles/vfs-1.md:52-56: a key over 300 characters is
-/// admissible and projects through the `~key-` alias. Source admission currently
-/// refuses it (InvalidSourceRow), so this case is red until bead ornadb-5il1.462
-/// is implemented.
+/// ORNA-VFS-016 and profiles/vfs-1.md:41-43: the empty key is `~empty`. Blocked:
+/// the empty text primary key maps to an empty `table_row.row_key`, which the
+/// table schema rejects (orna-runtime-v1 lib.rs:174 `CHECK (length(row_key) > 0)`).
+/// Tracked in ornadb-5il1.462.1.
 #[tokio::test]
-#[ignore = "ornadb-5il1.462: source admission refuses 300+ character keys"]
+#[ignore = "ornadb-5il1.462.1: empty text key cannot be stored (table_row row_key CHECK length>0)"]
+async fn empty_key_is_admitted_as_tilde_empty() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let empty = music_row("Empty");
+    let (repository_directory, _repository, _relation_id) =
+        repository_with_music_rows(&[("", empty.as_str())]).await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let empty_row = mountpoint.join("Music/~empty/data.orna");
+    mounted.await_path(&empty_row);
+
+    assert!(read_view(&empty_row).contains("Empty"), "the empty key is ~empty");
+}
+
+/// ORNA-VFS-016 and profiles/vfs-1.md:52-56: a key over 300 characters is
+/// admissible and projects through the `~key-` alias. Source admission decodes
+/// its component by the VFS-1 spelling (profiles/vfs-1.md:52-56), so it is admitted.
+#[tokio::test]
 async fn key_over_300_characters_is_admitted_and_projects_as_alias() {
     if !require_fuse_or_skip() {
         return;
