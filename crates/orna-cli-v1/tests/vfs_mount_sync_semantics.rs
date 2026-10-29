@@ -1038,6 +1038,42 @@ async fn same_length_truncate_clears_guard_on_accepted_fsync_while_open() {
     assert_view_contains(&fixture, "Truncate same");
 }
 
+/// ORNA-VFS-008, EDIT-1 step 2 (spec-silent order, flagged for review): a path
+/// truncate while a writer holds a dirty candidate applies to that candidate, so
+/// the fsync that accepts it accepts the truncated bytes, never the cut tail.
+#[tokio::test]
+async fn path_truncate_while_writer_open_cuts_the_accepted_candidate() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut file = open_rw(&fixture);
+    let kept = row("Truncated before accept");
+    replace_draft(&mut file, &format!("{kept}{}", row("discarded tail")));
+    assert_eq!(draft_guard(&fixture), b'1', "a write is pending draft state");
+    let truncated = std::process::Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+        .arg(&fixture.data_path)
+        .arg(kept.len().to_string())
+        .output()
+        .expect("run python3 os.truncate");
+    assert!(
+        truncated.status.success(),
+        "path truncate of the open writer's candidate failed: {}",
+        String::from_utf8_lossy(&truncated.stderr)
+    );
+    file.sync_all()
+        .expect("fsync accepts the truncated candidate");
+    assert_view_contains(&fixture, "Truncated before accept");
+    assert_view_lacks(&fixture, "discarded tail");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'0',
+        "the accepted fsync clears the dirty handle",
+    );
+    drop(file);
+}
+
 /// EDIT-1 step 2: a write followed by fsync of a valid candidate is acknowledged
 /// only after the candidate is accepted, and the accepted fsync clears the
 /// handle's dirty state.
