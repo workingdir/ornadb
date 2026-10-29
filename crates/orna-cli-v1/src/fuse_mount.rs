@@ -1017,8 +1017,8 @@ impl MountWriter {
             .clone()
             .into_iter()
             .partition(|field| field.text);
-        let substituted = substitute_text_fields(source, &text_fields, text_replacement)
-            .map_err(|error| {
+        let substituted =
+            substitute_text_fields(source, &text_fields, text_replacement).map_err(|error| {
                 eprintln!("mounted row text field was refused: {error}");
                 orna_runtime_v1::TableActivationError::Runtime(
                     orna_runtime_v1::RuntimeError::InvalidTableMutation,
@@ -1772,7 +1772,13 @@ impl RowSaveContext {
                 },
                 &NoFault,
             ));
-        self.settle_replacement(outcome, &accepted_row, field, replacement_bytes, record_baseline)
+        self.settle_replacement(
+            outcome,
+            &accepted_row,
+            field,
+            replacement_bytes,
+            record_baseline,
+        )
     }
 
     /// Records an accepted replacement on its field, or maps the save outcome to a refusal. The
@@ -1889,7 +1895,13 @@ impl RowSaveContext {
                 },
                 &NoFault,
             ));
-        self.settle_replacement(outcome, &accepted_row, field, replacement_bytes, record_baseline)
+        self.settle_replacement(
+            outcome,
+            &accepted_row,
+            field,
+            replacement_bytes,
+            record_baseline,
+        )
     }
 
     fn commit_temporary(
@@ -2017,6 +2029,8 @@ impl From<&str> for EditError {
 pub(super) struct PreparedEdit {
     initial_bytes: Vec<u8>,
     commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>>,
+    /// The document an accepted `edit --row` re-projects: its inode and save context.
+    reproject: Option<(u64, Arc<RowSaveContext>)>,
 }
 
 impl PreparedEdit {
@@ -2199,6 +2213,7 @@ impl WorkspaceFilesystem {
                 }
             }
         };
+        let reproject = blob_edit.is_none().then(|| (inode, Arc::clone(&save)));
         let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
             Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path, record_baseline| {
                 writer
@@ -2242,6 +2257,7 @@ impl WorkspaceFilesystem {
         };
         Ok(PreparedEdit {
             initial_bytes,
+            reproject,
             commit,
         })
     }
@@ -2317,8 +2333,30 @@ impl WorkspaceFilesystem {
         // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
         // `edit PATH` owner-routed by another writer leaves the mounted baseline
         // unchanged, so the mount's next save is stale against that writer's row.
-        self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?
-            .commit(&candidate, draft, grouped_row)
+        let prepared = self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?;
+        let reproject = prepared.reproject.clone();
+        prepared.commit(&candidate, draft, grouped_row)?;
+        if let Some((inode, save)) = reproject {
+            self.adopt_accepted_document(inode, &save, &candidate);
+        }
+        Ok(())
+    }
+
+    /// Shows the row an owner-routed `edit --row` accepted: the document takes the accepted
+    /// bytes, and a Str over 64 KiB is re-projected to its `.txt` sibling (profiles/vfs-1.md:76-80).
+    fn adopt_accepted_document(&self, inode: u64, save: &Arc<RowSaveContext>, accepted: &[u8]) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(NodeKind::Document { bytes, .. }) =
+            state.nodes.get_mut(&inode).map(|node| &mut node.kind)
+        {
+            *bytes = accepted.to_vec();
+        }
+        if let Err(error) = state.project_accepted_document(inode, save) {
+            eprintln!("the accepted row document could not be re-projected: {error}");
+        }
     }
 }
 
@@ -6618,8 +6656,10 @@ impl FsBuilder {
         Ok(true)
     }
 
-    /// Re-projects a row's `data.orna` from the row the save has just accepted, so a Str
-    /// that crosses the 64 KiB bound shows its `.txt` reference (profiles/vfs-1.md:76-79).
+    /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
+    /// A Str over 64 KiB shows its `.txt` sibling beside `data.orna`; a Str at or under the
+    /// bound is inline again, so its stale `.txt` sibling leaves the directory. Open handles
+    /// keep the `.txt` generation they captured (`retire_node`).
     fn project_accepted_document(
         &mut self,
         document_inode: u64,
@@ -6640,26 +6680,106 @@ impl FsBuilder {
             .get(&document_inode)
             .map(|node| node.parent)
             .ok_or_else(|| "the accepted document disappeared".to_owned())?;
-        let files = self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
-        // Only a row that carries or carried a `.txt` sibling changes its document reference;
-        // other rows keep the document node the handles were opened against.
-        let large_now = files.iter().any(|(_, kind)| matches!(kind, NodeKind::Text { .. }));
-        let large_before = self
-            .nodes
-            .values()
-            .any(|node| node.parent == parent && matches!(node.kind, NodeKind::Text { .. }));
-        if !large_now && !large_before {
+        let files =
+            self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
+        let mut document = None;
+        let mut texts = Vec::new();
+        for (name, kind) in files {
+            if name == "data.orna" {
+                document = Some(kind);
+            } else if matches!(kind, NodeKind::Text { .. }) {
+                texts.push((name, kind));
+            }
+        }
+        // Only a row that carries or carried a `.txt` sibling changes its layout; other rows
+        // keep the document node the handles were opened against.
+        let current_texts: Vec<(OsString, u64)> = self
+            .directory(parent)
+            .ok_or_else(|| "the accepted row directory disappeared".to_owned())?
+            .entries
+            .iter()
+            .filter(|entry| self.is_text_node(entry.inode))
+            .map(|entry| (entry.name.clone(), entry.inode))
+            .collect();
+        if texts.is_empty() && current_texts.is_empty() {
             return Ok(());
         }
-        let document = files
-            .into_iter()
-            .find_map(|(name, kind)| (name == "data.orna").then_some(kind))
-            .ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
+        let document =
+            document.ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
+        // Refuse a name collision before any mutation, so a refused projection changes nothing.
+        for (name, _) in &texts {
+            let name = OsStr::new(name);
+            let collides = self
+                .directory(parent)
+                .and_then(|directory| directory.entry(name))
+                .is_some_and(|entry| !self.is_text_node(entry.inode));
+            if collides {
+                return Err(format!(
+                    "the projected text file {name:?} collides with a sibling"
+                ));
+            }
+        }
+        for (name, inode) in &current_texts {
+            let still_projected = texts
+                .iter()
+                .any(|(text, _)| OsStr::new(text) == name.as_os_str());
+            if still_projected {
+                continue;
+            }
+            if self
+                .directory_mut(parent)
+                .and_then(|directory| directory.remove_entry(name))
+                .is_none()
+            {
+                return Err("a stale text file had already left its directory".to_owned());
+            }
+            self.retire_node(*inode);
+        }
+        for (name, kind) in texts {
+            let already_listed = current_texts
+                .iter()
+                .any(|(child, _)| child.as_os_str() == OsStr::new(&name));
+            if already_listed {
+                self.replace_child(parent, OsStr::new(&name), kind)?;
+            } else {
+                self.add_file(parent, &name, kind)?;
+            }
+        }
         let node = self
             .nodes
             .get_mut(&document_inode)
             .ok_or_else(|| "the accepted document disappeared".to_owned())?;
         node.kind = document;
+        Ok(())
+    }
+
+    /// Whether `inode` is a projected `.txt` sibling of a large Str.
+    fn is_text_node(&self, inode: u64) -> bool {
+        matches!(
+            self.nodes.get(&inode).map(|node| &node.kind),
+            Some(NodeKind::Text { .. })
+        )
+    }
+
+    /// Swaps the child `name` of `parent` for a new node at the same readdir position, so
+    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles.
+    fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<(), String> {
+        let inode = self.next_inode;
+        self.next_inode = inode
+            .checked_add(1)
+            .ok_or_else(|| "mount tree has too many entries".to_owned())?;
+        let directory = self
+            .nodes
+            .get_mut(&parent)
+            .and_then(|node| node.kind.directory_mut())
+            .ok_or_else(|| "mount parent is not a directory".to_owned())?;
+        let index = *directory
+            .by_name
+            .get(name)
+            .ok_or_else(|| "the mount child to replace is missing".to_owned())?;
+        let superseded = std::mem::replace(&mut directory.entries[index].inode, inode);
+        self.nodes.insert(inode, FsNode { parent, kind });
+        self.retire_node(superseded);
         Ok(())
     }
 
@@ -7263,9 +7383,11 @@ fn selects_blob(value: &Raw) -> bool {
     matches!(selected_blob_payload(value), Raw::Tag(orna_value_v1::ROV3_BLOB_TAG, _))
 }
 
+/// Bytes above which a Str projects as a sibling file rather than staying inline (profiles/vfs-1.md:76).
+const LARGE_TEXT_BOUND_BYTES: usize = 64 * 1024;
+
 /// The text a stored Str holds when it exceeds 64 KiB and therefore projects as a sibling file.
 fn large_text_payload(value: &Raw) -> Option<&str> {
-    const LARGE_TEXT_BOUND_BYTES: usize = 64 * 1024;
     match selected_blob_payload(value) {
         Raw::Text(text) if text.len() > LARGE_TEXT_BOUND_BYTES => Some(text.as_str()),
         _ => None,
@@ -7583,10 +7705,24 @@ fn plain_string_literal(value: &Expr) -> Option<&str> {
     }
 }
 
+/// The body of any string literal, escapes included, as written in a row document.
+fn inline_string_literal(value: &Expr) -> Option<&str> {
+    match value {
+        Expr::Literal {
+            text,
+            kind: LiteralKind::String,
+            ..
+        } => text.strip_prefix('"')?.strip_suffix('"'),
+        _ => None,
+    }
+}
+
 /// Replaces each captured text Str descriptor in a candidate `data.orna` with the Str literal of
 /// its bytes (profiles/vfs-1.md, Large Str values). The descriptor must keep the field's own
 /// sibling path and `utf-8` encoding. The replacement, when named, supplies new content for that
 /// field; otherwise the captured bytes stand. An optional field may stay `null`.
+/// An inline string literal within the bound stands as the field's new value; that is how a
+/// shrink returns a Str to the row document.
 fn substitute_text_fields(
     source: &str,
     fields: &[BlobField],
@@ -7595,7 +7731,9 @@ fn substitute_text_fields(
     if let Some((name, _)) = replacement
         && !fields.iter().any(|field| field.name == name)
     {
-        return Err(format!("replacement names {name}, which is not a text field"));
+        return Err(format!(
+            "replacement names {name}, which is not a text field"
+        ));
     }
     if fields.is_empty() {
         return Ok(source.to_owned());
@@ -7613,8 +7751,27 @@ fn substitute_text_fields(
         let entry = entries
             .iter()
             .find(|entry| &entry.name == name)
-            .ok_or_else(|| format!("Str field {name} is missing; data.orna must keep its descriptor"))?;
-        if !field.required && matches!(entry.value, Expr::Literal { kind: LiteralKind::Null, .. }) {
+            .ok_or_else(|| {
+                format!("Str field {name} is missing; data.orna must keep its descriptor")
+            })?;
+        if !field.required
+            && matches!(
+                entry.value,
+                Expr::Literal {
+                    kind: LiteralKind::Null,
+                    ..
+                }
+            )
+        {
+            continue;
+        }
+        let replaced = replacement.is_some_and(|(replaced, _)| replaced == name);
+        if !replaced && let Some(body) = inline_string_literal(&entry.value) {
+            if body.len() > LARGE_TEXT_BOUND_BYTES {
+                return Err(format!(
+                    "Str field {name} is over 64 KiB and must keep its {{ text, encoding }} descriptor"
+                ));
+            }
             continue;
         }
         validate_text_descriptor(&entry.value, field)?;
@@ -7653,9 +7810,8 @@ fn validate_text_descriptor(value: &Expr, field: &BlobField) -> Result<(), Strin
     let mut text = None;
     let mut encoding = None;
     for part in descriptor {
-        let value = plain_string_literal(&part.value).ok_or_else(|| {
-            format!("Str field {name} descriptor entries must be plain strings")
-        })?;
+        let value = plain_string_literal(&part.value)
+            .ok_or_else(|| format!("Str field {name} descriptor entries must be plain strings"))?;
         match part.name.as_str() {
             "text" if text.is_none() => text = Some(value),
             "encoding" if encoding.is_none() => encoding = Some(value),
@@ -7682,8 +7838,8 @@ fn validate_text_descriptor(value: &Expr, field: &BlobField) -> Result<(), Strin
 /// The Orna string literal whose value is `bytes`, which must be UTF-8. `{` is escaped so the
 /// literal never opens an interpolation, and other control characters use `\u{..}`.
 fn orna_string_literal(bytes: &[u8]) -> Result<String, String> {
-    let text =
-        std::str::from_utf8(bytes).map_err(|_| "text field content is not valid UTF-8".to_owned())?;
+    let text = std::str::from_utf8(bytes)
+        .map_err(|_| "text field content is not valid UTF-8".to_owned())?;
     let mut literal = String::with_capacity(text.len() + 2);
     literal.push('"');
     for character in text.chars() {
@@ -7783,6 +7939,26 @@ fn key_directory(builder: &mut FsBuilder, parent: u64, key: &TypedKey) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn orna_string_literal_round_trips_through_the_evaluator() {
+        use orna_evaluator_v1::{Limits, evaluate_expression};
+        use orna_foundation_v1::CanonicalValue;
+        use orna_value_v1::Raw;
+        let value = "nul\0 quote\" back\\slash newline\n cr\r crlf\r\n tab\t brace{x} bell\u{7} astral\u{1F600}";
+        let literal = super::orna_string_literal(value.as_bytes()).expect("literal is UTF-8");
+        let evaluated = evaluate_expression(
+            &literal,
+            &std::collections::BTreeMap::new(),
+            Limits::default(),
+        )
+        .expect("the writer's literal evaluates");
+        assert_eq!(
+            evaluated,
+            CanonicalValue::new(Raw::Text(value.into())).expect("canonical text"),
+            "NUL, quotes, backslashes, newlines, CRLF, braces and astral scalars round-trip"
+        );
+    }
+
     #[test]
     fn candidate_read_is_chunked_and_stops_at_candidate_end() {
         use super::{CANDIDATE_CHUNK_BYTES, read_candidate_range};
