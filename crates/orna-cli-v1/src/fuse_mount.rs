@@ -2525,6 +2525,8 @@ struct WorkspaceFilesystem {
     state: Mutex<FsBuilder>,
     open_files: Mutex<HashMap<u64, OpenFile>>,
     draft_state: Mutex<DraftState>,
+    /// Serializes source-module group commits; held outside the draft lock.
+    source_gate: Mutex<()>,
     next_handle: AtomicU64,
 }
 
@@ -2867,6 +2869,7 @@ impl WorkspaceFilesystem {
                 retained_scratch,
                 ..DraftState::default()
             }),
+            source_gate: Mutex::new(()),
             next_handle: AtomicU64::new(1),
         })
     }
@@ -3137,13 +3140,9 @@ impl WorkspaceFilesystem {
                     )),
                 }
             }
-            Some(OpenFile::Source(_)) => {
-                if draft_state.source_drafts.values().any(|draft| draft.dirty) {
-                    self.source_commit(draft_state)
-                } else {
-                    Err(DocumentCommitError::NoCandidate)
-                }
-            }
+            Some(OpenFile::Source(_)) => Err(DocumentCommitError::Failed(
+                "source module commits go through source_sync".to_owned(),
+            )),
             None => Err(DocumentCommitError::Failed(
                 "file handle is not open".to_owned(),
             )),
@@ -5072,6 +5071,13 @@ impl Filesystem for WorkspaceFilesystem {
         _datasync: bool,
         reply: ReplyEmpty,
     ) {
+        if let Some(trigger) = self.source_handle_inode(handle.0) {
+            match self.source_sync(trigger) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
+            return;
+        }
         let mut draft_state = self
             .draft_state
             .lock()
@@ -5140,6 +5146,14 @@ impl Filesystem for WorkspaceFilesystem {
             .is_some_and(|writer| *writer != request.pid())
         {
             reply.ok();
+            return;
+        }
+        if let Some(trigger) = self.source_handle_inode(handle.0) {
+            drop(draft_state);
+            match self.source_sync(trigger) {
+                Ok(()) => reply.ok(),
+                Err(errno) => reply.error(errno),
+            }
             return;
         }
         match self.commit_open_handle(&mut draft_state, inode, handle.0) {
