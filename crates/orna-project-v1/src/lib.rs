@@ -16,6 +16,7 @@ use std::{
 use orna_repository_v1::{
     CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
     GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
+    TypedKey,
 };
 use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime_v1::{TableMutation, TableObjectId};
@@ -611,6 +612,11 @@ pub fn admit_format3_row(
 
 /// Admit a source row expression and accepted captured Blob bindings as one
 /// canonical mutation. This variant accepts no source-owner scalar fields.
+///
+/// The logical key path must use the VFS-1 projection (profiles/vfs-1.md:44-56).
+/// The legacy `key-path-v1` spelling (`~xx`, `~ff`) is refused with
+/// `InvalidSourceRow`: legacy loose rows are read only through their recorded
+/// import context (Orna-1.1.0.md, "File extension"), which this path does not admit.
 pub fn admit_source_row(
     project: &LoadedProject,
     logical_path: &str,
@@ -792,7 +798,8 @@ pub struct KeyComponentText {
 /// Decodes the VFS-1 projected key components of a logical source row path to
 /// canonical key text. Each component must re-project to exactly its spelling
 /// (profiles/vfs-1.md:44-50); a `~key-` alias resolves only through a supplied
-/// pair whose projection is that alias.
+/// pair whose projection is that alias and whose text is the canonical text of
+/// its encoding (profiles/vfs-1.md:52-56).
 fn decode_source_key_path(
     key_path: &[String],
     key_components: &[KeyComponentText],
@@ -807,10 +814,23 @@ fn decode_source_key_path(
             VfsComponent::Canonical(text) => Some(text),
             VfsComponent::LongAlias { .. } => key_components
                 .iter()
-                .find(|key| project_key_component(&key.text, &key.canonical_encoding) == component)
+                .find(|key| {
+                    project_key_component(&key.text, &key.canonical_encoding) == component
+                        && key_pair_round_trips(key)
+                })
                 .map(|key| key.text.clone()),
         })
         .collect()
+}
+
+/// A supplied pair names a key only when its encoding decodes to a typed key
+/// whose canonical component text is exactly the supplied text. Without this
+/// check a caller could pair a digest-matching encoding with any text.
+fn key_pair_round_trips(key: &KeyComponentText) -> bool {
+    TypedKey::decode_canonical(&key.canonical_encoding)
+        .ok()
+        .and_then(|typed| typed.component_text())
+        .is_some_and(|text| text == key.text)
 }
 
 /// The closed constant insert-time defaults of `table` in `module_name`, as
