@@ -64,11 +64,15 @@ impl MountedProcess {
         }
     }
 
-    /// Waits until `path` exists inside the mount, failing if the mount process
-    /// exits first.
+    /// Waits until `path` is visible inside the mount: the mount table lists the
+    /// mountpoint, the mounted root answers, and `path` exists. Fails if the mount
+    /// process exits first.
     pub fn await_path(&mut self, path: &Path) {
         let deadline = Instant::now() + Duration::from_secs(10);
-        while !path.exists() {
+        while !(mountinfo_contains(&self.mountpoint)
+            && root_answers_before(&self.mountpoint, deadline)
+            && path.exists())
+        {
             if let Some(status) = self.child.try_wait().unwrap() {
                 self.exited(status);
             }
@@ -428,10 +432,11 @@ pub async fn repository_with_music_rows_and_modules(
     (repository_directory, repository, relation_id)
 }
 
-/// The contents of every retained candidate record in the repository's VFS
-/// recovery storage. Records are the top-level regular files; the private
-/// `editor-drafts` subdirectory holds explicit edit drafts, not records.
-pub fn retained_drafts(repository: &Repository) -> Vec<String> {
+/// The retained candidate records in the repository's VFS recovery storage, as
+/// `(draft id, candidate bytes)`. Records are the top-level regular files; the id is
+/// the record's file stem (`<id>.draft`). The private `editor-drafts` subdirectory
+/// holds explicit edit drafts, not records.
+pub fn retained_draft_records(repository: &Repository) -> Vec<(String, String)> {
     let directory = repository
         .runtime_paths()
         .root()
@@ -441,13 +446,27 @@ pub fn retained_drafts(repository: &Repository) -> Vec<String> {
             .map(|entry| entry.expect("list retained drafts").path())
             .filter(|path| path.is_file())
             .map(|path| {
-                String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
-                    .into_owned()
+                let id = path
+                    .file_stem()
+                    .expect("a retained record has a file name")
+                    .to_string_lossy()
+                    .into_owned();
+                let bytes = String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
+                    .into_owned();
+                (id, bytes)
             })
             .collect(),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(error) => panic!("list retained drafts in {}: {error}", directory.display()),
     }
+}
+
+/// The contents of every retained candidate record (see `retained_draft_records`).
+pub fn retained_drafts(repository: &Repository) -> Vec<String> {
+    retained_draft_records(repository)
+        .into_iter()
+        .map(|(_, bytes)| bytes)
+        .collect()
 }
 
 /// Record limit of recovery storage (ORNA-VFS-009). Past this many `.draft`
