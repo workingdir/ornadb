@@ -172,6 +172,7 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
         fixture._repository_directory.path(),
         &mountpoint,
     ));
+    fixture._mounted.await_path(&fixture.data_path);
     assert_eq!(
         fresh_view(&fixture),
         original,
@@ -810,9 +811,22 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         !output.status.success(),
         "orna edit's strong read baseline refuses the save: {diagnostics}"
     );
+    // The owner refuses the explicit edit with ESTALE (fuse_mount.rs:2586-2590), and the CLI
+    // reports that reply as the stale detail with E2000 (cli_mount.rs:436-440). [INFERENCE] from
+    // reading fuse_mount.rs:3893: that refusal returns before the mount records a draft refusal,
+    // so the spec cause sys.vfs.stale_edit (fuse_mount.rs:1587, Orna-1.1.0.md:8674) is not in
+    // the mount's unresolved-draft fields. This test does not assert that absence.
     assert!(
         diagnostics.contains("E2000"),
-        "the refusal is the stale-edit cause E2000: {diagnostics}"
+        "the refusal carries the product code E2000: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("Edit is stale against the mounted baseline"),
+        "the refusal names the stale baseline: {diagnostics}"
+    );
+    assert!(
+        diagnostics.contains("reapply the retained draft"),
+        "the refusal points at the retained draft: {diagnostics}"
     );
     let view = fresh_view(&fixture);
     assert!(
