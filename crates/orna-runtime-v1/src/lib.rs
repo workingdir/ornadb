@@ -3259,9 +3259,9 @@ pub struct StreamValidatedTableDeliveryCommit<'a> {
     pub faults: &'a dyn FaultInjector,
 }
 
-/// The identity of the committed schema and source a table row is validated
-/// under: the table object, its descriptor, and the source modules it is
-/// declared in (ORNA-VFS-019). Computed by the caller at one committed head.
+/// The identity of the committed schema a table row is validated under: a
+/// digest of the table object and the descriptor its committed head resolves
+/// it to (ORNA-VFS-019). Computed by the caller at one committed head.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableSchemaIdentity([u8; 32]);
 
@@ -7115,18 +7115,20 @@ impl RuntimeState {
         self.require_owner(&transaction, writer)
             .await
             .map_err(TableActivationError::Runtime)?;
-        if validator.schema_identity() != expected_schema {
-            return Err(TableActivationError::Runtime(
-                RuntimeError::StaleTableSchema,
-            ));
-        }
         if table_mutations_already_durable_tx(&transaction, &encoded)
             .await
             .map_err(TableActivationError::Runtime)?
         {
             // An exact replay of a save the relation already holds publishes
-            // nothing new: no row effect, mutation record or checkpoint.
+            // nothing new: no row effect, mutation record or checkpoint. It is
+            // checked before the schema, so a schema change after admission
+            // does not turn an idempotent replay into a stale refusal.
             return Ok(current);
+        }
+        if validator.schema_identity() != expected_schema {
+            return Err(TableActivationError::Runtime(
+                RuntimeError::StaleTableSchema,
+            ));
         }
         if !transfers.is_empty() {
             let Some(expected_graph_repository_id) = self.graph_repository_id.as_ref() else {
@@ -22509,6 +22511,21 @@ mod tests {
         let repository = Repository::discover(temp.path()).unwrap();
         (temp, repository)
     }
+    fn activation_test_cwd_generation(runtime: u64) -> &'static CwdGeneration {
+        static GENERATION_ZERO: std::sync::OnceLock<CwdGeneration> = std::sync::OnceLock::new();
+        static GENERATION_ONE: std::sync::OnceLock<CwdGeneration> = std::sync::OnceLock::new();
+        let generation = match runtime {
+            0 => &GENERATION_ZERO,
+            1 => &GENERATION_ONE,
+            _ => panic!("test CWD generation is outside the fixture set"),
+        };
+        generation.get_or_init(|| {
+            let (_temp, repository) = repository();
+            repository
+                .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                .unwrap()
+        })
+    }
     fn activation_test_schema() -> TableSchemaIdentity {
         TableSchemaIdentity::new([7; 32])
     }
@@ -22859,6 +22876,100 @@ mod tests {
                 .expect("an accepted save publishes its checkpoint")
                 .generation,
             1
+        );
+    }
+
+    /// M4: a save the relation already holds is an exact replay. It publishes
+    /// nothing new, so a schema change after the save was admitted must not
+    /// turn the replay into a stale refusal; the already-durable check runs first.
+    #[tokio::test]
+    async fn replay_of_already_durable_mutations_survives_schema_change() {
+        /// A schema-scoped validator with no CWD generation whose live schema
+        /// identity the test controls.
+        struct LiveSchemaValidator {
+            tables: Vec<String>,
+            live: TableSchemaIdentity,
+        }
+
+        impl TableActivationCandidateValidator for LiveSchemaValidator {
+            fn tables(&self) -> &[String] {
+                &self.tables
+            }
+
+            fn cwd_generation(&self) -> Option<&CwdGeneration> {
+                None
+            }
+
+            fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+                Some(self.live.clone())
+            }
+
+            fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+                Ok(())
+            }
+        }
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let mutations = [table_mutation(5, 1, Some(9))];
+        let admitted = activation_test_schema();
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = LiveSchemaValidator {
+            tables: vec!["books".into()],
+            live: admitted.clone(),
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted.clone()),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await
+            .unwrap();
+        let generation = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .expect("the first commit publishes its checkpoint")
+            .generation;
+
+        // The replay is admitted under the schema the save was first committed
+        // under, but the live validator now reports a different schema; the
+        // relation already holds the mutation, so the replay still succeeds.
+        let context = state.begin_activation().await.unwrap();
+        let mut replay_validator = LiveSchemaValidator {
+            tables: vec!["books".into()],
+            live: TableSchemaIdentity::new([8; 32]),
+        };
+        state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut replay_validator,
+                faults: &NoFault,
+            })
+            .await
+            .expect("an exact replay of a durable save is not a stale schema");
+        assert_eq!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .expect("the first commit publishes its checkpoint")
+                .generation,
+            generation
         );
     }
 
