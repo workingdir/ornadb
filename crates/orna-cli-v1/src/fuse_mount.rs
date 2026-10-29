@@ -1640,11 +1640,15 @@ impl RowSaveContext {
             .clone()
     }
 
-    /// The CAS baseline an explicit `orna edit` saves against (41-vfs.md:75-77): the row's
-    /// durable image read when the save commits. The recorded baseline is not used: a plain
-    /// owner-routed edit leaves it at the row before that edit, so a later explicit edit would
-    /// be refused against its own predecessor.
-    fn explicit_edit_baseline(&self) -> Result<Option<Vec<u8>>, String> {
+    /// The CAS baseline an explicit `orna edit` saves against (41-vfs.md:75-77). A grouped
+    /// `edit --row` is this mount's own row save and compares against the row the mount recorded
+    /// (stale when another writer advanced it). A plain `edit PATH` reads the durable row at commit:
+    /// a plain owner-routed edit leaves the recorded baseline at the row before it, so a later
+    /// plain edit would be refused against its own predecessor.
+    fn explicit_edit_baseline(&self, grouped_row: bool) -> Result<Option<Vec<u8>>, String> {
+        if grouped_row {
+            return Ok(self.recorded_baseline());
+        }
         let key = runtime_table_key_bytes(&self.key)?;
         self.temporary_baseline(&key)
     }
@@ -2276,7 +2280,7 @@ impl WorkspaceFilesystem {
                     })
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 let expected = save
-                    .explicit_edit_baseline()
+                    .explicit_edit_baseline(grouped_row)
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
                     save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline)
@@ -2303,7 +2307,7 @@ impl WorkspaceFilesystem {
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
                     let expected = save
-                        .explicit_edit_baseline()
+                        .explicit_edit_baseline(grouped_row)
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
                     admit_edit_result(
                         save.commit_document_against(&draft, record_baseline, expected),
