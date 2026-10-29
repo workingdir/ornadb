@@ -75,9 +75,11 @@ async fn sixty_four_mib_candidate_stays_bounded_in_memory() {
     ));
     let draft = EditDraft::open(baseline, CANDIDATE_BYTES, storage);
 
-    // Measure only the candidate work, not the test harness setup above.
-    LIVE_BYTES.store(0, Ordering::Relaxed);
-    PEAK_BYTES.store(0, Ordering::Relaxed);
+    // Measure only the candidate work: capture the live heap as it stands after
+    // setup and track the peak relative to it, so setup blocks freed inside the
+    // window cannot drive the count negative or hide growth.
+    let baseline_live = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(baseline_live, Ordering::Relaxed);
 
     for chunk in 0..CHUNKS {
         let bytes = pattern(chunk);
@@ -96,7 +98,7 @@ async fn sixty_four_mib_candidate_stays_bounded_in_memory() {
         assert_eq!(read, pattern(chunk), "chunk {chunk} round-trips through the spool");
     }
 
-    let peak = PEAK_BYTES.load(Ordering::Relaxed);
+    let peak = PEAK_BYTES.load(Ordering::Relaxed) - baseline_live;
     assert!(
         peak < PEAK_LIMIT_BYTES,
         "peak live heap {peak} bytes reached the {PEAK_LIMIT_BYTES}-byte limit; \
