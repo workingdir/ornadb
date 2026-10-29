@@ -2219,6 +2219,24 @@ pub fn project_content_name(
     Ok(name)
 }
 
+/// The projected sibling name of a stored Str projected as text: the escaped
+/// field name plus `.txt`. A field whose name cannot fit the component bound
+/// takes the same digest alias a Blob takes.
+pub fn project_text_name(field: &str) -> Result<String, VfsPathError> {
+    const TEXT_SUFFIX: &str = "txt";
+    if project_field_name(field).len() + 1 + TEXT_SUFFIX.len() > VFS_MAX_COMPONENT_BYTES {
+        return Ok(format!(
+            "{}.{}",
+            long_alias(VfsNameNamespace::Field, &field_name_digest(field)),
+            TEXT_SUFFIX
+        ));
+    }
+    let mut name = project_field_name(field);
+    name.push('.');
+    name.push_str(TEXT_SUFFIX);
+    Ok(name)
+}
+
 /// Whether `suffix` is a hint MIME-1 admits for this media type: a compatible
 /// suffix of a registered type, or any safe suffix for octet-stream and
 /// unregistered types (MIME-1, VFS-012).
@@ -2363,6 +2381,14 @@ pub enum VfsStoredFieldKind {
         required: bool,
         captured: Option<CapturedContentDescriptor>,
     },
+    /// A stored Str longer than 64 KiB projected as a sibling `<field>.txt`
+    /// file. `data.orna` names the file with `{ text: "./<file>", encoding:
+    /// "utf-8" }`; the file's bytes are the stored string. `required` mirrors
+    /// the schema's declaration, as for a Blob (VFS-013).
+    Text {
+        length: u64,
+        required: bool,
+    },
 }
 
 /// The captured Blob descriptor of one stored content field, as the shared
@@ -2478,6 +2504,15 @@ impl VfsStoredField {
         }
     }
 
+    /// A stored Str longer than 64 KiB, projected as a sibling text file. A
+    /// required Str can never be unlinked; an optional one may be set `null`.
+    pub fn text(name: impl Into<String>, length: u64, required: bool) -> Self {
+        Self {
+            name: name.into(),
+            kind: VfsStoredFieldKind::Text { length, required },
+        }
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -2496,6 +2531,7 @@ pub struct VfsProjectedFile {
     descriptor_size: u64,
     required: bool,
     captured: Option<CapturedContentDescriptor>,
+    text: bool,
 }
 
 impl VfsProjectedFile {
@@ -2540,6 +2576,12 @@ impl VfsProjectedFile {
     /// sibling file can never be unlinked (VFS-013).
     pub const fn is_required(&self) -> bool {
         self.required
+    }
+
+    /// True when this sibling is a stored Str projected as UTF-8 text
+    /// (Str>64KiB) rather than a Blob.
+    pub const fn is_text(&self) -> bool {
+        self.text
     }
 }
 
@@ -2605,6 +2647,27 @@ impl<S> VfsRowProjection<S> {
                         descriptor_size: *descriptor_size,
                         required: *required,
                         captured: captured.clone(),
+                        text: false,
+                    });
+                }
+                VfsStoredFieldKind::Text { length, required } => {
+                    let name = project_text_name(&field.name)?;
+                    if names.contains(&name) {
+                        return Err(VfsPathError::NameCollision);
+                    }
+                    document.push_str("    ");
+                    document.push_str(&render_field_name(&field.name)?);
+                    document.push_str(": { text: \"./");
+                    document.push_str(&name);
+                    document.push_str("\", encoding: \"utf-8\" },\n");
+                    names.push(name.clone());
+                    files.push(VfsProjectedFile {
+                        name,
+                        media_type: "text/plain".to_owned(),
+                        descriptor_size: *length,
+                        required: *required,
+                        captured: None,
+                        text: true,
                     });
                 }
             }

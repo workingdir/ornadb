@@ -5844,7 +5844,10 @@ impl Context<'_, '_> {
         let mut output = String::new();
         for segment in segments {
             match segment {
-                StringSegment::Text { text, .. } => output.push_str(&unescape_string_body(text)?),
+                StringSegment::Text { text, .. } => output.push_str(
+                    &orna_syntax_v1::unescape_string_body(text)
+                        .map_err(|_| error("ORNA-EVAL-VALUE"))?,
+                ),
                 StringSegment::Expression { value, .. } => {
                     let Value::String(value) = self.evaluate(value, scope, depth + 1)? else {
                         return Err(error("ORNA-EVAL-TYPE"));
@@ -16561,51 +16564,7 @@ fn parse_decimal(text: &str) -> Result<(BigInt, BigInt), EvaluationError> {
     Ok((coefficient, BigInt::from(exponent)))
 }
 fn unescape_string(text: &str) -> Result<String, EvaluationError> {
-    if text.len() < 2 {
-        return Err(error("ORNA-EVAL-VALUE"));
-    }
-    unescape_string_body(&text[1..text.len() - 1])
-}
-fn unescape_string_body(body: &str) -> Result<String, EvaluationError> {
-    let mut output = String::new();
-    let mut characters = body.chars();
-    while let Some(character) = characters.next() {
-        if character != '\\' {
-            output.push(character);
-            continue;
-        }
-        match characters.next().ok_or_else(|| error("ORNA-EVAL-VALUE"))? {
-            'n' => output.push('\n'),
-            'r' => output.push('\r'),
-            't' => output.push('\t'),
-            '\\' => output.push('\\'),
-            '"' => output.push('"'),
-            'u' => {
-                if characters.next() != Some('{') {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let mut digits = String::new();
-                loop {
-                    let character = characters.next().ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
-                    if character == '}' {
-                        break;
-                    }
-                    if !character.is_ascii_hexdigit() || digits.len() == 6 {
-                        return Err(error("ORNA-EVAL-VALUE"));
-                    }
-                    digits.push(character);
-                }
-                if digits.is_empty() {
-                    return Err(error("ORNA-EVAL-VALUE"));
-                }
-                let scalar =
-                    u32::from_str_radix(&digits, 16).map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                output.push(char::from_u32(scalar).ok_or_else(|| error("ORNA-EVAL-VALUE"))?);
-            }
-            _ => return Err(error("ORNA-EVAL-VALUE")),
-        }
-    }
-    Ok(output)
+    orna_syntax_v1::unescape_string_literal(text).map_err(|_| error("ORNA-EVAL-VALUE"))
 }
 
 #[cfg(test)]
