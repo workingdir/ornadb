@@ -2409,7 +2409,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation.clone(),
+            Some(cwd_generation.clone()),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2423,7 +2423,8 @@ impl DurableTransactionalEvaluator {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(&cwd_generation),
+                expected_schema: None,
                 mutations: &mutations,
                 content_pins: &mut [],
                 next_digest,
@@ -2612,7 +2613,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation.clone(),
+            Some(cwd_generation.clone()),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -2786,7 +2787,7 @@ impl DurableTransactionalEvaluator {
                 Err(error) => return RunningTableRequestDisposition::Fenced(error),
             };
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation.clone(),
+            Some(cwd_generation.clone()),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -3809,7 +3810,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation.clone(),
+            Some(cwd_generation.clone()),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -3823,7 +3824,8 @@ impl DurableTransactionalEvaluator {
             .commit_validated_table_activation(ValidatedTableActivationCommit {
                 writer: lease,
                 context,
-                cwd_generation: &cwd_generation,
+                cwd_generation: Some(&cwd_generation),
+                expected_schema: None,
                 mutations: &mutations,
                 content_pins: &mut [],
                 next_digest,
@@ -3949,7 +3951,7 @@ impl DurableTransactionalEvaluator {
             durable_activation_digest(context.capture().generation_digest(), &mutations);
         let cwd_generation = activation_cwd_generation(repository, context)?;
         let mut validator = TransactionalTableCandidateValidator::new(
-            cwd_generation.clone(),
+            Some(cwd_generation.clone()),
             &admitted.functions,
             &admitted.key_fields,
             &admitted.float_fields,
@@ -4545,7 +4547,7 @@ fn activation_cwd_generation(
 }
 
 struct TransactionalTableCandidateValidator {
-    cwd_generation: orna_repository_v1::CwdGeneration,
+    cwd_generation: Option<orna_repository_v1::CwdGeneration>,
     table_assertions: TableAssertions,
     module_assertions: ModuleAssertions,
     candidate_table_fields: TableFields,
@@ -4559,7 +4561,7 @@ struct TransactionalTableCandidateValidator {
 pub fn transactional_table_candidate_validator(
     unit: &SourceUnit,
     entry: &str,
-    cwd_generation: orna_repository_v1::CwdGeneration,
+    cwd_generation: Option<orna_repository_v1::CwdGeneration>,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     let admitted = admit_transaction_source_inner(unit, limits, entry, false, AdmissionCatalogue::Production)
@@ -4602,7 +4604,7 @@ pub fn project_declares_assertions(loaded: &orna_project_v1::LoadedProject) -> b
 pub fn transactional_loaded_project_candidate_validator(
     loaded: &orna_project_v1::LoadedProject,
     identities: &orna_project_v1::ObjectIdentityManifest,
-    cwd_generation: orna_repository_v1::CwdGeneration,
+    cwd_generation: Option<orna_repository_v1::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
     limits: EvaluatorLimits,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
@@ -4716,7 +4718,7 @@ fn candidate_table_fields_in_stable_id_order(
 
 impl TransactionalTableCandidateValidator {
     fn new(
-        cwd_generation: orna_repository_v1::CwdGeneration,
+        cwd_generation: Option<orna_repository_v1::CwdGeneration>,
         functions: &Functions,
         key_fields: &TableKeys,
         float_fields: &TableFloatFields,
@@ -4760,8 +4762,8 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
         self.table_object_ids.as_ref().clone()
     }
 
-    fn cwd_generation(&self) -> &orna_repository_v1::CwdGeneration {
-        &self.cwd_generation
+    fn cwd_generation(&self) -> Option<&orna_repository_v1::CwdGeneration> {
+        self.cwd_generation.as_ref()
     }
 
     fn validate(&mut self, rows: &orna_runtime_v1::RuntimeTableRows) -> Result<(), SafeDiagnostic> {

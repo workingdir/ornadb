@@ -639,15 +639,84 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 #[tokio::test]
 /// ORNA-VFS-005: workspace editing stays attached to the selected worktree snapshot after HEAD advances.
 async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
-    if !fuse_test_available() {
+    // A comment-only head advance leaves the Music declaration, and so its committed schema identity, unchanged.
+    let advanced = format!("{MUSIC_SOURCE}// head advances without changing the Music declaration\n");
+    let Some(run) = edit_row_after_head_advances(&advanced).await else {
         return;
+    };
+    assert!(
+        run.output.status.success(),
+        "edit --row failed; stdout={}; stderr={}",
+        String::from_utf8_lossy(&run.output.stdout),
+        String::from_utf8_lossy(&run.output.stderr),
+    );
+    assert_eq!(
+        orna_value_v1::Value::decode(&run.before)
+            .expect("decode the original admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("before".to_owned())]),
+    );
+    assert_eq!(
+        orna_value_v1::Value::decode(&run.after)
+            .expect("decode the edited admitted row")
+            .raw(),
+        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
+    );
+    assert!(run.head_unchanged_by_edit, "edit --row leaves the advanced HEAD in place");
+}
+
+#[tokio::test]
+/// ORNA-VFS-019: a head advance that changes the Music declaration is a schema change. The pinned
+/// mount can no longer serve the row under the changed declaration, so `edit --row` is refused before
+/// any write: the refusal is definite, not "outcome is unknown", and the admitted row is unchanged.
+/// The refusal is EIO (profiles/vfs-1.md:134 and :140, backing unavailability), not EAGAIN: the
+/// edit cannot read the row, so no expected version or draft exists to be stale.
+async fn cwd_mount_edit_row_refused_after_head_changes_music_schema() {
+    let advanced = "pub table Music(id: Str) { title: Str, subtitle: Str, }\n";
+    let Some(run) = edit_row_after_head_advances(advanced).await else {
+        return;
+    };
+    let stderr = String::from_utf8_lossy(&run.output.stderr).into_owned();
+    assert!(
+        !run.output.status.success(),
+        "a changed Music schema refuses the pinned edit; stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("outcome is unknown"),
+        "a definite refusal is not reported as unknown; stderr={stderr}"
+    );
+    assert!(
+        stderr.contains("mounted entry could not be read")
+            && stderr.contains("Input/output error"),
+        "the mount refuses to serve the row under the changed schema with EIO; stderr={stderr}"
+    );
+    assert_eq!(
+        run.after, run.before,
+        "the refused edit leaves the admitted row unchanged"
+    );
+    assert!(run.head_unchanged_by_edit, "the refused edit leaves the advanced HEAD in place");
+}
+
+const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+
+/// What one pinned `edit --row` run after a HEAD advance produced.
+struct PinnedRowEdit {
+    output: std::process::Output,
+    before: Vec<u8>,
+    after: Vec<u8>,
+    head_unchanged_by_edit: bool,
+}
+
+/// Attaches `mount --cwd` to the committed `Music/london` row, advances HEAD by committing
+/// `advanced_main` as `main.orna`, then runs `orna edit --row` on the mounted row. Returns
+/// `None` when FUSE is unavailable or the mount does not come up.
+async fn edit_row_after_head_advances(advanced_main: &str) -> Option<PinnedRowEdit> {
+    if !fuse_test_available() {
+        return None;
     }
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_with_context(
-            "pub table Music(id: Str) { title: Str, }\n",
-            "Music",
-        );
+        format3::format3_repository_with_context(MUSIC_SOURCE, "Music");
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
     let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
@@ -708,13 +777,9 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     let row_path = mountpoint.join("Music/london");
     let document_path = row_path.join("data.orna");
     if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
-        return;
+        return None;
     }
-    std::fs::write(
-        repository_directory.path().join("main.orna"),
-        "invalid @@@ source\n",
-    )
-    .unwrap();
+    std::fs::write(repository_directory.path().join("main.orna"), advanced_main).unwrap();
     format3::git(repository_directory.path(), &["add", "main.orna"]);
     format3::git(
         repository_directory.path(),
@@ -733,6 +798,7 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
+            "--debug",
             "--db",
             repository_directory.path().to_str().unwrap(),
             "edit",
@@ -742,12 +808,6 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         .env("EDITOR", &editor)
         .output()
         .expect("run edit --row against mounted absolute row directory");
-    assert!(
-        output.status.success(),
-        "edit --row failed; stdout={}; stderr={}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-    );
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
     assert!(status.success(), "mount exits cleanly after edit and unmount");
@@ -760,19 +820,12 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
         .unwrap()
         .unwrap()
         .to_vec();
-    assert_eq!(
-        orna_value_v1::Value::decode(&before)
-            .expect("decode the original admitted row")
-            .raw(),
-        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("before".to_owned())]),
-    );
-    assert_eq!(
-        orna_value_v1::Value::decode(&after)
-            .expect("decode the edited admitted row")
-            .raw(),
-        &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
-    );
-    assert_eq!(repository.head().unwrap().unwrap(), head_after_move);
+    Some(PinnedRowEdit {
+        output,
+        before,
+        after,
+        head_unchanged_by_edit: repository.head().unwrap().unwrap() == head_after_move,
+    })
 }
 
 /// A live `mount --cwd` over the committed `Music/london` row. The handles it
@@ -797,6 +850,12 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
 
 /// [`mount_music_row`] over the table `source` declares, seeded with `initial`.
 async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<MountedMusicRow> {
+    mount_music_rows_with_source(source, &[("london", initial)]).await
+}
+
+/// [`mount_music_row_with_source`] seeding every `(key, source row)` in `rows` under `Music`. The
+/// returned handle's `row_path` is the first row; the other rows sit beside it.
+async fn mount_music_rows_with_source(source: &str, rows: &[(&str, &str)]) -> Option<MountedMusicRow> {
     if !fuse_test_available() {
         return None;
     }
@@ -811,6 +870,17 @@ async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<Moun
         .await
         .unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    let captures = rows
+        .iter()
+        .enumerate()
+        .map(|(index, &(key, source_row))| media_commit::SourceCaptureRow {
+            key,
+            blob_fields: &[],
+            source_row,
+            ordinal: 0x92 + index as u16,
+            insert_only: true,
+        })
+        .collect::<Vec<_>>();
     media_commit::commit_source_captures_for_table(
         &repository,
         &state,
@@ -819,13 +889,7 @@ async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<Moun
         relation_id,
         &format_context,
         "Music",
-        &[media_commit::SourceCaptureRow {
-            key: "london",
-            blob_fields: &[],
-            source_row: initial,
-            ordinal: 0x92,
-            insert_only: true,
-        }],
+        &captures,
     )
     .await;
     drop(state);
@@ -850,8 +914,12 @@ async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<Moun
         mountpoint: mountpoint.clone(),
     };
     let row_path = mountpoint.join("Music/london");
-    let document_path = row_path.join("data.orna");
-    if !wait_for_mount_paths(&mut mounted, &[document_path.as_path()]) {
+    let document_paths = rows
+        .iter()
+        .map(|(key, _)| mountpoint.join("Music").join(key).join("data.orna"))
+        .collect::<Vec<_>>();
+    let document_path_refs = document_paths.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>();
+    if !wait_for_mount_paths(&mut mounted, &document_path_refs) {
         return None;
     }
     Some(MountedMusicRow {
@@ -3417,6 +3485,62 @@ async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-019 and profiles/vfs-1.md:91-92 and :138: a Blob write handle opened under the v1 schema captured that generation. After the owner commits a schema change, its fsync is refused with EAGAIN, and the accepted Blob keeps its bytes.
+async fn cwd_mount_blob_write_open_before_schema_change_is_stale_eagain() {
+    let original = lcg_bytes(0x8181_0000_0000_0001, 32 * 1024);
+    let replacement = lcg_bytes(0x8181_0000_0000_0002, 16 * 1024);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
+
+    let mut handle = OpenOptions::new()
+        .write(true)
+        .open(&blob_path)
+        .expect("a write-mode open captures the v1 schema generation");
+
+    std::fs::write(
+        repository.join("main.orna"),
+        "pub table Music(id: Str) { content: Blob, note: Str?, }\n",
+    )
+    .unwrap();
+    format3::git(&repository, &["add", "main.orna"]);
+    format3::git(
+        &repository,
+        &["commit", "--quiet", "-m", "add optional note to Music"],
+    );
+
+    handle.set_len(0).unwrap();
+    handle.write_all(&replacement).unwrap();
+    let refused = handle
+        .sync_all()
+        .expect_err("a Blob write captured under the v1 schema is stale after the schema change");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN));
+    drop(handle);
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        original,
+        "a stale-generation Blob write keeps the accepted bytes"
+    );
+    // The refused candidate stays a retained draft, so unmount names it and is refused.
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(&repository)
+        .arg("unmount")
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run orna unmount");
+    assert!(!refused.status.success(), "a retained stale blob draft must refuse unmount");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("sys.vfs.stale_edit"),
+        "unmount must name the retained stale candidate: {}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    drop(row);
+}
+
+#[tokio::test]
 /// ORNA-VFS-011 / EDIT-1 (ornadb-5il1.366.1 M1): sibling handles opened before any accept race to sync
 /// distinct candidates for one Blob. Each accepted sync commits one whole candidate, so the final bytes
 /// must equal an accepted candidate or the untouched original, never a mix of two candidates.
@@ -4331,6 +4455,175 @@ async fn cwd_mount_text_write_after_owner_advances_row_is_stale_then_retries() {
         "the retry keeps the other writer's artist: {document}"
     );
     row.unmount();
+}
+
+const TWO_FIELD_MUSIC: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+const TWO_FIELD_MUSIC_WITH_NOTE: &str =
+    "pub table Music(id: Str) { title: Str, artist: Str, note: Str?, }\n";
+
+/// Commits `source` as the repository's `main.orna` through git, as a declaration change by the owner does. A git commit takes no orna writer lease.
+fn commit_source_change(repository: &Path, source: &str, message: &str) {
+    std::fs::write(repository.join("main.orna"), source).unwrap();
+    format3::git(repository, &["add", "main.orna"]);
+    format3::git(repository, &["commit", "--quiet", "-m", message]);
+}
+
+#[tokio::test]
+/// ORNA-VFS-019: a commit that leaves the Music declaration unchanged (here an unrelated Notes table) is not a schema change for Music, so it does not refuse an open document handle's save.
+async fn cwd_mount_unrelated_commit_does_not_refuse_held_document_handle() {
+    let Some(mut row) = mount_music_row_with_source(
+        TWO_FIELD_MUSIC,
+        "{ title: \"before\", artist: \"Kieran\", }\n",
+    )
+    .await
+    else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let document = row.row_path.join("data.orna");
+    let mut held = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&document)
+        .expect("a write-intent open captures the baseline");
+    commit_source_change(
+        &repository,
+        &format!("{TWO_FIELD_MUSIC}pub table Notes(id: Str) {{ body: Str, }}\n"),
+        "Add unrelated Notes table",
+    );
+    held.write_all(b"{ title: \"Unrelated\", artist: \"Kieran\", }\n")
+        .expect("the bytes are accepted into the handle");
+    held.sync_all()
+        .expect("a commit that leaves Music unchanged does not refuse the held handle");
+    drop(held);
+    let stored = std::fs::read_to_string(&document).unwrap();
+    assert!(stored.contains("Unrelated"), "the held save is accepted: {stored}");
+    row.unmount();
+}
+
+#[tokio::test]
+/// ORNA-VFS-019: one schema change refuses every open document handle on the changed table, each for its own row. Two handles on two rows are both refused with EAGAIN.
+async fn cwd_mount_two_handles_on_two_rows_are_both_refused_after_schema_change() {
+    let Some(mut row) = mount_music_rows_with_source(
+        TWO_FIELD_MUSIC,
+        &[
+            ("london", "{ title: \"before\", artist: \"Kieran\", }\n"),
+            ("paris", "{ title: \"before\", artist: \"Other\", }\n"),
+        ],
+    )
+    .await
+    else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let london = row.row_path.join("data.orna");
+    let paris = row.row_path.parent().unwrap().join("paris/data.orna");
+    let mut london_handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&london)
+        .expect("a write-intent open on london captures its baseline");
+    let mut paris_handle = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&paris)
+        .expect("a write-intent open on paris captures its baseline");
+    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    for (name, handle) in [("london", &mut london_handle), ("paris", &mut paris_handle)] {
+        handle
+            .write_all(b"{ title: \"Stale\", artist: \"Kieran\", }\n")
+            .expect("the bytes are accepted into the handle");
+        let refused = handle
+            .sync_all()
+            .expect_err("a write against the changed schema is stale");
+        assert_eq!(refused.raw_os_error(), Some(EAGAIN), "the {name} handle is refused EAGAIN: {refused}");
+    }
+    drop(london_handle);
+    drop(paris_handle);
+    stop_mount_retaining_drafts(&mut row.mounted);
+    drop(row);
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:91-92 and ORNA-VFS-019: a `.txt` handle opened before a schema change is refused with EAGAIN, and the accepted Str is kept.
+async fn cwd_mount_text_handle_opened_before_schema_change_is_eagain() {
+    let Some(mut row) = mount_music_row_with_source(
+        TWO_FIELD_MUSIC,
+        "{ title: \"before\", artist: \"Kieran\", }\n",
+    )
+    .await
+    else {
+        return;
+    };
+    let big = ascii_text(70 * 1024);
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{big}\", artist: \"Kieran\", }}")),
+        "large Str save",
+    );
+    let repository = row.repository_directory.path().to_path_buf();
+    let title = row.row_path.join("title.txt");
+    let mut held = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&title)
+        .expect("a write-intent open captures the .txt baseline");
+    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    held.write_all(b"schema replacement")
+        .expect("the bytes are accepted into the handle");
+    let refused = held
+        .sync_all()
+        .expect_err("a .txt write against the changed schema is stale");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN), "stale .txt is EAGAIN: {refused}");
+    drop(held);
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        big.as_bytes(),
+        "a refused .txt write keeps the accepted Str"
+    );
+    stop_mount_retaining_drafts(&mut row.mounted);
+    drop(row);
+}
+
+#[tokio::test]
+/// ORNA-VFS-019: a schema change between an accepted save and the next save on the same handle refuses that next save with EAGAIN. The accepted save stays.
+async fn cwd_mount_schema_change_between_saves_refuses_the_next_save_on_same_handle() {
+    let Some(mut row) = mount_music_row_with_source(
+        TWO_FIELD_MUSIC,
+        "{ title: \"before\", artist: \"Kieran\", }\n",
+    )
+    .await
+    else {
+        return;
+    };
+    let repository = row.repository_directory.path().to_path_buf();
+    let document = row.row_path.join("data.orna");
+    let mut held = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&document)
+        .expect("a write-intent open captures the baseline");
+    held.write_all(b"{ title: \"First\", artist: \"Kieran\", }\n")
+        .expect("the first bytes are accepted into the handle");
+    held.sync_all()
+        .expect("the save before the schema change is accepted");
+    assert!(
+        std::fs::read_to_string(&document).unwrap().contains("First"),
+        "the accepted save is stored before the schema change"
+    );
+    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    held.set_len(0).expect("truncate the private candidate");
+    held.seek(SeekFrom::Start(0)).expect("rewind the handle to the start");
+    held.write_all(b"{ title: \"Second\", artist: \"Kieran\", }\n")
+        .expect("the next bytes are accepted into the handle");
+    let refused = held
+        .sync_all()
+        .expect_err("the next save on the handle is stale after the schema change");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN), "next save is EAGAIN: {refused}");
+    drop(held);
+    // Reads through the mount fail with EIO once the schema has changed (see the edit --row test), so the
+    // refusal is checked by EAGAIN above. The accepted save was checked before the change.
+    stop_mount_retaining_drafts(&mut row.mounted);
+    drop(row);
 }
 
 #[tokio::test]

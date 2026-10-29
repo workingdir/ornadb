@@ -23,12 +23,13 @@ use orna_project_v1::{
 use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
     GraphError, HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding,
-    Repository, RepositoryReadScope, RowMapSnapshot, RuntimeGeneration, TypedKey,
+    Repository, RepositoryReadScope, RowMapSnapshot, TypedKey,
     MountRowBaselines,
 };
 use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
+    TableSchemaIdentity,
     vfs::{
         CANDIDATE_CHUNK_BYTES, CandidateSnapshot, EditDraft, EditDraftError, ManagedFile,
         SnapshotPin, TemporaryRenameOutcome, TemporarySave,
@@ -1063,20 +1064,6 @@ impl MountWriter {
             .map_err(|_| "mounted editor runtime snapshot was already captured".to_owned())
     }
 
-    fn cwd_generation(&self) -> Result<orna_repository_v1::CwdGeneration, String> {
-        let capture = self
-            .runtime
-            .block_on(self.state.capture())
-            .map_err(|error| format!("mounted editor CWD could not be captured: {error:?}"))?;
-        let generation = u64::try_from(capture.generation())
-            .map_err(|_| "mounted editor runtime generation is invalid".to_owned())?;
-        self.repository
-            .cwd_generation(RuntimeGeneration::new(generation))
-            .map_err(|error| {
-                format!("mounted editor repository generation is unavailable: {error:?}")
-            })
-    }
-
     fn row_baseline<'a>(
         &'a self,
         table: &RuntimeTableIdentity,
@@ -1303,7 +1290,7 @@ impl MountWriter {
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
             &self.identities,
-            coordinates.cwd_generation().clone(),
+            None,
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
         )
@@ -1312,8 +1299,14 @@ impl MountWriter {
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             )
         })?;
+        let live_repository = self.repository.clone();
+        let live_table = row.table.object_id();
         let candidate = VfsSaveCandidate::new(replacement, validator)
-            .with_protected_content_transfers(replacement_bytes.clone(), content_transfers);
+            .with_protected_content_transfers(replacement_bytes.clone(), content_transfers)
+            .with_live_schema_identity(move || {
+                crate::table_schema::committed_table_schema_identity(&live_repository, live_table)
+                    .ok()
+            });
         Ok((candidate, replacement_bytes))
     }
 }
@@ -1648,15 +1641,24 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
+    /// The committed schema identity of the row's table right now. Operations capture it when
+    /// they open their handle or scratch and pass that captured value to the commit (ORNA-VFS-019).
+    fn live_schema_identity(&self) -> Result<TableSchemaIdentity, String> {
+        crate::table_schema::committed_table_schema_identity(
+            &self.writer.repository,
+            self.table.object_id(),
+        )
+    }
+
     fn durable_save_with_baseline(
         &self,
         expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
     ) -> Result<VfsDurableSave, String> {
-        let cwd_generation = self.writer.cwd_generation()?;
         let key = runtime_table_key_bytes(&self.key)?;
         Ok(VfsDurableSave::new(
             self.writer.owner_id,
-            cwd_generation,
+            schema_identity,
             self.table.clone(),
             key,
         )
@@ -1799,8 +1801,9 @@ impl RowSaveContext {
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
+        opened: &TableSchemaIdentity,
     ) -> Result<(), DocumentCommitError> {
-        self.commit_document_against(draft, record_baseline, self.recorded_baseline())
+        self.commit_document_against(draft, record_baseline, self.recorded_baseline(), opened)
     }
 
     /// Commits `draft` against `expected_baseline_row`, the durable row the save compares (CAS).
@@ -1809,9 +1812,10 @@ impl RowSaveContext {
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
         expected_baseline_row: Option<Vec<u8>>,
+        opened: &TableSchemaIdentity,
     ) -> Result<(), DocumentCommitError> {
         let save = self
-            .durable_save_with_baseline(expected_baseline_row)
+            .durable_save_with_baseline(expected_baseline_row, opened.clone())
             .map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
@@ -1864,6 +1868,7 @@ impl RowSaveContext {
         field: &BlobField,
         replacement_bytes: Arc<[u8]>,
         expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         if std::str::from_utf8(&replacement_bytes).is_err() {
@@ -1875,7 +1880,7 @@ impl RowSaveContext {
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
         let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
-        let save = self.durable_save_with_baseline(expected_baseline_row)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
         let admitted_text = Arc::clone(&replacement_bytes);
@@ -1966,6 +1971,7 @@ impl RowSaveContext {
         scratch: &TemporarySave<RowMapSnapshot>,
         field: &BlobField,
         expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         if field.text {
@@ -1980,6 +1986,7 @@ impl RowSaveContext {
                 field,
                 replacement_bytes,
                 expected_baseline_row,
+                schema_identity,
                 record_baseline,
             );
         }
@@ -1996,6 +2003,7 @@ impl RowSaveContext {
                 field,
                 expected_identity,
                 expected_baseline_row.clone(),
+                schema_identity.clone(),
                 record_baseline,
             )? {
                 BlobAttempt::Settled(row) => return Ok(row),
@@ -2049,6 +2057,7 @@ impl RowSaveContext {
         field: &BlobField,
         expected_identity: ContentIdentity,
         expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<BlobAttempt, DocumentCommitError> {
         let capture = self
@@ -2060,7 +2069,7 @@ impl RowSaveContext {
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
         let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
-        let save = self.durable_save_with_baseline(expected_baseline_row)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
         let accepted_row = Arc::new(Mutex::new(None));
@@ -2122,9 +2131,10 @@ impl RowSaveContext {
         self: &Arc<Self>,
         scratch: &TemporarySave<RowMapSnapshot>,
         expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
         record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
-        let save = self.durable_save_with_baseline(expected_baseline_row)?;
+        let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -2398,6 +2408,11 @@ impl WorkspaceFilesystem {
                         .cloned()
                         .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
                     let initial = read_blob_bytes(&graph, &reference)?;
+                    let schema_identity = crate::table_schema::committed_table_schema_identity(
+                        &writer.repository,
+                        save.table.object_id(),
+                    )
+                    .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
                     let image = Arc::new(VfsFileSnapshot::new(
                         row_image_pin(&save.source.rows),
                         Arc::<[u8]>::from([]),
@@ -2411,7 +2426,11 @@ impl WorkspaceFilesystem {
                             .runtime
                             .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                     );
-                    (save, initial, Some((target, scratch, field)))
+                    (
+                        save,
+                        initial,
+                        Some((target, scratch, field, schema_identity)),
+                    )
                 }
                 _ => {
                     return Err(if grouped_row {
@@ -2424,7 +2443,7 @@ impl WorkspaceFilesystem {
         };
         let reproject = blob_edit.is_none().then(|| (inode, Arc::clone(&save)));
         let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
-            Some((target, scratch, field)) => Box::new(move |candidate, draft_path, record_baseline| {
+            Some((target, scratch, field, schema_identity)) => Box::new(move |candidate, draft_path, record_baseline| {
                 writer
                     .runtime
                     .block_on(async {
@@ -2440,12 +2459,24 @@ impl WorkspaceFilesystem {
                     .explicit_edit_baseline(grouped_row)
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
-                    save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline)
+                    save.commit_blob_temporary(
+                        &target,
+                        &scratch,
+                        &field,
+                        expected,
+                        schema_identity,
+                        record_baseline,
+                    )
                         .map(|_| ()),
                     draft_path,
                 )
             }),
             None => {
+                let opened = crate::table_schema::committed_table_schema_identity(
+                    &writer.repository,
+                    save.table.object_id(),
+                )
+                .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
                 let draft = Arc::new(
                     writer
                         .runtime
@@ -2467,7 +2498,7 @@ impl WorkspaceFilesystem {
                         .explicit_edit_baseline(grouped_row)
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
                     admit_edit_result(
-                        save.commit_document_against(&draft, record_baseline, expected),
+                        save.commit_document_against(&draft, record_baseline, expected, &opened),
                         draft_path,
                     )
                 })
@@ -2819,7 +2850,11 @@ fn fusermount_program() -> OsString {
 
 #[derive(Clone)]
 enum OpenFile {
-    Document(Arc<RowSaveContext>, Arc<EditDraft<RowMapSnapshot>>),
+    Document(
+        Arc<RowSaveContext>,
+        Arc<EditDraft<RowMapSnapshot>>,
+        Arc<Mutex<TableSchemaIdentity>>,
+    ),
     Temporary(
         Arc<RowSaveContext>,
         Arc<ManagedFile<RowMapSnapshot>>,
@@ -2929,11 +2964,13 @@ impl DraftState {
     }
 }
 
-/// A write-open Blob handle's candidate generation and the row baseline it captured at open
-/// (ORNA-VFS-011). The baseline advances to the accepted row after each accept (41-vfs.md EDIT-1 step 3).
+/// A write-open Blob handle's candidate generation, the row baseline and the table schema it
+/// captured at open (ORNA-VFS-011, ORNA-VFS-019). The baseline advances to the accepted row after
+/// each accept (41-vfs.md EDIT-1 step 3).
 struct BlobHandle {
     generation: u64,
     baseline: Option<Vec<u8>>,
+    schema_identity: TableSchemaIdentity,
     /// The mount-relative path captured at open; a refusal keeps it after the row leaves the mount.
     path: String,
 }
@@ -3045,12 +3082,14 @@ impl WorkspaceFilesystem {
                 eprintln!("mounted Blob rename refused: {error}");
                 Errno::EIO
             })?;
+        let schema_identity = save.live_schema_identity().map_err(|_| Errno::EIO)?;
         if let Err(error) = commit_blob_descriptor_change(
             &save,
             &old.name,
             Some(new.clone()),
             rewritten.as_bytes(),
             baseline,
+            schema_identity,
         ) {
             eprintln!("mounted Blob rename failed: {error}");
             drop(state);
@@ -3129,9 +3168,15 @@ impl WorkspaceFilesystem {
             eprintln!("mounted Blob unlink refused: {error}");
             Errno::EIO
         })?;
-        if let Err(error) =
-            commit_blob_descriptor_change(&save, &field.name, None, rewritten.as_bytes(), baseline)
-        {
+        let schema_identity = save.live_schema_identity().map_err(|_| Errno::EIO)?;
+        if let Err(error) = commit_blob_descriptor_change(
+            &save,
+            &field.name,
+            None,
+            rewritten.as_bytes(),
+            baseline,
+            schema_identity,
+        ) {
             eprintln!("mounted Blob unlink failed: {error}");
             drop(state);
             self.refresh_stale_blob_document(document_inode, &save, &error);
@@ -3405,6 +3450,9 @@ impl WorkspaceFilesystem {
             baseline,
             candidate,
         } = record;
+        // A persisted scratch record stores no schema identity, so a restored scratch binds to the
+        // schema committed at restore time; a schema change before this remount is not detected for it.
+        let schema_identity = save.live_schema_identity()?;
         let name = identity.name.clone();
         builder.add_file(
             parent,
@@ -3417,6 +3465,7 @@ impl WorkspaceFilesystem {
                 blob_field,
                 baseline,
                 identity: Arc::new(identity),
+                schema_identity,
             },
         )
     }
@@ -3506,6 +3555,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
+        opened: &Arc<Mutex<TableSchemaIdentity>>,
     ) -> Result<(), DocumentCommitError> {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
@@ -3521,7 +3571,11 @@ impl WorkspaceFilesystem {
                 })?;
             draft_state.pending_truncates.remove(&inode);
         }
-        if let Err(error) = save.commit_document(draft, true) {
+        let based_on = opened
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Err(error) = save.commit_document(draft, true, &based_on) {
             // NoCandidate: the handle submitted no bytes, so there is no candidate to
             // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
             if matches!(error, DocumentCommitError::NoCandidate) {
@@ -3586,8 +3640,8 @@ impl WorkspaceFilesystem {
             .get(&handle)
             .cloned();
         match open_file {
-            Some(OpenFile::Document(save, draft)) => {
-                self.accept_document(draft_state, handle, inode.0, &save, &draft)
+            Some(OpenFile::Document(save, draft, opened)) => {
+                self.accept_document(draft_state, handle, inode.0, &save, &draft, &opened)
             }
             Some(OpenFile::Temporary(save, target, scratch, Some(field)))
                 if draft_state.blob_handles.contains_key(&handle) =>
@@ -3641,6 +3695,7 @@ impl WorkspaceFilesystem {
         };
         let inode = blob.generation;
         let baseline = blob.baseline.clone();
+        let schema_identity = blob.schema_identity.clone();
         let path = blob.path.clone();
         let (parent, text_field) = {
             let state = self
@@ -3667,7 +3722,14 @@ impl WorkspaceFilesystem {
                 }
             }
         };
-        if let Err(error) = save.commit_blob_temporary(target, scratch, field, baseline, true) {
+        if let Err(error) = save.commit_blob_temporary(
+            target,
+            scratch,
+            field,
+            baseline,
+            schema_identity.clone(),
+            true,
+        ) {
             return Err(retain_refused_scratch(
                 draft_state,
                 save,
@@ -3754,6 +3816,7 @@ impl WorkspaceFilesystem {
                 generation,
                 baseline: accepted_baseline,
                 path: next_path,
+                schema_identity,
             },
         );
         Ok(())
@@ -4042,7 +4105,7 @@ impl WorkspaceFilesystem {
                     .iter()
                     .filter(|(_, dirty_inode)| **dirty_inode == *inode)
                     .filter_map(|(handle, _)| match open_files.get(handle) {
-                        Some(OpenFile::Document(_, draft)) => Some((*handle, Arc::clone(draft))),
+                        Some(OpenFile::Document(_, draft, _)) => Some((*handle, Arc::clone(draft))),
                         _ => None,
                     })
                     .max_by_key(|(handle, _)| *handle)
@@ -4057,7 +4120,7 @@ impl WorkspaceFilesystem {
             }
         }
         for (handle, inode) in &draft_state.unresolved_handles {
-            if let Some(OpenFile::Document(save, draft)) = open_files.get(handle) {
+            if let Some(OpenFile::Document(save, draft, _)) = open_files.get(handle) {
                 let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
                     *truncated == *inode
                         && latest.as_ref().is_some_and(|latest| Arc::ptr_eq(latest, draft))
@@ -4491,7 +4554,7 @@ impl Filesystem for WorkspaceFilesystem {
                 .get(&handle)
                 .cloned()?;
             Some(match &open_file {
-                OpenFile::Document(save, draft) => {
+                OpenFile::Document(save, draft, _) => {
                     save.writer.runtime.block_on(draft.candidate_len())
                 }
                 OpenFile::Temporary(save, _, scratch, _) => {
@@ -4758,7 +4821,20 @@ impl Filesystem for WorkspaceFilesystem {
                 }
             }
             if blob_field.is_some() {
-                // The handle holds its generation and the row baseline it captured at open (ORNA-VFS-011).
+                // The handle holds its generation, the row baseline and the table schema it
+                // captured at open (ORNA-VFS-011, ORNA-VFS-019).
+                let schema_identity = match save.live_schema_identity() {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        eprintln!("mounted blob open could not capture the table schema: {error}");
+                        draft_state.unresolved_handles.remove(&handle);
+                        if is_scratch && !had_retained_scratch {
+                            draft_state.retained_scratch.remove(&inode.0);
+                        }
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                };
                 let baseline = save
                     .expected_baseline_row
                     .lock()
@@ -4778,6 +4854,7 @@ impl Filesystem for WorkspaceFilesystem {
                         generation: inode.0,
                         baseline,
                         path,
+                        schema_identity,
                     },
                 );
             }
@@ -4797,6 +4874,18 @@ impl Filesystem for WorkspaceFilesystem {
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
+        let schema_identity = match crate::table_schema::committed_table_schema_identity(
+            &save.writer.repository,
+            save.table.object_id(),
+        ) {
+            Ok(identity) => identity,
+            Err(error) => {
+                eprintln!("mounted document open could not capture the table schema: {error}");
+                draft_state.unresolved_handles.remove(&handle);
+                reply.error(Errno::EIO);
+                return;
+            }
+        };
         let draft = Arc::new(
             save.writer
                 .runtime
@@ -4813,7 +4902,10 @@ impl Filesystem for WorkspaceFilesystem {
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle, OpenFile::Document(save, draft));
+            .insert(
+                handle,
+                OpenFile::Document(save, draft, Arc::new(Mutex::new(schema_identity))),
+            );
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
@@ -4895,6 +4987,10 @@ impl Filesystem for WorkspaceFilesystem {
                 name: name.to_owned(),
                 blob_field_name: blob_field.as_ref().map(|field| field.name.clone()),
             });
+            let Ok(schema_identity) = save.live_schema_identity() else {
+                reply.error(Errno::EIO);
+                return;
+            };
             let Ok(target) = save.temporary_target(blob_field.as_ref()) else {
                 reply.error(Errno::EIO);
                 return;
@@ -4925,6 +5021,7 @@ impl Filesystem for WorkspaceFilesystem {
                     blob_field: blob_field.clone(),
                     baseline,
                     identity: Arc::clone(&identity),
+                    schema_identity,
                 },
             ) {
                 Ok(inode) => inode,
@@ -4999,6 +5096,7 @@ impl Filesystem for WorkspaceFilesystem {
             blob_field,
             baseline,
             identity,
+            schema_identity,
         ) = {
             let mut state = self
                 .state
@@ -5018,19 +5116,21 @@ impl Filesystem for WorkspaceFilesystem {
                 blob_field,
                 baseline,
                 identity,
+                schema_identity,
                 ..
             }) = state.nodes.get(&source_inode).map(|node| &node.kind)
             else {
                 reply.error(refused_mutation_errno());
                 return;
             };
-            let (save, target, scratch, blob_field, baseline, identity) = (
+            let (save, target, scratch, blob_field, baseline, identity, schema_identity) = (
                 Arc::clone(save),
                 Arc::clone(target),
                 Arc::clone(scratch),
                 blob_field.clone(),
                 baseline.clone(),
                 Arc::clone(identity),
+                schema_identity.clone(),
             );
             // An unbound scratch commits to the destination its rename names: the row document
             // or the Blob field of that name. A Blob-bound scratch must rename to its own field.
@@ -5097,6 +5197,7 @@ impl Filesystem for WorkspaceFilesystem {
                 blob_field,
                 baseline,
                 identity,
+                schema_identity,
             )
         };
         // An unbound scratch renamed onto a Blob moves its candidate into a scratch of that Blob's
@@ -5115,8 +5216,17 @@ impl Filesystem for WorkspaceFilesystem {
             _ => (target, scratch),
         };
         let committed = match &blob_field {
-            Some(field) => save.commit_blob_temporary(&target, &scratch, field, baseline, true),
-            None => save.commit_temporary(&scratch, baseline, true).map(|()| None),
+            Some(field) => save.commit_blob_temporary(
+                &target,
+                &scratch,
+                field,
+                baseline,
+                schema_identity,
+                true,
+            ),
+            None => save
+                .commit_temporary(&scratch, baseline, schema_identity, true)
+                .map(|()| None),
         };
         let accepted_row = committed.as_ref().ok().and_then(Option::clone);
         if let Err(error) = committed {
@@ -5375,7 +5485,7 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let private_read = match open_file {
-            Some(OpenFile::Document(save, draft)) => Some(read_candidate_range(
+            Some(OpenFile::Document(save, draft, _)) => Some(read_candidate_range(
                 |offset, length| save.writer.runtime.block_on(draft.read_range(offset, length)),
                 offset,
                 reply_read_size(size),
@@ -5552,7 +5662,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
         }
         let (result, candidate_len) = match open_file {
-            Some(OpenFile::Document(save, draft)) => (
+            Some(OpenFile::Document(save, draft, _)) => (
                 save.writer.runtime.block_on(draft.write_at(offset, data)),
                 None,
             ),
@@ -5750,7 +5860,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
             // Release is cleanup only (EDIT-1 step 4): an unsynced document is
             // retained as a draft, never accepted here.
-            (Some(inode), Some(OpenFile::Document(save, draft))) => {
+            (Some(inode), Some(OpenFile::Document(save, draft, _))) => {
                 self.retain_unsynced_document(&mut draft_state, inode, handle.0, &save, &draft);
             }
             _ => {}
@@ -5830,7 +5940,7 @@ impl Filesystem for WorkspaceFilesystem {
                     }
                 }
                 let (result, candidate_len) = match open_file {
-                    OpenFile::Document(save, draft) => {
+                    OpenFile::Document(save, draft, _) => {
                         (save.writer.runtime.block_on(draft.truncate(size)), None)
                     }
                     OpenFile::Temporary(save, _, scratch, _) => {
@@ -7409,6 +7519,9 @@ enum NodeKind {
         blob_field: Option<BlobField>,
         baseline: Option<Vec<u8>>,
         identity: Arc<TemporaryScratchIdentity>,
+        /// The table schema the scratch was built under; its commit is refused once the committed
+        /// schema moves (ORNA-VFS-019).
+        schema_identity: TableSchemaIdentity,
     },
     Blob {
         graph: Arc<NativeGraphContext>,
@@ -7729,6 +7842,7 @@ fn commit_row_document(
     save: &Arc<RowSaveContext>,
     bytes: &[u8],
     baseline: Option<Vec<u8>>,
+    schema_identity: TableSchemaIdentity,
 ) -> Result<(), DocumentCommitError> {
     let scratch = save.writer.runtime.block_on(
         save.target
@@ -7740,7 +7854,7 @@ fn commit_row_document(
         .map_err(|error| {
             DocumentCommitError::Failed(format!("row document could not be staged: {error:?}"))
         })?;
-    save.commit_temporary(&scratch, baseline, true)
+    save.commit_temporary(&scratch, baseline, schema_identity, true)
 }
 
 /// Swaps the admitted Blob field `field_name` for `replacement` (`None` removes it) and commits
@@ -7752,6 +7866,7 @@ fn commit_blob_descriptor_change(
     replacement: Option<BlobField>,
     document: &[u8],
     baseline: Option<Vec<u8>>,
+    schema_identity: TableSchemaIdentity,
 ) -> Result<(), DocumentCommitError> {
     let removed = replacement.is_none();
     let mut fields = save
@@ -7769,7 +7884,7 @@ fn commit_blob_descriptor_change(
         None => fields.remove(index),
     };
     drop(fields);
-    let committed = commit_row_document(save, document, baseline);
+    let committed = commit_row_document(save, document, baseline, schema_identity);
     if committed.is_err() {
         let mut fields = save
             .blob_fields

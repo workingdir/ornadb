@@ -16,7 +16,7 @@ use orna_project_v1::{
     KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader,
     admit_source_row_with_owner_fields,
 };
-use orna_repository_v1::{Repository, RuntimeGeneration};
+use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     NoFault, RequestIdentity, RequestState, RuntimeState, RuntimeTableIdentity, TableMutation,
     TableObjectId, TerminalOutcome, WriterLease,
@@ -24,6 +24,11 @@ use orna_runtime_v1::{
 };
 use orna_storage_v1::LoosePath;
 use orna_value_v1::Format3Context;
+
+/// The production table schema identity (ORNA-VFS-019), shared with the mount.
+#[path = "../../src/table_schema.rs"]
+mod table_schema;
+pub use table_schema::committed_table_schema_identity;
 
 /// Projects one fixture row key with the VFS-1 key spelling the mount writes
 /// (profiles/vfs-1.md:44-56) and returns its canonical pair for admission.
@@ -444,17 +449,14 @@ pub async fn commit_source_replacement_through_save_admission(
         .expect("resolve the table from its committed identity manifest");
     assert_eq!(schema.declaration_name(), table_name);
     assert_eq!(schema.table_object_id(), TableObjectId::new(relation_id));
-    let runtime_capture = state.capture().await.expect("capture the runtime CWD");
-    let generation = u64::try_from(runtime_capture.generation())
-        .expect("the runtime generation fits a repository generation");
-    let cwd_generation = repository
-        .cwd_generation(RuntimeGeneration::new(generation))
-        .expect("the repository CWD generation is available");
+    let schema_identity =
+        committed_table_schema_identity(repository, TableObjectId::new(relation_id))
+            .expect("the committed table has a schema identity");
     let table = RuntimeTableIdentity::new(table_name, TableObjectId::new(relation_id))
         .expect("the captured table has a runtime identity");
     let save = VfsDurableSave::new(
         writer.owner_id,
-        cwd_generation,
+        schema_identity,
         table,
         capture.key.as_bytes().to_vec(),
     );
@@ -541,13 +543,18 @@ pub async fn commit_source_replacement_through_save_admission(
     let validator = transactional_loaded_project_candidate_validator(
         &project,
         &identities,
-        coordinates.cwd_generation().clone(),
+        None,
         Arc::clone(&table_object_ids),
         Limits::default(),
     )
     .unwrap_or_else(|_| panic!("the committed project yields a candidate validator"));
+    let live_repository = repository.clone();
+    let live_table = coordinates.table().object_id();
     let candidate = VfsSaveCandidate::new(replacement, validator)
-        .with_protected_content_transfers(replacement_bytes, content_transfers);
+        .with_protected_content_transfers(replacement_bytes, content_transfers)
+        .with_live_schema_identity(move || {
+            committed_table_schema_identity(&live_repository, live_table).ok()
+        });
     admission
         .commit(candidate)
         .await
