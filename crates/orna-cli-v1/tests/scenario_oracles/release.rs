@@ -2078,13 +2078,12 @@ fn views_expose_no_repository_internals(db: &mut Db) -> Check {
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
-    // ORNA-VFS-020 (ornadb-9npn.1): a reachable ordinary source module at the root is projected
-    // beside the table directories; only repository internals (.git, .orna) are forbidden here.
-    ensure!(
-        names.iter().any(|name| name == "media")
-            && names.iter().all(|name| name == "media" || name == "main.orna"),
-        "the view root lists {names:?}"
-    );
+    // ORNA-VFS-020 (ornadb-9npn.1): the root lists the table directory and the reachable
+    // ordinary source module main.orna (profiles/vfs-1.md:31); .git and .orna are reserved
+    // and never projected (profiles/vfs-1.md:33-34).
+    let mut listed = names;
+    listed.sort();
+    ensure!(listed == ["main.orna", "media"], "the view root lists {listed:?}");
     ensure!(
         fs::write(mount.point.join(".git"), b"x").is_err()
             && fs::write(mount.point.join("data"), b"x").is_err(),
@@ -2474,7 +2473,7 @@ fn workspace_source_module_write_is_refused(db: &mut Db) -> Probe {
     let error = fs::write(&module, b"// edited\n").err().ok_or_else(|| {
         Failure::Unmet("the workspace mount now accepts a source module write".to_owned())
     })?;
-    if error.raw_os_error() != Some(1) {
+    if error.raw_os_error() != Some(libc::EPERM) {
         return Err(Failure::Harness(format!(
             "the source module write failed for another reason: {error}"
         )));

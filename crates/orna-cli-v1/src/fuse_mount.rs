@@ -33,7 +33,8 @@ use orna_runtime_v1::{
         CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
-        project_component, project_key_component, unproject_component,
+        project_colliding_table_component, project_component, project_key_component,
+        unproject_component,
         FsyncFailure,
     },
 };
@@ -2503,8 +2504,6 @@ impl WorkspaceFilesystem {
             None => Some(super::invocation_owner_id()),
         };
 
-        // Reachable source modules are projected before any table directory, so a
-        // source path that collides with a table directory takes priority.
         let project = match &writer {
             Some(writer) => Arc::clone(&writer.project),
             None => Arc::new(
@@ -2515,6 +2514,9 @@ impl WorkspaceFilesystem {
                     })?,
             ),
         };
+        // Reachable source modules are projected before any table directory, so a
+        // generated component that collides with a source path escapes its first
+        // byte instead of dropping the table (profiles/vfs-1.md:31-33).
         builder.add_source_modules(project.modules())?;
 
         for (relation_id, qualified_name) in tables {
@@ -2525,15 +2527,6 @@ impl WorkspaceFilesystem {
                     TableObjectId::new(relation_id),
                 )
                 .map_err(|error| format!("committed table schema is unavailable: {error:?}"))?;
-            if builder.table_path_is_source(
-                schema.binding().module_name().unwrap_or_default(),
-                schema.declaration_name(),
-            ) {
-                eprintln!(
-                    "skipped table {qualified_name}: a source path takes priority on collision"
-                );
-                continue;
-            }
             let table_directory = builder.table_directory(
                 schema.binding().module_name().unwrap_or_default(),
                 schema.declaration_name(),
@@ -5125,49 +5118,38 @@ impl FsBuilder {
         Ok(())
     }
 
-    /// Whether a source path occupies the table's directory path. A source path
-    /// takes priority on collision (profiles/vfs-1.md), so such a table is not
-    /// projected: its final component is source-owned, or an intermediate
-    /// component is a source file rather than a directory.
-    fn table_path_is_source(&self, module_name: &str, table_name: &str) -> bool {
-        let components = module_name
-            .split('.')
-            .filter(|component| !component.is_empty())
-            .chain(std::iter::once(table_name))
-            .map(project_component)
-            .collect::<Vec<_>>();
-        let last = components.len().saturating_sub(1);
-        let mut parent = ROOT_INODE;
-        for (index, component) in components.iter().enumerate() {
-            let Some(inode) = self
-                .directory(parent)
-                .and_then(|directory| directory.entry(OsStr::new(component)))
-                .map(|entry| entry.inode)
-            else {
-                return false;
-            };
-            if self.source_nodes.contains(&inode) {
-                let is_directory = self
-                    .nodes
-                    .get(&inode)
-                    .is_some_and(|node| node.kind.is_directory());
-                if index == last || !is_directory {
-                    return true;
-                }
-            }
-            parent = inode;
+    /// Whether the source tree occupies `component` directly under `parent`.
+    fn source_occupies(&self, parent: u64, component: &str) -> bool {
+        self.directory(parent)
+            .and_then(|directory| directory.entry(OsStr::new(component)))
+            .is_some_and(|entry| self.source_nodes.contains(&entry.inode))
+    }
+
+    /// Projects a generated namespace or table component under `parent`. A source
+    /// path keeps its plain name on collision, and the generated component escapes
+    /// its first byte instead, so the table stays projected (profiles/vfs-1.md:31-33).
+    fn generated_component(&self, parent: u64, name: &str) -> Result<String, String> {
+        let plain = project_component(name);
+        if !self.source_occupies(parent, &plain) {
+            return Ok(plain);
         }
-        false
+        let escaped = project_colliding_table_component(name);
+        if self.source_occupies(parent, &escaped) {
+            return Err(format!("generated name {escaped:?} collides with a source path"));
+        }
+        Ok(escaped)
     }
 
     fn table_directory(&mut self, module_name: &str, table_name: &str) -> Result<u64, String> {
         let mut parent = ROOT_INODE;
         if !module_name.is_empty() {
             for component in module_name.split('.') {
-                parent = self.ensure_directory(parent, &project_component(component))?;
+                let name = self.generated_component(parent, component)?;
+                parent = self.ensure_directory(parent, &name)?;
             }
         }
-        self.ensure_directory(parent, &project_component(table_name))
+        let name = self.generated_component(parent, table_name)?;
+        self.ensure_directory(parent, &name)
     }
 
     fn add_table_rows(
