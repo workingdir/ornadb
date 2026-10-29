@@ -219,12 +219,11 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
     assert!(status.success(), "remounted process exited with {status}");
 }
 
-/// Red proof for bead ornadb-eufo.1: a write whose open captured the v1 schema
-/// generation must be refused EAGAIN after the owner commits a schema change
+/// Proof for bead ornadb-eufo.1: a write whose open captured the v1 schema
+/// generation is refused EAGAIN after the owner commits a schema change
 /// (profiles/vfs-1.md:91-92 captures schema/source generation; :138 EAGAIN is a
-/// stale expected version). The product currently accepts it.
+/// stale expected version).
 #[test]
-#[ignore = "ornadb-eufo.1"]
 fn vfs_019_stale_generation_write_after_schema_change_is_eagain() {
     if !require_fuse_or_skip() {
         return;
@@ -271,6 +270,12 @@ fn vfs_019_stale_generation_write_after_schema_change_is_eagain() {
         ),
         "a stale-generation write keeps the accepted row"
     );
+
+    // The refused candidate stays an unresolved draft that blocks unmount until the
+    // change is dropped: reopen the file, write the current row, and fsync it
+    // (profiles/vfs-1.md:144).
+    write_and_sync(&london, ORIGINAL)
+        .expect("dropping the refused change and fsyncing the current row clears the draft");
 
     run_orna_unmount(&root, &mountpoint);
     let status = mounted
