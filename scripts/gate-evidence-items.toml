@@ -291,8 +291,9 @@ title = "Media player plus binary export and replacement"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_replace_content_updates_blob_descriptor_and_preserves_row_identity" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:edit_cli" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_media_reader" },
 ]
-limitations = ["No media player is run (ornadb-5il1.62)."]
+limitations = ["The mpv leg runs only where mpv is installed; CI installs it and sets ORNA_REQUIRE_MEDIA_PLAYER=1, which makes a missing mpv a failure. One player is exercised, not a player matrix (ornadb-5il1.62)."]
 
 [[item]]
 gate = "E"
