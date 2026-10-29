@@ -227,3 +227,38 @@ fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
     );
     assert!(admitted.is_ok(), "the pair whose text encodes to the alias admits");
 }
+
+#[test]
+fn nested_record_row_with_declaration_order_differing_from_key_order_is_admitted() {
+    let (_directory, repository, relation_id) = format3::format3_repository_for_table(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, }\n",
+        "Music",
+    );
+    let commit = repository.head().unwrap().unwrap();
+    let loader = ProjectLoader::default();
+    let project = loader
+        .load_committed_snapshot(&repository, &commit)
+        .unwrap();
+    let schema = loader
+        .resolve_committed_source_table_schema(
+            &repository,
+            &commit,
+            orna_runtime_v1::TableObjectId::new(relation_id),
+        )
+        .unwrap();
+    let context = format3_context_for_database(&commit, *schema.database_id());
+    let row_source = "{ meta: { label: \"x\", rank: 1, }, }\n";
+    let accepted = admit_source_row(
+        &project,
+        "Music/london.orna",
+        row_source,
+        &schema,
+        &context,
+        Vec::new(),
+        [0x78; 16],
+    );
+    assert!(
+        accepted.is_ok(),
+        "a nested record row must be admitted in encoded-key order"
+    );
+}
