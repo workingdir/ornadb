@@ -2046,6 +2046,33 @@ impl WorkspaceFilesystem {
         })
     }
 
+    /// Attributes of `inode` as a path stat reports them. A document's size is
+    /// the accepted image its new opens read (`ManagedFile::stat`), so an owner
+    /// write is visible to stat at once (profiles/vfs-1.md:133, ORNA-VFS-019).
+    /// Only the node's served size changes; open handles keep their own draft,
+    /// captured baseline and generation, so stale-save refusal is unaffected.
+    fn attr_of(&self, inode: u64) -> Option<FileAttr> {
+        let (mut attr, document) = {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let attr = state.attr(inode)?;
+            let document = match state.nodes.get(&inode).map(|node| &node.kind) {
+                Some(NodeKind::Document { save, .. }) => Some(Arc::clone(save)),
+                _ => None,
+            };
+            (attr, document)
+        };
+        if let Some(save) = document
+            && let Some(stat) = save.writer.runtime.block_on(save.target.stat())
+        {
+            attr.size = stat.size();
+            attr.blocks = attr.size.saturating_add(511) / 512;
+        }
+        Some(attr)
+    }
+
     /// Commits an explicit edit requested through the `user.orna.edit-commit`
     /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft`; the draft
     /// must be a regular editor draft in this repository's recovery store.
@@ -3579,12 +3606,13 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn lookup(&self, _request: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let mut state = self
+        let looked_up = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match state.lookup_child(parent.0, name) {
-            Ok(Some(inode)) => match state.attr(inode) {
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .lookup_child(parent.0, name);
+        match looked_up {
+            Ok(Some(inode)) => match self.attr_of(inode) {
                 Some(attr) => reply.entry(&ENTRY_TTL, &attr, Generation(1)),
                 None => reply.error(Errno::EIO),
             },
@@ -3648,11 +3676,7 @@ impl Filesystem for WorkspaceFilesystem {
             }
         };
 
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match state.attr(inode.0) {
+        match self.attr_of(inode.0) {
             Some(mut attr) => {
                 if let Some(size) = candidate_size {
                     attr.size = size;
@@ -4900,11 +4924,7 @@ impl Filesystem for WorkspaceFilesystem {
                 draft_state.pending_truncates.insert(inode.0, size);
             }
         }
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match state.attr(inode.0) {
+        match self.attr_of(inode.0) {
             Some(mut attr) => {
                 if let Some(size) = size {
                     attr.size = size;
