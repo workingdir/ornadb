@@ -22,7 +22,10 @@ mod media_commit;
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-use editor_mount::{assert_errno, repository_with_music_rows, require_fuse_or_skip, spawn_mount_process, write_and_sync};
+use editor_mount::{
+    assert_errno, repository_with_music_rows, repository_with_music_rows_and_modules,
+    require_fuse_or_skip, spawn_mount_process, write_and_sync,
+};
 
 const EINVAL: i32 = 22;
 
@@ -188,35 +191,42 @@ async fn vfs_020_reachable_source_module_is_projected_with_committed_bytes() {
     assert!(root.contains(&"Music".to_owned()), "the table directory stays beside it: {root:?}");
 }
 
-/// profiles/vfs-1.md: on collision a source path takes priority over a table
-/// directory. The table `Music` yields to the source directory `Music`, so the
-/// nested source module is readable and the directory lists only source entries.
-/// Row-level suppression is not observable here (the fixture commits no rows);
-/// it is covered by the table-skip path in the projection.
+/// profiles/vfs-1.md:31-33 and ORNA-VFS-020: a source path keeps its plain name on
+/// collision. The source directory `Music` stays `Music` and lists only its source
+/// entries; the table `Music` is projected under the first-byte escape `%4Dusic` with
+/// its rows intact. Projection is read at mount open. Not covered: projection after a
+/// later commit changes the rows, since this fixture has no remount helper.
 #[tokio::test]
-async fn vfs_020_source_path_takes_priority_over_colliding_table_directory() {
+async fn vfs_020_source_path_keeps_name_and_table_projects_escaped() {
     if !require_fuse_or_skip() {
         return;
     }
-    let (repository_directory, _repository, _relation_id, _context) =
-        format3::format3_repository_with_context_and_modules(
-            "use Music.extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
-            "Music",
-            &[("Music/extra.orna", EXTRA_SOURCE)],
-        );
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "use Music.extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+        &[("Music/extra.orna", EXTRA_SOURCE)],
+        &[("london", music_row("Original").as_str())],
+    )
+    .await;
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
-    let music = mountpoint.join("Music");
-    let extra = music.join("extra.orna");
+    let extra = mountpoint.join("Music/extra.orna");
+    let data = mountpoint.join("%4Dusic/london/data.orna");
     mounted.await_path(&extra);
+    mounted.await_path(&data);
 
     assert_eq!(read_view(&extra), EXTRA_SOURCE, "the colliding source module reads its bytes");
     assert_eq!(
-        sorted_names(&music),
-        vec!["extra.orna".to_owned()],
-        "the source directory owns Music; the table directory is not projected"
+        sorted_names(&mountpoint),
+        vec!["%4Dusic".to_owned(), "Music".to_owned(), "main.orna".to_owned()],
+        "the source path keeps Music; the table is projected under its escaped name"
     );
+    assert_eq!(
+        sorted_names(&mountpoint.join("Music")),
+        vec!["extra.orna".to_owned()],
+        "the source directory lists only its source entries"
+    );
+    assert!(read_view(&data).contains("Original"), "the escaped table keeps its committed row");
 }
 
 /// ORNA-VFS-020 and profiles/vfs-1.md: a source module is read-only in this slice. A
