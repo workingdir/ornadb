@@ -401,6 +401,10 @@ fn edit_via_owner(
     request.extend_from_slice(relative.as_os_str().as_bytes());
     request.push(0);
     request.extend_from_slice(draft.as_os_str().as_bytes());
+    // The digest names the bytes the editor was seeded from, so the owner refuses a draft whose
+    // mounted view moved after this read (41-vfs.md:75-77).
+    request.push(0);
+    request.extend_from_slice(crate::fuse_mount::edit_view_digest(&initial).as_bytes());
     match rustix::fs::setxattr(
         mountpoint,
         "user.orna.edit-commit",

@@ -642,9 +642,6 @@ async fn reader_opened_before_shrinking_owner_write_keeps_old_bytes() {
 /// write captures its draft and read-to-save baseline from the accepted row, not from
 /// a stale in-process copy of the row. The editor sees the owner's row and its save
 /// succeeds. A stale baseline would make this save fail (E2000) or overwrite the draft.
-/// Ignored until ornadb-5il1.471: the owner compares the explicit edit against the mount's cached
-/// baseline, which an earlier owner-routed plain edit left stale (E2000).
-#[ignore = "ornadb-5il1.471: owner-routed explicit edit CAS uses the mount's cached baseline"]
 #[tokio::test]
 async fn orna_edit_started_after_owner_write_starts_from_fresh_row() {
     if !require_fuse_or_skip() {
