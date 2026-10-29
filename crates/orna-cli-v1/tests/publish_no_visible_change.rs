@@ -118,6 +118,7 @@ async fn commit_capture(
         format_context,
         vec![("payload".to_owned(), blob_binding)],
         vec![],
+        &[],
         [ordinal + 3; 16],
     )
     .expect("admit a complete source-owned row");
