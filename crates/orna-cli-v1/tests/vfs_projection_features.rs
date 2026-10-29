@@ -2,10 +2,11 @@
 
 //! FUSE projection cases for `profiles/vfs-1.md` that the mount must show:
 //! module-path directories (bead ornadb-5il1.464), key-component escaping and
-//! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), and nested
-//! record and list fields (profiles/vfs-1.md:71-74, bead ornadb-5il1.372). Cases
-//! that are not implemented yet are `#[ignore]`d with their bead id and run with
-//! `--include-ignored` to show the current red output.
+//! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), the large Str
+//! `.txt` projection (profiles/vfs-1.md:63-80), and nested record and list fields
+//! (profiles/vfs-1.md:71-74, bead ornadb-5il1.372). Cases that are not implemented yet
+//! are `#[ignore]`d with their bead id and run with `--include-ignored` to show the
+//! current red output.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -224,10 +225,8 @@ async fn key_over_300_characters_is_admitted_and_projects_as_alias() {
 /// profiles/vfs-1.md:63-66 (large Str) and ORNA-VFS-020 neighbourhood: a Str over
 /// 64 KiB projects as `<field>.txt` beside `data.orna`, and `data.orna` carries
 /// `{text: "./<field>.txt", encoding: "utf-8"}` instead of the text. A UTF-8 write to
-/// the `.txt` replaces the Str (not a Blob). Not implemented: the mount has no
-/// `.txt` projection for Str, so this case is red until bead ornadb-5il1.372 lands.
+/// the `.txt` replaces the Str (not a Blob).
 #[tokio::test]
-#[ignore = "ornadb-5il1.372: large Str (>64 KiB) .txt projection is not implemented"]
 async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
     if !require_fuse_or_skip() {
         return;
@@ -247,14 +246,135 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
     let title = row.join("title.txt");
     mounted.await_path(&title);
 
-    assert_eq!(std::fs::read(&title).unwrap().len(), big.len(), "the .txt carries the full Str");
+    assert!(std::fs::read(&title).unwrap() == big.as_bytes(), "the .txt is the full Str, byte-exact");
     let data = read_view(&row.join("data.orna"));
     assert!(data.contains("./title.txt"), "data.orna names the .txt file: {data:?}");
     assert!(data.contains("encoding: \"utf-8\""), "data.orna names utf-8: {data:?}");
     assert!(!data.contains(&big), "data.orna no longer carries the 70 KiB text");
     editor_mount::write_and_sync(&title, "short replacement")
         .expect("a UTF-8 write replaces the Str");
-    assert!(read_view(&row.join("data.orna")).contains("short replacement"));
+    // profiles/vfs-1.md:63-66: the 64 KiB bound applies to the replaced value, so a short
+    // Str projects inline again and the `.txt` sibling is gone.
+    assert!(!title.exists(), "a short replacement is inline; no title.txt remains");
+    let data = read_view(&row.join("data.orna"));
+    assert!(data.contains("short replacement"), "data.orna shows the replaced Str: {data:?}");
+    assert!(!data.contains("./title.txt"), "data.orna no longer names a .txt: {data:?}");
+}
+
+/// profiles/vfs-1.md:63-66: the 64 KiB bound is exclusive. A Str of exactly 65536 bytes stays
+/// inline in `data.orna` with no `.txt` sibling; one byte more projects as `title.txt`.
+#[tokio::test]
+async fn large_str_bound_is_exclusive_at_64_kib() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let at_bound = "b".repeat(64 * 1024);
+    let over_bound = "c".repeat(64 * 1024 + 1);
+    let inline_document = format!("{{ title: \"{at_bound}\", artist: \"Kieran\", }}\n");
+    let over_document = format!("{{ title: \"{over_bound}\", artist: \"Kieran\", }}\n");
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows(&[
+        ("inline", inline_document.as_str()),
+        ("over", over_document.as_str()),
+    ])
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let over = mountpoint.join("Music/over/title.txt");
+    mounted.await_path(&over);
+
+    assert_eq!(std::fs::read(&over).unwrap(), over_bound.as_bytes());
+    let inline = mountpoint.join("Music/inline");
+    assert_eq!(sorted_names(&inline), vec!["data.orna".to_owned()], "no .txt at the bound");
+    assert!(read_view(&inline.join("data.orna")).contains(&at_bound));
+}
+
+/// profiles/vfs-1.md:63-66 and ORNA-VFS-009: a `.txt` write whose bytes are not UTF-8 is refused
+/// at fsync with EINVAL, and the accepted row and its `.txt` stay unchanged.
+#[tokio::test]
+async fn large_str_text_rejects_invalid_utf8_and_keeps_the_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let big = "d".repeat(70 * 1024);
+    let document = format!("{{ title: \"{big}\", artist: \"Kieran\", }}\n");
+    let (repository_directory, _repository, _relation_id) =
+        repository_with_music_rows(&[("london", document.as_str())]).await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let title = row.join("title.txt");
+    mounted.await_path(&title);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&title)
+        .expect("a write-intent open of the .txt");
+    std::io::Write::write_all(&mut file, &[0xff, 0xfe, b'x']).expect("the bytes are buffered");
+    assert_eq!(
+        file.sync_all().unwrap_err().raw_os_error(),
+        Some(libc::EINVAL),
+        "non-UTF-8 text is refused"
+    );
+    drop(file);
+    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
+    assert!(read_view(&row.join("data.orna")).contains("./title.txt"));
+}
+
+/// ORNA-VFS-009 and profiles/vfs-1.md:63-66: a `.txt` write-intent handle opened before
+/// another writer's accepted save is stale. Its fsync refuses the candidate, and the
+/// candidate is kept in recovery storage before the fsync replies.
+#[tokio::test]
+async fn stale_large_str_candidate_is_retained_before_fsync_replies() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let big = "e".repeat(70 * 1024);
+    let document = format!("{{ title: \"{big}\", artist: \"Kieran\", }}\n");
+    let (repository_directory, repository, _relation_id) =
+        repository_with_music_rows(&[("london", document.as_str())]).await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let title = row.join("title.txt");
+    let data = row.join("data.orna");
+    mounted.await_path(&title);
+
+    let mut stale_text = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&title)
+        .expect("a write-intent open of the .txt");
+
+    // Another writer's accepted save advances the row past the open handle.
+    let advanced = read_view(&data).replace("artist: \"Kieran\"", "artist: \"Other\"");
+    let mut other = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&data)
+        .expect("a write-intent open of data.orna");
+    std::io::Write::write_all(&mut other, advanced.as_bytes()).expect("the bytes are buffered");
+    other.sync_all().expect("the other writer's save is accepted");
+    drop(other);
+    assert!(read_view(&data).contains("artist: \"Other\""));
+
+    let candidate = "stale candidate text";
+    std::io::Write::write_all(&mut stale_text, candidate.as_bytes())
+        .expect("the bytes are buffered");
+    assert!(stale_text.sync_all().is_err(), "a stale .txt candidate is refused at fsync");
+    drop(stale_text);
+
+    let records = editor_mount::retained_drafts(&repository);
+    assert!(
+        records.iter().any(|record| {
+            record.contains("path Music/london/title.txt")
+                && record.contains(&format!("\n\n{candidate}"))
+        }),
+        "the stale candidate is retained in recovery storage: {records:?}"
+    );
+    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
 }
 
 /// profiles/vfs-1.md:71-74 (nested records and lists): a record field projects as

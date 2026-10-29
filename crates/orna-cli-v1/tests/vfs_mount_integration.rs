@@ -792,14 +792,16 @@ struct MountedMusicRow {
 /// Seeds `Music/london` with `initial`, then mounts the cwd. Returns `None`
 /// when FUSE is opted out or its prerequisites are optional and absent.
 async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
+    mount_music_row_with_source("pub table Music(id: Str) { title: Str, }\n", initial).await
+}
+
+/// [`mount_music_row`] over the table `source` declares, seeded with `initial`.
+async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<MountedMusicRow> {
     if !fuse_test_available() {
         return None;
     }
     let (repository_directory, repository, relation_id, format_context) =
-        format3::format3_repository_with_context(
-            "pub table Music(id: Str) { title: Str, }\n",
-            "Music",
-        );
+        format3::format3_repository_with_context(source, "Music");
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, runtime_identity, digest)
         .await
@@ -840,7 +842,7 @@ async fn mount_music_row(initial: &str) -> Option<MountedMusicRow> {
             "--cwd",
         ])
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::inherit())
         .spawn()
         .expect("start mount --cwd");
     let mut mounted = MountedProcess {
@@ -2648,7 +2650,7 @@ fn wait_for_mount_paths(mounted: &mut MountedProcess, paths: &[&Path]) -> bool {
     while !(mountinfo_contains(&mounted.mountpoint) && paths.iter().all(|path| path.exists())) {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             let stderr = take_child_stderr(&mut mounted.child);
-            if is_optional_fuse_setup_failure(&stderr) {
+            if !fuse_test_required() && is_optional_fuse_setup_failure(&stderr) {
                 eprintln!("SKIP: FUSE mount prerequisites failed: {stderr}");
                 return false;
             }
@@ -3943,7 +3945,7 @@ async fn mount_case_distinct_keys_project_to_distinct_rows() {
 }
 
 #[tokio::test]
-/// A Str far above the 64 KiB inline bound saves through the document; the stored row holds the full text and the document read contains it. This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
+/// A Str over the 64 KiB inline bound is projected as a `.txt` file beside `data.orna`, and the document names it as `{text: "./title.txt", encoding: "utf-8"}` (profiles/vfs-1.md:76-80). This does not exercise ORNA-VFS-010 (metadata-only saves) or ORNA-VFS-018 (listing/stat sniffing).
 async fn cwd_mount_large_str_round_trips_through_document() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
@@ -3957,9 +3959,224 @@ async fn cwd_mount_large_str_round_trips_through_document() {
     );
     let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
     assert!(
-        document.contains(&large),
-        "the document read returns the full large Str"
+        document.contains("./title.txt") && document.contains("utf-8"),
+        "data.orna names the title.txt projection: {document}"
+    );
+    assert!(
+        !document.contains(&large),
+        "data.orna does not inline a Str over 64 KiB"
+    );
+    assert_eq!(
+        std::fs::read_to_string(row.row_path.join("title.txt")).unwrap(),
+        large,
+        "title.txt holds the full large Str"
     );
     row.unmount();
     assert_title(&row.stored_row().await, &large);
+}
+
+#[tokio::test]
+/// A save that shrinks a large Str to the 64 KiB bound or below returns it inline and removes its `.txt` sibling (profiles/vfs-1.md:76-79). A handle opened on the old `.txt` keeps reading the bytes it captured.
+async fn cwd_mount_shrunk_str_drops_its_text_sibling() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let large: String = (0..300_000u32)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect();
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{large}\", }}")),
+        "large Str save",
+    );
+    let text_path = row.row_path.join("title.txt");
+    let mut pinned = std::fs::File::open(&text_path).unwrap();
+    assert_saved(
+        &row.save("small", "{ title: \"small\", }"),
+        "shrinking Str save",
+    );
+    assert!(
+        !text_path.exists(),
+        "the stale title.txt leaves the row directory once the Str is inline again"
+    );
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains("\"small\""),
+        "data.orna inlines the shrunk Str: {document}"
+    );
+    use std::io::Read as _;
+    let mut captured = String::new();
+    pinned.read_to_string(&mut captured).unwrap();
+    drop(pinned);
+    assert_eq!(
+        captured, large,
+        "an open handle keeps reading the pinned title.txt bytes"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "small");
+}
+
+/// `count` bytes of ASCII text, so a Str built from it is over the inline bound when `count` is.
+fn ascii_text(count: usize) -> String {
+    (0..count).map(|index| char::from(b'a' + (index % 26) as u8)).collect()
+}
+
+/// Writes `document` to `path` through a write-intent open and syncs it, as an editor's save does.
+fn write_text_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
+    let mut file = File::create(path)?;
+    file.write_all(document.as_bytes())?;
+    file.sync_all()
+}
+
+/// The leading `"..."` string literal of `text`, honouring backslash escapes.
+fn leading_string_literal(text: &str) -> &str {
+    let bytes = text.as_bytes();
+    assert_eq!(bytes.first(), Some(&b'"'), "a string literal starts the field: {text:?}");
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return &text[..=index],
+            _ => index += 1,
+        }
+    }
+    panic!("the string literal is unterminated: {text:?}");
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:76-80: a `.txt` projection is byte-exact UTF-8 in both directions. NUL, quotes, backslashes, CR/LF, tabs, control characters, braces and astral scalars survive a large `.txt`, and survive the inline literal `data.orna` holds once the Str shrinks back under the bound.
+async fn cwd_mount_text_round_trips_special_characters_through_document() {
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024))),
+        "large Str save",
+    );
+    let title = row.row_path.join("title.txt");
+    let special = "nul\0 quote\" back\\slash\nlf\r\ncrlf\ttab {brace} bell\u{7} astral\u{1F600} é";
+    let oversized = special.repeat(1_200);
+    assert!(oversized.len() > 64 * 1024, "the replacement stays over the inline bound");
+    write_text_and_sync(&title, &oversized).expect("a large UTF-8 replacement is accepted");
+    assert_eq!(std::fs::read(&title).unwrap(), oversized.as_bytes(), "the .txt is byte-exact");
+
+    write_text_and_sync(&title, special).expect("a short replacement is accepted");
+    assert!(!title.exists(), "a short replacement is inline");
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    let start = document.find("title: ").expect("data.orna names the title") + "title: ".len();
+    let literal = leading_string_literal(&document[start..]);
+    let evaluated = orna_evaluator_v1::evaluate_expression(
+        literal,
+        &std::collections::BTreeMap::new(),
+        orna_evaluator_v1::Limits::default(),
+    )
+    .expect("the inline title literal evaluates");
+    assert_eq!(
+        evaluated.raw(),
+        &orna_foundation_v1::OvbRaw::Text(special.to_owned()),
+        "the literal evaluates back to the written text: {literal}"
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, special);
+}
+
+#[tokio::test]
+/// ORNA-VFS-009 and 41-vfs.md EDIT-1: a `.txt` write whose baseline predates another writer's row change is refused with EAGAIN and keeps the accepted Str. A later write commits against the refreshed row, and the other writer's field survives.
+async fn cwd_mount_text_write_after_owner_advances_row_is_stale_then_retries() {
+    let Some(mut row) = mount_music_row_with_source(
+        "pub table Music(id: Str) { title: Str, artist: Str, }\n",
+        "{ title: \"before\", artist: \"Kieran\", }\n",
+    )
+    .await
+    else {
+        return;
+    };
+    let big = ascii_text(70 * 1024);
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{big}\", artist: \"Kieran\", }}")),
+        "large Str save",
+    );
+    let repository = row.repository_directory.path().to_path_buf();
+    let title = row.row_path.join("title.txt");
+    let mut stale = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&title)
+        .expect("a write-intent open captures the baseline");
+    owner_edit_row_text(&repository, "artist: \"Kieran\"", "artist: \"Other\"");
+    stale.write_all(b"stale replacement").expect("the bytes are accepted into the handle");
+    let refused = stale
+        .sync_all()
+        .expect_err("a write against a row another writer advanced is stale");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN));
+    drop(stale);
+    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "a stale write keeps the Str");
+    let retained = std::fs::read_dir(row.repository.runtime_paths().root().join("vfs-retained-drafts-v1"))
+        .expect("the refused candidate is kept in recovery storage (ORNA-VFS-009)")
+        .map(|entry| entry.expect("list retained draft").path())
+        .filter(|path| path.is_file())
+        .map(|path| std::fs::read(path).unwrap())
+        .map(|record| String::from_utf8_lossy(&record).into_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        retained
+            .iter()
+            .any(|record| record.contains("\nbytes 17\n") && record.ends_with("stale replacement")),
+        "the stale candidate was not retained: {retained:?}"
+    );
+
+    write_text_and_sync(&title, "retried replacement")
+        .expect("the retried write commits against the refreshed row");
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        document.contains("title: \"retried replacement\"") && document.contains("artist: \"Other\""),
+        "the retry keeps the other writer's artist: {document}"
+    );
+    row.unmount();
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:76-80 and 41-vfs.md: a large Str `.txt` projects a required field, not a Blob. Renaming it is refused with EPERM, and unlinking it while the field is required is refused with EPERM. The Str keeps its text and data.orna still names the file.
+async fn cwd_mount_required_text_rename_and_unlink_are_refused() {
+    let big = ascii_text(70 * 1024);
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{big}\", }}")),
+        "large Str save",
+    );
+    let title = row.row_path.join("title.txt");
+    let renamed = std::fs::rename(&title, row.row_path.join("title.md"))
+        .expect_err("a large Str .txt is not renamed");
+    assert_eq!(renamed.raw_os_error(), Some(EPERM));
+    let unlinked =
+        std::fs::remove_file(&title).expect_err("a required Str .txt is never unlinked");
+    assert_eq!(unlinked.raw_os_error(), Some(EPERM));
+    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the Str keeps its text");
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(document.contains("./title.txt"), "data.orna still names the .txt: {document}");
+    row.unmount();
+}
+
+#[tokio::test]
+/// profiles/vfs-1.md:110-111 and ORNA-VFS-013: unlinking the `.txt` of an optional large Str commits `null` for the field and removes the sibling file.
+async fn cwd_mount_optional_text_unlink_commits_null() {
+    let Some(mut row) = mount_music_row_with_source(
+        "pub table Music(id: Str) { title: Str?, }\n",
+        "{ title: \"before\", }\n",
+    )
+    .await
+    else {
+        return;
+    };
+    assert_saved(
+        &row.save("large", &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024))),
+        "large optional Str save",
+    );
+    let title = row.row_path.join("title.txt");
+    std::fs::remove_file(&title).expect("unlinking an optional large Str is accepted");
+    assert!(!title.exists(), "the unlinked optional Str has no file");
+    let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(document.contains("title: null"), "data.orna commits the optional Str as null: {document}");
+    row.unmount();
 }
