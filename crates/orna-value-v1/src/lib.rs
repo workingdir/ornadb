@@ -4794,12 +4794,28 @@ fn validate_anonymous_record(value: &Raw, fields: &[Raw], definitions: &[Raw]) -
     if values.len() != fields.len() {
         return Err(Error::InvalidValue);
     }
-    for (field, value) in fields.iter().zip(values) {
-        let field = array(field)?;
+    // Stored fields are ordered by encoded field key (ORNA-FORMAT-004), which
+    // need not match descriptor declaration order, so match each entry by key.
+    let mut prior = None;
+    for value in values {
         let entry = array(value)?;
-        if entry.len() != 2 || entry[0] != field[0] {
+        if entry.len() != 2 {
             return Err(Error::InvalidValue);
         }
+        let key = encode_raw(&entry[0])?;
+        if prior.as_ref().is_some_and(|x: &Vec<u8>| key <= *x) {
+            return Err(Error::DuplicateOrUnorderedMapKey);
+        }
+        prior = Some(key);
+        let field = fields
+            .iter()
+            .map(array)
+            .find_map(|field| match field {
+                Ok(field) if field.first() == Some(&entry[0]) => Some(Ok(field)),
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .ok_or(Error::InvalidValue)??;
         validate_stored_value_as_type(
             &entry[1],
             field.get(1).ok_or(Error::InvalidSchema)?,
