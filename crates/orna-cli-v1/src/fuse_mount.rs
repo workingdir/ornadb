@@ -1580,15 +1580,6 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
-    fn durable_save(&self) -> Result<VfsDurableSave, String> {
-        let expected_baseline_row = self
-            .expected_baseline_row
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        self.durable_save_with_baseline(expected_baseline_row)
-    }
-
     fn durable_save_with_baseline(
         &self,
         expected_baseline_row: Option<Vec<u8>>,
@@ -1647,6 +1638,15 @@ impl RowSaveContext {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    /// The CAS baseline an explicit `orna edit` saves against (41-vfs.md:75-77): the row's
+    /// durable image read when the save commits. The recorded baseline is not used: a plain
+    /// owner-routed edit leaves it at the row before that edit, so a later explicit edit would
+    /// be refused against its own predecessor.
+    fn explicit_edit_baseline(&self) -> Result<Option<Vec<u8>>, String> {
+        let key = runtime_table_key_bytes(&self.key)?;
+        self.temporary_baseline(&key)
     }
 
     fn temporary_target(
@@ -1722,7 +1722,19 @@ impl RowSaveContext {
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
     ) -> Result<(), DocumentCommitError> {
-        let save = self.durable_save().map_err(DocumentCommitError::Failed)?;
+        self.commit_document_against(draft, record_baseline, self.recorded_baseline())
+    }
+
+    /// Commits `draft` against `expected_baseline_row`, the durable row the save compares (CAS).
+    fn commit_document_against(
+        self: &Arc<Self>,
+        draft: &EditDraft<RowMapSnapshot>,
+        record_baseline: bool,
+        expected_baseline_row: Option<Vec<u8>>,
+    ) -> Result<(), DocumentCommitError> {
+        let save = self
+            .durable_save_with_baseline(expected_baseline_row)
+            .map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -2225,11 +2237,6 @@ impl WorkspaceFilesystem {
                         .cloned()
                         .ok_or_else(|| "Blob edit target is not an admitted row field".to_owned())?;
                     let initial = read_blob_bytes(&graph, &reference)?;
-                    let expected = save
-                        .expected_baseline_row
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone();
                     let image = Arc::new(VfsFileSnapshot::new(
                         row_image_pin(&save.source.rows),
                         Arc::<[u8]>::from([]),
@@ -2243,7 +2250,7 @@ impl WorkspaceFilesystem {
                             .runtime
                             .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                     );
-                    (save, initial, Some((target, scratch, field, expected)))
+                    (save, initial, Some((target, scratch, field)))
                 }
                 _ => {
                     return Err(if grouped_row {
@@ -2256,7 +2263,7 @@ impl WorkspaceFilesystem {
         };
         let reproject = blob_edit.is_none().then(|| (inode, Arc::clone(&save)));
         let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
-            Some((target, scratch, field, expected)) => Box::new(move |candidate, draft_path, record_baseline| {
+            Some((target, scratch, field)) => Box::new(move |candidate, draft_path, record_baseline| {
                 writer
                     .runtime
                     .block_on(async {
@@ -2267,6 +2274,9 @@ impl WorkspaceFilesystem {
                             format!("Blob candidate exceeds draft limits: {error:?}")
                         })
                     })
+                    .map_err(|error| retained_edit_error(&error, draft_path))?;
+                let expected = save
+                    .explicit_edit_baseline()
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
                     save.commit_blob_temporary(&target, &scratch, &field, expected, record_baseline)
@@ -2292,7 +2302,13 @@ impl WorkspaceFilesystem {
                             })
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    admit_edit_result(save.commit_document(&draft, record_baseline), draft_path)
+                    let expected = save
+                        .explicit_edit_baseline()
+                        .map_err(|error| retained_edit_error(&error, draft_path))?;
+                    admit_edit_result(
+                        save.commit_document_against(&draft, record_baseline, expected),
+                        draft_path,
+                    )
                 })
             }
         };
@@ -2333,12 +2349,12 @@ impl WorkspaceFilesystem {
     }
 
     /// Commits an explicit edit requested through the `user.orna.edit-commit`
-    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft`; the draft
+    /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft NUL digest`; the draft
     /// must be a regular editor draft in this repository's recovery store.
     fn commit_requested_edit(&self, request: &[u8]) -> Result<(), EditError> {
         use std::os::unix::ffi::OsStrExt as _;
         let fields: Vec<&[u8]> = request.split(|byte| *byte == 0).collect();
-        let [mode, path, draft_bytes] = fields.as_slice() else {
+        let [mode, path, draft_bytes, digest] = fields.as_slice() else {
             return Err("edit request is malformed".into());
         };
         let grouped_row = match *mode {
@@ -2369,12 +2385,18 @@ impl WorkspaceFilesystem {
             return Err("edit draft is outside the editor draft store".into());
         }
         let candidate = read_regular_draft(draft)?;
-        // ORNA-VFS-015: `edit --row` is this mount's own grouped row save, so the
-        // mount records the row it accepted and its next save compares against it
-        // (EDIT-1: explicit edits CAS their own read-to-save baseline). A plain
-        // `edit PATH` owner-routed by another writer leaves the mounted baseline
-        // unchanged, so the mount's next save is stale against that writer's row.
+        // ORNA-VFS-015: `edit --row` records the row it accepted as this mount's own grouped save.
+        // An explicit edit CASes against the durable row read at commit, not the mount's recorded
+        // baseline, which a plain owner-routed edit leaves at the row before it (41-vfs.md:75-77).
         let prepared = self.prepare_edit(Path::new(OsStr::from_bytes(path)), grouped_row)?;
+        // 41-vfs.md:75-77: the editor was seeded from the bytes the CLI read. If the mounted row
+        // moved since, that read is stale: nothing is written and the draft stays retained.
+        if edit_view_digest(&prepared.initial_bytes).as_bytes() != *digest {
+            return Err(EditError::Stale(format!(
+                "the mounted row changed after orna edit read it; nothing was written; draft retained at {}",
+                draft.display()
+            )));
+        }
         let reproject = prepared.reproject.clone();
         prepared.commit(&candidate, draft, grouped_row)?;
         if let Some((inode, save)) = reproject {
@@ -2399,6 +2421,12 @@ impl WorkspaceFilesystem {
             eprintln!("the accepted row document could not be re-projected: {error}");
         }
     }
+}
+
+/// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
+/// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
+pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// Reads an editor draft through one descriptor opened without following a
