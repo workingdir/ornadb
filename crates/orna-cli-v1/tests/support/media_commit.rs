@@ -255,7 +255,11 @@ pub async fn commit_source_captures_for_table(
     let mut paths_by_key = std::collections::BTreeMap::new();
     let mut retained_sources = Vec::with_capacity(captures.len());
     for capture in captures {
-        let logical_path = format!("{table_name}/{}.orna", capture.key);
+        // Admission decodes each logical path component with the source path
+        // encoding, so the fixture encodes the key the same way.
+        let encoded_key = orna_value_v1::path_encode_component(capture.key)
+            .expect("the fixture key has a source path encoding");
+        let logical_path = format!("{table_name}/{encoded_key}.orna");
         let row_source = capture.source_row;
         let mut blob_fields = Vec::with_capacity(capture.blob_fields.len());
         for (field_name, expression) in capture.blob_fields {
