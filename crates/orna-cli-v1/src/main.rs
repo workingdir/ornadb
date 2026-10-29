@@ -23,6 +23,7 @@ mod cli_serve;
 mod media_range;
 mod repl;
 mod sys_host;
+mod table_schema;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
@@ -3631,7 +3632,7 @@ fn run_repl_input(
         let mut validator = match transactional_loaded_project_candidate_validator(
             &transactions.project,
             &transactions.identities,
-            cwd_generation,
+            Some(cwd_generation),
             Arc::clone(&transactions.table_object_ids),
             Limits::default(),
         ) {

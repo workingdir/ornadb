@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -23,12 +23,13 @@ use orna_project_v1::{
 use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
     GraphError, HistoricalFormatContext, KeyRange, NativeGraphContext, NativeOid, OrpBlobBinding,
-    Repository, RepositoryReadScope, RowMapSnapshot, RuntimeGeneration, TypedKey,
+    Repository, RepositoryReadScope, RowMapSnapshot, TypedKey,
     MountRowBaselines,
 };
 use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
+    TableSchemaIdentity,
     vfs::{
         CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
@@ -1002,20 +1003,6 @@ impl MountWriter {
             .map_err(|_| "mounted editor runtime snapshot was already captured".to_owned())
     }
 
-    fn cwd_generation(&self) -> Result<orna_repository_v1::CwdGeneration, String> {
-        let capture = self
-            .runtime
-            .block_on(self.state.capture())
-            .map_err(|error| format!("mounted editor CWD could not be captured: {error:?}"))?;
-        let generation = u64::try_from(capture.generation())
-            .map_err(|_| "mounted editor runtime generation is invalid".to_owned())?;
-        self.repository
-            .cwd_generation(RuntimeGeneration::new(generation))
-            .map_err(|error| {
-                format!("mounted editor repository generation is unavailable: {error:?}")
-            })
-    }
-
     fn row_baseline<'a>(
         &'a self,
         table: &RuntimeTableIdentity,
@@ -1242,7 +1229,7 @@ impl MountWriter {
         let validator = transactional_loaded_project_candidate_validator(
             &self.project,
             &self.identities,
-            coordinates.cwd_generation().clone(),
+            None,
             Arc::clone(&row.table_object_ids),
             EvaluatorLimits::default(),
         )
@@ -1251,8 +1238,14 @@ impl MountWriter {
                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
             )
         })?;
+        let live_repository = self.repository.clone();
+        let live_table = row.table.object_id();
         let candidate = VfsSaveCandidate::new(replacement, validator)
-            .with_protected_content_transfers(replacement_bytes.clone(), content_transfers);
+            .with_protected_content_transfers(replacement_bytes.clone(), content_transfers)
+            .with_live_schema_identity(move || {
+                crate::table_schema::committed_table_schema_identity(&live_repository, live_table)
+                    .ok()
+            });
         Ok((candidate, replacement_bytes))
     }
 }
@@ -1580,33 +1573,38 @@ impl std::fmt::Display for DocumentCommitError {
 }
 
 impl RowSaveContext {
-    /// The save for one document commit, carrying the CWD generation the handle captured
-    /// when it opened or when its last accepted save captured the live one
-    /// (profiles/vfs-1.md:91-92). The stale check runs inside admission, after the
-    /// NoCandidate and baseline checks (profiles/vfs-1.md:138 EAGAIN).
-    fn durable_document_save(
+    fn durable_save(
         &self,
-        opened: &orna_repository_v1::CwdGeneration,
-    ) -> Result<VfsDurableSave, DocumentCommitError> {
-        let key = runtime_table_key_bytes(&self.key).map_err(DocumentCommitError::Failed)?;
-        Ok(VfsDurableSave::new(
-            self.writer.owner_id,
-            opened.clone(),
-            self.table.clone(),
-            key,
-        )
-        .with_expected_baseline_row(self.recorded_baseline()))
+        schema_identity: TableSchemaIdentity,
+    ) -> Result<VfsDurableSave, String> {
+        let expected_baseline_row = self
+            .expected_baseline_row
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        self.durable_save_at(expected_baseline_row, schema_identity)
     }
 
     fn durable_save_with_baseline(
         &self,
         expected_baseline_row: Option<Vec<u8>>,
     ) -> Result<VfsDurableSave, String> {
-        let cwd_generation = self.writer.cwd_generation()?;
+        let schema_identity = crate::table_schema::committed_table_schema_identity(
+            &self.writer.repository,
+            self.table.object_id(),
+        )?;
+        self.durable_save_at(expected_baseline_row, schema_identity)
+    }
+
+    fn durable_save_at(
+        &self,
+        expected_baseline_row: Option<Vec<u8>>,
+        schema_identity: TableSchemaIdentity,
+    ) -> Result<VfsDurableSave, String> {
         let key = runtime_table_key_bytes(&self.key)?;
         Ok(VfsDurableSave::new(
             self.writer.owner_id,
-            cwd_generation,
+            schema_identity,
             self.table.clone(),
             key,
         )
@@ -1730,17 +1728,9 @@ impl RowSaveContext {
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
-        opened: &orna_repository_v1::CwdGeneration,
+        opened: &TableSchemaIdentity,
     ) -> Result<(), DocumentCommitError> {
-        // The live generation is read outside the runtime's locks: admission runs inside the
-        // runtime and cannot block on it. A generation that moved since the handle captured it
-        // is stale (profiles/vfs-1.md:138 EAGAIN). Admission refuses it only after the
-        // NoCandidate, idempotent and baseline checks, so a clean handle still syncs.
-        let live = self.writer.cwd_generation().map_err(DocumentCommitError::Failed)?;
-        let moved = &live != opened;
-        let refused = Arc::new(AtomicBool::new(false));
-        let refused_flag = Arc::clone(&refused);
-        let save = self.durable_document_save(opened)?;
+        let save = self.durable_save(opened.clone()).map_err(DocumentCommitError::Failed)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
@@ -1752,12 +1742,6 @@ impl RowSaveContext {
                 &self.writer.state,
                 save,
                 move |coordinates, bytes| async move {
-                    if moved {
-                        refused_flag.store(true, Ordering::SeqCst);
-                        return Err(orna_runtime_v1::TableActivationError::Runtime(
-                            orna_runtime_v1::RuntimeError::InvalidTableMutation,
-                        ));
-                    }
                     let (candidate, row_bytes) =
                         row_context
                             .writer
@@ -1784,7 +1768,6 @@ impl RowSaveContext {
                 "mounted row document was rejected by semantic admission".into(),
             )),
             Ok(TemporaryRenameOutcome::Stale { .. }) => Err(DocumentCommitError::Stale),
-            Err(_) if refused.load(Ordering::SeqCst) => Err(DocumentCommitError::Stale),
             Err(error) => Err(save_failure("mounted row save failed", error)),
         }
     }
@@ -2300,9 +2283,11 @@ impl WorkspaceFilesystem {
                 )
             }),
             None => {
-                let opened = writer.cwd_generation().map_err(|error| {
-                    format!("edit could not capture the CWD generation: {error}")
-                })?;
+                let opened = crate::table_schema::committed_table_schema_identity(
+                    &writer.repository,
+                    save.table.object_id(),
+                )
+                .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
                 let draft = Arc::new(
                     writer
                         .runtime
@@ -2320,7 +2305,10 @@ impl WorkspaceFilesystem {
                             })
                         })
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    admit_edit_result(save.commit_document(&draft, record_baseline, &opened), draft_path)
+                    admit_edit_result(
+                        save.commit_document(&draft, record_baseline, &opened),
+                        draft_path,
+                    )
                 })
             }
         };
@@ -2661,8 +2649,7 @@ enum OpenFile {
     Document(
         Arc<RowSaveContext>,
         Arc<EditDraft<RowMapSnapshot>>,
-        // The generation the handle's next save is based on. Duplicated descriptors share it.
-        Arc<Mutex<orna_repository_v1::CwdGeneration>>,
+        Arc<Mutex<TableSchemaIdentity>>,
     ),
     Temporary(
         Arc<RowSaveContext>,
@@ -3319,7 +3306,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
-        opened: &Arc<Mutex<orna_repository_v1::CwdGeneration>>,
+        opened: &Arc<Mutex<TableSchemaIdentity>>,
     ) -> Result<(), DocumentCommitError> {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
@@ -3355,16 +3342,17 @@ impl WorkspaceFilesystem {
                 None => error,
             });
         }
-        // The accepted save moved the CWD generation. The handle's next save is based on the
-        // accepted state, so it captures the live generation (profiles/vfs-1.md:100).
-        match save.writer.cwd_generation() {
-            Ok(generation) => {
-                *opened
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) = generation;
+        // The accepted save moved the table schema. The handle's next save is based on the
+        // accepted state, so it captures the live identity.
+        match crate::table_schema::committed_table_schema_identity(
+            &save.writer.repository,
+            save.table.object_id(),
+        ) {
+            Ok(identity) => {
+                *opened.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
             }
             Err(error) => eprintln!(
-                "mounted document could not capture the CWD generation after its save: {error}"
+                "mounted document could not capture the table schema after its save: {error}"
             ),
         }
         let bytes = save
@@ -4626,10 +4614,13 @@ impl Filesystem for WorkspaceFilesystem {
             reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
             return;
         }
-        let opened = match save.writer.cwd_generation() {
-            Ok(generation) => generation,
+        let schema_identity = match crate::table_schema::committed_table_schema_identity(
+            &save.writer.repository,
+            save.table.object_id(),
+        ) {
+            Ok(identity) => identity,
             Err(error) => {
-                eprintln!("mounted document open could not capture the CWD generation: {error}");
+                eprintln!("mounted document open could not capture the table schema: {error}");
                 draft_state.unresolved_handles.remove(&handle);
                 reply.error(Errno::EIO);
                 return;
@@ -4651,7 +4642,10 @@ impl Filesystem for WorkspaceFilesystem {
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(handle, OpenFile::Document(save, draft, Arc::new(Mutex::new(opened))));
+            .insert(
+                handle,
+                OpenFile::Document(save, draft, Arc::new(Mutex::new(schema_identity))),
+            );
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
