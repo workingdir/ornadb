@@ -2784,17 +2784,32 @@ async fn mount_captured_media(
     })
 }
 
-/// Mounts `Music/london` over a repository whose row has a `title` Str, a required Blob `content`
-/// (`tone.mp3`) and an optional Blob `cover` (`cover.png`), both captured from a media root.
-/// Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
+/// Mounts `Music/london` over the plain titled cover schema: a `title` Str, a required Blob
+/// `content` (`tone.mp3`) and an optional Blob `cover` (`cover.png`), both captured from a media
+/// root. Returns `None` when FUSE is opted out or its prerequisites are optional and absent.
 async fn mount_titled_cover_row(content: &[u8], cover: &[u8]) -> Option<MountedBlobRow> {
+    mount_blob_row_with_source(
+        "pub table Music(id: Str) { title: Str, content: Blob, cover: Blob?, }\n",
+        content,
+        cover,
+    )
+    .await
+}
+
+/// Mounts `Music/london` over `source`, which declares the `title`, `content` and `cover` fields
+/// of [`mount_titled_cover_row`]. Returns `None` when FUSE is opted out or its prerequisites are
+/// optional and absent.
+async fn mount_blob_row_with_source(
+    source: &str,
+    content: &[u8],
+    cover: &[u8],
+) -> Option<MountedBlobRow> {
     if !fuse_test_available() {
         return None;
     }
     let media_root = TempDir::new().unwrap();
     std::fs::write(media_root.path().join("tone.mp3"), content).unwrap();
     std::fs::write(media_root.path().join("cover.png"), cover).unwrap();
-    let source = "pub table Music(id: Str) { title: Str, content: Blob, cover: Blob?, }\n";
     let root = format!("{:?}", media_root.path().to_string_lossy().as_ref());
     let content_capture = format!(
         "sys.blob.annotate(sys.blob.capture_file({root}, \"tone.mp3\", 4194304), \"audio/mpeg\")"
@@ -3384,6 +3399,8 @@ async fn cwd_mount_blob_read_write_open_is_coherent() {
 const EPERM: i32 = 1;
 /// POSIX `EAGAIN` (Linux errno 11): a stale-baseline CAS refusal for a Blob replacement (ORNA-VFS-009).
 const EAGAIN: i32 = 11;
+/// POSIX `EINVAL` (Linux errno 22): a document the schema refuses (profiles/vfs-1.md errno table).
+const EINVAL: i32 = 22;
 /// POSIX `EDQUOT` (Linux errno 122): the per-mount unbound scratch cap (41-vfs.md:67).
 const EDQUOT: i32 = 122;
 
@@ -3617,6 +3634,41 @@ async fn cwd_mount_blob_rename_after_owner_advances_row_is_stale_then_retries() 
     );
     assert_eq!(std::fs::read(&remounted_blob).unwrap(), content);
     unmount_and_reap(&repository, &mut remounted);
+}
+
+#[tokio::test]
+/// ORNA-VFS-013 and profiles/vfs-1.md: when the table schema refuses the `null` that unlinking an optional Blob would commit, the unlink fails with EINVAL, the file keeps its bytes and data.orna keeps the descriptor.
+async fn cwd_mount_optional_blob_unlink_refused_by_schema_keeps_file() {
+    if !fuse_test_available() {
+        return;
+    }
+    let content = lcg_bytes(0x7171_0000_0000_0001, 16 * 1024 + 5);
+    let cover = lcg_bytes(0x7171_0000_0000_0002, 8 * 1024 + 9);
+    let Some(mut row) = mount_blob_row_with_source(
+        "pub table Music(id: Str) {\n    title: Str,\n    content: Blob,\n    cover: Blob?,\n    assert every(track => track.cover != null);\n}\n",
+        &content,
+        &cover,
+    )
+    .await
+    else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let cover_path = row_path.join("cover.png");
+    let document_before = std::fs::read(row_path.join("data.orna")).unwrap();
+    let unlinked = std::fs::remove_file(&cover_path).expect_err("the schema refuses a null cover");
+    assert_eq!(unlinked.raw_os_error(), Some(EINVAL));
+    assert_eq!(
+        std::fs::read(&cover_path).unwrap(),
+        cover,
+        "the optional Blob keeps its bytes"
+    );
+    assert_eq!(
+        std::fs::read(row_path.join("data.orna")).unwrap(),
+        document_before,
+        "data.orna keeps the descriptor"
+    );
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
 
 #[tokio::test]
