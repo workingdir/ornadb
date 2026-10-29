@@ -3197,6 +3197,11 @@ async fn cwd_mount_wav_blob_row_plays_through_seek_reads_and_exports_byte_for_by
             String::from_utf8_lossy(&output.stderr)
         );
     } else {
+        assert_ne!(
+            std::env::var_os("ORNA_REQUIRE_MEDIA_PLAYER").as_deref(),
+            Some(std::ffi::OsStr::new("1")),
+            "ORNA_REQUIRE_MEDIA_PLAYER=1 forbids skipping the mpv leg (mpv is not installed)"
+        );
         eprintln!("SKIP: mpv is not installed; the seek and range reads are the decoder leg");
     }
 
