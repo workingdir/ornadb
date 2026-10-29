@@ -1,21 +1,29 @@
 //! Source-module writes in the workspace mount (ORNA-VFS-020; 41-vfs.md:97;
 //! profiles/vfs-1.md:66-80). A write-intent open of a projected source module
 //! takes a private candidate seeded from its committed bytes. Writes stay in
-//! memory and are never evaluated. fsync and close commit every dirty candidate
-//! as one group: the project must validate with the candidates as overlays, each
-//! disk file must still hold the baseline its candidate was derived from, and the
-//! files are replaced together or not at all. A refused candidate is retained
-//! (ORNA-VFS-009) and stays unresolved until a later commit accepts it.
+//! memory and are never evaluated. fsync and close commit the dirty candidates
+//! together: each candidate is judged against the committed tree, and the
+//! candidates that fail are refused and retained (ORNA-VFS-009). The remaining
+//! candidates are written together or not at all. A refused candidate stays
+//! unresolved until a later commit accepts it.
+//!
+//! The group is the set of dirty candidates, which the spec does not define
+//! (profiles/vfs-1.md states no cross-handle trigger). The sync trigger's errno
+//! reports only the trigger's own candidate, never another module's refusal.
 
 use super::*;
 
-/// Refusal causes recorded with a retained source candidate. Spec-silent names,
-/// chosen here; they appear in the unmount listing and the retained draft record.
-const SOURCE_INVALID: &str = "invalid_document";
-const SOURCE_STALE: &str = "stale_edit";
-const SOURCE_GROUP: &str = "group_refused";
-const SOURCE_WRITE_FAILED: &str = "write_failed";
+/// Refusal causes recorded with a retained source candidate (ORNA-VFS-009). The
+/// `sys.vfs.*` names follow the document causes in `DocumentCommitError::cause`.
+const SOURCE_INVALID: &str = "sys.vfs.invalid_document";
+const SOURCE_STALE: &str = "sys.vfs.stale_edit";
 const SOURCE_UNSYNCED: &str = "unsynced";
+
+/// Bound on candidate and baseline bytes across every source draft (EDQUOT).
+const SOURCE_DRAFT_TOTAL_BOUND_BYTES: usize = 4 * DRAFT_FILE_BOUND_BYTES;
+
+/// Validation attempts before a commit gives up because drafts kept changing.
+const SOURCE_COMMIT_ATTEMPTS: usize = 3;
 
 /// A source module's private candidate. `baseline` is the committed content the
 /// candidate was derived from; commit compares it with the disk file.
@@ -48,9 +56,28 @@ impl SourceDraft {
     }
 }
 
+/// A group member as it stood when its commit began.
+struct SourceMember {
+    inode: u64,
+    path: String,
+    baseline: Vec<u8>,
+    candidate: Vec<u8>,
+    dirty: bool,
+    refused: bool,
+}
+
+/// The verdict on one group member.
+enum SourceVerdict {
+    Accept,
+    /// The candidate fails the project check, or is not UTF-8.
+    Invalid(String),
+    /// The disk file no longer holds the baseline the candidate came from.
+    Stale,
+}
+
 impl WorkspaceFilesystem {
-    /// The committed bytes of a projected source module, or None for any other node.
-    fn source_committed_bytes(&self, inode: u64) -> Option<Vec<u8>> {
+    /// Runs `read` on the committed bytes of a projected source module. None for any other node.
+    fn with_source_committed<R>(&self, inode: u64, read: impl FnOnce(&[u8]) -> R) -> Option<R> {
         let state = self
             .state
             .lock()
@@ -59,9 +86,13 @@ impl WorkspaceFilesystem {
             return None;
         }
         match state.nodes.get(&inode).map(|node| &node.kind) {
-            Some(NodeKind::Bytes(bytes)) => Some(bytes.clone()),
+            Some(NodeKind::Bytes(bytes)) => Some(read(bytes.as_slice())),
             _ => None,
         }
+    }
+
+    fn source_committed_bytes(&self, inode: u64) -> Option<Vec<u8>> {
+        self.with_source_committed(inode, <[u8]>::to_vec)
     }
 
     fn source_writer(&self) -> Option<Arc<MountWriter>> {
@@ -113,15 +144,48 @@ impl WorkspaceFilesystem {
             .contains(&inode)
     }
 
-    /// The draft for `inode`. A clean draft is re-seeded from the committed bytes,
-    /// so it never carries content the disk no longer holds.
+    /// Fails with EDQUOT when a candidate of `candidate_len` bytes for `inode` would push
+    /// the drafts past the total bound. `rebase` means the draft is reseeded from the
+    /// committed bytes (a truncating open of a clean draft).
+    fn source_budget_fits(
+        &self,
+        draft_state: &DraftState,
+        inode: u64,
+        rebase: bool,
+        candidate_len: usize,
+    ) -> Result<(), Errno> {
+        let others: usize = draft_state
+            .source_drafts
+            .iter()
+            .filter(|(other, _)| **other != inode)
+            .map(|(_, draft)| draft.baseline.len() + draft.candidate.len())
+            .sum();
+        let baseline_len = match draft_state.source_drafts.get(&inode) {
+            Some(draft) if !(rebase && !draft.dirty) => draft.baseline.len(),
+            _ => self
+                .with_source_committed(inode, |bytes| bytes.len())
+                .ok_or(Errno::EBADF)?,
+        };
+        if others + baseline_len + candidate_len > SOURCE_DRAFT_TOTAL_BOUND_BYTES {
+            return Err(Errno::EDQUOT);
+        }
+        Ok(())
+    }
+
+    /// The draft for `inode`. A draft is seeded from the committed bytes only when none
+    /// exists, or when `rebase` asks for a clean draft to restart from the committed bytes.
+    /// A held refusal is otherwise kept, so the handle never loses its candidate silently.
     fn source_candidate_mut<'a>(
         &self,
         draft_state: &'a mut DraftState,
         inode: u64,
+        rebase: bool,
     ) -> Result<&'a mut SourceDraft, Errno> {
-        let clean = !matches!(draft_state.source_drafts.get(&inode), Some(draft) if draft.dirty);
-        if clean {
+        let reseed = match draft_state.source_drafts.get(&inode) {
+            None => true,
+            Some(draft) => rebase && !draft.dirty,
+        };
+        if reseed {
             let committed = self.source_committed_bytes(inode).ok_or(Errno::EBADF)?;
             draft_state
                 .source_drafts
@@ -136,7 +200,8 @@ impl WorkspaceFilesystem {
     }
 
     /// Opens a source module for writing (ORNA-VFS-020). A mount without a writer
-    /// has nothing to commit through, so the open is refused with EPERM.
+    /// has nothing to commit through, so the open is refused with EPERM. A truncating
+    /// open starts the candidate empty from the committed bytes.
     pub(super) fn source_open_write(
         &self,
         draft_state: &mut DraftState,
@@ -144,9 +209,12 @@ impl WorkspaceFilesystem {
         truncate: bool,
         pid: u32,
     ) -> Result<u64, Errno> {
-        self.source_committed_bytes(inode).ok_or(Errno::EPERM)?;
+        self.with_source_committed(inode, |_| ()).ok_or(Errno::EPERM)?;
         self.source_writer().ok_or(Errno::EPERM)?;
-        let draft = self.source_candidate_mut(draft_state, inode)?;
+        if truncate {
+            self.source_budget_fits(&*draft_state, inode, true, 0)?;
+        }
+        let draft = self.source_candidate_mut(draft_state, inode, truncate)?;
         if truncate {
             draft.candidate.clear();
             draft.dirty = true;
@@ -182,7 +250,12 @@ impl WorkspaceFilesystem {
         }
         let start = usize::try_from(offset).map_err(|_| Errno::EFBIG)?;
         let end = usize::try_from(end).map_err(|_| Errno::EFBIG)?;
-        let draft = self.source_candidate_mut(draft_state, inode)?;
+        let current = draft_state
+            .source_drafts
+            .get(&inode)
+            .map_or(0, |draft| draft.candidate.len());
+        self.source_budget_fits(&*draft_state, inode, false, end.max(current))?;
+        let draft = self.source_candidate_mut(draft_state, inode, false)?;
         if draft.candidate.len() < end {
             draft.candidate.resize(end, 0);
         }
@@ -205,7 +278,8 @@ impl WorkspaceFilesystem {
             return Err(Errno::EDQUOT);
         }
         let size = usize::try_from(size).map_err(|_| Errno::EFBIG)?;
-        let draft = self.source_candidate_mut(draft_state, inode)?;
+        self.source_budget_fits(&*draft_state, inode, false, size)?;
+        let draft = self.source_candidate_mut(draft_state, inode, false)?;
         draft.candidate.resize(size, 0);
         draft.dirty = true;
         draft.refusal = None;
@@ -219,18 +293,16 @@ impl WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let committed;
-        let bytes: &[u8] = match draft_state.source_drafts.get(&inode) {
-            Some(draft) => &draft.candidate,
-            None => {
-                committed = self.source_committed_bytes(inode).unwrap_or_default();
-                &committed
-            }
+        let window = |bytes: &[u8]| {
+            let len = bytes.len();
+            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(len);
+            let end = start.saturating_add(size as usize).min(len);
+            bytes[start..end].to_vec()
         };
-        let len = bytes.len();
-        let start = usize::try_from(offset).unwrap_or(usize::MAX).min(len);
-        let end = start.saturating_add(size as usize).min(len);
-        bytes[start..end].to_vec()
+        match draft_state.source_drafts.get(&inode) {
+            Some(draft) => window(&draft.candidate),
+            None => self.with_source_committed(inode, window).unwrap_or_default(),
+        }
     }
 
     /// The candidate length of a source module, for attributes of an open handle.
@@ -239,11 +311,12 @@ impl WorkspaceFilesystem {
             .draft_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(draft) = draft_state.source_drafts.get(&inode) {
-            return draft.candidate.len() as u64;
+        match draft_state.source_drafts.get(&inode) {
+            Some(draft) => draft.candidate.len() as u64,
+            None => self
+                .with_source_committed(inode, |bytes| bytes.len() as u64)
+                .unwrap_or(0),
         }
-        self.source_committed_bytes(inode)
-            .map_or(0, |bytes| bytes.len() as u64)
     }
 
     /// Forgets the unresolved and dirty state of every handle open on `inodes`.
@@ -276,7 +349,10 @@ impl WorkspaceFilesystem {
         cause: &'static str,
         keep_dirty: bool,
     ) -> Option<Errno> {
-        let draft = draft_state.source_drafts.get_mut(&inode)?;
+        let Some(draft) = draft_state.source_drafts.get_mut(&inode) else {
+            eprintln!("{path}: not accepted ({cause}); no candidate is held to retain");
+            return Some(Errno::EIO);
+        };
         let (draft_id, failure) = match retain_source_candidate(writer, path, cause, &draft.candidate) {
             Ok(id) => (Some(id), None),
             Err(error) => {
@@ -295,156 +371,189 @@ impl WorkspaceFilesystem {
         failure
     }
 
-    /// Refuses every candidate of a group with one cause. Returns the worst retention errno.
-    fn refuse_source_group(
-        &self,
-        draft_state: &mut DraftState,
-        writer: &MountWriter,
-        group: &[(u64, String)],
-        cause: &'static str,
-    ) -> Option<Errno> {
-        let mut worst = None;
-        for (inode, path) in group {
-            if let Some(errno) = self.refuse_source(draft_state, writer, *inode, path, cause, true) {
-                worst = worst_retention_errno(worst, errno);
-            }
+    /// Commits the dirty source candidates (fsync or close of a source handle). The
+    /// commit gate serializes groups; the draft lock is held only for snapshots and
+    /// applied results, so validation does not stall other handles.
+    pub(super) fn source_sync(&self, trigger: u64) -> Result<(), Errno> {
+        let _gate = self
+            .source_gate
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self
+            .draft_state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .quiescing
+        {
+            return Err(Errno::EBUSY);
         }
-        worst
+        self.source_group_commit(trigger).map_err(|error| {
+            eprintln!("source commit did not accept the group: {error}");
+            error.errno()
+        })
     }
 
-    /// Commits every dirty source candidate as one group (fsync or close). A refused
-    /// group keeps its candidates dirty and retained; an accepted group removes its drafts.
-    pub(super) fn source_commit(
-        &self,
-        draft_state: &mut DraftState,
-    ) -> Result<(), DocumentCommitError> {
-        let dirty: Vec<u64> = draft_state
-            .source_drafts
-            .iter()
-            .filter(|(_, draft)| draft.dirty)
-            .map(|(inode, _)| *inode)
-            .collect();
-        if dirty.is_empty() {
-            return Ok(());
-        }
+    /// The commit itself, run under the commit gate. `trigger` is the inode of the
+    /// handle that asked for the sync. Its errno reports only its own candidate.
+    fn source_group_commit(&self, trigger: u64) -> Result<(), DocumentCommitError> {
         let writer = self
             .source_writer()
             .ok_or_else(|| DocumentCommitError::Failed("mount has no writer".to_owned()))?;
-        let group = dirty
-            .iter()
-            .map(|inode| {
-                self.source_path(*inode)
-                    .map(|path| (*inode, path))
-                    .ok_or_else(|| {
-                        DocumentCommitError::Failed("source module path is unavailable".to_owned())
-                    })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        // Admission: the whole project must validate with the group as overlays.
-        if let Err(detail) = admit_source_group(&writer, draft_state, &group) {
-            eprintln!("source save refused ({SOURCE_INVALID}): {detail}");
-            return Err(
-                match self.refuse_source_group(draft_state, &writer, &group, SOURCE_INVALID) {
-                    Some(errno) => DocumentCommitError::Unretained {
-                        errno,
-                        cause: SOURCE_INVALID,
-                    },
-                    None => DocumentCommitError::Rejected(detail),
-                },
-            );
-        }
-
-        // Compare-and-swap: each disk file must still hold the baseline its candidate came from.
         let root = writer.repository.worktree().to_path_buf();
-        let mut stale = Vec::new();
-        let mut disk_bytes = Vec::new();
-        for (inode, path) in &group {
-            let baseline = &draft_state.source_drafts[inode].baseline;
-            let disk = checked_project_source_path(&root, path)
-                .ok()
-                .and_then(|disk| std::fs::read(disk).ok());
-            if disk.as_deref() != Some(baseline.as_slice()) {
-                stale.push(*inode);
-            }
-            disk_bytes.push((*inode, disk));
-        }
-        if !stale.is_empty() {
-            // A stale file keeps its retained candidate and re-projects the disk content.
-            // The rest of the group is refused as a unit and stays pending. The handles
-            // stay unresolved, so a later fsync or close cannot acknowledge the stale write.
-            let mut worst = None;
-            for (inode, path) in &group {
-                let (cause, keep_dirty) = if stale.contains(inode) {
-                    (SOURCE_STALE, false)
-                } else {
-                    (SOURCE_GROUP, true)
-                };
-                if let Some(errno) =
-                    self.refuse_source(draft_state, &writer, *inode, path, cause, keep_dirty)
-                {
-                    worst = worst_retention_errno(worst, errno);
-                }
-            }
-            for (inode, disk) in disk_bytes {
-                if let (true, Some(bytes)) = (stale.contains(&inode), disk) {
-                    self.set_source_node_bytes(inode, bytes);
-                }
-            }
-            return Err(match worst {
-                Some(errno) => DocumentCommitError::Unretained {
-                    errno,
-                    cause: SOURCE_STALE,
-                },
-                None => DocumentCommitError::Stale,
-            });
-        }
-
-        // Replacement: every file is written, or the whole group is restored.
-        for (index, (inode, path)) in group.iter().enumerate() {
-            let draft = &draft_state.source_drafts[inode];
-            let result = match checked_project_source_path(&root, path) {
-                Ok(disk) => write_source_atomically(&disk, &draft.baseline, &draft.candidate),
-                Err(_) => Err(std::io::Error::other("source path is unavailable")),
+        let mut trigger_in_group = false;
+        for _ in 0..SOURCE_COMMIT_ATTEMPTS {
+            let (members, siblings) = {
+                let draft_state = self
+                    .draft_state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.source_snapshot(&draft_state, trigger)?
             };
-            if let Err(error) = result {
-                for (done, done_path) in group[..index].iter().rev() {
-                    let done_draft = &draft_state.source_drafts[done];
-                    let restored = checked_project_source_path(&root, done_path).is_ok_and(|disk| {
-                        restore_source_after_failed_write(
-                            &disk,
-                            &done_draft.baseline,
-                            &done_draft.candidate,
-                        )
-                    });
-                    if !restored {
-                        eprintln!(
-                            "source {done_path} could not be restored after a failed group save"
-                        );
+            trigger_in_group = members.iter().any(|member| member.inode == trigger);
+            if members.is_empty() {
+                return Ok(());
+            }
+
+            // Validation reads the disk and runs the project check without the draft lock.
+            let verdicts = source_verdicts(&writer, &root, &members);
+            let sibling_disk: Vec<(u64, String, Option<Vec<u8>>)> = siblings
+                .into_iter()
+                .map(|(inode, path)| {
+                    let bytes = disk_bytes(&root, &path);
+                    (inode, path, bytes)
+                })
+                .collect();
+
+            let mut draft_state = self
+                .draft_state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // A write, release, or refusal since the snapshot invalidates the verdicts.
+            if !members
+                .iter()
+                .all(|member| draft_matches(draft_state.source_drafts.get(&member.inode), member))
+            {
+                continue;
+            }
+            // A sibling changed on disk after the project check read it, so the verdicts
+            // no longer describe the tree being replaced. Re-project it and stop.
+            let mut sibling_changed = false;
+            for (inode, path, expected) in &sibling_disk {
+                let current = disk_bytes(&root, path);
+                if &current != expected {
+                    sibling_changed = true;
+                    if let Some(bytes) = current {
+                        self.set_source_node_bytes(*inode, bytes);
                     }
                 }
-                let refused =
-                    self.refuse_source_group(draft_state, &writer, &group, SOURCE_WRITE_FAILED);
-                return Err(match refused {
-                    Some(errno) => DocumentCommitError::Unretained {
-                        errno,
-                        cause: SOURCE_WRITE_FAILED,
-                    },
-                    None => DocumentCommitError::Failed(format!(
-                        "source save for {path} failed: {error}"
-                    )),
-                });
             }
-        }
+            if sibling_changed {
+                eprintln!("source commit stopped: a sibling source module changed on disk");
+                return group_result(trigger_in_group, DocumentCommitError::Stale);
+            }
 
-        let inodes: Vec<u64> = group.iter().map(|(inode, _)| *inode).collect();
-        for inode in &inodes {
-            if let Some(draft) = draft_state.source_drafts.remove(inode) {
-                self.set_source_node_bytes(*inode, draft.candidate);
+            // Culprits are refused and retained; the rest of the group stays pending.
+            if verdicts
+                .iter()
+                .any(|verdict| !matches!(verdict, SourceVerdict::Accept))
+            {
+                let mut trigger_error = None;
+                for (member, verdict) in members.iter().zip(&verdicts) {
+                    let (cause, error) = match verdict {
+                        SourceVerdict::Accept => continue,
+                        SourceVerdict::Stale => {
+                            // The stale file keeps its retained candidate and re-projects the disk.
+                            if let Some(bytes) = disk_bytes(&root, &member.path) {
+                                self.set_source_node_bytes(member.inode, bytes);
+                            }
+                            (SOURCE_STALE, DocumentCommitError::Stale)
+                        }
+                        SourceVerdict::Invalid(detail) => {
+                            (SOURCE_INVALID, DocumentCommitError::Rejected(detail.clone()))
+                        }
+                    };
+                    let failure = self.refuse_source(
+                        &mut draft_state,
+                        &writer,
+                        member.inode,
+                        &member.path,
+                        cause,
+                        false,
+                    );
+                    if member.inode == trigger {
+                        trigger_error = Some(match failure {
+                            Some(errno) => DocumentCommitError::Unretained { errno, cause },
+                            None => error,
+                        });
+                    }
+                }
+                return if trigger_in_group {
+                    Err(trigger_error.unwrap_or_else(|| {
+                        DocumentCommitError::Failed(
+                            "source save refused: another candidate in the group was not accepted"
+                                .to_owned(),
+                        )
+                    }))
+                } else {
+                    Ok(())
+                };
             }
+
+            // Every candidate passed: the files are written together or not at all.
+            if let Err(detail) = write_source_group(&root, &members) {
+                return group_result(trigger_in_group, DocumentCommitError::Failed(detail));
+            }
+            let inodes: Vec<u64> = members.iter().map(|member| member.inode).collect();
+            for inode in &inodes {
+                if let Some(draft) = draft_state.source_drafts.remove(inode) {
+                    self.set_source_node_bytes(*inode, draft.candidate);
+                }
+            }
+            self.clear_source_handles(&mut draft_state, &inodes);
+            return Ok(());
         }
-        self.clear_source_handles(draft_state, &inodes);
-        Ok(())
+        group_result(trigger_in_group, DocumentCommitError::Stale)
+    }
+
+    /// The group for one commit: every dirty draft, plus the trigger's held refusal so
+    /// its own commit retries it. Returns the members and the other source modules.
+    fn source_snapshot(
+        &self,
+        draft_state: &DraftState,
+        trigger: u64,
+    ) -> Result<(Vec<SourceMember>, Vec<(u64, String)>), DocumentCommitError> {
+        let member_inodes: Vec<u64> = draft_state
+            .source_drafts
+            .iter()
+            .filter(|(inode, draft)| draft.dirty || (**inode == trigger && draft.refusal.is_some()))
+            .map(|(inode, _)| *inode)
+            .collect();
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut members = Vec::with_capacity(member_inodes.len());
+        for inode in &member_inodes {
+            let path = state.path_of(*inode).ok_or_else(|| {
+                DocumentCommitError::Failed("source module path is unavailable".to_owned())
+            })?;
+            let draft = &draft_state.source_drafts[inode];
+            members.push(SourceMember {
+                inode: *inode,
+                path,
+                baseline: draft.baseline.clone(),
+                candidate: draft.candidate.clone(),
+                dirty: draft.dirty,
+                refused: draft.refusal.is_some(),
+            });
+        }
+        let siblings = state
+            .source_nodes
+            .iter()
+            .filter(|inode| !member_inodes.contains(*inode))
+            .filter_map(|inode| state.path_of(*inode).map(|path| (*inode, path)))
+            .collect();
+        Ok((members, siblings))
     }
 
     /// Handles the close of a source handle (release). When no handle remains open
@@ -469,10 +578,24 @@ impl WorkspaceFilesystem {
             return;
         }
         if dirty && !refused {
-            let (Some(writer), Some(path)) = (self.source_writer(), self.source_path(inode)) else {
-                return;
-            };
-            self.refuse_source(draft_state, &writer, inode, &path, SOURCE_UNSYNCED, true);
+            match (self.source_writer(), self.source_path(inode)) {
+                (Some(writer), Some(path)) => {
+                    self.refuse_source(draft_state, &writer, inode, &path, SOURCE_UNSYNCED, true);
+                }
+                _ => {
+                    // Nothing can keep the candidate, so it is recorded as refused and unretained.
+                    eprintln!(
+                        "source module {inode}: candidate not retained at release (no writer or path)"
+                    );
+                    if let Some(draft) = draft_state.source_drafts.get_mut(&inode) {
+                        draft.dirty = false;
+                        draft.refusal = Some(SourceRefusal {
+                            cause: SOURCE_UNSYNCED,
+                            draft: None,
+                        });
+                    }
+                }
+            }
         }
     }
 
@@ -505,21 +628,128 @@ impl WorkspaceFilesystem {
     }
 }
 
-/// Validates the project with the group's candidates as overlays, the same check
-/// `check` runs on a saved tree. An invalid candidate is refused before any file is written.
-fn admit_source_group(
-    writer: &MountWriter,
-    draft_state: &DraftState,
-    group: &[(u64, String)],
-) -> Result<(), String> {
-    let mut overlays = BTreeMap::new();
-    for (inode, path) in group {
-        let candidate = &draft_state.source_drafts[inode].candidate;
-        let text = std::str::from_utf8(candidate).map_err(|_| format!("{path} is not UTF-8"))?;
-        overlays.insert(path.clone(), text.to_owned());
+/// The result of a group commit for the sync trigger: an error only when the trigger
+/// is a group member. A trigger outside the group has nothing pending to report.
+fn group_result(trigger_in_group: bool, error: DocumentCommitError) -> Result<(), DocumentCommitError> {
+    if trigger_in_group {
+        Err(error)
+    } else {
+        Ok(())
     }
+}
+
+/// Whether the draft still holds what the snapshot captured.
+fn draft_matches(draft: Option<&SourceDraft>, member: &SourceMember) -> bool {
+    draft.is_some_and(|draft| {
+        draft.dirty == member.dirty
+            && draft.refusal.is_some() == member.refused
+            && draft.baseline == member.baseline
+            && draft.candidate == member.candidate
+    })
+}
+
+/// The disk bytes of a source module, or None when the file cannot be read.
+fn disk_bytes(root: &Path, path: &str) -> Option<Vec<u8>> {
+    checked_project_source_path(root, path)
+        .ok()
+        .and_then(|disk| std::fs::read(disk).ok())
+}
+
+/// Judges each member: the disk must still hold its baseline, and its candidate must
+/// pass the project check. A candidate that fails alone is invalid. A group that fails
+/// only together is refused as a whole, and the verdict says so on stderr.
+fn source_verdicts(writer: &MountWriter, root: &Path, members: &[SourceMember]) -> Vec<SourceVerdict> {
+    let mut verdicts: Vec<SourceVerdict> = members
+        .iter()
+        .map(|member| {
+            if disk_bytes(root, &member.path).as_deref() == Some(member.baseline.as_slice()) {
+                SourceVerdict::Accept
+            } else {
+                SourceVerdict::Stale
+            }
+        })
+        .collect();
+    if verdicts
+        .iter()
+        .any(|verdict| matches!(verdict, SourceVerdict::Stale))
+    {
+        return verdicts;
+    }
+
+    let mut texts = BTreeMap::new();
+    for (index, member) in members.iter().enumerate() {
+        match std::str::from_utf8(&member.candidate) {
+            Ok(text) => {
+                texts.insert(member.path.clone(), text.to_owned());
+            }
+            Err(_) => {
+                verdicts[index] = SourceVerdict::Invalid(format!("{} is not UTF-8", member.path));
+            }
+        }
+    }
+    if texts.is_empty() {
+        return verdicts;
+    }
+    let Err(detail) = admit_source_overlays(writer, &texts) else {
+        return verdicts;
+    };
+
+    let mut blamed = false;
+    for (index, member) in members.iter().enumerate() {
+        if !matches!(verdicts[index], SourceVerdict::Accept) {
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(&member.candidate) else {
+            continue;
+        };
+        let alone = BTreeMap::from([(member.path.clone(), text.to_owned())]);
+        if let Err(solo) = admit_source_overlays(writer, &alone) {
+            verdicts[index] = SourceVerdict::Invalid(solo);
+            blamed = true;
+        }
+    }
+    if !blamed {
+        eprintln!("source group refused: {detail}; no candidate fails alone, so every candidate is refused");
+        for verdict in &mut verdicts {
+            if matches!(verdict, SourceVerdict::Accept) {
+                *verdict = SourceVerdict::Invalid(detail.clone());
+            }
+        }
+    }
+    verdicts
+}
+
+/// Writes every group member's candidate over its baseline. A failure restores the
+/// members already written, so the group lands whole or not at all.
+fn write_source_group(root: &Path, members: &[SourceMember]) -> Result<(), String> {
+    for (index, member) in members.iter().enumerate() {
+        let result = match checked_project_source_path(root, &member.path) {
+            Ok(disk) => write_source_atomically(&disk, &member.baseline, &member.candidate),
+            Err(_) => Err(std::io::Error::other("source path is unavailable")),
+        };
+        if let Err(error) = result {
+            for done in members[..index].iter().rev() {
+                let restored = checked_project_source_path(root, &done.path).is_ok_and(|disk| {
+                    restore_source_after_failed_write(&disk, &done.baseline, &done.candidate)
+                });
+                if !restored {
+                    eprintln!(
+                        "source {} could not be restored after a failed group save",
+                        done.path
+                    );
+                }
+            }
+            return Err(format!("source save for {} failed: {error}", member.path));
+        }
+    }
+    Ok(())
+}
+
+/// Validates the project with the given candidates as overlays, the same check `check`
+/// runs on a saved tree.
+fn admit_source_overlays(writer: &MountWriter, overlays: &BTreeMap<String, String>) -> Result<(), String> {
     let project = orna_project_v1::ProjectLoader::default()
-        .load_with_overlays(&writer.repository, &overlays)
+        .load_with_overlays(&writer.repository, overlays)
         .map_err(|error| format!("{error:?}"))?;
     let catalogue = project
         .production_catalogue()
