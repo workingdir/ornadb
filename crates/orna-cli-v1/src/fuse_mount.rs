@@ -95,7 +95,11 @@ fn refuse_unsupported(operation: &str) -> Errno {
 
 const VFS_SCRATCH_DIRECTORY: &str = "vfs-editor-scratch-v1";
 const VFS_SCRATCH_TEMP_PREFIX: &str = ".scratch-save-";
-const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS1";
+/// ORNAVFS2 records carry the schema identity captured when the scratch was created (ORNA-VFS-019).
+/// ORNAVFS1 records predate that identity. They are never bound to the live schema: at mount open
+/// their candidate is kept as a retained draft and the record is removed (`retain_legacy_scratch`).
+const VFS_SCRATCH_RECORD_MAGIC: &[u8; 8] = b"ORNAVFS2";
+const VFS_SCRATCH_RECORD_MAGIC_V1: &[u8; 8] = b"ORNAVFS1";
 
 #[derive(Clone, Debug)]
 struct TemporaryScratchIdentity {
@@ -108,8 +112,22 @@ struct TemporaryScratchIdentity {
 
 struct PersistedTemporaryScratch {
     identity: TemporaryScratchIdentity,
+    /// `None` for a legacy ORNAVFS1 record, which has no creation identity to keep.
+    schema_identity: Option<TableSchemaIdentity>,
     baseline: Option<Vec<u8>>,
     candidate: RecordedCandidate,
+}
+
+/// The persisted scratch records read at mount open, and the records that could not be read.
+struct ScratchLoad {
+    records: Vec<PersistedTemporaryScratch>,
+    unreadable: Vec<UnreadableScratch>,
+}
+
+/// A scratch record left on disk because it could not be read; the mount still opens.
+struct UnreadableScratch {
+    path: PathBuf,
+    reason: String,
 }
 
 /// Where a record's candidate lies inside its record file. The candidate is
@@ -155,6 +173,7 @@ impl VfsScratchStore {
     fn persist(
         &self,
         identity: &TemporaryScratchIdentity,
+        schema_identity: &TableSchemaIdentity,
         baseline: Option<&[u8]>,
         candidate: &CandidateSnapshot,
     ) -> Result<(), String> {
@@ -167,6 +186,9 @@ impl VfsScratchStore {
             .write_all(VFS_SCRATCH_RECORD_MAGIC)
             .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
         Self::write_identity(staged.as_file_mut(), identity)?;
+        staged
+            .write_all(schema_identity.bytes())
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
         Self::write_optional(staged.as_file_mut(), baseline)?;
         Self::write_candidate(staged.as_file_mut(), candidate)?;
         staged.as_file().sync_all().map_err(|error| {
@@ -183,8 +205,12 @@ impl VfsScratchStore {
         Self::sync_directory(&self.directory)
     }
 
-    fn load(&self) -> Result<Vec<PersistedTemporaryScratch>, String> {
+    /// Loads every persisted record. A record that cannot be read, or whose identity does not
+    /// match its name, is returned as unreadable and left on disk untouched so one bad record
+    /// cannot stop the mount from opening. Store-level failures still fail the load.
+    fn load(&self) -> Result<ScratchLoad, String> {
         let mut records = Vec::new();
+        let mut unreadable = Vec::new();
         let mut removed_staging = false;
         for entry in fs::read_dir(&self.directory)
             .map_err(|error| format!("temporary scratch records could not be listed: {error}"))?
@@ -192,30 +218,49 @@ impl VfsScratchStore {
             let entry = entry.map_err(|error| {
                 format!("temporary scratch record could not be inspected: {error}")
             })?;
+            let path = entry.path();
             let file_type = entry.file_type().map_err(|error| {
                 format!("temporary scratch record type could not be read: {error}")
             })?;
+            let name = entry.file_name().to_string_lossy().into_owned();
             if !file_type.is_file() {
-                return Err("temporary scratch store contains a non-file entry".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch store contains a non-file entry".into(),
+                });
+                continue;
             }
-            let name = entry
-                .file_name()
-                .into_string()
-                .map_err(|_| "temporary scratch record name is not UTF-8".to_owned())?;
             if name.starts_with(VFS_SCRATCH_TEMP_PREFIX) {
-                fs::remove_file(entry.path()).map_err(|error| {
+                fs::remove_file(&path).map_err(|error| {
                     format!("stale temporary scratch staging file could not be removed: {error}")
                 })?;
                 removed_staging = true;
                 continue;
             }
             if !name.ends_with(".scratch") {
-                return Err("temporary scratch store contains an unknown file".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch store contains an unknown file".into(),
+                });
+                continue;
             }
-            let record = Self::read_record(&entry.path())?;
-            Self::validate_identity(&record.identity)?;
+            let record = match Self::read_record(&path) {
+                Ok(record) => record,
+                Err(reason) => {
+                    unreadable.push(UnreadableScratch { path, reason });
+                    continue;
+                }
+            };
+            if let Err(reason) = Self::validate_identity(&record.identity) {
+                unreadable.push(UnreadableScratch { path, reason });
+                continue;
+            }
             if Self::record_name(&record.identity) != name {
-                return Err("temporary scratch record identity does not match its filename".into());
+                unreadable.push(UnreadableScratch {
+                    path,
+                    reason: "temporary scratch record identity does not match its filename".into(),
+                });
+                continue;
             }
             records.push(record);
         }
@@ -228,7 +273,8 @@ impl VfsScratchStore {
                 .cmp(&right.identity.logical_path)
                 .then_with(|| left.identity.name.cmp(&right.identity.name))
         });
-        Ok(records)
+        unreadable.sort_by(|left, right| left.path.cmp(&right.path));
+        Ok(ScratchLoad { records, unreadable })
     }
 
     fn remove(&self, identity: &TemporaryScratchIdentity) -> Result<(), String> {
@@ -391,10 +437,21 @@ impl VfsScratchStore {
         let mut magic = [0; 8];
         file.read_exact(&mut magic)
             .map_err(|error| format!("temporary scratch record header is incomplete: {error}"))?;
-        if &magic != VFS_SCRATCH_RECORD_MAGIC {
-            return Err("temporary scratch record has an unsupported format".into());
-        }
+        let legacy = match &magic {
+            VFS_SCRATCH_RECORD_MAGIC => false,
+            VFS_SCRATCH_RECORD_MAGIC_V1 => true,
+            _ => return Err("temporary scratch record has an unsupported format".into()),
+        };
         let identity = Self::read_identity(&mut file)?;
+        let schema_identity = if legacy {
+            None
+        } else {
+            let mut schema_bytes = [0; 32];
+            file.read_exact(&mut schema_bytes).map_err(|error| {
+                format!("temporary scratch record schema identity is incomplete: {error}")
+            })?;
+            Some(TableSchemaIdentity::new(schema_bytes))
+        };
         let baseline = Self::read_optional(&mut file)?;
         let candidate = Self::locate_candidate(&mut file, path)?;
         let mut trailing = [0];
@@ -407,6 +464,7 @@ impl VfsScratchStore {
         }
         Ok(PersistedTemporaryScratch {
             identity,
+            schema_identity,
             baseline,
             candidate,
         })
@@ -1782,13 +1840,14 @@ impl RowSaveContext {
         &self,
         scratch: &TemporarySave<RowMapSnapshot>,
         identity: &TemporaryScratchIdentity,
+        schema_identity: &TableSchemaIdentity,
         baseline: Option<&[u8]>,
     ) -> Result<(), String> {
         let store = &self.writer.scratch_store;
         self.writer
             .runtime
             .block_on(scratch.fsync_scratch_with(|_, snapshot| async move {
-                store.persist(identity, baseline, &snapshot)
+                store.persist(identity, schema_identity, baseline, &snapshot)
             }))
             .map(|_| ())
             .map_err(|failure| match failure {
@@ -3342,8 +3401,27 @@ impl WorkspaceFilesystem {
         }
         let mut retained_scratch = HashSet::new();
         if let Some(writer) = &writer {
-            for record in writer.scratch_store.load()? {
+            let ScratchLoad {
+                records,
+                unreadable,
+            } = writer.scratch_store.load()?;
+            for record in &unreadable {
+                eprintln!(
+                    "unreadable persisted temporary scratch {} left on disk: {}",
+                    record.path.display(),
+                    record.reason
+                );
+            }
+            for record in records {
                 let logical_path = record.identity.logical_path.clone();
+                if record.schema_identity.is_none() {
+                    if let Err(error) = Self::retain_legacy_scratch(writer, &record) {
+                        eprintln!(
+                            "legacy persisted temporary scratch {logical_path} left on disk: {error}"
+                        );
+                    }
+                    continue;
+                }
                 match Self::restore_temporary_scratch(&mut builder, writer, record) {
                     Ok(inode) => {
                         retained_scratch.insert(inode);
@@ -3366,6 +3444,53 @@ impl WorkspaceFilesystem {
             next_handle: AtomicU64::new(1),
         })
     }
+    /// Keeps a legacy ORNAVFS1 candidate as a retained draft instead of binding it to the live
+    /// schema (ORNA-VFS-019, ORNA-VFS-009). A legacy record has no creation schema identity, so its
+    /// staleness cannot be decided: the candidate is listed as a retained draft (cause
+    /// `sys.vfs.stale_edit`), its commit stays refused until the user re-applies it, and the scratch
+    /// record is removed only after retention has succeeded. Returns the retained draft ID.
+    fn retain_legacy_scratch(
+        writer: &MountWriter,
+        record: &PersistedTemporaryScratch,
+    ) -> Result<String, String> {
+        let candidate = &record.candidate;
+        let mut file = File::open(&candidate.record).map_err(|error| {
+            format!("persisted temporary scratch record could not be reopened: {error}")
+        })?;
+        let retained = writer
+            .retained_drafts
+            .retain(
+                &record.identity.logical_path,
+                "sys.vfs.stale_edit",
+                candidate.len,
+                &mut |offset, length| {
+                    file.seek(SeekFrom::Start(candidate.offset + offset)).map_err(|error| {
+                        RetentionError::io(
+                            format!("persisted temporary scratch bytes could not be read: {error}"),
+                            &error,
+                        )
+                    })?;
+                    let mut buffer = vec![0_u8; length];
+                    file.read_exact(&mut buffer).map_err(|error| {
+                        RetentionError::io(
+                            format!("persisted temporary scratch bytes could not be read: {error}"),
+                            &error,
+                        )
+                    })?;
+                    Ok(buffer)
+                },
+            )
+            .map_err(|error| error.to_string())?;
+        writer.scratch_store.remove(&record.identity)?;
+        eprintln!(
+            "{}: legacy scratch record (ORNAVFS1) kept as retained draft {} in {} (sys.vfs.draft_retained); commit refused until re-applied",
+            record.identity.logical_path,
+            retained.id,
+            retained.record.display()
+        );
+        Ok(retained.id)
+    }
+
     fn restore_temporary_scratch(
         builder: &mut FsBuilder,
         writer: &Arc<MountWriter>,
@@ -3449,10 +3574,13 @@ impl WorkspaceFilesystem {
             identity,
             baseline,
             candidate,
+            schema_identity,
         } = record;
-        // A persisted scratch record stores no schema identity, so a restored scratch binds to the
-        // schema committed at restore time; a schema change before this remount is not detected for it.
-        let schema_identity = save.live_schema_identity()?;
+        // `from_snapshot` routes a legacy ORNAVFS1 record (no creation identity) to
+        // `retain_legacy_scratch` before any scratch is begun, so only identified records restore.
+        let schema_identity = schema_identity.ok_or_else(|| {
+            "legacy persisted temporary scratch cannot restore as a Temporary node".to_owned()
+        })?;
         let name = identity.name.clone();
         builder.add_file(
             parent,
@@ -3655,9 +3783,12 @@ impl WorkspaceFilesystem {
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 match state.nodes.get(&inode.0).map(|node| &node.kind) {
                     Some(NodeKind::Temporary {
-                        identity, baseline, ..
+                        identity,
+                        baseline,
+                        schema_identity,
+                        ..
                     }) => save
-                        .fsync_temporary(&scratch, identity, baseline.as_deref())
+                        .fsync_temporary(&scratch, identity, schema_identity, baseline.as_deref())
                         .map_err(DocumentCommitError::Failed),
                     // Rename already accepted and removed this scratch node.
                     None => Ok(()),
@@ -4284,6 +4415,7 @@ impl WorkspaceFilesystem {
                 save,
                 scratch,
                 identity,
+                schema_identity,
                 baseline,
                 ..
             }) = state.nodes.get(&inode).map(|node| &node.kind)
@@ -4291,7 +4423,7 @@ impl WorkspaceFilesystem {
                 continue;
             };
             let path = state.display_path(inode);
-            match save.fsync_temporary(scratch, identity, baseline.as_deref()) {
+            match save.fsync_temporary(scratch, identity, schema_identity, baseline.as_deref()) {
                 Ok(()) => {
                     reports.insert(format!(
                         "kept scratch {path} for the next mount (sys.vfs.draft_retained)"
@@ -9422,6 +9554,74 @@ mod hardening_tests {
     #[test]
     fn live_mount_refusal_is_eperm() {
         assert_eq!(refused_mutation_errno(), Errno::EPERM);
+    }
+
+    #[test]
+    fn scratch_record_round_trips_its_creation_schema_identity() {
+        use super::{TableSchemaIdentity, TemporaryScratchIdentity, VFS_SCRATCH_RECORD_MAGIC, VfsScratchStore};
+        use std::io::Write as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("record");
+        let identity = TemporaryScratchIdentity {
+            logical_path: "table/row/field.txt".into(),
+            relation_id: [7; 16],
+            key: b"key".to_vec(),
+            name: "field.txt".into(),
+            blob_field_name: None,
+        };
+        let schema = TableSchemaIdentity::new([9; 32]);
+        let mut file = std::fs::File::create(&path).expect("record file");
+        file.write_all(VFS_SCRATCH_RECORD_MAGIC).expect("magic");
+        VfsScratchStore::write_identity(&mut file, &identity).expect("identity");
+        file.write_all(schema.bytes()).expect("schema identity");
+        VfsScratchStore::write_optional(&mut file, None).expect("baseline");
+        file.write_all(&0_u64.to_le_bytes()).expect("empty candidate");
+        drop(file);
+
+        let record = VfsScratchStore::read_record(&path).expect("ORNAVFS2 record");
+        assert_eq!(record.schema_identity.as_ref().map(TableSchemaIdentity::bytes), Some(schema.bytes()));
+        assert_eq!(record.identity.logical_path, "table/row/field.txt");
+        assert!(record.baseline.is_none());
+    }
+
+    #[test]
+    fn legacy_scratch_record_is_read_without_schema_identity() {
+        use super::{TemporaryScratchIdentity, VFS_SCRATCH_RECORD_MAGIC_V1, VfsScratchStore};
+        use std::io::Write as _;
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("record");
+        let identity = TemporaryScratchIdentity {
+            logical_path: "table/row/field.txt".into(),
+            relation_id: [7; 16],
+            key: b"key".to_vec(),
+            name: "field.txt".into(),
+            blob_field_name: None,
+        };
+        let mut file = std::fs::File::create(&path).expect("record file");
+        file.write_all(VFS_SCRATCH_RECORD_MAGIC_V1).expect("magic");
+        VfsScratchStore::write_identity(&mut file, &identity).expect("identity");
+        VfsScratchStore::write_optional(&mut file, None).expect("baseline");
+        file.write_all(&0_u64.to_le_bytes()).expect("empty candidate");
+        drop(file);
+
+        let record = VfsScratchStore::read_record(&path).expect("ORNAVFS1 record is read");
+        assert!(record.schema_identity.is_none(), "a legacy record has no creation identity");
+        assert_eq!(record.identity.logical_path, "table/row/field.txt");
+    }
+
+    #[test]
+    fn corrupt_scratch_record_is_reported_and_left_on_disk() {
+        use super::VfsScratchStore;
+        let root = tempfile::tempdir().expect("temporary directory");
+        let store = VfsScratchStore::open(root.path()).expect("scratch store");
+        let corrupt = store.directory.join("0000.scratch");
+        std::fs::write(&corrupt, b"not a record").expect("corrupt record");
+
+        let loaded = store.load().expect("a bad record does not fail the load");
+        assert!(loaded.records.is_empty());
+        assert_eq!(loaded.unreadable.len(), 1);
+        assert_eq!(loaded.unreadable[0].path, corrupt);
+        assert!(corrupt.exists(), "an unreadable record is left on disk");
     }
 }
 
