@@ -31,6 +31,7 @@ use editor_mount::{
 };
 
 const EPERM: i32 = 1;
+const EROFS: i32 = 30;
 const EIO: i32 = 5;
 const EINVAL: i32 = 22;
 const EAGAIN: i32 = 11;
@@ -549,9 +550,9 @@ async fn vfs_020_o_trunc_only_open_holds_an_empty_candidate_until_sync() {
 }
 
 /// ORNA-VFS-020 and 41-vfs.md: a snapshot mount (`mount --at`) has no writer, so a
-/// write-intent open of a source module is refused with EPERM and the snapshot is unchanged.
+/// write-intent open of a source module is refused with EROFS and the snapshot is unchanged.
 #[tokio::test]
-async fn vfs_020_source_write_on_snapshot_mount_is_refused_with_eperm() {
+async fn vfs_020_source_write_on_snapshot_mount_is_refused_with_erofs() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -574,7 +575,7 @@ async fn vfs_020_source_write_on_snapshot_mount_is_refused_with_eperm() {
 
     assert_errno(
         OpenOptions::new().write(true).truncate(true).open(&notes).map(|_| ()),
-        &[EPERM],
+        &[EROFS],
         "a write-intent open on a snapshot mount is refused",
     );
     assert_eq!(read_view(&notes), NOTES_SOURCE, "the snapshot keeps its committed bytes");
