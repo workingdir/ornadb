@@ -10,7 +10,9 @@ use std::{
     },
 };
 
-use orna_runtime_v1::vfs::{DraftQuota, DraftStorage, EditDraft, SnapshotPin, VfsFileSnapshot};
+use orna_runtime_v1::vfs::{
+    DraftQuota, DraftStorage, EditDraft, SnapshotPin, VfsFileSnapshot, VfsRepositoryCache,
+};
 use tempfile::TempDir;
 
 const CHUNK_BYTES: usize = 1 << 20;
@@ -103,5 +105,49 @@ async fn sixty_four_mib_candidate_stays_bounded_in_memory() {
         peak < PEAK_LIMIT_BYTES,
         "peak live heap {peak} bytes reached the {PEAK_LIMIT_BYTES}-byte limit; \
          the candidate was held in memory"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sixty_four_mib_scratch_fsync_stays_bounded_in_memory() {
+    let spool = TempDir::new().unwrap();
+    let cache = VfsRepositoryCache::in_runtime_root(spool.path()).expect("runtime root");
+    let baseline = Arc::new(VfsFileSnapshot::new(
+        SnapshotPin::capture(Arc::new(7_u64)),
+        Vec::<u8>::new(),
+    ));
+    let destination = cache
+        .managed_file(baseline)
+        .await
+        .expect("scope the destination baseline");
+    let scratch = destination.begin_temporary_replacement(CANDIDATE_BYTES).await;
+    for chunk in 0..CHUNKS {
+        scratch
+            .write_at((chunk * CHUNK_BYTES) as u64, &pattern(chunk))
+            .await
+            .expect("spool a chunk");
+    }
+
+    let baseline_live = LIVE_BYTES.load(Ordering::Relaxed);
+    PEAK_BYTES.store(baseline_live, Ordering::Relaxed);
+    scratch
+        .fsync_scratch_with(|_, snapshot| async move {
+            assert_eq!(snapshot.len(), CANDIDATE_BYTES as u64);
+            for chunk in 0..CHUNKS {
+                let range = snapshot
+                    .read_range((chunk * CHUNK_BYTES) as u64, CHUNK_BYTES)
+                    .expect("read a snapshot chunk");
+                assert_eq!(range, pattern(chunk), "chunk {chunk} streams from the snapshot");
+            }
+            Ok::<(), ()>(())
+        })
+        .await
+        .expect("persist the scratch candidate");
+
+    let peak = PEAK_BYTES.load(Ordering::Relaxed) - baseline_live;
+    assert!(
+        peak < PEAK_LIMIT_BYTES,
+        "scratch fsync peak live heap {peak} bytes reached the {PEAK_LIMIT_BYTES}-byte limit; \
+         the whole candidate was copied for persistence"
     );
 }

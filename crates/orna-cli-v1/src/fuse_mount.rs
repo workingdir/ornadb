@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -30,7 +30,8 @@ use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
     vfs::{
-        CANDIDATE_CHUNK_BYTES, EditDraft, EditDraftError, ManagedFile, SnapshotPin, TemporaryRenameOutcome, TemporarySave,
+        CANDIDATE_CHUNK_BYTES, CandidateSnapshot, EditDraft, EditDraftError, ManagedFile,
+        SnapshotPin, TemporaryRenameOutcome, TemporarySave,
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
         DraftQuota, QuotaCharge,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
@@ -107,7 +108,15 @@ struct TemporaryScratchIdentity {
 struct PersistedTemporaryScratch {
     identity: TemporaryScratchIdentity,
     baseline: Option<Vec<u8>>,
-    bytes: Vec<u8>,
+    candidate: RecordedCandidate,
+}
+
+/// Where a record's candidate lies inside its record file. The candidate is
+/// copied from here in [`CANDIDATE_CHUNK_BYTES`] slices at restore.
+struct RecordedCandidate {
+    record: PathBuf,
+    offset: u64,
+    len: u64,
 }
 
 struct VfsScratchStore {
@@ -146,7 +155,7 @@ impl VfsScratchStore {
         &self,
         identity: &TemporaryScratchIdentity,
         baseline: Option<&[u8]>,
-        bytes: &[u8],
+        candidate: &CandidateSnapshot,
     ) -> Result<(), String> {
         Self::validate_identity(identity)?;
         let mut staged = tempfile::Builder::new()
@@ -158,7 +167,7 @@ impl VfsScratchStore {
             .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
         Self::write_identity(staged.as_file_mut(), identity)?;
         Self::write_optional(staged.as_file_mut(), baseline)?;
-        Self::write_bytes(staged.as_file_mut(), bytes)?;
+        Self::write_candidate(staged.as_file_mut(), candidate)?;
         staged.as_file().sync_all().map_err(|error| {
             format!("temporary scratch record could not be synchronized: {error}")
         })?;
@@ -350,6 +359,31 @@ impl VfsScratchStore {
             .map_err(|error| format!("temporary scratch record could not be written: {error}"))
     }
 
+    /// Writes the candidate as one length-prefixed field, copying it through
+    /// [`CANDIDATE_CHUNK_BYTES`]-sized reads so the record never holds the whole
+    /// candidate in memory. The layout is identical to [`Self::write_bytes`].
+    fn write_candidate(file: &mut File, candidate: &CandidateSnapshot) -> Result<(), String> {
+        file.write_all(&candidate.len().to_le_bytes())
+            .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+        let length = candidate.len();
+        let mut offset = 0_u64;
+        while offset < length {
+            let wanted = usize::try_from(length - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let chunk = candidate.read_range(offset, wanted).map_err(|error| {
+                format!("temporary scratch candidate could not be read: {error}")
+            })?;
+            if chunk.is_empty() {
+                return Err("temporary scratch candidate ended before its recorded length".into());
+            }
+            file.write_all(&chunk)
+                .map_err(|error| format!("temporary scratch record could not be written: {error}"))?;
+            offset += chunk.len() as u64;
+        }
+        Ok(())
+    }
+
     fn read_record(path: &Path) -> Result<PersistedTemporaryScratch, String> {
         let mut file = File::open(path)
             .map_err(|error| format!("temporary scratch record could not be opened: {error}"))?;
@@ -361,7 +395,7 @@ impl VfsScratchStore {
         }
         let identity = Self::read_identity(&mut file)?;
         let baseline = Self::read_optional(&mut file)?;
-        let bytes = Self::read_bytes(&mut file)?;
+        let candidate = Self::locate_candidate(&mut file, path)?;
         let mut trailing = [0];
         if file
             .read(&mut trailing)
@@ -373,7 +407,34 @@ impl VfsScratchStore {
         Ok(PersistedTemporaryScratch {
             identity,
             baseline,
-            bytes,
+            candidate,
+        })
+    }
+
+    /// Skips the candidate field and records where it lies, so restore can stream
+    /// it from the record file without holding it in memory.
+    fn locate_candidate(file: &mut File, path: &Path) -> Result<RecordedCandidate, String> {
+        let mut encoded_length = [0; 8];
+        file.read_exact(&mut encoded_length).map_err(|error| {
+            format!("temporary scratch record field length is incomplete: {error}")
+        })?;
+        let len = u64::from_le_bytes(encoded_length);
+        let offset = file
+            .stream_position()
+            .map_err(|error| format!("temporary scratch record could not be read: {error}"))?;
+        let file_len = file
+            .metadata()
+            .map_err(|error| format!("temporary scratch record size could not be read: {error}"))?
+            .len();
+        if offset.checked_add(len).is_none_or(|end| end > file_len) {
+            return Err("temporary scratch record field exceeds its file size".into());
+        }
+        file.seek(SeekFrom::Start(offset + len))
+            .map_err(|error| format!("temporary scratch record could not be read: {error}"))?;
+        Ok(RecordedCandidate {
+            record: path.to_path_buf(),
+            offset,
+            len,
         })
     }
 
@@ -1682,18 +1743,24 @@ impl RowSaveContext {
             .runtime
             .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES));
         let len = self.writer.runtime.block_on(scratch.candidate_len());
-        if len > 0 {
-            let length = usize::try_from(len)
-                .map_err(|_| "scratch candidate exceeds addressable memory".to_owned())?;
+        let mut offset = 0_u64;
+        while offset < len {
+            let wanted = usize::try_from(len - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
             let bytes = self
                 .writer
                 .runtime
-                .block_on(scratch.read_range(0, length))
+                .block_on(scratch.read_range(offset, wanted))
                 .map_err(|error| format!("scratch candidate could not be read: {error:?}"))?;
+            if bytes.is_empty() {
+                return Err("scratch candidate ended before its length".to_owned());
+            }
             self.writer
                 .runtime
-                .block_on(retargeted.write_at(0, &bytes))
+                .block_on(retargeted.write_at(offset, &bytes))
                 .map_err(|error| format!("scratch candidate could not be moved: {error:?}"))?;
+            offset += bytes.len() as u64;
         }
         Ok((target, Arc::new(retargeted)))
     }
@@ -1707,8 +1774,8 @@ impl RowSaveContext {
         let store = &self.writer.scratch_store;
         self.writer
             .runtime
-            .block_on(scratch.fsync_scratch_with(|_, bytes| async move {
-                store.persist(identity, baseline, bytes.as_ref())
+            .block_on(scratch.fsync_scratch_with(|_, snapshot| async move {
+                store.persist(identity, baseline, &snapshot)
             }))
             .map(|_| ())
             .map_err(|failure| match failure {
@@ -1817,7 +1884,7 @@ impl RowSaveContext {
             outcome,
             &accepted_row,
             field,
-            replacement_bytes,
+            Some(replacement_bytes),
             record_baseline,
         )
     }
@@ -1832,11 +1899,14 @@ impl RowSaveContext {
         >,
         accepted_row: &Mutex<Option<Vec<u8>>>,
         field: &BlobField,
-        replacement_bytes: Arc<[u8]>,
+        replacement_bytes: Option<Arc<[u8]>>,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         match outcome {
             Ok(TemporaryRenameOutcome::Applied { .. }) => {
+                let replacement_bytes = replacement_bytes.ok_or_else(|| {
+                    DocumentCommitError::Failed("replacement Blob bytes were not admitted".into())
+                })?;
                 if let Some(field) = self
                     .blob_fields
                     .lock()
@@ -1875,12 +1945,12 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
         record_baseline: bool,
     ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
-        let replacement_bytes = self
-            .writer
-            .runtime
-            .block_on(scratch.candidate_bytes())
-            .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
         if field.text {
+            let replacement_bytes = self
+                .writer
+                .runtime
+                .block_on(scratch.candidate_bytes())
+                .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
             return self.commit_text_temporary(
                 target,
                 scratch,
@@ -1890,9 +1960,30 @@ impl RowSaveContext {
                 record_baseline,
             );
         }
-        let length = u64::try_from(replacement_bytes.len())
-            .map_err(|_| "replacement Blob length is invalid".to_owned())?;
-        let digest: [u8; 32] = Sha256::digest(&replacement_bytes).into();
+        // The digest streams the candidate in bounded ranges, so hashing never
+        // holds the whole Blob; the admitted bytes are the one copy the commit
+        // publishes and are taken from the admission below.
+        let length = self.writer.runtime.block_on(scratch.candidate_len());
+        let mut hasher = Sha256::new();
+        let mut offset = 0_u64;
+        while offset < length {
+            let wanted = usize::try_from(length - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let chunk = self
+                .writer
+                .runtime
+                .block_on(scratch.read_range(offset, wanted))
+                .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
+            if chunk.is_empty() {
+                return Err(DocumentCommitError::Failed(
+                    "scratch candidate ended before its length".into(),
+                ));
+            }
+            hasher.update(&chunk);
+            offset += chunk.len() as u64;
+        }
+        let digest: [u8; 32] = hasher.finalize().into();
         let expected_identity = ContentIdentity::new(length, digest)
             .map_err(|error| format!("replacement Blob identity is invalid: {error:?}"))?;
         let capture = self
@@ -1909,6 +2000,8 @@ impl RowSaveContext {
         let field_name = field.name.clone();
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
+        let blob_slot: Arc<Mutex<Option<Arc<[u8]>>>> = Arc::new(Mutex::new(None));
+        let blob_output = Arc::clone(&blob_slot);
         let outcome = self
             .writer
             .runtime
@@ -1921,7 +2014,10 @@ impl RowSaveContext {
                 expected_identity,
                 &field.media_type,
                 field.suffix.as_deref(),
-                move |coordinates, _blob_bytes, binding| async move {
+                move |coordinates, blob_bytes, binding| async move {
+                    *blob_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(blob_bytes);
                     let (candidate, row_bytes) = row_context.writer.candidate(
                         &row_context,
                         &coordinates,
@@ -1940,7 +2036,10 @@ impl RowSaveContext {
             outcome,
             &accepted_row,
             field,
-            replacement_bytes,
+            blob_slot
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
             record_baseline,
         )
     }
@@ -3210,23 +3309,18 @@ impl WorkspaceFilesystem {
                 .runtime
                 .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
-        writer
-            .runtime
-            .block_on(scratch.write_at(0, &record.bytes))
-            .map_err(|error| {
-                format!("persisted temporary scratch bytes could not be restored: {error:?}")
-            })?;
+        Self::restore_candidate(writer, &scratch, &record.candidate)?;
         let PersistedTemporaryScratch {
             identity,
             baseline,
-            bytes,
+            candidate,
         } = record;
         let name = identity.name.clone();
         builder.add_file(
             parent,
             &name,
             NodeKind::Temporary {
-                len: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+                len: candidate.len,
                 save,
                 target,
                 scratch,
@@ -3235,6 +3329,42 @@ impl WorkspaceFilesystem {
                 identity: Arc::new(identity),
             },
         )
+    }
+
+    /// Copies a recorded candidate into `scratch` in [`CANDIDATE_CHUNK_BYTES`]
+    /// slices read from the record file, so restore never holds the whole
+    /// candidate in memory.
+    fn restore_candidate(
+        writer: &Arc<MountWriter>,
+        scratch: &TemporarySave<RowMapSnapshot>,
+        candidate: &RecordedCandidate,
+    ) -> Result<(), String> {
+        let mut file = File::open(&candidate.record).map_err(|error| {
+            format!("persisted temporary scratch record could not be reopened: {error}")
+        })?;
+        file.seek(SeekFrom::Start(candidate.offset)).map_err(|error| {
+            format!("persisted temporary scratch bytes could not be read: {error}")
+        })?;
+        let buffer_len = candidate.len.min(CANDIDATE_CHUNK_BYTES as u64);
+        let mut buffer = vec![0_u8; usize::try_from(buffer_len).unwrap_or(CANDIDATE_CHUNK_BYTES)];
+        let mut offset = 0_u64;
+        while offset < candidate.len {
+            let wanted = usize::try_from(candidate.len - offset)
+                .unwrap_or(usize::MAX)
+                .min(CANDIDATE_CHUNK_BYTES);
+            let slice = &mut buffer[..wanted];
+            file.read_exact(slice).map_err(|error| {
+                format!("persisted temporary scratch bytes could not be read: {error}")
+            })?;
+            writer
+                .runtime
+                .block_on(scratch.write_at(offset, slice))
+                .map_err(|error| {
+                    format!("persisted temporary scratch bytes could not be restored: {error:?}")
+                })?;
+            offset += wanted as u64;
+        }
+        Ok(())
     }
 
     fn update_writable_len(&self, inode: u64, len: u64) {
