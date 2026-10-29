@@ -382,3 +382,66 @@ async fn vfs_020_stale_source_candidate_is_refused_with_eagain() {
     );
     assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
 }
+
+/// ORNA-VFS-020 and 41-vfs.md: source candidates commit as one group. Two modules edited
+/// together are admitted together. When one candidate is malformed, the sync is refused
+/// as a unit and neither committed module changes.
+#[tokio::test]
+async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let (repository_directory, _repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\nuse extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", NOTES_SOURCE), ("extra.orna", EXTRA_SOURCE)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    let extra = mountpoint.join("extra.orna");
+    mounted.await_path(&notes);
+    mounted.await_path(&extra);
+
+    const NOTES_ACCEPTED: &str = "pub fn group_a(): Int = 1;\n";
+    const EXTRA_ACCEPTED: &str = "pub fn group_b(): Int = 2;\n";
+    let mut notes_handle = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a write-intent open of notes.orna is accepted");
+    let mut extra_handle = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&extra)
+        .expect("a write-intent open of extra.orna is accepted");
+    notes_handle.write_all(NOTES_ACCEPTED.as_bytes()).expect("the notes candidate is accepted");
+    extra_handle.write_all(EXTRA_ACCEPTED.as_bytes()).expect("the extra candidate is accepted");
+    notes_handle.sync_all().expect("the valid group is admitted at sync");
+    assert_eq!(read_view(&notes), NOTES_ACCEPTED);
+    assert_eq!(read_view(&extra), EXTRA_ACCEPTED);
+    drop(extra_handle);
+    drop(notes_handle);
+
+    let mut notes_handle = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&notes)
+        .expect("a second write-intent open of notes.orna is accepted");
+    let mut extra_handle = std::fs::OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&extra)
+        .expect("a second write-intent open of extra.orna is accepted");
+    notes_handle.write_all(b"pub fn bad_a( {\n").expect("the malformed candidate is accepted");
+    extra_handle.write_all(b"pub fn good_b(): Int = 3;\n").expect("the valid candidate is accepted");
+    assert_errno(
+        notes_handle.sync_all(),
+        &[EINVAL],
+        "a group with one malformed candidate is refused as a unit with EINVAL",
+    );
+    assert_eq!(read_view(&notes), NOTES_ACCEPTED, "the malformed group leaves notes committed");
+    assert_eq!(read_view(&extra), EXTRA_ACCEPTED, "the valid sibling is not admitted alone");
+}
