@@ -2620,6 +2620,7 @@ struct MountedBlobRow {
     mounted: MountedProcess,
     repository_directory: TempDir,
     _repository: orna_repository_v1::Repository,
+    relation_id: [u8; 16],
     _media_root: TempDir,
     _mount_parent: TempDir,
 }
@@ -2777,6 +2778,7 @@ async fn mount_captured_media(
         mounted,
         repository_directory,
         _repository: repository,
+        relation_id,
         _media_root: media_root,
         _mount_parent: mount_parent,
     })
@@ -3281,6 +3283,8 @@ async fn cwd_mount_blob_read_write_open_is_coherent() {
 const EPERM: i32 = 1;
 /// POSIX `EAGAIN` (Linux errno 11): a stale-baseline CAS refusal for a Blob replacement (ORNA-VFS-009).
 const EAGAIN: i32 = 11;
+/// POSIX `EDQUOT` (Linux errno 122): the per-mount unbound scratch cap (41-vfs.md:67).
+const EDQUOT: i32 = 122;
 
 #[tokio::test]
 /// ORNA-VFS-014: symlinks and hard links are unsupported in VFS-1 and fail explicitly with EPERM; the row directory gains no entry and the stored row is unchanged.
@@ -3403,14 +3407,53 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     let document_before = std::fs::read(row_path.join("data.orna")).unwrap();
     std::fs::rename(&unbound, &blob_path).expect("renaming unbound scratch over the Blob is accepted");
     assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
-    // The row document must describe the accepted Blob: data.orna is served from the same commit.
+    // The row document carries the Blob's path and media type, not its bytes, so an accepted byte replacement leaves those names in place; the remount check below proves the document against the store.
     let document_after = std::fs::read(row_path.join("data.orna")).unwrap();
-    assert_ne!(document_before, document_after, "data.orna reflects the replaced Blob");
-    assert_eq!(std::fs::read(row_path.join("data.orna")).unwrap(), document_after, "data.orna is stable");
+    let document_after_text = String::from_utf8(document_after.clone()).expect("data.orna is UTF-8");
+    assert!(document_after_text.contains("./content.mp3"), "data.orna still names the Blob");
     assert!(!unbound.exists(), "the accepted scratch is consumed by its rename");
 
     // A retained stale candidate blocks unmount until removed (sys.vfs.stale_edit); remove it so the mount drains.
     std::fs::remove_file(&stale).expect("removing the refused stale scratch");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+
+    // Remount: data.orna and the Blob bytes must be rebuilt from the committed store row that holds the accepted replacement.
+    let committed = format3::committed_store_rows(&row._repository, row.relation_id);
+    assert_eq!(committed.len(), 1, "the relation keeps one committed row");
+    assert!(committed[0].value().encoded_fields().is_some(), "the accepted row is inline");
+    let mountpoint = row.mounted.mountpoint.clone();
+    let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &mountpoint);
+    assert!(wait_for_mount_paths(&mut remounted, &[blob_path.as_path()]), "remount exposes the Blob");
+    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement, "remount serves the accepted Blob bytes");
+    assert_eq!(std::fs::read(row_path.join("data.orna")).unwrap(), document_after, "remounted data.orna matches the document served before unmount");
+    unmount_and_reap(row.repository_directory.path(), &mut remounted);
+}
+
+#[tokio::test]
+/// 41-vfs.md:67 and CHANGELOG: each mount admits at most 16 unbound scratch records; the 17th create is refused with EDQUOT and removing one record frees its slot.
+async fn cwd_mount_unbound_scratch_cap_is_per_mount() {
+    let original = lcg_bytes(0x5151_0000_0000_0005, 4 * 1024 + 9);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let names: Vec<_> = (0..16).map(|i| row_path.join(format!(".clip{i}.wav.replace"))).collect();
+    for name in &names {
+        create_scratch(name, b"draft");
+    }
+    let overflow = row_path.join(".clip16.wav.replace");
+    let refused = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&overflow)
+        .expect_err("the 17th unbound scratch exceeds the per-mount cap");
+    assert_eq!(refused.raw_os_error(), Some(EDQUOT));
+
+    std::fs::remove_file(&names[0]).expect("removing one unbound scratch");
+    create_scratch(&overflow, b"draft");
+    for name in names.iter().skip(1).chain(std::iter::once(&overflow)) {
+        std::fs::remove_file(name).unwrap();
+    }
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 }
 
