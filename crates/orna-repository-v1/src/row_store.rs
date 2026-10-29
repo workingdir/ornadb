@@ -617,6 +617,29 @@ impl TypedKey {
         self.type_cmp(other).is_eq()
     }
 
+    /// The canonical text of one key component (profiles/vfs-1.md:44-50).
+    /// `None` for a tuple, which projects component by component, and for a
+    /// value whose text needs its schema.
+    pub fn component_text(&self) -> Option<String> {
+        Some(match self {
+            Self::Null => "null".to_owned(),
+            Self::Bool(value) => value.to_string(),
+            Self::UInt(value) => value.to_string(),
+            Self::Int(value) => value.to_string(),
+            Self::Bytes(bytes) => {
+                let mut text = String::with_capacity(2 + bytes.len() * 2);
+                text.push_str("0x");
+                for byte in bytes {
+                    text.push_str(&format!("{byte:02x}"));
+                }
+                text
+            }
+            Self::Text(value) => value.clone(),
+            Self::Tuple(_) => return None,
+            Self::Value(value) => value.canonical_text()?,
+        })
+    }
+
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, RowStoreError> {
         let mut output = Vec::new();
         encode_key(self, &mut output)?;
