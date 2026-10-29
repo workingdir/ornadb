@@ -1202,6 +1202,10 @@ impl<'a> DescriptorBuilder<'a> {
                         .collect::<Result<Vec<_>, _>>()?,
                 ),
             ]),
+            // Descriptor order is declaration order and is NOT the stored order: stored record
+            // fields are sorted by encoded field key (Orna-1.1.0.md:4015; 29-formats.md:46).
+            // The text-rendering order at 29-formats.md:123 is a separate rule and does not
+            // govern stored entries.
             Type::Record(fields) => Raw::Array(vec![
                 Raw::Int(4.into()),
                 Raw::Array(

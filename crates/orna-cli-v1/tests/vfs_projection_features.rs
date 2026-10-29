@@ -2,12 +2,14 @@
 
 //! FUSE projection cases for `profiles/vfs-1.md` that the mount must show:
 //! module-path directories (bead ornadb-5il1.464), key-component escaping and
-//! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), and the
-//! projections that are not implemented yet (bead ornadb-5il1.372). The ignored
-//! cases record the spec'd behaviour for .372 and run with `--include-ignored` to
-//! show the current red output.
+//! the long-key alias (profiles/vfs-1.md:44-60, bead ornadb-5il1.462), and nested
+//! record and list fields (profiles/vfs-1.md:71-74, bead ornadb-5il1.372). Cases
+//! that are not implemented yet are `#[ignore]`d with their bead id and run with
+//! `--include-ignored` to show the current red output.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
 
 use orna_repository_v1::TypedKey;
 use sha2::{Digest, Sha256};
@@ -257,12 +259,9 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
 
 /// profiles/vfs-1.md:71-74 (nested records and lists): a record field projects as
 /// an escaped directory whose children are its fields, and a list field projects
-/// as a directory of decimal element indices. Source admission currently refuses
-/// this row (InvalidSourceRow) before the mount is reached, so this case is red
-/// until bead ornadb-5il1.372 is implemented; the mount projection is not yet
-/// verified by this case.
+/// as a directory of decimal element indices. Source admission accepts this row in
+/// encoded-key order (ornadb-5il1.372), so the mount shows its pinned directories.
 #[tokio::test]
-#[ignore = "ornadb-5il1.372: source admission refuses nested record/list rows (InvalidSourceRow)"]
 async fn nested_record_and_list_fields_project_as_pinned_directories() {
     if !require_fuse_or_skip() {
         return;
@@ -281,8 +280,157 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
     let label = row.join("meta/label");
     mounted.await_path(&label);
 
-    assert_eq!(read_view(&label), "x", "the record field is a file under its directory");
+    assert_eq!(
+        read_view(&label),
+        "x",
+        "the record field is a file under its directory"
+    );
     assert_eq!(read_view(&row.join("meta/rank")), "1");
-    assert_eq!(sorted_names(&row.join("tags")), vec!["0".to_owned(), "1".to_owned()]);
-    assert_eq!(read_view(&row.join("tags/1")), "b", "list elements are decimal indices");
+    assert_eq!(
+        sorted_names(&row.join("tags")),
+        vec!["0".to_owned(), "1".to_owned()]
+    );
+    assert_eq!(
+        read_view(&row.join("tags/1")),
+        "b",
+        "list elements are decimal indices"
+    );
+}
+
+const EPERM: i32 = 1;
+const EAGAIN: i32 = 11;
+
+/// Replaces `Music/<key>` through `orna edit` on the repository path: a writer
+/// outside the mount, as in vfs_mount_sessions.rs `edit_elsewhere`.
+fn edit_outside_mount(repository: &Path, key: &str, document: &str) {
+    let scripts = TempDir::new().unwrap();
+    let editor = scripts.path().join("edit-outside");
+    std::fs::write(
+        &editor,
+        format!("#!/bin/sh\ncat > \"$1\" <<'ORNA_EDIT'\n{document}ORNA_EDIT\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .arg("--db")
+        .arg(repository)
+        .args(["edit", &format!("Music/{key}/data.orna")])
+        .env("EDITOR", &editor)
+        .output()
+        .expect("run orna edit outside the mount");
+    assert!(
+        output.status.success(),
+        "orna edit outside the mount failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// profiles/vfs-1.md:71-74 and the stale-save refresh (fuse_mount
+/// `refresh_stale_document`): after another writer changes a row, a stale save of
+/// `data.orna` is refused with EAGAIN and new opens show the current row. The
+/// nested directories are replaced with it, so `meta/label` matches the row, and a
+/// pending scratch file in the row directory survives the refresh.
+#[tokio::test]
+async fn stale_save_refreshes_nested_directories_and_keeps_scratch() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let document = "{ meta: { label: \"x\", rank: 1, }, tags: [\"a\", \"b\"], }\n";
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, tags: [Str], }\n",
+        &[],
+        &[("london", document)],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let label = row.join("meta/label");
+    mounted.await_path(&label);
+    assert_eq!(read_view(&label), "x");
+    assert_eq!(
+        sorted_names(&row.join("meta")),
+        vec!["label".to_owned(), "rank".to_owned()]
+    );
+
+    let scratch = row.join("pending.tmp");
+    editor_mount::write_and_sync(&scratch, "pending bytes").expect("create a pending scratch file");
+    edit_outside_mount(
+        repository_directory.path(),
+        "london",
+        "{ meta: { label: \"y\", rank: 2, }, tags: [\"a\"], }\n",
+    );
+    let error = editor_mount::write_and_sync(
+        &row.join("data.orna"),
+        "{ meta: { label: \"z\", rank: 3, }, tags: [\"q\"], }\n",
+    )
+    .expect_err("a save against a row another writer changed is stale");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(EAGAIN),
+        "the stale save is refused with EAGAIN"
+    );
+
+    assert_eq!(
+        read_view(&label),
+        "y",
+        "the nested directory shows the current row"
+    );
+    assert_eq!(read_view(&row.join("meta/rank")), "2");
+    assert_eq!(sorted_names(&row.join("tags")), vec!["0".to_owned()]);
+    assert!(
+        read_view(&row.join("data.orna")).contains("\"y\""),
+        "data.orna shows the current row"
+    );
+    assert_eq!(
+        read_view(&scratch),
+        "pending bytes",
+        "the pending scratch file survives"
+    );
+}
+
+/// profiles/vfs-1.md:71-74 with the optional and tuple shapes the nested projection
+/// maps: a present optional record field projects as its payload, tuple positions
+/// are decimal directory names, and a write-open of a nested leaf is refused with
+/// EPERM (the leaf is a read-only Bytes node; unsupported mutation, profiles/vfs-1.md:139).
+#[tokio::test]
+async fn nested_optional_and_tuple_fields_project_and_nested_leaves_refuse_writes() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let document = "{ meta: { label: \"x\", rank: 1, note: Some(\"n\"), }, tags: [\"a\"], pair: (51, \"north\"), }\n";
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, note: Str?, }, tags: [Str], pair: (Int, Str), }\n",
+        &[],
+        &[("london", document)],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let note = row.join("meta/note");
+    mounted.await_path(&note);
+    assert_eq!(
+        read_view(&note),
+        "n",
+        "a present optional record field reads its payload"
+    );
+    assert_eq!(
+        read_view(&row.join("pair/0")),
+        "51",
+        "tuple positions are decimal names"
+    );
+    assert_eq!(read_view(&row.join("pair/1")), "north");
+    let error = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&note)
+        .expect_err("a nested field is read-only");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(EPERM),
+        "a write-open of a nested field is refused"
+    );
 }
