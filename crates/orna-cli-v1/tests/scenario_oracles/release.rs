@@ -414,9 +414,9 @@ pub fn entries() -> Vec<Entry> {
         .with_fuse(),
         Entry::gap(
             "FINAL-VFS-020",
-            "ornadb-5il1.136",
-            "the workspace mount exposes tables only, not the project's source files",
-            workspace_has_no_source_files,
+            "ornadb-9npn.1.1",
+            "the workspace mount projects source modules but refuses writes to them (stage 2)",
+            workspace_source_module_write_is_refused,
         )
         .with_fuse(),
         Entry::gap(
@@ -2462,14 +2462,24 @@ fn workspace_is_read_only(db: &mut Db) -> Probe {
     ))
 }
 
-fn workspace_has_no_source_files(db: &mut Db) -> Probe {
+fn workspace_source_module_write_is_refused(db: &mut Db) -> Probe {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     let mount = db.mount("workspace", &["--cwd"])?;
-    ensure!(
-        !mount.point.join("main.orna").exists(),
-        "the workspace mount now exposes main.orna"
-    );
-    Ok("the workspace mount has no main.orna".to_owned())
+    let module = mount.point.join("main.orna");
+    if !module.exists() {
+        return Err(Failure::Harness(
+            "the workspace mount no longer projects main.orna".to_owned(),
+        ));
+    }
+    let error = fs::write(&module, b"// edited\n").err().ok_or_else(|| {
+        Failure::Unmet("the workspace mount now accepts a source module write".to_owned())
+    })?;
+    if error.raw_os_error() != Some(1) {
+        return Err(Failure::Harness(format!(
+            "the source module write failed for another reason: {error}"
+        )));
+    }
+    Ok(format!("write of main.orna in the workspace mount: {error}"))
 }
 
 fn traversal_descriptor_is_admitted(db: &mut Db) -> Probe {
