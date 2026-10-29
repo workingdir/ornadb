@@ -171,7 +171,7 @@ fn vfs_019_schema_change_under_live_mount_pins_handles_and_listing() {
 /// the CWD runtime row baseline, which stays v1-encoded and is validated against
 /// the v2 descriptor.
 #[test]
-#[ignore = "ornadb-eufo.2"]
+#[ignore = "ornadb-eufo.2.1"]
 fn vfs_019_remount_after_schema_change_shows_new_shape() {
     if !require_fuse_or_skip() {
         return;
