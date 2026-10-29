@@ -403,6 +403,8 @@ fn write_editor_script(path: &std::path::Path, body: &str) {
 /// session is open advances the row past the read baseline, so the save is
 /// refused (E2000, the stale-edit cause), the draft is retained, and the other
 /// writer's row stays in place.
+/// The `E2000` assertion relies on `ESTALE` on the wire: `EAGAIN` surfaces as EOPNOTSUPP on
+/// this kernel (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
 #[tokio::test]
 async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     if !require_fuse_or_skip() {
@@ -811,11 +813,13 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
         !output.status.success(),
         "orna edit's strong read baseline refuses the save: {diagnostics}"
     );
-    // The owner refuses the explicit edit with ESTALE (fuse_mount.rs:2586-2590), and the CLI
+    // The owner refuses the explicit edit with ESTALE (the xattr commit's Stale arm), and the CLI
     // reports that reply as the stale detail with E2000 (cli_mount.rs:436-440). [INFERENCE] from
     // reading fuse_mount.rs:3893: that refusal returns before the mount records a draft refusal,
     // so the spec cause sys.vfs.stale_edit (fuse_mount.rs:1587, Orna-1.1.0.md:8674) is not in
     // the mount's unresolved-draft fields. This test does not assert that absence.
+    // E2000 relies on ESTALE on the wire: EAGAIN surfaces as EOPNOTSUPP on this kernel
+    // (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
     assert!(
         diagnostics.contains("E2000"),
         "the refusal carries the product code E2000: {diagnostics}"
