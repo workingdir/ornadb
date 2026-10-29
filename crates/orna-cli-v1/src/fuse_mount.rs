@@ -6780,7 +6780,7 @@ impl FsBuilder {
             self.directory_mut(row_inode)
                 .and_then(|directory| directory.remove_entry(&name))
                 .ok_or_else(|| "a vanished row entry had already left its directory".to_owned())?;
-            self.retire_subtree(inode);
+            self.retire_node(inode);
         }
         for (name, kind) in others {
             let listed = self
@@ -6906,7 +6906,8 @@ impl FsBuilder {
     }
 
     /// Swaps the child `name` of `parent` for a new node at the same readdir position, so
-    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles.
+    /// sibling offsets hold. The superseded node keeps its captured bytes for open handles,
+    /// and a superseded directory stays loaded for a held listing.
     fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<(), String> {
         let inode = self.next_inode;
         self.next_inode = inode
@@ -6926,7 +6927,7 @@ impl FsBuilder {
         let superseded = std::mem::replace(&mut entry.inode, inode);
         entry.kind = file_type;
         self.nodes.insert(inode, FsNode { parent, kind });
-        self.retire_subtree(superseded);
+        self.retire_node(superseded);
         Ok(())
     }
 
@@ -7061,32 +7062,25 @@ impl FsBuilder {
     /// Drops a generation that is no longer reachable by name. Open handles keep it
     /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
     ///
+    /// A directory is never dropped here: a held directory handle keeps enumerating its
+    /// listing, and a refresh never makes that listing fail with ENOENT (41-vfs.md:39-40).
+    /// Directories are dropped only at remount. The children of a retired directory are not
+    /// reclaimed with it.
+    ///
     /// Accepted FUSE nodeid-lifetime deviation: retention follows tracked open handles, not
     /// kernel lookup counts. `forget` and `batch_forget` keep fuser's no-op defaults, so a
     /// retired generation is removed once no handle holds it, even if the kernel still
     /// caches its nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes
     /// on use; a stale nodeid then fails with ENOENT instead of serving retired bytes.
     fn retire_node(&mut self, inode: u64) {
+        if self.directory(inode).is_some() {
+            return;
+        }
         if self.open_blobs.contains_key(&inode) {
             self.superseded_blobs.insert(inode);
         } else {
             self.nodes.remove(&inode);
         }
-    }
-
-    /// Retires `inode` and every loaded node below it, so a replaced or removed directory
-    /// leaves no unreachable descendants behind.
-    fn retire_subtree(&mut self, inode: u64) {
-        let children: Vec<u64> = self
-            .nodes
-            .get(&inode)
-            .and_then(|node| node.kind.directory())
-            .map(|directory| directory.entries.iter().map(|entry| entry.inode).collect())
-            .unwrap_or_default();
-        for child in children {
-            self.retire_subtree(child);
-        }
-        self.retire_node(inode);
     }
 
     /// Replaces the blob named `name` under `parent` with a new generation inode.
@@ -9259,6 +9253,19 @@ mod readdir_cursor_tests {
         builder
             .replace_child(dir, OsStr::new("b"), NodeKind::Bytes(vec![1]))
             .expect("replace b");
+        let rest = list(&mut builder, dir, cursor, usize::MAX);
+        assert_eq!(names(&rest), ["b", "c"]);
+    }
+
+    /// A directory retired while a listing is held keeps its loaded entries, so the held
+    /// cursor still enumerates the entries after it (ORNA-VFS-017, 41-vfs.md:39-40).
+    #[test]
+    fn directory_retired_after_a_listing_opened_still_enumerates() {
+        let (mut builder, dir) = directory_with(&["a", "b", "c"]);
+        let first = list(&mut builder, dir, 0, 1);
+        let cursor = first.last().expect("one entry is listed").0;
+        builder.retire_node(dir);
+        assert!(builder.directory(dir).is_some(), "a retired directory stays loaded");
         let rest = list(&mut builder, dir, cursor, usize::MAX);
         assert_eq!(names(&rest), ["b", "c"]);
     }
