@@ -7038,10 +7038,13 @@ impl RuntimeState {
     /// writer transaction. Validation failure drops the transaction, so no
     /// table row, mutation record, or checkpoint capture becomes visible.
     ///
-    /// Lock order (ORNA-VFS-019): the VFS operation gates are taken first, then
-    /// the SQLite writer transaction (`BEGIN IMMEDIATE`). The committed schema
-    /// identity is read only inside that transaction, and it is read twice: once
-    /// before the candidate is validated and again immediately before COMMIT.
+    /// Lock order (ORNA-VFS-019): on the VFS save path the VFS operation gates
+    /// are taken first, then the VFS projection epoch lock
+    /// (`cache_epoch.generation`, held across this call by `commit_durable_save`
+    /// in `vfs.rs`), then the SQLite writer transaction (`BEGIN IMMEDIATE`).
+    /// The committed schema identity is read only inside that transaction, and
+    /// it is read twice: once before the candidate is validated and again
+    /// immediately before COMMIT.
     /// The identity is a Git head read that no SQLite lock covers, so a schema
     /// commit that lands between the reads and COMMIT is refused with
     /// `StaleTableSchema` instead of publishing a row under the wrong schema.
@@ -23008,7 +23011,7 @@ mod tests {
     /// `StaleTableSchema`; the dropped transaction rolls the candidate back and
     /// no checkpoint is published.
     #[tokio::test]
-    async fn schema_commit_landing_before_commit_refuses_the_save() {
+    async fn schema_commit_landing_between_identity_reads_refuses_the_save() {
         /// Commits the schema change at the mutation fault point, which runs
         /// inside the writer transaction after the first identity check.
         struct CommitSchemaChangeAfterMutation {
@@ -23065,6 +23068,8 @@ mod tests {
             .await
             .unwrap()
             .map(|checkpoint| checkpoint.generation);
+        let before_rows = state.committed_table_rows("books").await.unwrap();
+        let before_capture = state.capture().await.unwrap();
         let context = state.begin_activation().await.unwrap();
         let mut validator = RacingSchemaValidator {
             tables: vec!["books".into()],
@@ -23103,6 +23108,8 @@ mod tests {
                 .map(|checkpoint| checkpoint.generation),
             before
         );
+        assert_eq!(state.committed_table_rows("books").await.unwrap(), before_rows);
+        assert_eq!(state.capture().await.unwrap(), before_capture);
     }
 
     /// ORNA-VFS-008/VFS-021: a VFS save whose durable commit succeeded but
