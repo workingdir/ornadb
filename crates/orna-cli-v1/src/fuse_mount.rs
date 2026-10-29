@@ -7118,20 +7118,12 @@ fn civil_date_from_days(days: i64) -> (i64, i64, i64) {
 }
 
 fn key_component_text(key: &TypedKey) -> Result<KeyComponentText, String> {
-    let text = match key {
-        TypedKey::Null => "null".to_owned(),
-        TypedKey::Bool(value) => value.to_string(),
-        TypedKey::UInt(value) => value.to_string(),
-        TypedKey::Int(value) => value.to_string(),
-        TypedKey::Bytes(bytes) => format!("0x{}", hex_bytes(bytes)),
-        TypedKey::Text(value) => value.clone(),
-        TypedKey::Tuple(_) => {
-            return Err("tuple key must be projected component by component".into());
-        }
-        TypedKey::Value(value) => value
-            .canonical_text()
-            .ok_or_else(|| "key type needs its schema to project".to_owned())?,
-    };
+    if let TypedKey::Tuple(_) = key {
+        return Err("tuple key must be projected component by component".into());
+    }
+    let text = key
+        .component_text()
+        .ok_or_else(|| "key type needs its schema to project".to_owned())?;
     // A long key's `~key-` alias digests the typed component's canonical
     // OVB-1 encoding, not its text (VFS-1, "Row/key directory mapping").
     let canonical_encoding = key
