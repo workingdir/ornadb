@@ -34,7 +34,8 @@ use orna_runtime_v1::{
         VfsDurableSave, VfsComponent, VfsFileSnapshot, VfsRepositoryCache, VfsRowProjection,
         DraftQuota, QuotaCharge,
         VfsSaveCandidate, VfsSaveCoordinates, VfsSaveError, VfsStoredField, VfsTableRowReplacement,
-        project_component, project_key_component, unproject_component,
+        project_colliding_table_component, project_component, project_key_component,
+        unproject_component,
         FsyncFailure,
     },
 };
@@ -2781,6 +2782,21 @@ impl WorkspaceFilesystem {
             None => Some(super::invocation_owner_id()),
         };
 
+        let project = match &writer {
+            Some(writer) => Arc::clone(&writer.project),
+            None => Arc::new(
+                loader
+                    .load_committed_snapshot(repository, commit)
+                    .map_err(|error| {
+                        format!("committed source project could not be loaded: {error:?}")
+                    })?,
+            ),
+        };
+        // Reachable source modules are projected before any table directory, so a
+        // generated component that collides with a source path escapes its first
+        // byte instead of dropping the table (profiles/vfs-1.md:31-33).
+        builder.add_source_modules(project.modules())?;
+
         for (relation_id, qualified_name) in tables {
             let schema = loader
                 .resolve_committed_source_table_schema(
@@ -4098,6 +4114,10 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
                 Some(NodeKind::Bytes(_)) => {
+                    if write_mode {
+                        reply.error(Errno::EPERM);
+                        return;
+                    }
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -5309,6 +5329,9 @@ struct FsBuilder {
     open_blobs: HashMap<u64, u64>,
     /// Replaced blob inodes kept readable until their last open handle is released.
     superseded_blobs: HashSet<u64>,
+    /// Inodes of projected source modules and their directories. A table path
+    /// that reaches one of these yields to the source path (profiles/vfs-1.md).
+    source_nodes: HashSet<u64>,
 }
 
 impl FsBuilder {
@@ -5328,6 +5351,7 @@ impl FsBuilder {
             table_object_ids: Arc::new(BTreeMap::new()),
             open_blobs: HashMap::new(),
             superseded_blobs: HashSet::new(),
+            source_nodes: HashSet::new(),
         }
     }
 
@@ -5396,14 +5420,68 @@ impl FsBuilder {
         self.nodes.get_mut(&inode)?.kind.directory_mut()
     }
 
+    /// Projects each reachable source module at its logical path, creating its
+    /// directories. Reserved root `.git` and `.orna` are never projected.
+    fn add_source_modules(
+        &mut self,
+        modules: &[orna_semantic_v1::ModuleInput],
+    ) -> Result<(), String> {
+        for module in modules {
+            let components = module.logical_path.split('/').collect::<Vec<_>>();
+            let Some((leaf, directories)) = components.split_last() else {
+                continue;
+            };
+            if matches!(components.first(), Some(&(".git" | ".orna"))) {
+                continue;
+            }
+            let mut parent = ROOT_INODE;
+            for directory in directories {
+                parent = self.ensure_directory(parent, directory)?;
+                self.source_nodes.insert(parent);
+            }
+            let inode = self.insert_node(
+                parent,
+                leaf,
+                NodeKind::Bytes(module.source.clone().into_bytes()),
+                FileType::RegularFile,
+            )?;
+            self.source_nodes.insert(inode);
+        }
+        Ok(())
+    }
+
+    /// Whether the source tree occupies `component` directly under `parent`.
+    fn source_occupies(&self, parent: u64, component: &str) -> bool {
+        self.directory(parent)
+            .and_then(|directory| directory.entry(OsStr::new(component)))
+            .is_some_and(|entry| self.source_nodes.contains(&entry.inode))
+    }
+
+    /// Projects a generated namespace or table component under `parent`. A source
+    /// path keeps its plain name on collision, and the generated component escapes
+    /// its first byte instead, so the table stays projected (profiles/vfs-1.md:31-33).
+    fn generated_component(&self, parent: u64, name: &str) -> Result<String, String> {
+        let plain = project_component(name);
+        if !self.source_occupies(parent, &plain) {
+            return Ok(plain);
+        }
+        let escaped = project_colliding_table_component(name);
+        if self.source_occupies(parent, &escaped) {
+            return Err(format!("generated name {escaped:?} collides with a source path"));
+        }
+        Ok(escaped)
+    }
+
     fn table_directory(&mut self, module_name: &str, table_name: &str) -> Result<u64, String> {
         let mut parent = ROOT_INODE;
         if !module_name.is_empty() {
             for component in module_name.split('.') {
-                parent = self.ensure_directory(parent, &project_component(component))?;
+                let name = self.generated_component(parent, component)?;
+                parent = self.ensure_directory(parent, &name)?;
             }
         }
-        self.ensure_directory(parent, &project_component(table_name))
+        let name = self.generated_component(parent, table_name)?;
+        self.ensure_directory(parent, &name)
     }
 
     fn add_table_rows(

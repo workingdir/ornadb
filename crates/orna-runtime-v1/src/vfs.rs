@@ -2042,9 +2042,25 @@ pub fn project_field_name(text: &str) -> String {
     project_namespaced(text, VfsNameNamespace::Field, || field_name_digest(text))
 }
 
+/// Projects a generated table directory whose plain name a source path already
+/// occupies. The source path keeps the name; the generated component escapes its
+/// first byte, not the schema name (profiles/vfs-1.md:31-33).
+pub fn project_colliding_table_component(text: &str) -> String {
+    project_namespaced_escaping(text, VfsNameNamespace::Key, true, || str_component_digest(text))
+}
+
 fn project_namespaced(
     text: &str,
     namespace: VfsNameNamespace,
+    component_digest: impl FnOnce() -> [u8; 32],
+) -> String {
+    project_namespaced_escaping(text, namespace, is_reserved_component(text), component_digest)
+}
+
+fn project_namespaced_escaping(
+    text: &str,
+    namespace: VfsNameNamespace,
+    force_first: bool,
     component_digest: impl FnOnce() -> [u8; 32],
 ) -> String {
     if text.is_empty() {
@@ -2053,7 +2069,7 @@ fn project_namespaced(
     // Every byte outside `[A-Za-z0-9._-]` is escaped, `~` and `%` included, so a
     // spelling under the bound can never claim the alias namespace and always
     // stays an exact, reversible `%HH` encoding of the canonical text.
-    let out = escape_component_bytes(text.bytes().enumerate(), is_reserved_component(text));
+    let out = escape_component_bytes(text.bytes().enumerate(), force_first);
     if out.len() > VFS_MAX_COMPONENT_BYTES {
         long_alias(namespace, &component_digest())
     } else {
