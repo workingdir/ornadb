@@ -208,6 +208,13 @@ impl ResolvedTableSchema {
     pub fn binding(&self) -> &CommittedTableBinding {
         &self.binding
     }
+
+    /// The stored values the table's required fields are introduced with, keyed by field
+    /// ObjectId, as `project` frozen them (ORNA-EVOL-009). Used when a row written under an
+    /// earlier schema generation is admitted to this one.
+    pub fn introduced_values(&self, project: &LoadedProject) -> BTreeMap<[u8; 16], Raw> {
+        project.constant_default_stored_values(&self.table)
+    }
 }
 
 /// One exact accepted ORP Blob value paired with its field identity and pin.
