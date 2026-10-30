@@ -2860,6 +2860,44 @@ async fn cwd_mount_atomic_replacement_clears_pending_path_truncate() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-009 and ORNA-VFS-024 (41-vfs.md:68-72): a rename refused as stale keeps the destination's pending path truncate. The refused replacement stays in its scratch, and the destination's truncated prefix is retained once when the mount stops.
+async fn cwd_mount_stale_replacement_keeps_pending_path_truncate() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let repository = mount.repository_directory.path().to_path_buf();
+    let scratch = mount
+        .mountpoint
+        .join("Music/london/.data.orna.replacement-tmp");
+    // The scratch captures the row baseline before another writer advances the row.
+    create_scratch(&scratch, b"{ title: \"replaced\", }\n");
+    owner_edit_row_text(&repository, "title: \"before\"", "title: \"before-owner\"");
+    // The mount shows the owner's accepted row; its 13-byte prefix is the truncated view.
+    let baseline = std::fs::read(&mount.data_path).unwrap();
+    path_truncate(&mount.data_path, 13);
+    let refused = std::fs::rename(&scratch, &mount.data_path)
+        .expect_err("a replacement against a row another writer advanced is stale");
+    assert_eq!(refused.raw_os_error(), Some(EAGAIN));
+    assert!(
+        scratch.exists(),
+        "the refused replacement stays in its scratch"
+    );
+    send_sigterm(&mount.mounted);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    let data_records: Vec<&String> = records
+        .iter()
+        .filter(|record| record.contains("path Music/london/data.orna\n"))
+        .collect();
+    assert!(
+        data_records.len() == 1
+            && data_records[0].contains("\ncause unsynced\nbytes 13\n")
+            && data_records[0].ends_with(std::str::from_utf8(&baseline[..13]).unwrap()),
+        "a stale rename must keep the destination's 13-byte truncate, retained once: {records:?}"
+    );
+}
+
+#[tokio::test]
 /// ORNA-VFS-024: a rejected Document draft survives close and still blocks unmount until accepted.
 async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
     if !fuse_test_available() {

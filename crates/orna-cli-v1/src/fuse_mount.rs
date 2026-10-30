@@ -5893,6 +5893,11 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(error.errno());
             return;
         }
+        // The accepted replacement supersedes the bytes a path truncate cut from the
+        // destination, so that truncate is not retained against the replaced file (ORNA-VFS-024).
+        // Cleared before the post-commit steps, which can still refuse the reply with EIO: the
+        // accepted row is durable, so its truncate must not outlive it.
+        draft_state.pending_truncates.remove(&destination_inode);
         let accepted_bytes = match save.writer.runtime.block_on(scratch.candidate_bytes()) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -6012,9 +6017,6 @@ impl Filesystem for WorkspaceFilesystem {
             draft_state.unresolved_handles.remove(&refused);
         }
         draft_state.pending_truncates.remove(&source_inode);
-        // The accepted replacement supersedes the bytes a path truncate cut from the
-        // destination, so that truncate is not retained against the replaced file (ORNA-VFS-024).
-        draft_state.pending_truncates.remove(&destination_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
     }
