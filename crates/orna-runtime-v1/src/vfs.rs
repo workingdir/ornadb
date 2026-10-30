@@ -236,7 +236,7 @@ impl VfsRepositoryCache {
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
         S: Send + Sync + 'static,
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, CandidateSnapshot, OrpBlobBinding) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
@@ -4718,7 +4718,7 @@ mod tests {
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(handle.projection_is_current().await.unwrap());
         assert_eq!(
-            target.open_read().await.read_at(0, accepted_bytes.len()),
+            target.open_read().await.read_at(0, accepted_bytes.len()).unwrap(),
             accepted_bytes.as_bytes()
         );
 
@@ -4756,7 +4756,7 @@ mod tests {
             TemporaryRenameOutcome::Rejected { .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, accepted_bytes.len()),
+            target.open_read().await.read_at(0, accepted_bytes.len()).unwrap(),
             accepted_bytes.as_bytes()
         );
         assert_eq!(
@@ -4812,7 +4812,7 @@ mod tests {
         assert!(target.open_current().await.is_none());
         assert!(!live.projection_is_current().await.unwrap());
         assert_eq!(
-            live.read_at(0, accepted_bytes.len()),
+            live.read_at(0, accepted_bytes.len()).unwrap(),
             accepted_bytes.as_bytes()
         );
 
@@ -4845,12 +4845,12 @@ mod tests {
         let image = fixture_image();
         let handle = SnapshotReadHandle::open(Arc::clone(&image));
         let cursor = SnapshotReaddirCursor::new(image.pin().clone_pin(), 23_u64);
-        let original = handle.read_at(0, handle.len() as usize);
+        let original = handle.read_at(0, handle.len() as usize).unwrap();
 
         let draft = EditDraft::open(image, 1 << 20, DraftStorage::with_default_quota());
         draft.write_at(0, &[0x58]).await.unwrap();
 
-        assert_eq!(handle.read_at(0, original.len()), original);
+        assert_eq!(handle.read_at(0, original.len()).unwrap(), original);
         assert_eq!(*cursor.pin().snapshot(), 7);
         assert_ne!(
             draft.candidate_bytes().await.unwrap().as_ref(),
@@ -4904,7 +4904,7 @@ mod tests {
     /// changes nothing: no content, no revision, no charge.
     #[tokio::test]
     async fn growth_refused_by_quota_changes_nothing() {
-        let baseline_len = fixture_image().bytes.len() as u64;
+        let baseline_len = fixture_image().bytes.len();
         let quota = Arc::new(DraftQuota::new(baseline_len + 16));
         let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
         let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
@@ -4949,7 +4949,7 @@ mod tests {
     /// when the draft drops.
     #[tokio::test]
     async fn retained_rejected_draft_is_charged_and_released() {
-        let baseline_len = fixture_image().bytes.len() as u64;
+        let baseline_len = fixture_image().bytes.len();
         let quota = Arc::new(DraftQuota::new(1 << 20));
         let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
         let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
@@ -5080,7 +5080,7 @@ mod tests {
 
         let retained = draft.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.diagnostic(), rejected());
-        assert_ne!(retained.replacement_bytes(), fixture_image().bytes.as_ref());
+        assert_ne!(retained.replacement_bytes(), &fixture_image().bytes.to_arc().unwrap()[..]);
 
         let second = draft
             .fsync_with(|_| {
@@ -5119,7 +5119,7 @@ mod tests {
 
         assert_eq!(*new_handle.pin().snapshot(), 8);
         assert_eq!(*old_handle.pin().snapshot(), 7);
-        assert_ne!(old_handle.read_at(0, 1), new_handle.read_at(0, 1));
+        assert_ne!(old_handle.read_at(0, 1).unwrap(), new_handle.read_at(0, 1).unwrap());
         let repeated_calls = AtomicUsize::new(0);
         let repeated = draft
             .fsync_with(|_| {
@@ -5137,7 +5137,7 @@ mod tests {
         };
         assert_eq!(repeated_calls.load(Ordering::SeqCst), 0);
         assert_eq!(*repeated_handle.pin().snapshot(), 8);
-        assert_eq!(repeated_handle.read_at(0, 1), [0x58]);
+        assert_eq!(repeated_handle.read_at(0, 1).unwrap(), [0x58]);
 
         let calls = AtomicUsize::new(0);
         let draft = EditDraft::open(fixture_image(), 1 << 20, DraftStorage::with_default_quota());
@@ -5287,7 +5287,7 @@ mod tests {
         assert_eq!(row_store.transaction_count(), 1);
         assert_eq!(row_store.accepted(), row_text);
         assert_eq!(
-            target.open_read().await.read_at(0, row_text.len()),
+            target.open_read().await.read_at(0, row_text.len()).unwrap(),
             row_text
         );
         let retained = save.retained_invalid_draft().await.unwrap();
@@ -5334,7 +5334,7 @@ mod tests {
         assert_eq!(row_store.transaction_count(), 2);
         assert_eq!(row_store.accepted(), row_text);
         assert_eq!(
-            target.open_read().await.read_at(0, row_text.len()),
+            target.open_read().await.read_at(0, row_text.len()).unwrap(),
             row_text
         );
         let retained = draft.retained_invalid_draft().await.unwrap();
@@ -5376,7 +5376,7 @@ mod tests {
         assert_eq!(row_store.transaction_count(), before_stale_commits);
         assert_eq!(row_store.accepted(), row_text);
         assert_eq!(
-            target.open_read().await.read_at(0, row_text.len()),
+            target.open_read().await.read_at(0, row_text.len()).unwrap(),
             row_text
         );
         let parked = draft.retained_invalid_draft().await.unwrap();
@@ -5410,7 +5410,7 @@ mod tests {
         let repository = VfsRepositoryCache::new();
         let target = repository.managed_file(fixture_image()).await.unwrap();
         let old_handle = target.open_read().await;
-        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize).unwrap();
         let scratch = target.begin_temporary_replacement(1 << 20).await;
         scratch.write_at(0, &[0x58]).await.unwrap();
 
@@ -5430,7 +5430,7 @@ mod tests {
         assert_eq!(scratch_syncs.load(Ordering::SeqCst), 1);
         assert_eq!(target.cache_generation().await, 0);
         assert_eq!(
-            target.open_read().await.read_at(0, old_bytes.len()),
+            target.open_read().await.read_at(0, old_bytes.len()).unwrap(),
             old_bytes
         );
 
@@ -5450,7 +5450,7 @@ mod tests {
             TemporaryRenameOutcome::Rejected { .. }
         ));
         assert_eq!(target.cache_generation().await, 0);
-        assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
+        assert_eq!(old_handle.read_at(0, old_bytes.len()).unwrap(), old_bytes);
         let retained = scratch.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.replacement_bytes(), &[0x58]);
         assert_eq!(*retained.baseline().snapshot(), 7);
@@ -5485,9 +5485,9 @@ mod tests {
         assert_eq!(generation, 1);
         assert_eq!(target.cache_generation().await, 1);
         assert_eq!(*old_handle.pin().snapshot(), 7);
-        assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
+        assert_eq!(old_handle.read_at(0, old_bytes.len()).unwrap(), old_bytes);
         assert_eq!(*target.open_read().await.pin().snapshot(), 8);
-        assert_eq!(handle.read_at(0, 2), [0x58, 0x59]);
+        assert_eq!(handle.read_at(0, 2).unwrap(), [0x58, 0x59]);
         assert_eq!(
             scratch
                 .retained_invalid_draft()
@@ -5508,9 +5508,9 @@ mod tests {
             .managed_file(Arc::clone(&raw_target_image))
             .await
             .unwrap();
-        let sibling_image = Arc::new(VfsFileSnapshot::new(
+        let sibling_image = Arc::new(VfsFileSnapshot::from_candidate(
             SnapshotPin::capture(Arc::clone(&stale_snapshot)),
-            Arc::clone(&raw_target_image.bytes),
+            raw_target_image.bytes.duplicate().unwrap(),
         ));
         assert!(!Arc::ptr_eq(&raw_target_image, &sibling_image));
         let sibling = repository
@@ -5523,7 +5523,7 @@ mod tests {
         ));
         let old_handle = target.open_read().await;
         let sibling_handle = sibling.open_read().await;
-        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize).unwrap();
         let directory = SnapshotReaddirCursor::new(old_handle.pin().clone_pin(), 0_u64);
         let attributes = old_handle.project(("size", old_handle.len()));
         assert_eq!(old_handle.projection().unwrap().generation(), 0);
@@ -5586,7 +5586,7 @@ mod tests {
         assert!(!directory.projection_is_current().await.unwrap());
         assert!(!sibling_handle.projection_is_current().await.unwrap());
         assert!(!attributes.projection_is_current().await.unwrap());
-        assert_eq!(old_handle.read_at(0, old_bytes.len()), old_bytes);
+        assert_eq!(old_handle.read_at(0, old_bytes.len()).unwrap(), old_bytes);
         assert!(handle.projection_is_current().await.unwrap());
         // Admission binds every alias of the original raw image to generation
         // zero. After the accepted replacement advances the repository epoch,
@@ -5600,9 +5600,9 @@ mod tests {
         ));
         // Re-capturing the same owner snapshot Arc must recover the original
         // binding too; making a new VfsFileSnapshot wrapper cannot bypass it.
-        let rewrapped_stale_image = Arc::new(VfsFileSnapshot::new(
+        let rewrapped_stale_image = Arc::new(VfsFileSnapshot::from_candidate(
             SnapshotPin::capture(Arc::clone(&stale_snapshot)),
-            Arc::clone(&raw_target_image.bytes),
+            raw_target_image.bytes.duplicate().unwrap(),
         ));
         assert_eq!(rewrapped_stale_image.projection().unwrap().generation(), 0);
         assert!(
@@ -5682,7 +5682,7 @@ mod tests {
         assert_eq!(repository.generation().await, 0);
         let baseline = include_str!("../tests/fixtures/publication-repository-main.orna");
         assert_eq!(
-            target.open_read().await.read_at(0, baseline.len()),
+            target.open_read().await.read_at(0, baseline.len()).unwrap(),
             baseline.as_bytes()
         );
     }
@@ -5712,7 +5712,7 @@ mod tests {
         // image, so it is not stale and it commits instead of being refused.
         let next = target.open_draft(1 << 20).await;
         assert_eq!(
-            next.baseline().await.read_at(0, accepted_bytes.len()),
+            next.baseline().await.read_at(0, accepted_bytes.len()).unwrap(),
             accepted_bytes.as_bytes()
         );
         next.write_at(0, &[0x5A]).await.unwrap();
@@ -5729,7 +5729,7 @@ mod tests {
             committed,
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
-        assert_eq!(target.open_read().await.read_at(0, 1), [0x5A]);
+        assert_eq!(target.open_read().await.read_at(0, 1).unwrap(), [0x5A]);
     }
 
     /// A strong read baseline refuses the save once a concurrent REPL change
@@ -5749,7 +5749,7 @@ mod tests {
         let baseline = target.open_read_baseline(1 << 20).await;
         let read_handle = baseline.baseline();
         assert_eq!(
-            read_handle.read_at(0, read_bytes.len()),
+            read_handle.read_at(0, read_bytes.len()).unwrap(),
             read_bytes.as_bytes()
         );
         baseline.draft().truncate(0).await.unwrap();
@@ -5802,11 +5802,11 @@ mod tests {
         // The REPL change is still what the row holds, and the read handle
         // still reads the version it captured.
         assert_eq!(
-            target.open_read().await.read_at(0, repl_bytes.len()),
+            target.open_read().await.read_at(0, repl_bytes.len()).unwrap(),
             repl_bytes.as_bytes()
         );
         assert_eq!(
-            read_handle.read_at(0, read_bytes.len()),
+            read_handle.read_at(0, read_bytes.len()).unwrap(),
             read_bytes.as_bytes()
         );
 
@@ -5832,7 +5832,7 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, draft_bytes.len()),
+            target.open_read().await.read_at(0, draft_bytes.len()).unwrap(),
             draft_bytes.as_bytes()
         );
     }
@@ -6207,7 +6207,7 @@ mod tests {
             .await
             .unwrap();
         let old_handle = target.open_read().await;
-        let old_bytes = old_handle.read_at(0, old_handle.len() as usize);
+        let old_bytes = old_handle.read_at(0, old_handle.len() as usize).unwrap();
         let scratch = target.begin_temporary_replacement(1 << 20).await;
         scratch.write_at(8, &[0xa5, 0x5a]).await.unwrap();
         let mut sparse_hole = vec![0; 10];
@@ -6265,7 +6265,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            target.open_read().await.read_at(0, old_bytes.len()),
+            target.open_read().await.read_at(0, old_bytes.len()).unwrap(),
             old_bytes,
             "scratch flush leaves new opens on the accepted image"
         );
@@ -6459,7 +6459,7 @@ mod tests {
                 move |coordinates, _, encoded_blob| async move {
                     assert_eq!(cache_for_admit.generation().await, 0);
                     assert_eq!(
-                        target_for_admit.open_read().await.read_at(0, PIXEL.len()),
+                        target_for_admit.open_read().await.read_at(0, PIXEL.len()).unwrap(),
                         PIXEL
                     );
                     assert_eq!(
@@ -6544,11 +6544,11 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, replacement_bytes.len()),
+            target.open_read().await.read_at(0, replacement_bytes.len()).unwrap(),
             replacement_bytes
         );
         assert_eq!(
-            old_handle.read_at(0, old_bytes.len()),
+            old_handle.read_at(0, old_bytes.len()).unwrap(),
             old_bytes,
             "the already-open read handle remains pinned to its original image"
         );
