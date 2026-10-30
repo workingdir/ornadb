@@ -769,12 +769,13 @@ impl<S> DraftState<S> {
 
     /// Retains a stale compare-and-swap candidate without caching the outcome.
     /// A caller may retry these same bytes against a newly captured baseline.
-    fn retain_retryable_conflict(
+    /// The caller already holds the candidate bytes of `revision`, so the spool is read once.
+    fn retain_retryable_conflict_with(
         &mut self,
         revision: u64,
+        replacement: Arc<[u8]>,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        let replacement = self.candidate_arc()?;
         self.retain_draft(revision, replacement, diagnostic)
     }
 
@@ -1041,9 +1042,14 @@ impl DraftSpool {
 
     fn read_all(&self) -> io::Result<Arc<[u8]>> {
         let length = usize::try_from(self.len).map_err(|_| io::Error::other("draft too large"))?;
-        let mut bytes = vec![0; length];
-        self.file.read_exact_at(&mut bytes, 0)?;
-        Ok(Arc::from(bytes))
+        // One allocation: the zeroed buffer is read in place, so no intermediate `Vec` is copied
+        // into a second `Arc` buffer.
+        let zeroed = Arc::<[u8]>::new_zeroed_slice(length);
+        // SAFETY: every byte of the buffer is zero, which is a valid `u8`, so it is initialised.
+        let mut bytes = unsafe { zeroed.assume_init() };
+        let buffer = Arc::get_mut(&mut bytes).expect("a fresh Arc is unique");
+        self.file.read_exact_at(buffer, 0)?;
+        Ok(bytes)
     }
 
     /// Reads `[offset, offset + length)` clamped to the spool length. Holds at
@@ -3674,7 +3680,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 .state
                 .lock()
                 .await
-                .retain_retryable_conflict(revision, diagnostic)
+                .retain_retryable_conflict_with(revision, Arc::clone(&candidate_bytes), diagnostic)
                 .map_err(VfsSaveError::Backing)?;
             return Err(VfsSaveError::Stale {
                 generation: *self.cache_epoch.generation.lock().await,
@@ -3714,7 +3720,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                     .state
                     .lock()
                     .await
-                    .retain_rejection(revision, diagnostic)
+                    .retain_rejection_with(
+                        revision,
+                        Arc::clone(&candidate_bytes),
+                        diagnostic,
+                    )
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Rejected {
                     generation: *cache_generation,
@@ -3727,7 +3737,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                     .state
                     .lock()
                     .await
-                    .retain_retryable_conflict(revision, diagnostic)
+                    .retain_retryable_conflict_with(
+                        revision,
+                        Arc::clone(&candidate_bytes),
+                        diagnostic,
+                    )
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Stale {
                     generation: *cache_generation,
