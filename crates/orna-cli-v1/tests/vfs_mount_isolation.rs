@@ -653,6 +653,73 @@ async fn reader_opened_before_owner_write_survives_temp_rename_over_row() {
     drop(reader);
 }
 
+/// ornadb-5il1.470.3 and 41-vfs.md:38-40: a handle opened on the live `data.orna`, with no
+/// read or owner write before the rename, keeps the bytes and size it pinned when a temp file
+/// renames over the row. A new open shows the admitted replacement (profiles/vfs-1.md:126-133).
+/// No read happens before the rename, so the kernel page cache cannot serve the old bytes. The
+/// sleep lets the attributes cached at open expire (fs/fuse/dir.c compares i_time with jiffies
+/// strictly), so `fstat` reaches the server, which must report the pinned node.
+#[tokio::test]
+async fn reader_opened_on_live_row_survives_temp_rename_over_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.replace-temp",
+        &music_row("Temp replacement, substantially longer than the original row"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the temp replacement");
+    assert!(
+        fresh_view(&fixture).contains("Temp replacement"),
+        "a new open sees the admitted replacement"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on a handle pinned to the live row reports its pinned size after the rename"
+    );
+    assert_eq!(
+        read_from_start(&mut reader),
+        original,
+        "a handle pinned to the live row reads its pinned bytes after the rename"
+    );
+    drop(reader);
+}
+
+/// ornadb-5il1.470.4: a path `stat` taken right after each owner-routed write reports the
+/// accepted size, even though a `stat` just before the write cached the dentry and attributes.
+/// ENTRY_TTL is zero, so the kernel revalidates on use (fs/fuse/dir.c: fuse_time_to_jiffies
+/// returns 0 for a zero timeout and fuse_dentry_revalidate compares that against jiffies).
+/// The row grows every round, so a stale size would differ from the accepted size.
+#[tokio::test]
+async fn path_stat_after_owner_write_reports_accepted_size_in_loop() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    for round in 0..24 {
+        std::fs::metadata(&fixture.data_path).unwrap();
+        let title = "y".repeat(round + 1);
+        owner_routed_edit(&fixture, &title);
+        let stat = std::fs::metadata(&fixture.data_path).unwrap().len();
+        let accepted = fresh_view(&fixture);
+        assert!(
+            accepted.contains(&title),
+            "round {round}: the owner write is accepted, got {accepted:?}"
+        );
+        assert_eq!(
+            stat,
+            accepted.len() as u64,
+            "round {round}: a path stat right after the owner write reports the accepted size"
+        );
+    }
+}
+
 /// ORNA-VFS-019 and 41-vfs.md:39-40: a handle opened before an owner write that
 /// shrinks the row keeps its captured bytes. One owner write from the original row.
 #[tokio::test]
