@@ -626,6 +626,7 @@ async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation(
     let fixture = start_editor_mount_with_source(
         source,
         "{ title: \"Original\", artist: \"Kieran\", }\n",
+        "Original",
         false,
     )
     .await;

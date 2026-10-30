@@ -38,7 +38,8 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EditorMount, assert_errno, await_draft_guard, fresh_view, open_rw, require_fuse_or_skip,
-    start_editor_mount, start_mount_process, wait_for_mount,
+    retained_drafts, start_editor_mount, start_editor_mount_with_source, start_mount_process,
+    wait_for_mount,
 };
 
 fn music_row(title: &str) -> String {
@@ -542,6 +543,47 @@ async fn writer_opened_before_owner_write_is_refused_with_eagain() {
     drop(writer);
 }
 
+/// ORNA-VFS-011 and ORNA-VFS-009 (41-vfs.md:38-40, 67-68): a writer handle pinned to
+/// `data.orna` before the owner's temp renames over the row. The handle's candidate is refused
+/// stale with EAGAIN and retained, and the owner's replacement stays. Both arms of the rename
+/// are covered by this and the large-Str tests; this one takes the pinned arm.
+#[tokio::test]
+async fn writer_handle_pinned_before_owner_rename_over_is_refused_and_candidate_retained() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut writer = open_rw(&fixture);
+    writer.set_len(0).unwrap();
+    writer
+        .write_all(music_row("Stale writer").as_bytes())
+        .unwrap();
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.replace-temp",
+        &music_row("Owner replacement"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("the owner's temp admits its replacement");
+
+    assert_errno(
+        writer.sync_all(),
+        &[libc::EAGAIN],
+        "a writer pinned before the owner's rename-over must be refused",
+    );
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Owner replacement") && !view.contains("Stale writer"),
+        "the refused writer leaves the owner's row in place, got {view}"
+    );
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Stale writer")),
+        "the refused candidate is retained (ORNA-VFS-009)"
+    );
+    drop(writer);
+}
+
 /// ORNA-VFS-019 and 41-vfs.md:38-39: a writer's stat reports its own draft size
 /// while the draft is open, before any owner write.
 #[tokio::test]
@@ -651,6 +693,158 @@ async fn reader_opened_before_owner_write_survives_temp_rename_over_row() {
         "fstat on that handle reports the pinned size after the rename"
     );
     drop(reader);
+}
+
+/// ornadb-5il1.470.3 and 41-vfs.md:38-40: a handle opened on the live `data.orna`, with no
+/// read or owner write before the rename, keeps the bytes and size it pinned when a temp file
+/// renames over the row. A new open shows the admitted replacement (profiles/vfs-1.md:126-133).
+/// No read happens before the rename, so the kernel page cache cannot serve the old bytes. The
+/// sleep lets the attributes cached at open expire (fs/fuse/dir.c compares i_time with jiffies
+/// strictly), so `fstat` reaches the server, which must report the pinned node.
+#[tokio::test]
+async fn reader_opened_on_live_row_survives_temp_rename_over_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.replace-temp",
+        &music_row("Temp replacement, substantially longer than the original row"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the temp replacement");
+    assert!(
+        fresh_view(&fixture).contains("Temp replacement"),
+        "a new open sees the admitted replacement"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on a handle pinned to the live row reports its pinned size after the rename"
+    );
+    assert_eq!(
+        read_from_start(&mut reader),
+        original,
+        "a handle pinned to the live row reads its pinned bytes after the rename"
+    );
+    drop(reader);
+}
+
+/// Source of the one-table fixture the large-Str tests mount (ornadb-5il1.470.3).
+const LARGE_STR_SOURCE: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+
+/// A Str over the 64 KiB inline bound, so its row projects `title.txt` beside `data.orna`
+/// (profiles/vfs-1.md:76-80).
+fn large_title(fill: char) -> String {
+    fill.to_string().repeat(70_000)
+}
+
+/// Mounts the large-Str fixture. `./title.txt` is the projected row's readiness marker.
+async fn start_large_str_mount() -> EditorMount {
+    start_editor_mount_with_source(
+        LARGE_STR_SOURCE,
+        &music_row(&large_title('a')),
+        "./title.txt",
+        false,
+    )
+    .await
+}
+
+/// A new open shows the inline row, and the `.txt` sibling is gone from the row directory.
+fn assert_shrunk_to_inline(fixture: &EditorMount) {
+    let accepted = fresh_view(fixture);
+    assert!(
+        accepted.contains("\"small\"") && !accepted.contains("./title.txt"),
+        "a new open shows the inline row: {accepted}"
+    );
+    assert!(
+        !fixture.row_directory.join("title.txt").exists(),
+        "the stale title.txt sibling leaves the row directory"
+    );
+}
+
+/// ornadb-5il1.470.3 and 41-vfs.md:38-40, profiles/vfs-1.md:76-80: a handle pinned to
+/// `data.orna` keeps the bytes it captured when a temp renames over a row whose large Str
+/// shrinks to an inline literal. The stale `.txt` sibling leaves the directory.
+#[tokio::test]
+async fn pinned_reader_survives_temp_rename_shrinking_large_str_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_large_str_mount().await;
+    let original = fresh_view(&fixture);
+    assert!(
+        original.contains("./title.txt"),
+        "the large Str is projected as title.txt: {original}"
+    );
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut reader), original);
+
+    let temp = write_temporary_sibling(&fixture, ".data.orna.replace-temp", &music_row("small"));
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the inline replacement");
+    assert_shrunk_to_inline(&fixture);
+    assert_eq!(
+        read_from_start(&mut reader),
+        original,
+        "a handle pinned to the row reads its pinned bytes after the rename"
+    );
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on that handle reports the pinned size after the rename"
+    );
+    drop(reader);
+}
+
+/// ornadb-5il1.470.3: a temp renames over a large-Str row with no handle open on it, and the
+/// Str shrinks to an inline literal. The stale `.txt` sibling leaves the directory
+/// (profiles/vfs-1.md:76-80).
+#[tokio::test]
+async fn temp_rename_shrinking_large_str_row_removes_text_sibling() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_large_str_mount().await;
+    assert!(
+        fresh_view(&fixture).contains("./title.txt"),
+        "the large Str is projected as title.txt"
+    );
+
+    let temp = write_temporary_sibling(&fixture, ".data.orna.replace-temp", &music_row("small"));
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the inline replacement");
+    assert_shrunk_to_inline(&fixture);
+}
+
+/// ornadb-5il1.470.4: a path `stat` taken right after each owner-routed write reports the
+/// accepted size, even though a `stat` just before the write cached the dentry and attributes.
+/// ENTRY_TTL is zero, so the kernel revalidates on use (fs/fuse/dir.c: fuse_time_to_jiffies
+/// returns 0 for a zero timeout and fuse_dentry_revalidate compares that against jiffies).
+/// The row grows every round, so a stale size would differ from the accepted size.
+#[tokio::test]
+async fn path_stat_after_owner_write_reports_accepted_size_in_loop() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    for round in 0..24 {
+        std::fs::metadata(&fixture.data_path).unwrap();
+        let title = "y".repeat(round + 1);
+        owner_routed_edit(&fixture, &title);
+        let stat = std::fs::metadata(&fixture.data_path).unwrap().len();
+        let accepted = fresh_view(&fixture);
+        assert!(
+            accepted.contains(&title),
+            "round {round}: the owner write is accepted, got {accepted:?}"
+        );
+        assert_eq!(
+            stat,
+            accepted.len() as u64,
+            "round {round}: a path stat right after the owner write reports the accepted size"
+        );
+    }
 }
 
 /// ORNA-VFS-019 and 41-vfs.md:39-40: a handle opened before an owner write that

@@ -5928,6 +5928,33 @@ impl Filesystem for WorkspaceFilesystem {
                     }
                 }
             }
+            None if state.subtree_pinned(destination_inode) => {
+                // 41-vfs.md:38-40: a handle pinned to the replaced row keeps the generation it
+                // captured; the accepted bytes go to a new node that new opens show
+                // (profiles/vfs-1.md:126-133), the same policy adopt_accepted_document applies.
+                let new_inode = match state.replace_child(
+                    newparent.0,
+                    newname,
+                    NodeKind::Document {
+                        bytes: accepted_bytes.to_vec(),
+                        save: Arc::clone(&save),
+                    },
+                ) {
+                    Ok(inode) => inode,
+                    Err(error) => {
+                        eprintln!("mounted replacement install failed: {error}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                };
+                // The `.txt` sibling of a Str over 64 KiB follows the accepted row, as
+                // accept_document and adopt_accepted_document project it (profiles/vfs-1.md:76-80).
+                if !state.is_superseded(new_inode)
+                    && let Err(error) = state.project_accepted_document(new_inode, &save)
+                {
+                    eprintln!("the accepted row document could not be re-projected: {error}");
+                }
+            }
             None => {
                 let Some(NodeKind::Document {
                     bytes,
@@ -5944,6 +5971,12 @@ impl Filesystem for WorkspaceFilesystem {
                 // New opens continue from the row this scratch's context accepted.
                 if !Arc::ptr_eq(destination_save, &save) {
                     *destination_save = Arc::clone(&save);
+                }
+                // The `.txt` sibling of a Str over 64 KiB follows the accepted row.
+                if !state.is_superseded(destination_inode)
+                    && let Err(error) = state.project_accepted_document(destination_inode, &save)
+                {
+                    eprintln!("the accepted row document could not be re-projected: {error}");
                 }
             }
         }
