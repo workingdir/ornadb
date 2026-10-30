@@ -7976,10 +7976,13 @@ impl FsBuilder {
     }
 
     /// Replaces the accepted document `document` with a new generation that shows `bytes`.
-    /// The superseded node keeps the bytes and save context it captured, so a handle pinned to
-    /// it reports the size it opened with and its flush still compares against the row it
-    /// opened (profiles/vfs-1.md:126-133). The new generation saves against the row the mount
-    /// accepted (ORNA-VFS-011). Returns the new node's inode.
+    /// The superseded node keeps the bytes it captured, so a handle pinned to it reports the
+    /// size it opened with (profiles/vfs-1.md:126-133). Its save context is the one the pinned
+    /// handle holds, and its `expected_baseline_row` is not isolated: a grouped `edit --row`
+    /// committed through this generation before the replacement advances the baseline that the
+    /// pinned handle's flush compares against. That violates ORNA-VFS-011 for the pinned writer;
+    /// it is pre-existing (ornadb-5il1.470.1). The new generation saves against the row the
+    /// mount accepted (ORNA-VFS-011). Returns the new node's inode.
     fn replace_document_generation(
         &mut self,
         document: u64,
