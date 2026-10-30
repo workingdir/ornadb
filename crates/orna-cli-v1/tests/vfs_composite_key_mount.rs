@@ -198,8 +198,9 @@ fn composite_key_components_project_as_nested_directories() {
         ("south/c.d/data.orna", 3),
     ] {
         let view = fs::read_to_string(stock.join(path)).expect("read the composite row");
+        let expected = format!("quantity: {quantity},");
         assert!(
-            view.contains(&format!("quantity: {quantity}")),
+            view.lines().any(|line| line.trim() == expected),
             "{path} reads its own committed quantity {quantity}: {view}"
         );
     }
