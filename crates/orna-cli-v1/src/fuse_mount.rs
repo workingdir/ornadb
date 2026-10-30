@@ -72,6 +72,11 @@ const HISTORY_LIMIT: usize = 1024;
 /// How long a failed committed-schema scan is kept before the table is scanned again.
 const HISTORICAL_SCAN_RETRY: Duration = Duration::from_secs(5);
 
+/// How long one pass of a table's committed-schema scan may run before it pauses. A paused scan
+/// keeps its progress and resumes on the next request for the table, so a long history never holds
+/// a request or mount startup past this bound per pass.
+const HISTORICAL_RESOLVE_BUDGET: Duration = Duration::from_secs(10);
+
 /// Refusal text for a CWD row that needs a table's committed schema history while it is scanned.
 const SCAN_PENDING: &str = "the committed schema history of this table is still being scanned";
 
@@ -1074,8 +1079,9 @@ struct MountWriter {
     retained_drafts: VfsRetainedDraftStore,
     owner_id: [u8; 16],
     row_baselines: Option<MountRowBaselines>,
-    /// Committed schema history of each table on `HEAD`'s lineage, scanned once per mount on a
-    /// background thread the first time a CWD row the mounted schema cannot validate needs it
+    /// Committed schema history of each table on `HEAD`'s lineage. Each table is scanned on a
+    /// background thread the first time a CWD row the mounted schema cannot validate needs it, in
+    /// passes bounded by `HISTORICAL_RESOLVE_BUDGET` that resume where the previous pass paused
     /// (ORNA-EVOL-002).
     historical_generations: Arc<Mutex<BTreeMap<[u8; 16], HistoricalState>>>,
 }
@@ -1093,19 +1099,121 @@ enum HistoricalState {
     /// A scan thread is running.
     Resolving,
     Ready(Arc<HistoricalTableSchemas>),
+    /// A scan pass ran out of its budget. The next pass resumes the scan at its next commit.
+    Paused(Box<HistoricalScan>),
     /// The last scan failed; it is retried once `HISTORICAL_SCAN_RETRY` has elapsed.
     Failed { reason: String, at: Instant },
 }
 
-/// Runs one committed-schema scan and returns the table's resulting state. A panicking scan is a
-/// failed scan, so a table is never left resolving.
-fn settle_historical_scan(repository: &Repository, relation_id: [u8; 16]) -> HistoricalState {
+/// The committed-schema scan of one table: the history walked when it started, and the progress of
+/// its passes over that history.
+type HistoricalScan = ScanProgress<GitCommitRef, SchemaDescriptor>;
+
+/// What one commit of a table's history contributes to the scan.
+struct HistoricalDeclaration<G> {
+    /// The schema generation the commit declares for the table.
+    generation: G,
+    /// The IDs of the table's stored fields at that commit.
+    field_ids: HashSet<[u8; 16]>,
+    /// The stored constant default of each field, as frozen by that commit.
+    defaults: BTreeMap<[u8; 16], Raw>,
+}
+
+/// A scan of one table's committed history, oldest commit first, which stops when its budget runs
+/// out and resumes at the next commit.
+struct ScanProgress<C, G> {
+    commits: Vec<C>,
+    /// The index of the next commit to visit.
+    next: usize,
+    /// The field IDs at the last commit that declared the table.
+    previous_ids: HashSet<[u8; 16]>,
+    introductions: BTreeMap<[u8; 16], Raw>,
+    /// The generation declared by each declaring commit, oldest first.
+    declared: Vec<G>,
+}
+
+impl<C, G: PartialEq> ScanProgress<C, G> {
+    fn new(commits: Vec<C>) -> Self {
+        Self {
+            commits,
+            next: 0,
+            previous_ids: HashSet::new(),
+            introductions: BTreeMap::new(),
+            declared: Vec::new(),
+        }
+    }
+
+    /// Visits the commits from `next` on. Returns `true` once the history is exhausted, or `false`
+    /// when `within_budget` refuses the next commit. `declare` reads one commit and returns `None`
+    /// when the commit does not declare the table.
+    fn advance(
+        &mut self,
+        mut within_budget: impl FnMut() -> bool,
+        declare: &impl Fn(&C) -> Result<Option<HistoricalDeclaration<G>>, String>,
+    ) -> Result<bool, String> {
+        while self.next < self.commits.len() {
+            if !within_budget() {
+                return Ok(false);
+            }
+            let Some(declaration) = declare(&self.commits[self.next])? else {
+                self.next += 1;
+                continue;
+            };
+            let previous_ids = &self.previous_ids;
+            for id in declaration
+                .field_ids
+                .iter()
+                .filter(|id| !previous_ids.contains(*id))
+            {
+                match declaration.defaults.get(id) {
+                    Some(value) => self.introductions.insert(*id, value.clone()),
+                    None => self.introductions.remove(id),
+                };
+            }
+            self.previous_ids = declaration.field_ids;
+            self.declared.push(declaration.generation);
+            self.next += 1;
+        }
+        Ok(true)
+    }
+
+    /// The declared generations, newest first and each distinct, with the introduced values. Only
+    /// meaningful once `advance` has returned `true`.
+    fn finish(self) -> (Vec<G>, BTreeMap<[u8; 16], Raw>) {
+        let mut generations: Vec<G> = Vec::new();
+        for generation in self.declared.into_iter().rev() {
+            if !generations.contains(&generation) {
+                generations.push(generation);
+            }
+        }
+        (generations, self.introductions)
+    }
+}
+
+/// The outcome of one pass of a table's committed-schema scan.
+enum HistoricalStep {
+    /// The pass visited the whole history.
+    Settled(HistoricalTableSchemas),
+    /// The pass ran out of budget; the scan resumes from here.
+    Paused(Box<HistoricalScan>),
+}
+
+/// Runs one pass of a table's committed-schema scan on the calling thread, until `deadline`, and
+/// returns the table's resulting state. A panicking pass is a failed scan, so a table is never left
+/// resolving.
+fn settle_historical_scan(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    scan: Option<Box<HistoricalScan>>,
+    deadline: Instant,
+) -> HistoricalState {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        scan_historical_schemas(repository, relation_id)
+        advance_historical_scan(repository, relation_id, scan, deadline)
     }))
     .unwrap_or_else(|_| Err("the committed schema scan panicked".to_owned()));
     match outcome {
-        Ok(schemas) => HistoricalState::Ready(Arc::new(schemas)),
+        Ok(HistoricalStep::Settled(schemas)) => HistoricalState::Ready(Arc::new(schemas)),
+        Ok(HistoricalStep::Paused(scan)) => HistoricalState::Paused(scan),
         Err(reason) => HistoricalState::Failed {
             reason,
             at: Instant::now(),
@@ -1113,93 +1221,103 @@ fn settle_historical_scan(repository: &Repository, relation_id: [u8; 16]) -> His
     }
 }
 
-/// Scans the committed schema history of `relation_id` along `repository`'s `HEAD` lineage,
-/// oldest commit first. A commit with no committed identity for the table predates it and is
-/// skipped (F7: identity-less commits are not scanned). Any other commit that cannot be read or
-/// resolved fails the scan: a generation is never silently left out (ORNA-EVOL-002). The
-/// introduced value of a field is the default frozen by the commit that most recently introduced
-/// it, read from that commit's own source (ORNA-EVOL-009).
-///
-/// The scan covers the history walked when it starts. A `HEAD` that moves after the table's first
-/// scan is not rescanned for the lifetime of this mount (F8).
-fn scan_historical_schemas(
+/// Advances the committed-schema scan of `relation_id` along `repository`'s `HEAD` lineage until
+/// `deadline`. The first pass walks the history and starts the scan; a later pass resumes the
+/// history that the first pass walked, so a `HEAD` that moves afterwards is not rescanned (F8).
+fn advance_historical_scan(
     repository: &Repository,
     relation_id: [u8; 16],
-) -> Result<HistoricalTableSchemas, String> {
-    let history = repository
-        .committed_history(HISTORY_LIMIT + 1)
-        .map_err(|error| format!("committed history could not be read: {error:?}"))?;
-    if history.len() > HISTORY_LIMIT {
-        return Err(format!(
-            "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
-        ));
-    }
-    let mut introductions: BTreeMap<[u8; 16], Raw> = BTreeMap::new();
-    let mut previous_ids: HashSet<[u8; 16]> = HashSet::new();
-    let mut declared_oldest_first: Vec<SchemaDescriptor> = Vec::new();
-    for entry in history.iter().rev() {
-        let commit = entry.commit();
-        let identities = ObjectIdentityManifest::read_committed_if_present(repository, commit)
-            .map_err(|error| {
-                format!(
-                    "committed identities at {} could not be read: {error:?}",
-                    commit.as_str()
-                )
-            })?;
-        let Some(identities) = identities else {
-            continue;
-        };
-        let declared = identities.records().iter().any(|record| {
-            record.kind() == ObjectKind::Table
-                && !record.is_retired()
-                && *record.id() == relation_id
-        });
-        if !declared {
-            continue;
-        }
-        let (schema, defaults) = ProjectLoader::default()
-            .resolve_committed_source_table_schema_with_introductions(
-                repository,
-                commit,
-                TableObjectId::new(relation_id),
+    scan: Option<Box<HistoricalScan>>,
+    deadline: Instant,
+) -> Result<HistoricalStep, String> {
+    let mut scan = match scan {
+        Some(scan) => *scan,
+        None => {
+            let history = repository
+                .committed_history(HISTORY_LIMIT + 1)
+                .map_err(|error| format!("committed history could not be read: {error:?}"))?;
+            if history.len() > HISTORY_LIMIT {
+                return Err(format!(
+                    "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
+                ));
+            }
+            ScanProgress::new(
+                history
+                    .iter()
+                    .rev()
+                    .map(|entry| entry.commit().clone())
+                    .collect(),
             )
-            .map_err(|error| {
-                format!(
-                    "the table's committed schema at {} could not be resolved: {error:?}",
-                    commit.as_str()
-                )
-            })?;
-        let stored = StoredSchema::new(schema.descriptor()).map_err(|error| {
+        }
+    };
+    let complete = scan.advance(
+        || Instant::now() < deadline,
+        &|commit: &GitCommitRef| declare_historical_commit(repository, relation_id, commit),
+    )?;
+    if !complete {
+        return Ok(HistoricalStep::Paused(Box::new(scan)));
+    }
+    let (generations, introductions) = scan.finish();
+    Ok(HistoricalStep::Settled(HistoricalTableSchemas {
+        generations,
+        introductions,
+    }))
+}
+
+/// Reads one commit of a table's history. A commit with no committed identity for the table
+/// predates it and does not declare it (F7: identity-less commits are not scanned). Any other
+/// commit that cannot be read or resolved fails the scan: a generation is never silently left out
+/// (ORNA-EVOL-002).
+fn declare_historical_commit(
+    repository: &Repository,
+    relation_id: [u8; 16],
+    commit: &GitCommitRef,
+) -> Result<Option<HistoricalDeclaration<SchemaDescriptor>>, String> {
+    let identities = ObjectIdentityManifest::read_committed_if_present(repository, commit)
+        .map_err(|error| {
             format!(
-                "the table's committed schema at {} is invalid: {error:?}",
+                "committed identities at {} could not be read: {error:?}",
                 commit.as_str()
             )
         })?;
-        let ids: HashSet<[u8; 16]> = stored
-            .fields()
-            .iter()
-            .filter(|field| field.role() == 1)
-            .map(|field| *field.id())
-            .collect();
-        for id in ids.iter().filter(|id| !previous_ids.contains(*id)) {
-            match defaults.get(id) {
-                Some(value) => introductions.insert(*id, value.clone()),
-                None => introductions.remove(id),
-            };
-        }
-        previous_ids = ids;
-        declared_oldest_first.push(schema.descriptor().clone());
+    let Some(identities) = identities else {
+        return Ok(None);
+    };
+    let declared = identities.records().iter().any(|record| {
+        record.kind() == ObjectKind::Table && !record.is_retired() && *record.id() == relation_id
+    });
+    if !declared {
+        return Ok(None);
     }
-    let mut generations: Vec<SchemaDescriptor> = Vec::new();
-    for descriptor in declared_oldest_first.iter().rev() {
-        if !generations.contains(descriptor) {
-            generations.push(descriptor.clone());
-        }
-    }
-    Ok(HistoricalTableSchemas {
-        generations,
-        introductions,
-    })
+    let (schema, defaults) = ProjectLoader::default()
+        .resolve_committed_source_table_schema_with_introductions(
+            repository,
+            commit,
+            TableObjectId::new(relation_id),
+        )
+        .map_err(|error| {
+            format!(
+                "the table's committed schema at {} could not be resolved: {error:?}",
+                commit.as_str()
+            )
+        })?;
+    let stored = StoredSchema::new(schema.descriptor()).map_err(|error| {
+        format!(
+            "the table's committed schema at {} is invalid: {error:?}",
+            commit.as_str()
+        )
+    })?;
+    let field_ids = stored
+        .fields()
+        .iter()
+        .filter(|field| field.role() == 1)
+        .map(|field| *field.id())
+        .collect();
+    Ok(Some(HistoricalDeclaration {
+        generation: schema.descriptor().clone(),
+        field_ids,
+        defaults,
+    }))
 }
 
 impl MountWriter {
@@ -1304,9 +1422,10 @@ impl MountWriter {
     }
 
     /// The committed schema history of `relation_id`, cached per table for this mount. The first
-    /// request starts a background scan and fails transiently; requests fail transiently until
-    /// the scan completes, after which they succeed. A failed scan is retried once
-    /// `HISTORICAL_SCAN_RETRY` has elapsed.
+    /// request starts a background scan pass and fails transiently. A pass that runs out of
+    /// `HISTORICAL_RESOLVE_BUDGET` keeps its progress, and the next request resumes it. Requests
+    /// fail transiently until the scan completes, after which they succeed. A failed scan is
+    /// retried from the start once `HISTORICAL_SCAN_RETRY` has elapsed.
     fn historical_descriptors(
         &self,
         relation_id: [u8; 16],
@@ -1327,16 +1446,21 @@ impl MountWriter {
                     "the committed schema history could not be scanned: {reason}"
                 )));
             }
-            Some(HistoricalState::Failed { .. }) | None => {}
+            Some(HistoricalState::Paused(_) | HistoricalState::Failed { .. }) | None => {}
         }
-        states.insert(relation_id, HistoricalState::Resolving);
+        let previous = states.insert(relation_id, HistoricalState::Resolving);
         drop(states);
+        let scan = match previous {
+            Some(HistoricalState::Paused(scan)) => Some(scan),
+            _ => None,
+        };
         let repository = self.repository.clone();
         let shared = Arc::clone(&self.historical_generations);
+        let deadline = Instant::now() + HISTORICAL_RESOLVE_BUDGET;
         let spawned = std::thread::Builder::new()
             .name("orna-historical-scan".to_owned())
             .spawn(move || {
-                let state = settle_historical_scan(&repository, relation_id);
+                let state = settle_historical_scan(&repository, relation_id, scan, deadline);
                 shared
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1363,21 +1487,27 @@ impl MountWriter {
         }
     }
 
-    /// Settles the committed schema history of `relation_id` on the calling thread. It runs
-    /// before the mount serves requests, so persisted temporary scratch of the table can be
-    /// restored (ORNA-VFS-019); a table whose history is already settled keeps that result.
-    fn resolve_historical_blocking(&self, relation_id: [u8; 16]) {
-        let settled = matches!(
-            self.historical_generations
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .get(&relation_id),
-            Some(HistoricalState::Ready(_))
-        );
-        if settled {
+    /// Advances the committed schema history of `relation_id` on the calling thread until
+    /// `deadline`. It runs before the mount serves requests, so persisted temporary scratch of the
+    /// table can be restored (ORNA-VFS-019). A table whose history is resolving or settled keeps
+    /// that state.
+    fn resolve_historical_blocking(&self, relation_id: [u8; 16], deadline: Instant) {
+        let mut states = self
+            .historical_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if matches!(
+            states.get(&relation_id),
+            Some(HistoricalState::Ready(_) | HistoricalState::Resolving)
+        ) {
             return;
         }
-        let state = settle_historical_scan(&self.repository, relation_id);
+        let scan = match states.insert(relation_id, HistoricalState::Resolving) {
+            Some(HistoricalState::Paused(scan)) => Some(scan),
+            _ => None,
+        };
+        drop(states);
+        let state = settle_historical_scan(&self.repository, relation_id, scan, deadline);
         self.historical_generations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3683,15 +3813,18 @@ impl WorkspaceFilesystem {
                 );
             }
             // Restoring a row may need its table's committed schema history (ORNA-VFS-019). The
-            // mount serves nothing yet, so each such scan settles here rather than failing the
-            // restore on a background scan that has not started.
+            // mount serves nothing yet, so each such scan is advanced here within one budget that
+            // all of them share. A table whose scan runs out of it keeps its progress and resumes
+            // on the next request for that table; the scratch of such a table is left on disk, as
+            // any unresolved record is.
+            let deadline = Instant::now() + HISTORICAL_RESOLVE_BUDGET;
             let relations: HashSet<[u8; 16]> = records
                 .iter()
                 .filter(|record| record.schema_identity.is_some())
                 .map(|record| record.identity.relation_id)
                 .collect();
             for relation_id in relations {
-                writer.resolve_historical_blocking(relation_id);
+                writer.resolve_historical_blocking(relation_id, deadline);
             }
             for record in records {
                 let logical_path = record.identity.logical_path.clone();
@@ -10290,5 +10423,83 @@ mod nested_projection_tests {
             Some(&Raw::Int(99_999_i64.into()))
         );
         assert!(nested_value_at(&list, &[100_000]).is_none());
+    }
+}
+
+#[cfg(test)]
+mod historical_scan_budget_tests {
+    use super::{HistoricalDeclaration, ScanProgress};
+    use std::cell::Cell;
+    use std::collections::{BTreeMap, HashSet};
+
+    /// Commits of one table's history, oldest first. The third commit declares the generation of
+    /// the second again, so the newest-first list must keep only the distinct generations.
+    fn commits() -> ScanProgress<u32, u32> {
+        ScanProgress::new(vec![1, 2, 2, 3])
+    }
+
+    fn declare(commit: &u32) -> Result<Option<HistoricalDeclaration<u32>>, String> {
+        Ok(Some(HistoricalDeclaration {
+            generation: *commit,
+            field_ids: HashSet::new(),
+            defaults: BTreeMap::new(),
+        }))
+    }
+
+    #[test]
+    fn a_pass_without_budget_visits_no_commit() {
+        let visited = Cell::new(0_usize);
+        let counted = |commit: &u32| {
+            visited.set(visited.get() + 1);
+            declare(commit)
+        };
+        let mut progress = commits();
+        let complete = progress
+            .advance(|| false, &counted)
+            .expect("a pass with no budget should not fail");
+        assert!(!complete);
+        assert_eq!(visited.get(), 0);
+        assert_eq!(progress.next, 0);
+    }
+
+    #[test]
+    fn a_paused_pass_resumes_where_it_stopped_and_matches_an_uninterrupted_pass() {
+        let visited = Cell::new(0_usize);
+        let counted = |commit: &u32| {
+            visited.set(visited.get() + 1);
+            declare(commit)
+        };
+        let mut budget = 2_usize;
+        let mut progress = commits();
+        let complete = progress
+            .advance(
+                || {
+                    if budget == 0 {
+                        false
+                    } else {
+                        budget -= 1;
+                        true
+                    }
+                },
+                &counted,
+            )
+            .expect("the first pass should not fail");
+        assert!(!complete);
+        assert_eq!(visited.get(), 2);
+        assert_eq!(progress.next, 2);
+
+        let complete = progress
+            .advance(|| true, &counted)
+            .expect("the resumed pass should not fail");
+        assert!(complete);
+        assert_eq!(visited.get(), 4);
+        let resumed = progress.finish();
+
+        let mut uninterrupted = commits();
+        uninterrupted
+            .advance(|| true, &counted)
+            .expect("the uninterrupted pass should not fail");
+        assert_eq!(resumed, uninterrupted.finish());
+        assert_eq!(resumed.0, vec![3, 2, 1]);
     }
 }
