@@ -760,6 +760,16 @@ enum CandidateSource {
     Truncated { size: u64, latest: Option<Arc<EditDraft<RowMapSnapshot>>> },
 }
 
+impl CandidateSource {
+    /// The live draft this candidate was cut from: the draft itself, or the draft a truncate cut.
+    fn live_draft(&self) -> Option<Arc<EditDraft<RowMapSnapshot>>> {
+        match self {
+            Self::Draft(draft) => Some(Arc::clone(draft)),
+            Self::Truncated { latest, .. } => latest.clone(),
+        }
+    }
+}
+
 /// Reads up to `length` bytes at `offset` of the candidate that results from
 /// cutting or zero-extending a base of `base_len` bytes to `size`. `read_base`
 /// reads the base's bytes; growth is zero-filled. Copies only the requested window.
@@ -3383,7 +3393,7 @@ struct DraftRefusal {
     /// The released or refused writer's draft: the base a path truncate that
     /// arrives before retention cuts (ORNA-VFS-009).
     candidate: Option<Arc<EditDraft<RowMapSnapshot>>>,
-    unretained: Option<(Arc<RowSaveContext>, CandidateSource)>,
+    unretained: Vec<(Arc<RowSaveContext>, CandidateSource)>,
 }
 
 /// A replacement candidate whose rename was refused. `kept` records that its
@@ -4506,7 +4516,7 @@ impl WorkspaceFilesystem {
                     retained.id,
                     retained.record.display()
                 );
-                (Some(retained.id), None, None)
+                (Some(retained.id), Vec::new(), None)
             }
             Err(retain_error) => {
                 eprintln!("{path}: not accepted ({cause}); candidate could not be retained: {retain_error}");
@@ -4514,7 +4524,7 @@ impl WorkspaceFilesystem {
                 // left, so it stays unresolved and is retried at the next retention.
                 (
                     None,
-                    Some((Arc::clone(save), CandidateSource::Draft(Arc::clone(draft)))),
+                    vec![(Arc::clone(save), CandidateSource::Draft(Arc::clone(draft)))],
                     Some(retain_error.errno),
                 )
             }
@@ -4529,7 +4539,7 @@ impl WorkspaceFilesystem {
                 draft: retained_draft,
                 unretained,
             },
-        ) && superseded.unretained.is_some()
+        ) && !superseded.unretained.is_empty()
         {
             eprintln!("{path}: an earlier unretained candidate was superseded");
         }
@@ -4782,7 +4792,7 @@ impl WorkspaceFilesystem {
                 CandidateSource::Truncated { size: *size, latest: latest.clone() },
             ));
         }
-        let mut unresolved = HashMap::new();
+        let mut unresolved: HashMap<u64, DraftRefusal> = HashMap::new();
         let mut refused: Option<Errno> = None;
         let mut superseded: HashMap<u64, (String, String)> = HashMap::new();
         for (inode, refusal) in std::mem::take(&mut draft_state.rejected_documents) {
@@ -4795,29 +4805,21 @@ impl WorkspaceFilesystem {
                         .zip(refusal.candidate.as_ref())
                         .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
             });
-            match (refusal.draft, refusal.unretained) {
-                (_, Some((save, source))) => {
-                    candidates.push((
-                        inode,
-                        refusal.handle,
-                        refusal.cause,
-                        save,
-                        source,
-                    ));
+            if !refusal.unretained.is_empty() {
+                for (save, source) in refusal.unretained {
+                    candidates.push((inode, refusal.handle, refusal.cause, save, source));
                 }
-                (Some(draft), None) => {
-                    let path = state.display_path(inode);
-                    let report = format!(
-                        "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
-                        refusal.cause
-                    );
-                    if cut_by_truncate {
-                        superseded.insert(inode, (draft, report));
-                    } else {
-                        reports.insert(report);
-                    }
+            } else if let Some(draft) = refusal.draft {
+                let path = state.display_path(inode);
+                let report = format!(
+                    "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
+                    refusal.cause
+                );
+                if cut_by_truncate {
+                    superseded.insert(inode, (draft, report));
+                } else {
+                    reports.insert(report);
                 }
-                (None, None) => {}
             }
         }
         for (inode, handle, cause, save, source) in candidates {
@@ -4893,17 +4895,28 @@ impl WorkspaceFilesystem {
                     }
                     // Recovery storage refused the candidate: it stays unresolved, and its
                     // live source is retried at the next retention rather than copied here.
-                    unresolved.insert(
-                        inode,
-                        DraftRefusal {
-                            cause,
-                            path,
-                            draft: None,
-                            handle,
-                            candidate: None,
-                            unretained: Some((save, source)),
-                        },
-                    );
+                    let live = source.live_draft();
+                    match unresolved.entry(inode) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            // A second refused candidate of this inode: both stay unresolved, so
+                            // neither the earlier unretained source nor its live draft is dropped.
+                            let kept = entry.get_mut();
+                            kept.unretained.push((save, source));
+                            if live.is_some() {
+                                kept.candidate = live;
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert(DraftRefusal {
+                                cause,
+                                path,
+                                draft: None,
+                                handle,
+                                candidate: live,
+                                unretained: vec![(save, source)],
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -10335,7 +10348,7 @@ mod hardening_tests {
             handle: None,
             candidate: None,
             draft: None,
-            unretained: None,
+            unretained: Vec::new(),
         };
         assert_eq!(super::release_retention_cause(Some(&refusal)), "sys.vfs.stale_edit");
     }
