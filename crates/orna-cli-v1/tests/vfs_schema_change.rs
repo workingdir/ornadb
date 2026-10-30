@@ -10,9 +10,9 @@
 //!   generation rather than mixing old and new shapes.
 //!
 //! A write whose open captured the old generation must fail EAGAIN (profiles/vfs-1.md
-//! :91-92 and :138; bead ornadb-eufo.1), and is proven live. One gap stays an ignored red
-//! proof rather than weakened here: a restarted mount must expose the new shape without EIO
-//! (ORNA-VFS-019; bead ornadb-eufo.2).
+//! :91-92 and :138; bead ornadb-eufo.1), and is proven live. A restarted mount must expose the
+//! new shape without EIO (ORNA-VFS-019; bead ornadb-eufo.2.1): the v1 CWD row is admitted to
+//! the committed v2 generation when read.
 
 #[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
@@ -52,6 +52,8 @@ const ORIGINAL: &str = "{\n    artist: \"Kieran\",\n    title: \"Original\",\n}\
 const STALE: &str = "{\n    artist: \"Kieran\",\n    title: \"Stale\",\n}\n";
 const NOTED: &str =
     "{\n    artist: \"Kieran\",\n    note: \"fresh\",\n    title: \"Original\",\n}\n";
+const ADMITTED_V2: &str =
+    "{\n    artist: \"Kieran\",\n    note: null,\n    title: \"Original\",\n}\n";
 
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = fs::read_dir(directory)
@@ -165,13 +167,10 @@ fn vfs_019_schema_change_under_live_mount_pins_handles_and_listing() {
     drop(mounted);
 }
 
-/// Red proof for bead ornadb-eufo.2: a mount restarted after an owner schema
-/// change must expose the new generation. The remounted row currently fails
-/// validation and reads EIO: the schema commit rewrites committed rows but not
-/// the CWD runtime row baseline, which stays v1-encoded and is validated against
-/// the v2 descriptor.
+/// Proof for bead ornadb-eufo.2.1: a mount restarted after an owner schema change must
+/// expose the new generation. The v1 CWD row is admitted to the committed v2 generation when
+/// read (ORNA-EVOL-002), rather than failing validation and reading EIO.
 #[test]
-#[ignore = "ornadb-eufo.2.1"]
 fn vfs_019_remount_after_schema_change_shows_new_shape() {
     if !require_fuse_or_skip() {
         return;
@@ -200,7 +199,7 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
     assert!(
         same_row(
             &fs::read_to_string(&london).expect("read the remounted row"),
-            ORIGINAL
+            ADMITTED_V2
         ),
         "the remounted row keeps its accepted content; mount stderr: {}",
         remounted.stderr_text()
@@ -340,10 +339,8 @@ fn vfs_019_unreadable_persisted_scratch_is_reported_and_left_on_disk() {
 /// ORNA-VFS-019 restart: a temporary scratch fsynced under schema v1 is restored after the owner
 /// commits a schema change while the mount is down. Its captured bytes survive intact; the scratch
 /// keeps its creation generation (a later commit of it is refused EAGAIN, not retargeted).
-/// Red under ornadb-eufo.2.1: the restarted v2 mount skips the v1 CWD row with
-/// `InvalidValue` ("the CWD row failed validation against the mounted schema"), so the
-/// persisted scratch is never exposed. Not weakened; ignored until the bead lands.
-#[ignore = "ornadb-eufo.2.1"]
+/// A restarted v2 mount admits the v1 CWD row to the committed generation (ORNA-EVOL-002)
+/// instead of skipping it, so the persisted scratch is restored (ornadb-eufo.2.1).
 #[test]
 fn vfs_019_persisted_scratch_is_restored_after_schema_change() {
     if !require_fuse_or_skip() {
@@ -465,8 +462,7 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
     let restarted = mount_parent.path().join("restarted");
     let mut remounted = spawn_mount_process(&root, &restarted);
     let restarted_row = restarted.join("Music/london");
-    // A restarted v2 mount may not expose the v1 row (ornadb-eufo.2.1), so wait for the legacy
-    // record's disposition and its stderr report rather than for the row.
+    // Wait for the legacy record's disposition and its stderr report rather than for the row.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while (record.exists() || !remounted.stderr_text().contains("legacy scratch record"))
         && std::time::Instant::now() < deadline

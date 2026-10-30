@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -26,6 +27,7 @@ use orna_repository_v1::{
     Repository, RepositoryReadScope, RowMapSnapshot, TypedKey,
     MountRowBaselines,
 };
+use orna_repository_v1::schema_evolution::admit_row_under_descriptor;
 use orna_runtime_v1::{
     NoFault, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, RuntimeTableRows,
     TableObjectId,
@@ -61,6 +63,11 @@ const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
 /// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
 /// Records restored from earlier mounts are not counted (`VfsScratchStore::reserve_unbound`).
 const MAX_UNBOUND_SCRATCH: usize = 16;
+
+/// Bound on the committed history a restarted mount scans for the schema generations of a
+/// table whose CWD row predates the mounted schema (ORNA-EVOL-002). A longer history is
+/// refused rather than scanned partially.
+const HISTORY_LIMIT: usize = 1024;
 
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
@@ -1061,6 +1068,9 @@ struct MountWriter {
     retained_drafts: VfsRetainedDraftStore,
     owner_id: [u8; 16],
     row_baselines: Option<MountRowBaselines>,
+    /// Schema generations of each table on `HEAD`'s lineage, filled on the first CWD row the
+    /// mounted schema cannot validate (ORNA-EVOL-002).
+    historical_generations: Mutex<BTreeMap<[u8; 16], Arc<Vec<SchemaDescriptor>>>>,
 }
 
 impl MountWriter {
@@ -1109,7 +1119,122 @@ impl MountWriter {
             retained_drafts,
             owner_id,
             row_baselines,
+            historical_generations: Mutex::new(BTreeMap::new()),
         }))
+    }
+
+    /// Admits a CWD row the mounted schema cannot validate (ORNA-VFS-001, ORNA-EVOL-002).
+    /// Exactly one committed schema generation of the table must validate the row; the row
+    /// is then rewritten to the mounted generation. A row that no generation, or more than
+    /// one generation, validates is refused with the mounted-schema error.
+    fn admit_runtime_row<'row>(
+        &self,
+        source: &TableSource,
+        canonical_key: &[u8],
+        row: &'row [u8],
+    ) -> Result<Cow<'row, [u8]>, String> {
+        let relation_id = *source.binding.relation_id();
+        let descriptor = source.schema.descriptor();
+        let mounted_error = match descriptor.validate_stored_row(relation_id, canonical_key, row) {
+            Ok(()) => return Ok(Cow::Borrowed(row)),
+            Err(error) => error,
+        };
+        let generations = self.historical_descriptors(relation_id)?;
+        let matching: Vec<&SchemaDescriptor> = generations
+            .iter()
+            .filter(|generation| {
+                generation
+                    .validate_stored_row(relation_id, canonical_key, row)
+                    .is_ok()
+            })
+            .collect();
+        let [historical] = matching.as_slice() else {
+            return Err(format!(
+                "the CWD row failed validation against the mounted schema ({mounted_error:?}) \
+                 and {} committed schema generation(s) validate it",
+                matching.len()
+            ));
+        };
+        let introductions = source.schema.introduced_values(&self.project);
+        admit_row_under_descriptor(
+            relation_id,
+            *historical,
+            source.schema.descriptor(),
+            &introductions,
+            canonical_key,
+            row,
+        )
+        .map(Cow::Owned)
+        .map_err(|refusal| {
+            format!("the CWD row cannot be admitted to the mounted schema: {refusal}")
+        })
+    }
+
+    /// The distinct schema generations `relation_id` has on `HEAD`'s lineage, newest first,
+    /// cached per table. A commit that carries no committed identity for the table predates
+    /// it and is skipped. Any other commit that cannot be read or resolved fails the scan:
+    /// a generation is never silently left out (ORNA-EVOL-002).
+    fn historical_descriptors(
+        &self,
+        relation_id: [u8; 16],
+    ) -> Result<Arc<Vec<SchemaDescriptor>>, String> {
+        let mut cache = self
+            .historical_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(generations) = cache.get(&relation_id) {
+            return Ok(Arc::clone(generations));
+        }
+        let history = self
+            .repository
+            .committed_history(HISTORY_LIMIT + 1)
+            .map_err(|error| format!("committed history could not be read: {error:?}"))?;
+        if history.len() > HISTORY_LIMIT {
+            return Err(format!(
+                "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
+            ));
+        }
+        let mut generations: Vec<SchemaDescriptor> = Vec::new();
+        for entry in &history {
+            let commit = entry.commit();
+            let identities =
+                ObjectIdentityManifest::read_committed_if_present(&self.repository, commit)
+                    .map_err(|error| {
+                        format!(
+                            "committed identities at {} could not be read: {error:?}",
+                            commit.as_str()
+                        )
+                    })?;
+            let Some(identities) = identities else {
+                continue;
+            };
+            let declared = identities.records().iter().any(|record| {
+                record.kind() == ObjectKind::Table
+                    && !record.is_retired()
+                    && *record.id() == relation_id
+            });
+            if !declared {
+                continue;
+            }
+            let schema = ProjectLoader::default()
+                .resolve_committed_source_table_schema(
+                    &self.repository,
+                    commit,
+                    TableObjectId::new(relation_id),
+                )
+                .map_err(|error| {
+                    format!(
+                        "the table's committed schema at {} could not be resolved: {error:?}",
+                        commit.as_str()
+                    )
+                })?;
+            if !generations.contains(schema.descriptor()) {
+                generations.push(schema.descriptor().clone());
+            }
+        }
+        let generations = Arc::new(generations);
+        cache.insert(relation_id, Arc::clone(&generations));
+        Ok(generations)
     }
 
     fn capture_mount_activation(&self, tables: &[RuntimeTableIdentity]) -> Result<(), String> {
@@ -6863,20 +6988,20 @@ impl FsBuilder {
             .map_err(|error| format!("committed row fields could not be decoded: {error:?}"))?;
         let pinned_fields = decode_canonical_storage_value(decoded.canonical_fields())
             .map_err(|error| format!("committed row values could not be decoded: {error:?}"))?;
-        if let Some(runtime_row) = runtime_row {
-            let canonical_key = key
-                .canonical_bytes()
-                .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
-            source
-                .schema
-                .descriptor()
-                .validate_stored_row(*source.binding.relation_id(), &canonical_key, runtime_row)
-                .map_err(|error| {
-                    format!("the CWD row failed validation against the mounted schema: {error:?}")
+        let admitted = match runtime_row {
+            Some(runtime_row) => {
+                let canonical_key = key
+                    .canonical_bytes()
+                    .map_err(|error| format!("committed row key cannot be encoded: {error:?}"))?;
+                let writer = self.writer.as_ref().ok_or_else(|| {
+                    "the CWD row cannot be admitted without a mounted writer".to_owned()
                 })?;
-        }
+                Some(writer.admit_runtime_row(source, &canonical_key, runtime_row)?)
+            }
+            None => None,
+        };
         let (canonical_fields, _projection_source) = select_runtime_row_fields(
-            runtime_row,
+            admitted.as_deref(),
             pinned_fields,
             &source.pinned_field_layout.fields,
             source
