@@ -4184,7 +4184,7 @@ async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
 /// bounds the ranged read path for restored content. The bound is 24 MiB (25,165,824 B). Five measured
 /// runs of this test grew 15,912,960, 15,015,936, 15,912,960, 15,912,960 and 14,950,400 B. The largest
 /// sits 9,252,864 B (8.8 MiB) under 24 MiB; the earlier 16 MiB bound left 864,256 B (0.8 MiB). A
-/// non-streaming restore holds the whole 64 MiB Blob and grows by at least 64 MiB, far above 24 MiB.
+/// non-streaming restore would hold the whole 64 MiB Blob, so it would grow by about 64 MiB [INFERENCE: not measured], far above 24 MiB.
 async fn cwd_mount_blob_64_mib_committed_restore_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
