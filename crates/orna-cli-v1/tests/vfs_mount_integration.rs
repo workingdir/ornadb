@@ -2846,21 +2846,13 @@ async fn cwd_mount_truncate_after_same_inode_refusal_keeps_both_drafts() {
     set_mode(&record_dir, 0o700);
     drop(second);
     wait_for_mount_exit(&mut mount.mounted);
-    let records = retained_record_texts(&mount.repository);
     assert_eq!(
-        records.len(),
-        2,
-        "the refused candidate and the truncated live draft are each retained once: {records:?}"
-    );
-    assert!(
-        records
-            .iter()
-            .any(|record| record.contains("\nbytes 13\n") && record.ends_with("{ title: \"sec")),
-        "the truncated live draft is retained as its 13-byte prefix: {records:?}"
-    );
-    assert!(
-        records.iter().any(|record| record.contains("unsynced writes kept")),
-        "the refused candidate is retained in full: {records:?}"
+        retained_record_bodies(&mount.repository),
+        [
+            "{ title: \"sec",
+            "{ title: \"unsynced writes kept\",\n",
+        ],
+        "the truncated live draft (13 bytes) and the refused candidate are each retained in full"
     );
 }
 
