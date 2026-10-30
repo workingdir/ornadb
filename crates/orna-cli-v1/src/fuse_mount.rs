@@ -4339,8 +4339,8 @@ impl WorkspaceFilesystem {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.track_blob_open(generation);
-            state.track_blob_release(inode);
+            state.track_open(generation);
+            state.track_release(inode);
             state.display_path(generation)
         };
         self.open_files
@@ -5187,7 +5187,7 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EPERM);
                 return;
             }
-            state.track_blob_open(inode.0);
+            state.track_open(inode.0);
         }
         drop(state);
         if replaced_blob {
@@ -5323,7 +5323,7 @@ impl Filesystem for WorkspaceFilesystem {
                         reply.error(Errno::EPERM);
                         return;
                     }
-                    state.track_blob_open(inode.0);
+                    state.track_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -5332,7 +5332,7 @@ impl Filesystem for WorkspaceFilesystem {
                         reply.error(refuse_unsupported("open for write"));
                         return;
                     }
-                    state.track_blob_open(inode.0);
+                    state.track_open(inode.0);
                     reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
                     return;
                 }
@@ -5399,7 +5399,7 @@ impl Filesystem for WorkspaceFilesystem {
                         .state
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    state.track_blob_open(inode.0);
+                    state.track_open(inode.0);
                     state.display_path(inode.0)
                 };
                 draft_state.blob_handles.insert(
@@ -6382,7 +6382,7 @@ impl Filesystem for WorkspaceFilesystem {
             self.state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .track_blob_release(inode.0);
+                .track_release(inode.0);
         }
         let mut draft_state = self
             .draft_state
@@ -6401,7 +6401,7 @@ impl Filesystem for WorkspaceFilesystem {
             self.state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .track_blob_release(generation);
+                .track_release(generation);
         }
         draft_state.dirty_handles.remove(&handle.0);
         draft_state.writer_owners.remove(&handle.0);
@@ -6602,6 +6602,45 @@ impl Filesystem for WorkspaceFilesystem {
         }
         reply.ok();
     }
+
+    fn opendir(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        _flags: fuser::OpenFlags,
+        reply: ReplyOpen,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.nodes.contains_key(&inode.0) {
+            reply.error(Errno::ENOENT);
+            return;
+        }
+        if state.directory(inode.0).is_none() {
+            reply.error(Errno::ENOTDIR);
+            return;
+        }
+        // A held listing keeps a retired directory loaded until it is released (41-vfs.md:39-40).
+        state.track_open(inode.0);
+        reply.opened(fuser::FileHandle(0), fuser::FopenFlags::empty());
+    }
+
+    fn releasedir(
+        &self,
+        _request: &Request,
+        inode: INodeNo,
+        _handle: fuser::FileHandle,
+        _flags: fuser::OpenFlags,
+        reply: ReplyEmpty,
+    ) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .track_release(inode.0);
+        reply.ok();
+    }
 }
 
 struct FsBuilder {
@@ -6609,10 +6648,11 @@ struct FsBuilder {
     next_inode: u64,
     writer: Option<Arc<MountWriter>>,
     table_object_ids: Arc<BTreeMap<String, TableObjectId>>,
-    /// Open handle counts for blob inodes opened without draft state (handle 0).
-    open_blobs: HashMap<u64, u64>,
-    /// Replaced blob inodes kept readable until their last open handle is released.
-    superseded_blobs: HashSet<u64>,
+    /// Open handle counts for inodes opened with `opendir` or a stateless `open` (handle 0).
+    open_handles: HashMap<u64, u64>,
+    /// Retired subtrees whose root has an open handle at or below it. Each stays loaded
+    /// until the last such handle is released.
+    superseded_nodes: HashSet<u64>,
     /// Inodes of projected source modules and their directories. A table path
     /// that reaches one of these yields to the source path (profiles/vfs-1.md).
     source_nodes: HashSet<u64>,
@@ -6633,8 +6673,8 @@ impl FsBuilder {
             next_inode: ROOT_INODE + 1,
             writer: None,
             table_object_ids: Arc::new(BTreeMap::new()),
-            open_blobs: HashMap::new(),
-            superseded_blobs: HashSet::new(),
+            open_handles: HashMap::new(),
+            superseded_nodes: HashSet::new(),
             source_nodes: HashSet::new(),
         }
     }
@@ -7326,6 +7366,7 @@ impl FsBuilder {
         let mut projected_fields = Vec::with_capacity(values.len());
         let mut blob_files = Vec::new();
         let mut nested_trees: Vec<(String, NodeKind)> = Vec::new();
+        let mut nested_fields: Vec<&str> = Vec::new();
         let mut blob_fields = Vec::new();
         for (field, value) in decoded.fields().iter().zip(values) {
             let field_name = source
@@ -7474,6 +7515,7 @@ impl FsBuilder {
                     render_stored_source_value(&value)?,
                 ));
                 if has_nested_children(&value) {
+                    nested_fields.push(field_name.as_str());
                     nested_trees.push((
                         field_name.clone(),
                         NodeKind::NestedDirectory(NestedDirectory::new(Arc::new(value), Vec::new())),
@@ -7481,9 +7523,10 @@ impl FsBuilder {
                 }
             }
         }
-        let projection = VfsRowProjection::project(
+        let projection = VfsRowProjection::project_with_nested_directories(
             SnapshotPin::capture(Arc::clone(&source.graph)),
             &projected_fields,
+            &nested_fields,
         )
         .map_err(|error| format!("committed row projection is invalid: {error:?}"))?;
         let mut files = Vec::with_capacity(projection.files().len() + 1);
@@ -7509,7 +7552,14 @@ impl FsBuilder {
             None => NodeKind::Bytes(document_bytes),
         };
         files.push(("data.orna".to_owned(), document));
-        files.extend(nested_trees);
+        for (field, node) in nested_trees {
+            let directory = projection
+                .directories()
+                .iter()
+                .find(|directory| directory.field() == field.as_str())
+                .ok_or_else(|| "projected nested directory has no admitted field".to_owned())?;
+            files.push((directory.name().to_owned(), node));
+        }
         for file in projection.files() {
             let candidate_field = candidate_fields
                 .iter()
@@ -7627,15 +7677,115 @@ impl FsBuilder {
                 .record_accepted_row(table.table(), &key, &row)
                 .map_err(|error| format!("the refreshed row baseline could not be recorded: {error}"))?;
         }
+        self.reconcile_row_files(document_inode, Some(document), others)?;
+        Ok(true)
+    }
+
+    /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
+    /// A Str over 64 KiB shows its `.txt` sibling beside `data.orna`; a Str at or under the
+    /// bound is inline again, so its stale `.txt` sibling leaves the directory. Open handles
+    /// keep the `.txt` generation they captured (`retire_node`).
+    fn project_accepted_document(
+        &mut self,
+        document_inode: u64,
+        save: &Arc<RowSaveContext>,
+    ) -> Result<(), String> {
+        let table = save
+            .source
+            .runtime_table
+            .as_ref()
+            .ok_or_else(|| "the accepted row has no runtime table".to_owned())?;
+        let key = runtime_table_key_bytes(&save.key)?;
+        let row = save
+            .writer
+            .live_row(table, &key)?
+            .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
+        let parent = self
+            .nodes
+            .get(&document_inode)
+            .map(|node| node.parent)
+            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
+        let files =
+            self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
+        let mut document = None;
+        let mut others = Vec::with_capacity(files.len());
+        for (name, kind) in files {
+            if name == "data.orna" {
+                document = Some(kind);
+            } else {
+                others.push((name, kind));
+            }
+        }
+        // Only a row that carries or carried a projected child changes its layout; other rows
+        // keep the document node the handles were opened against.
+        let listed_children = self
+            .directory(parent)
+            .ok_or_else(|| "the accepted row directory disappeared".to_owned())?
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.name.as_os_str() != OsStr::new("data.orna")
+                    && !matches!(
+                        self.nodes.get(&entry.inode).map(|node| &node.kind),
+                        Some(NodeKind::Temporary { .. })
+                    )
+            });
+        if others.is_empty() && !listed_children {
+            return Ok(());
+        }
+        // A row with a `.txt` sibling, projected or listed, takes the freshly projected document
+        // node as base does; any other row keeps the node its handles were opened against
+        // (profiles/vfs-1.md:71-80).
+        let text_layout = others
+            .iter()
+            .any(|(_, kind)| matches!(kind, NodeKind::Text { .. }))
+            || self.directory(parent).is_some_and(|directory| {
+                directory
+                    .entries
+                    .iter()
+                    .any(|entry| self.is_text_node(entry.inode))
+            });
+        let document =
+            document.ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
+        // Refuse a name collision before any mutation, so a refused projection changes nothing.
+        for (name, kind) in &others {
+            if !matches!(kind, NodeKind::Text { .. }) {
+                continue;
+            }
+            let name = OsStr::new(name);
+            let collides = self
+                .directory(parent)
+                .and_then(|directory| directory.entry(name))
+                .is_some_and(|entry| !self.is_text_node(entry.inode));
+            if collides {
+                return Err(format!(
+                    "the projected text file {name:?} collides with a sibling"
+                ));
+            }
+        }
+        let document = text_layout.then_some(document);
+        self.reconcile_row_files(document_inode, document, others)
+    }
+
+    /// Reconciles the row directory of `document_inode` with its freshly projected `document`
+    /// and the row's other projected files `others`. A stale refresh and an accepted save share
+    /// this, so a new open shows the row that was accepted (profiles/vfs-1.md:71-80).
+    fn reconcile_row_files(
+        &mut self,
+        document_inode: u64,
+        document: Option<NodeKind>,
+        others: Vec<(String, NodeKind)>,
+    ) -> Result<(), String> {
         let row_inode = self
             .nodes
             .get(&document_inode)
             .map(|node| node.parent)
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
-        // data.orna keeps its node, so handles opened earlier keep their captured baseline. Pending
-        // scratch files keep their entries: their saves belong to the user, not the row. The row's
-        // other projected files are reconciled by name, in place, so every view agrees on the new
-        // row and held listings keep their positions. Files the row no longer projects are retired.
+        // data.orna keeps its node unless a new one is given, so handles opened earlier keep their
+        // captured baseline. Pending scratch files keep their entries: their saves belong to the
+        // user, not the row. The row's other projected files are reconciled by name, in place, so
+        // every view agrees on the new row and held listings keep their positions. Files the row no
+        // longer projects are retired.
         let (kept_inodes, kept_names): (HashSet<u64>, HashSet<OsString>) = {
             let directory = self
                 .directory(row_inode)
@@ -7694,107 +7844,12 @@ impl FsBuilder {
                 self.add_file(row_inode, &name, kind)?;
             }
         }
-        self.nodes
-            .get_mut(&document_inode)
-            .ok_or_else(|| "the refreshed document disappeared".to_owned())?
-            .kind = document;
-        Ok(true)
-    }
-
-    /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
-    /// A Str over 64 KiB shows its `.txt` sibling beside `data.orna`; a Str at or under the
-    /// bound is inline again, so its stale `.txt` sibling leaves the directory. Open handles
-    /// keep the `.txt` generation they captured (`retire_node`).
-    fn project_accepted_document(
-        &mut self,
-        document_inode: u64,
-        save: &Arc<RowSaveContext>,
-    ) -> Result<(), String> {
-        let table = save
-            .source
-            .runtime_table
-            .as_ref()
-            .ok_or_else(|| "the accepted row has no runtime table".to_owned())?;
-        let key = runtime_table_key_bytes(&save.key)?;
-        let row = save
-            .writer
-            .live_row(table, &key)?
-            .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
-        let parent = self
-            .nodes
-            .get(&document_inode)
-            .map(|node| node.parent)
-            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
-        let files =
-            self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
-        let mut document = None;
-        let mut texts = Vec::new();
-        for (name, kind) in files {
-            if name == "data.orna" {
-                document = Some(kind);
-            } else if matches!(kind, NodeKind::Text { .. }) {
-                texts.push((name, kind));
-            }
+        if let Some(document) = document {
+            self.nodes
+                .get_mut(&document_inode)
+                .ok_or_else(|| "the refreshed document disappeared".to_owned())?
+                .kind = document;
         }
-        // Only a row that carries or carried a `.txt` sibling changes its layout; other rows
-        // keep the document node the handles were opened against.
-        let current_texts: Vec<(OsString, u64)> = self
-            .directory(parent)
-            .ok_or_else(|| "the accepted row directory disappeared".to_owned())?
-            .entries
-            .iter()
-            .filter(|entry| self.is_text_node(entry.inode))
-            .map(|entry| (entry.name.clone(), entry.inode))
-            .collect();
-        if texts.is_empty() && current_texts.is_empty() {
-            return Ok(());
-        }
-        let document =
-            document.ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
-        // Refuse a name collision before any mutation, so a refused projection changes nothing.
-        for (name, _) in &texts {
-            let name = OsStr::new(name);
-            let collides = self
-                .directory(parent)
-                .and_then(|directory| directory.entry(name))
-                .is_some_and(|entry| !self.is_text_node(entry.inode));
-            if collides {
-                return Err(format!(
-                    "the projected text file {name:?} collides with a sibling"
-                ));
-            }
-        }
-        for (name, inode) in &current_texts {
-            let still_projected = texts
-                .iter()
-                .any(|(text, _)| OsStr::new(text) == name.as_os_str());
-            if still_projected {
-                continue;
-            }
-            if self
-                .directory_mut(parent)
-                .and_then(|directory| directory.remove_entry(name))
-                .is_none()
-            {
-                return Err("a stale text file had already left its directory".to_owned());
-            }
-            self.retire_node(*inode);
-        }
-        for (name, kind) in texts {
-            let already_listed = current_texts
-                .iter()
-                .any(|(child, _)| child.as_os_str() == OsStr::new(&name));
-            if already_listed {
-                self.replace_child(parent, OsStr::new(&name), kind)?;
-            } else {
-                self.add_file(parent, &name, kind)?;
-            }
-        }
-        let node = self
-            .nodes
-            .get_mut(&document_inode)
-            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
-        node.kind = document;
         Ok(())
     }
 
@@ -7939,48 +7994,85 @@ impl FsBuilder {
         Ok(inode)
     }
 
-    /// Records a stateless open of a blob generation so a replacement keeps the captured
-    /// node readable for as long as a handle still refers to it.
-    fn track_blob_open(&mut self, inode: u64) {
-        *self.open_blobs.entry(inode).or_insert(0) += 1;
+    /// Records an open of `inode` through `opendir` or a stateless `open` (handle 0), so a
+    /// replacement keeps the captured subtree loaded for as long as a handle refers to it.
+    fn track_open(&mut self, inode: u64) {
+        *self.open_handles.entry(inode).or_insert(0) += 1;
     }
 
-    /// Releases one stateless blob open. The last release of a superseded generation
-    /// removes its node; untracked inodes are ignored.
-    fn track_blob_release(&mut self, inode: u64) {
-        let Some(count) = self.open_blobs.get_mut(&inode) else {
+    /// Releases one open of `inode`. When the last handle on `inode` is released, every
+    /// retired subtree that no open handle still pins is removed. Untracked inodes are ignored.
+    fn track_release(&mut self, inode: u64) {
+        let Some(count) = self.open_handles.get_mut(&inode) else {
             return;
         };
         *count -= 1;
         if *count == 0 {
-            self.open_blobs.remove(&inode);
-            if self.superseded_blobs.remove(&inode) {
-                self.nodes.remove(&inode);
-            }
+            self.open_handles.remove(&inode);
+            self.reclaim_superseded();
         }
     }
 
-    /// Drops a generation that is no longer reachable by name. Open handles keep it
-    /// readable (profiles/vfs-1.md: old handles remain on captured immutable content).
+    /// Whether `root` or a node below it has an open handle.
+    fn subtree_pinned(&self, root: u64) -> bool {
+        if self.open_handles.is_empty() {
+            return false;
+        }
+        let mut pending = vec![root];
+        while let Some(inode) = pending.pop() {
+            if self.open_handles.contains_key(&inode) {
+                return true;
+            }
+            if let Some(directory) = self.directory(inode) {
+                pending.extend(directory.entries.iter().map(|entry| entry.inode));
+            }
+        }
+        false
+    }
+
+    /// Removes `root` and every node below it.
+    fn remove_subtree(&mut self, root: u64) {
+        let mut pending = vec![root];
+        while let Some(inode) = pending.pop() {
+            if let Some(directory) = self.directory(inode) {
+                pending.extend(directory.entries.iter().map(|entry| entry.inode));
+            }
+            self.nodes.remove(&inode);
+        }
+    }
+
+    /// Removes each retired subtree that no open handle still pins.
+    fn reclaim_superseded(&mut self) {
+        let unpinned: Vec<u64> = self
+            .superseded_nodes
+            .iter()
+            .copied()
+            .filter(|&root| !self.subtree_pinned(root))
+            .collect();
+        for root in unpinned {
+            self.superseded_nodes.remove(&root);
+            self.remove_subtree(root);
+        }
+    }
+
+    /// Drops a retired subtree that no longer has a name. Open handles keep it readable
+    /// (profiles/vfs-1.md: old handles remain on captured immutable content).
     ///
-    /// A directory is never dropped here: a held directory handle keeps enumerating its
-    /// listing, and a refresh never makes that listing fail with ENOENT (41-vfs.md:39-40).
-    /// Directories are dropped only at remount. The children of a retired directory are not
-    /// reclaimed with it.
+    /// A subtree with an open handle at or below its root is kept in `superseded_nodes` and
+    /// stays loaded, so a held directory handle keeps enumerating its listing and a refresh
+    /// never makes that listing fail with ENOENT (41-vfs.md:39-40). The last release reclaims
+    /// it. Any other subtree is removed at once, with its descendants.
     ///
     /// Accepted FUSE nodeid-lifetime deviation: retention follows tracked open handles, not
     /// kernel lookup counts. `forget` and `batch_forget` keep fuser's no-op defaults, so a
-    /// retired generation is removed once no handle holds it, even if the kernel still
-    /// caches its nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes
-    /// on use; a stale nodeid then fails with ENOENT instead of serving retired bytes.
+    /// retired subtree is removed once no handle holds it, even if the kernel still caches its
+    /// nodeid. `ENTRY_TTL` is zero, so the kernel revalidates names and attributes on use; a
+    /// stale nodeid then fails with ENOENT instead of serving retired bytes.
     fn retire_node(&mut self, inode: u64) {
-        if self.directory(inode).is_some() {
-            return;
-        }
-        if self.open_blobs.contains_key(&inode) {
-            self.superseded_blobs.insert(inode);
+        if self.subtree_pinned(inode) {
+            self.superseded_nodes.insert(inode);
         } else {
-            self.nodes.remove(&inode);
+            self.remove_subtree(inode);
         }
     }
 
@@ -10260,17 +10352,48 @@ mod readdir_cursor_tests {
         assert_eq!(names(&rest), ["b", "c"]);
     }
 
-    /// A directory retired while a listing is held keeps its loaded entries, so the held
-    /// cursor still enumerates the entries after it (ORNA-VFS-017, 41-vfs.md:39-40).
+    /// A directory retired while a listing is held stays loaded, so the held cursor still
+    /// enumerates the entries after it (ORNA-VFS-017, 41-vfs.md:39-40). Its last release
+    /// removes it.
     #[test]
     fn directory_retired_after_a_listing_opened_still_enumerates() {
         let (mut builder, dir) = directory_with(&["a", "b", "c"]);
         let first = list(&mut builder, dir, 0, 1);
         let cursor = first.last().expect("one entry is listed").0;
+        builder.track_open(dir);
         builder.retire_node(dir);
-        assert!(builder.directory(dir).is_some(), "a retired directory stays loaded");
+        assert!(builder.directory(dir).is_some(), "a held retired directory stays loaded");
         let rest = list(&mut builder, dir, cursor, usize::MAX);
         assert_eq!(names(&rest), ["b", "c"]);
+        builder.track_release(dir);
+        assert!(builder.directory(dir).is_none(), "the last release reclaims the directory");
+    }
+
+    /// A retired directory with no open handle below it is removed with its children.
+    #[test]
+    fn directory_retired_without_an_open_handle_is_removed_with_its_children() {
+        let (mut builder, dir) = directory_with(&["a", "b"]);
+        let directory = builder.directory(dir).expect("the directory is loaded");
+        let children: Vec<u64> = directory.entries.iter().map(|entry| entry.inode).collect();
+        builder.retire_node(dir);
+        assert!(builder.directory(dir).is_none(), "an unpinned retired directory is removed");
+        assert!(
+            children.iter().all(|child| !builder.nodes.contains_key(child)),
+            "its children are removed with it"
+        );
+    }
+
+    /// An open handle on a child pins the retired directory above it.
+    #[test]
+    fn directory_retired_while_a_child_is_open_stays_loaded() {
+        let (mut builder, dir) = directory_with(&["a", "b"]);
+        let directory = builder.directory(dir).expect("the directory is loaded");
+        let child = directory.entries[0].inode;
+        builder.track_open(child);
+        builder.retire_node(dir);
+        assert!(builder.directory(dir).is_some(), "an open child keeps its parent loaded");
+        builder.track_release(child);
+        assert!(builder.directory(dir).is_none(), "the release reclaims the parent");
     }
 }
 

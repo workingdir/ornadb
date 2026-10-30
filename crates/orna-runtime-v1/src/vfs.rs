@@ -2653,12 +2653,33 @@ impl VfsProjectedFile {
     }
 }
 
+/// A nested record, tuple, list or map field projected as its own directory
+/// (profiles/vfs-1.md:75). Its host name is the escaped field name, the base a
+/// sibling Text or Blob takes, so the two never share one host name (VFS-016).
+pub struct VfsProjectedDirectory {
+    field: String,
+    name: String,
+}
+
+impl VfsProjectedDirectory {
+    /// The stored field this directory projects.
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    /// The host directory name inside the row.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 /// The `data.orna` document and sibling content files projected for one and the
 /// same row, pinned to the snapshot that admitted them (VFS-001, VFS-002).
 pub struct VfsRowProjection<S> {
     pin: SnapshotPin<S>,
     document: String,
     files: Vec<VfsProjectedFile>,
+    directories: Vec<VfsProjectedDirectory>,
 }
 
 impl<S> VfsRowProjection<S> {
@@ -2667,6 +2688,18 @@ impl<S> VfsRowProjection<S> {
     /// sibling files. Two distinct fields that would share one host name are
     /// refused rather than merged (VFS-016).
     pub fn project(pin: SnapshotPin<S>, fields: &[VfsStoredField]) -> Result<Self, VfsPathError> {
+        Self::project_with_nested_directories(pin, fields, &[])
+    }
+
+    /// Projects one row like `project`, and also projects each named Document field as a
+    /// nested directory (profiles/vfs-1.md:75). The directory's host name is the escaped
+    /// field name, the base a sibling Text or Blob takes, so it takes the same collision
+    /// refusal (VFS-016).
+    pub fn project_with_nested_directories(
+        pin: SnapshotPin<S>,
+        fields: &[VfsStoredField],
+        nested_directory_fields: &[&str],
+    ) -> Result<Self, VfsPathError> {
         let mut document = String::from("{\n");
         let mut files = Vec::new();
         let mut names = vec![VFS_ROW_DOCUMENT.to_owned()];
@@ -2740,6 +2773,20 @@ impl<S> VfsRowProjection<S> {
                 }
             }
         }
+        let mut directories = Vec::with_capacity(nested_directory_fields.len());
+        for field in nested_directory_fields {
+            let name = project_field_name(field);
+            // A nested directory is one more host name in the row, so it takes the same
+            // collision refusal as a sibling file (VFS-016).
+            if names.contains(&name) {
+                return Err(VfsPathError::NameCollision);
+            }
+            names.push(name.clone());
+            directories.push(VfsProjectedDirectory {
+                field: (*field).to_owned(),
+                name,
+            });
+        }
         document.push_str("}\n");
         if document.len() > VFS_MAX_PATH_BYTES * 1024 {
             return Err(VfsPathError::NameTooLong);
@@ -2748,6 +2795,7 @@ impl<S> VfsRowProjection<S> {
             pin,
             document,
             files,
+            directories,
         })
     }
 
@@ -2776,6 +2824,11 @@ impl<S> VfsRowProjection<S> {
 
     pub fn files(&self) -> &[VfsProjectedFile] {
         &self.files
+    }
+
+    /// Nested directories of this row, one per nested record, tuple, list or map field.
+    pub fn directories(&self) -> &[VfsProjectedDirectory] {
+        &self.directories
     }
 
     /// Resolves one entry name inside this row directory. A name outside the
@@ -4300,6 +4353,43 @@ mod tests {
             row.lookup("~key-not-a-field.mp3"),
             Err(VfsPathError::UnknownRow)
         ));
+    }
+
+    #[test]
+    fn nested_directory_takes_escaped_field_name_and_shares_the_file_collision_check() {
+        let row = VfsRowProjection::project_with_nested_directories(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[VfsStoredField::document("con", "{ x: 1 }")],
+            &["con"],
+        )
+        .expect("nested directory projection");
+        assert_eq!(row.directories().len(), 1);
+        assert_eq!(row.directories()[0].field(), "con");
+        assert_eq!(row.directories()[0].name(), "%63on");
+        assert_eq!(row.directories()[0].name(), project_field_name("con"));
+
+        // Two nested directories that name one host directory take the same
+        // collision refusal two sibling files take (VFS-016).
+        assert!(matches!(
+            VfsRowProjection::project_with_nested_directories(
+                SnapshotPin::capture(Arc::new(7_u64)),
+                &[VfsStoredField::document("x", "{ y: 2 }")],
+                &["x", "x"],
+            ),
+            Err(VfsPathError::NameCollision)
+        ));
+        // A directory name carries no dot, so it never meets a sibling file's
+        // `.suffix` host name: a Text sibling `x` and a nested directory `y` coexist.
+        let row = VfsRowProjection::project_with_nested_directories(
+            SnapshotPin::capture(Arc::new(7_u64)),
+            &[
+                VfsStoredField::text("x", 3, true),
+                VfsStoredField::document("y", "{ z: 3 }"),
+            ],
+            &["y"],
+        )
+        .expect("text sibling and nested directory coexist");
+        assert_eq!(row.directories()[0].name(), "y");
     }
 
     #[test]
