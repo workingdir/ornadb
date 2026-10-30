@@ -105,6 +105,7 @@ Local results on `fix/ornadb-5il1.245-gate-e-items` (`CARGO_TARGET_DIR` on the s
 - `vfs_mount_isolation blind_replacement_after_late_temp`: `test result: ok. 1 passed; 0 failed`.
 - `vfs_mount_isolation` (whole binary): 18 passed, 1 ignored (the pre-existing ignored test).
 - `vfs_mount_integration` (the two selectors above): 2 passed.
+- `vfs_composite_key_mount composite_key_components_project_as_nested_directories` (E8), `cargo test --locked -p orna-cli-v1 --test vfs_composite_key_mount`, kernel `6.19.10-300.fc44.x86_64`, `ORNA_REQUIRE_FUSE=1`: on this PR head `test result: ok. 1 passed; 0 failed`, exit 0. On origin/main `5ec573fea` with the same test file (throwaway worktree, same pinned `stdlib/std`): `test result: ok. 1 passed; 0 failed`, exit 0. This is the basis for the CHANGELOG statement that the test passes on main; it is coverage, not a fix.
 - `vfs_mount_isolation` E9 test: failed once in three runs before a fix. The failure was `fresh_view` returning NotFound after the SIGKILL remount. `wait_for_mount` waits only for the root to answer, so the test now calls `await_path` on the projected row before reading. After the fix, ten consecutive single-test runs passed, and a later 20-iteration loop of the single test passed 20 of 20 (`cargo test -q -p orna-cli-v1 --test vfs_mount_isolation -- --exact <E9 name>`, exit 0 each time). The cause is [INFERENCE] a readiness race; the failure did not reproduce on demand.
 - `python3 scripts/gate_evidence.py check`: exit 0.
 - `python3 -m unittest scripts/test_gate_evidence.py`: 44 tests, OK.
