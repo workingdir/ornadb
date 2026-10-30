@@ -4039,7 +4039,7 @@ async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
 /// ORNA-VFS-1 (41-vfs.md EDIT-1; ornadb-5il1.366.3): a 64 MiB Blob candidate is written and read back
 /// through the mount in 1 MiB ranges. Peak RSS growth of the mount daemon above its post-mount baseline
 /// is checked after the write and read-back (16 MiB bound) and after the accept (96 MiB regression ceiling).
-/// The ceiling is a regression bound with about 12 MiB headroom, not proof that no whole-candidate copy remains.
+/// The ceiling is a regression bound, not proof that no whole-candidate copy remains.
 async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
@@ -4084,11 +4084,10 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     );
 
     handle.sync_all().expect("the 64 MiB candidate is accepted");
-    // The accept commits the 64 MiB candidate through the mount. The current commit API holds the
-    // candidate once as an `Arc<[u8]>` (the 64 MiB floor). Peak growth through the accept is 83.8 MiB
-    // (87,863,296 B) on this head and 130.6 MiB (136,937,472 B) on origin/main. The 96 MiB ceiling
-    // is a regression bound with about 12 MiB headroom. Reaching the 16 MiB bound over the floor needs
-    // a streaming commit API (bead ornadb-u715).
+    // The accept commits the 64 MiB candidate through the mount. One-run measurements of the accept
+    // growth above are 20,045,824 B (19.1 MiB) on this head and 88,264,704 B (84.2 MiB) on origin/main
+    // 9eab295fd. The 96 MiB ceiling is a regression bound. The 16 MiB bound over the floor is not yet
+    // met (ornadb-u715, partial).
     let accept_growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
     eprintln!("mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes");
     assert!(
