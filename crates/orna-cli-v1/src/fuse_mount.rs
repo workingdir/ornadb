@@ -4134,8 +4134,10 @@ impl WorkspaceFilesystem {
         }
         // The handle commits against the row it captured at open and advances only with its
         // own accepted candidate (ORNA-VFS-011), so a row another writer accepted since then
-        // fails the compare. A handle pinned to a superseded generation is refused before the
-        // compare: its generation is retired (see `replace_document_generation`).
+        // fails the compare. A handle pinned to a superseded generation whose draft holds a
+        // candidate is refused before the compare: its generation is retired (see
+        // `replace_document_generation`). A clean superseded handle has no candidate to refuse,
+        // so it reaches the commit, which reports NoCandidate; fsync acknowledges that.
         let (based_on, schema_identity) = {
             let baseline = opened
                 .lock()
@@ -4147,7 +4149,8 @@ impl WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_superseded(inode);
-        let outcome = if superseded {
+        let refuse_superseded = superseded && save.writer.runtime.block_on(draft.has_candidate());
+        let outcome = if refuse_superseded {
             Err(DocumentCommitError::Stale)
         } else {
             save.commit_document_against(draft, true, based_on, &schema_identity)
@@ -8017,10 +8020,11 @@ impl FsBuilder {
     /// Replaces the accepted document `document` with a generation that shows the accepted row.
     /// The superseded node keeps the bytes it captured, so a handle pinned to it reports the
     /// size it opened with (profiles/vfs-1.md:126-133). A handle pinned to a superseded
-    /// generation never commits: `accept_document` refuses its close flush as stale and
-    /// retained before the CAS compare, so a row that returns to the bytes that handle
+    /// generation never commits a candidate: `accept_document` refuses its dirty close flush as
+    /// stale and retained before the CAS compare, so a row that returns to the bytes that handle
     /// captured is not accepted over the owner's row (ORNA-VFS-011; a conservative choice,
-    /// spec-silent on that return). The new generation saves against the row the mount
+    /// spec-silent on that return). A clean handle has no candidate and acknowledges its fsync.
+    /// The new generation saves against the row the mount
     /// accepted and shows that row's projected document, the image a fresh open reads
     /// (ORNA-VFS-011). Returns the new node's inode.
     fn replace_document_generation(&mut self, document: u64) -> Result<u64, String> {
