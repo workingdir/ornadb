@@ -2828,12 +2828,20 @@ async fn cwd_mount_truncate_after_same_inode_refusal_keeps_both_drafts() {
     };
     let record_dir = record_directory(&mount.repository);
     set_mode(&record_dir, 0o500);
-    let mut first = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    first.write_all(b"{ title: \"unsynced writes kept\",\n").unwrap();
+    let mut first = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    first
+        .write_all(b"{ title: \"unsynced writes kept\",\n")
+        .unwrap();
     drop(first);
     // FUSE release is asynchronous to close(2); let the release refuse retention first.
     thread::sleep(Duration::from_millis(300));
-    let mut second = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    let mut second = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
     second.write_all(b"{ title: \"second draft\",\n").unwrap();
     path_truncate(&mount.data_path, 13);
     send_sigterm(&mount.mounted);
@@ -2848,10 +2856,7 @@ async fn cwd_mount_truncate_after_same_inode_refusal_keeps_both_drafts() {
     wait_for_mount_exit(&mut mount.mounted);
     assert_eq!(
         retained_record_bodies(&mount.repository),
-        [
-            "{ title: \"sec",
-            "{ title: \"unsynced writes kept\",\n",
-        ],
+        ["{ title: \"sec", "{ title: \"unsynced writes kept\",\n",],
         "the truncated live draft (13 bytes) and the refused candidate are each retained in full"
     );
 }
@@ -2865,13 +2870,23 @@ async fn cwd_mount_release_after_same_inode_refusal_keeps_both_drafts() {
     };
     let record_dir = record_directory(&mount.repository);
     set_mode(&record_dir, 0o500);
-    let mut first = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    first.write_all(b"{ title: \"unsynced writes kept\",\n").unwrap();
+    let mut first = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    first
+        .write_all(b"{ title: \"unsynced writes kept\",\n")
+        .unwrap();
     drop(first);
     // FUSE release is asynchronous to close(2); let the release refuse retention first.
     thread::sleep(Duration::from_millis(300));
-    let mut second = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    second.write_all(b"{ title: \"second draft is kept\",\n").unwrap();
+    let mut second = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    second
+        .write_all(b"{ title: \"second draft is kept\",\n")
+        .unwrap();
     drop(second);
     thread::sleep(Duration::from_millis(300));
     set_mode(&record_dir, 0o700);
