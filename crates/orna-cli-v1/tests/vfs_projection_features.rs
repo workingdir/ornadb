@@ -455,20 +455,53 @@ async fn stale_large_str_candidate_is_retained_before_fsync_replies() {
     assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
 }
 
-/// profiles/vfs-1.md:71-74 (nested records and lists): a record field projects as
-/// an escaped directory whose children are its fields, and a list field projects
-/// as a directory of decimal element indices. Source admission accepts this row in
-/// encoded-key order (ornadb-5il1.372), so the mount shows its pinned directories.
+/// Collects list entry names as decimal positions, failing on any name that is not a canonical
+/// decimal index.
+fn positions_of(entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>>) -> Vec<usize> {
+    let mut positions: Vec<usize> = entries
+        .map(|entry| {
+            let name = entry.expect("directory entry").file_name();
+            let name = name.to_str().expect("list names are UTF-8");
+            let index: usize = name.parse().expect("list names are decimal indices");
+            assert_eq!(name, index.to_string(), "decimal indices have no leading zeros");
+            index
+        })
+        .collect();
+    positions.sort_unstable();
+    positions
+}
+
+/// Reads a handle to its end; the text is the generation the handle captured at open.
+fn read_handle(file: &mut std::fs::File) -> String {
+    use std::io::Read as _;
+    let mut text = String::new();
+    file.read_to_string(&mut text).expect("read the handle's captured generation");
+    text
+}
+
+fn nested_row(label: &str, rank: u32, tags: &str) -> String {
+    format!("{{ meta: {{ label: \"{label}\", rank: {rank}, }}, tags: {tags}, }}\n")
+}
+
+const NESTED_TAGS: &str = "[\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\", \"j\", \"k\"]";
+
+/// profiles/vfs-1.md:71-75: a record field projects as an escaped directory of its fields, and a
+/// list projects as a directory of decimal positions under the captured containing version. A
+/// handle never retargets to a new element at the same position (profiles/vfs-1.md:74), so handles
+/// opened before another writer's accepted save keep the generation they captured
+/// (profiles/vfs-1.md:100-101, :132), and stat reports the descriptor size (:133). Nested
+/// directories and leaves refuse mutation with EPERM (profiles/vfs-1.md:139); the accepted write
+/// path for a nested field is the complete row document `data.orna` (profiles/vfs-1.md:81-83).
 #[tokio::test]
 async fn nested_record_and_list_fields_project_as_pinned_directories() {
     if !require_fuse_or_skip() {
         return;
     }
-    let document = "{ meta: { label: \"x\", rank: 1, }, tags: [\"a\", \"b\"], }\n";
+    let document = nested_row("x", 1, NESTED_TAGS);
     let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
         "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, tags: [Str], }\n",
         &[],
-        &[("london", document)],
+        &[("london", document.as_str())],
     )
     .await;
     let mount_parent = TempDir::new().unwrap();
@@ -476,23 +509,143 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
     let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
     let row = mountpoint.join("Music/london");
     let label = row.join("meta/label");
+    let rank = row.join("meta/rank");
+    let tags = row.join("tags");
     mounted.await_path(&label);
+    let all_positions: Vec<usize> = (0..11).collect();
 
     assert_eq!(
         read_view(&label),
         "x",
         "the record field is a file under its directory"
     );
-    assert_eq!(read_view(&row.join("meta/rank")), "1");
     assert_eq!(
-        sorted_names(&row.join("tags")),
-        vec!["0".to_owned(), "1".to_owned()]
+        std::fs::metadata(&label).unwrap().len(),
+        1,
+        "stat reports the descriptor size"
+    );
+    assert_eq!(read_view(&rank), "1");
+    assert_eq!(
+        positions_of(std::fs::read_dir(&tags).unwrap()),
+        all_positions,
+        "list elements are listed by decimal position"
     );
     assert_eq!(
         read_view(&row.join("tags/1")),
         "b",
         "list elements are decimal indices"
     );
+    assert_eq!(read_view(&row.join("tags/10")), "k", "positions past nine are decimal names");
+
+    // An accepted save of data.orna replaces the nested fields through the row document.
+    editor_mount::write_and_sync(&row.join("data.orna"), &nested_row("w", 2, NESTED_TAGS))
+        .expect("a complete row document with changed nested fields is accepted");
+    assert_eq!(read_view(&label), "w", "a new open shows the accepted nested field");
+    assert_eq!(read_view(&rank), "2");
+
+    // Handles opened on this generation: a directory whose first entry is read before the
+    // owner write, a record leaf, and the list element at position 0.
+    let mut held_tags = std::fs::read_dir(&tags).expect("open the list directory");
+    let first_held_entry = held_tags.next().expect("the list directory has entries");
+    let mut held_label = std::fs::File::open(&label).expect("open the record field");
+    let mut held_element = std::fs::File::open(tags.join("0")).expect("open list element 0");
+
+    edit_outside_mount(
+        repository_directory.path(),
+        "london",
+        &nested_row("yy", 3, "[\"q\"]"),
+    );
+    let error = editor_mount::write_and_sync(
+        &row.join("data.orna"),
+        &nested_row("zzz", 4, "[\"r\"]"),
+    )
+    .expect_err("a save against a row another writer changed is stale");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(EAGAIN),
+        "the stale save is refused with EAGAIN"
+    );
+
+    assert_eq!(
+        read_handle(&mut held_label),
+        "w",
+        "a leaf handle keeps the generation it captured"
+    );
+    assert_eq!(
+        held_label.metadata().unwrap().len(),
+        1,
+        "a held leaf reports its captured size"
+    );
+    assert_eq!(
+        read_handle(&mut held_element),
+        "a",
+        "a list element handle never retargets to the new element at the same position"
+    );
+    assert_eq!(
+        positions_of(std::iter::once(first_held_entry).chain(held_tags)),
+        all_positions,
+        "a directory handle keeps enumerating the generation it began reading"
+    );
+
+    assert_eq!(
+        read_view(&label),
+        "yy",
+        "a new open shows the refreshed record field"
+    );
+    assert_eq!(
+        std::fs::metadata(&label).unwrap().len(),
+        2,
+        "stat reports the refreshed size"
+    );
+    assert_eq!(read_view(&rank), "3");
+    assert_eq!(
+        positions_of(std::fs::read_dir(&tags).unwrap()),
+        vec![0_usize],
+        "a new listing shows the refreshed list"
+    );
+    assert_eq!(read_view(&row.join("tags/0")), "q");
+    assert_eq!(
+        std::fs::metadata(row.join("tags/1"))
+            .expect_err("position 1 left the refreshed list")
+            .kind(),
+        std::io::ErrorKind::NotFound,
+    );
+
+    // Nested directories and leaves refuse every mutation with EPERM (profiles/vfs-1.md:139).
+    let refusals: [(&str, std::io::Result<()>); 5] = [
+        (
+            "create in a record directory",
+            std::fs::File::create(row.join("meta/extra")).map(drop),
+        ),
+        (
+            "mkdir in a list directory",
+            std::fs::create_dir(tags.join("extra")),
+        ),
+        (
+            "unlink a list element",
+            std::fs::remove_file(tags.join("0")),
+        ),
+        (
+            "rename a list element",
+            std::fs::rename(tags.join("0"), tags.join("9")),
+        ),
+        (
+            "write-open a list element",
+            std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(tags.join("0"))
+                .map(drop),
+        ),
+    ];
+    for (operation, result) in refusals {
+        let error = result.expect_err(operation);
+        assert_eq!(
+            error.raw_os_error(),
+            Some(EPERM),
+            "{operation} is refused with EPERM"
+        );
+    }
 }
 
 const EPERM: i32 = 1;

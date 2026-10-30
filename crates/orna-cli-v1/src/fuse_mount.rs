@@ -7194,15 +7194,115 @@ impl FsBuilder {
                 .record_accepted_row(table.table(), &key, &row)
                 .map_err(|error| format!("the refreshed row baseline could not be recorded: {error}"))?;
         }
+        self.reconcile_row_files(document_inode, Some(document), others)?;
+        Ok(true)
+    }
+
+    /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
+    /// A Str over 64 KiB shows its `.txt` sibling beside `data.orna`; a Str at or under the
+    /// bound is inline again, so its stale `.txt` sibling leaves the directory. Open handles
+    /// keep the `.txt` generation they captured (`retire_node`).
+    fn project_accepted_document(
+        &mut self,
+        document_inode: u64,
+        save: &Arc<RowSaveContext>,
+    ) -> Result<(), String> {
+        let table = save
+            .source
+            .runtime_table
+            .as_ref()
+            .ok_or_else(|| "the accepted row has no runtime table".to_owned())?;
+        let key = runtime_table_key_bytes(&save.key)?;
+        let row = save
+            .writer
+            .live_row(table, &key)?
+            .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
+        let parent = self
+            .nodes
+            .get(&document_inode)
+            .map(|node| node.parent)
+            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
+        let files =
+            self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
+        let mut document = None;
+        let mut others = Vec::with_capacity(files.len());
+        for (name, kind) in files {
+            if name == "data.orna" {
+                document = Some(kind);
+            } else {
+                others.push((name, kind));
+            }
+        }
+        // Only a row that carries or carried a projected child changes its layout; other rows
+        // keep the document node the handles were opened against.
+        let listed_children = self
+            .directory(parent)
+            .ok_or_else(|| "the accepted row directory disappeared".to_owned())?
+            .entries
+            .iter()
+            .any(|entry| {
+                entry.name.as_os_str() != OsStr::new("data.orna")
+                    && !matches!(
+                        self.nodes.get(&entry.inode).map(|node| &node.kind),
+                        Some(NodeKind::Temporary { .. })
+                    )
+            });
+        if others.is_empty() && !listed_children {
+            return Ok(());
+        }
+        // A row with a `.txt` sibling, projected or listed, takes the freshly projected document
+        // node as base does; any other row keeps the node its handles were opened against
+        // (profiles/vfs-1.md:71-80).
+        let text_layout = others
+            .iter()
+            .any(|(_, kind)| matches!(kind, NodeKind::Text { .. }))
+            || self.directory(parent).is_some_and(|directory| {
+                directory
+                    .entries
+                    .iter()
+                    .any(|entry| self.is_text_node(entry.inode))
+            });
+        let document =
+            document.ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
+        // Refuse a name collision before any mutation, so a refused projection changes nothing.
+        for (name, kind) in &others {
+            if !matches!(kind, NodeKind::Text { .. }) {
+                continue;
+            }
+            let name = OsStr::new(name);
+            let collides = self
+                .directory(parent)
+                .and_then(|directory| directory.entry(name))
+                .is_some_and(|entry| !self.is_text_node(entry.inode));
+            if collides {
+                return Err(format!(
+                    "the projected text file {name:?} collides with a sibling"
+                ));
+            }
+        }
+        let document = text_layout.then_some(document);
+        self.reconcile_row_files(document_inode, document, others)
+    }
+
+    /// Reconciles the row directory of `document_inode` with its freshly projected `document`
+    /// and the row's other projected files `others`. A stale refresh and an accepted save share
+    /// this, so a new open shows the row that was accepted (profiles/vfs-1.md:71-80).
+    fn reconcile_row_files(
+        &mut self,
+        document_inode: u64,
+        document: Option<NodeKind>,
+        others: Vec<(String, NodeKind)>,
+    ) -> Result<(), String> {
         let row_inode = self
             .nodes
             .get(&document_inode)
             .map(|node| node.parent)
             .ok_or_else(|| "the refreshed document disappeared".to_owned())?;
-        // data.orna keeps its node, so handles opened earlier keep their captured baseline. Pending
-        // scratch files keep their entries: their saves belong to the user, not the row. The row's
-        // other projected files are reconciled by name, in place, so every view agrees on the new
-        // row and held listings keep their positions. Files the row no longer projects are retired.
+        // data.orna keeps its node unless a new one is given, so handles opened earlier keep their
+        // captured baseline. Pending scratch files keep their entries: their saves belong to the
+        // user, not the row. The row's other projected files are reconciled by name, in place, so
+        // every view agrees on the new row and held listings keep their positions. Files the row no
+        // longer projects are retired.
         let (kept_inodes, kept_names): (HashSet<u64>, HashSet<OsString>) = {
             let directory = self
                 .directory(row_inode)
@@ -7261,107 +7361,12 @@ impl FsBuilder {
                 self.add_file(row_inode, &name, kind)?;
             }
         }
-        self.nodes
-            .get_mut(&document_inode)
-            .ok_or_else(|| "the refreshed document disappeared".to_owned())?
-            .kind = document;
-        Ok(true)
-    }
-
-    /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
-    /// A Str over 64 KiB shows its `.txt` sibling beside `data.orna`; a Str at or under the
-    /// bound is inline again, so its stale `.txt` sibling leaves the directory. Open handles
-    /// keep the `.txt` generation they captured (`retire_node`).
-    fn project_accepted_document(
-        &mut self,
-        document_inode: u64,
-        save: &Arc<RowSaveContext>,
-    ) -> Result<(), String> {
-        let table = save
-            .source
-            .runtime_table
-            .as_ref()
-            .ok_or_else(|| "the accepted row has no runtime table".to_owned())?;
-        let key = runtime_table_key_bytes(&save.key)?;
-        let row = save
-            .writer
-            .live_row(table, &key)?
-            .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
-        let parent = self
-            .nodes
-            .get(&document_inode)
-            .map(|node| node.parent)
-            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
-        let files =
-            self.project_row_files(&save.source, &save.key, Some(&row), Some(row.clone()))?;
-        let mut document = None;
-        let mut texts = Vec::new();
-        for (name, kind) in files {
-            if name == "data.orna" {
-                document = Some(kind);
-            } else if matches!(kind, NodeKind::Text { .. }) {
-                texts.push((name, kind));
-            }
+        if let Some(document) = document {
+            self.nodes
+                .get_mut(&document_inode)
+                .ok_or_else(|| "the refreshed document disappeared".to_owned())?
+                .kind = document;
         }
-        // Only a row that carries or carried a `.txt` sibling changes its layout; other rows
-        // keep the document node the handles were opened against.
-        let current_texts: Vec<(OsString, u64)> = self
-            .directory(parent)
-            .ok_or_else(|| "the accepted row directory disappeared".to_owned())?
-            .entries
-            .iter()
-            .filter(|entry| self.is_text_node(entry.inode))
-            .map(|entry| (entry.name.clone(), entry.inode))
-            .collect();
-        if texts.is_empty() && current_texts.is_empty() {
-            return Ok(());
-        }
-        let document =
-            document.ok_or_else(|| "the accepted row has no data.orna document".to_owned())?;
-        // Refuse a name collision before any mutation, so a refused projection changes nothing.
-        for (name, _) in &texts {
-            let name = OsStr::new(name);
-            let collides = self
-                .directory(parent)
-                .and_then(|directory| directory.entry(name))
-                .is_some_and(|entry| !self.is_text_node(entry.inode));
-            if collides {
-                return Err(format!(
-                    "the projected text file {name:?} collides with a sibling"
-                ));
-            }
-        }
-        for (name, inode) in &current_texts {
-            let still_projected = texts
-                .iter()
-                .any(|(text, _)| OsStr::new(text) == name.as_os_str());
-            if still_projected {
-                continue;
-            }
-            if self
-                .directory_mut(parent)
-                .and_then(|directory| directory.remove_entry(name))
-                .is_none()
-            {
-                return Err("a stale text file had already left its directory".to_owned());
-            }
-            self.retire_node(*inode);
-        }
-        for (name, kind) in texts {
-            let already_listed = current_texts
-                .iter()
-                .any(|(child, _)| child.as_os_str() == OsStr::new(&name));
-            if already_listed {
-                self.replace_child(parent, OsStr::new(&name), kind)?;
-            } else {
-                self.add_file(parent, &name, kind)?;
-            }
-        }
-        let node = self
-            .nodes
-            .get_mut(&document_inode)
-            .ok_or_else(|| "the accepted document disappeared".to_owned())?;
-        node.kind = document;
         Ok(())
     }
 
