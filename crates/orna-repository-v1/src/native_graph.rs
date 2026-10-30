@@ -2755,16 +2755,17 @@ impl NativeGraphContext {
                 .update(&input[..count])
                 .map_err(|_| GraphError::InvalidLength(next_total))?;
             for byte in &input[..count] {
-                if let Some(chunk) = chunker.push(*byte) {
-                    index.push_chunk_bytes(chunk)?;
+                if chunker.push(*byte) {
+                    index.push_chunk_bytes(chunker.chunk())?;
+                    chunker.clear();
                 }
             }
             total = next_total;
             reservation.commit(count as u64);
             crate::publication_crash_barrier("capture-read");
         }
-        if let Some(chunk) = chunker.finish() {
-            index.push_chunk_bytes(chunk)?;
+        if !chunker.chunk().is_empty() {
+            index.push_chunk_bytes(chunker.chunk())?;
         }
 
         let identity = digest.finish();
@@ -4337,20 +4338,19 @@ impl StreamingGearChunker {
         }
     }
 
-    fn push(&mut self, byte: u8) -> Option<Vec<u8>> {
+    /// Feeds one byte; returns true when a chunk boundary closes the pending chunk.
+    fn push(&mut self, byte: u8) -> bool {
         self.chunk.push(byte);
-        if self.state.push(byte) {
-            Some(std::mem::replace(
-                &mut self.chunk,
-                Vec::with_capacity(crate::blob_store::GEAR_MAXIMUM),
-            ))
-        } else {
-            None
-        }
+        self.state.push(byte)
     }
 
-    fn finish(self) -> Option<Vec<u8>> {
-        (!self.chunk.is_empty()).then_some(self.chunk)
+    /// The pending chunk, reused across boundaries so only one buffer is ever live.
+    fn chunk(&self) -> &[u8] {
+        &self.chunk
+    }
+
+    fn clear(&mut self) {
+        self.chunk.clear();
     }
 }
 
@@ -4394,12 +4394,12 @@ impl<'a> CaptureIndexBuilder<'a> {
         )
     }
 
-    fn push_chunk_bytes(&mut self, chunk: Vec<u8>) -> Result<(), GraphError> {
+    fn push_chunk_bytes(&mut self, chunk: &[u8]) -> Result<(), GraphError> {
         let length = chunk.len() as u64;
-        let chunk_sha256 = crate::blob_store::digest_bytes(&chunk).sha256();
+        let chunk_sha256 = crate::blob_store::digest_bytes(chunk).sha256();
         let target = self.graph.write_capture_object(
             "blob",
-            &chunk,
+            chunk,
             self.written,
             self.object_limit,
         )?;
