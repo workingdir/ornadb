@@ -57,7 +57,8 @@ fn sorted_names(directory: &Path) -> Vec<String> {
 /// documents under one mount are each admitted at their own sync, in the order
 /// the caller performs them. A rejected later save does not roll back an
 /// earlier accepted one. No cross-file transaction is asserted. Grouped source
-/// edits are covered by `vfs_020_source_module_group_is_admitted_together_or_not_at_all`;
+/// edits are covered by `vfs_020_source_module_group_is_admitted_together_or_not_at_all` and
+/// `multi_file_source_edit_requires_grouped_validation`;
 /// no-evaluation-during-speculative-writes (ORNA-VFS-020 proper) is NOT covered; see bead ornadb-9npn.
 #[tokio::test]
 async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollback() {
@@ -489,6 +490,98 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
     );
     assert_eq!(read_view(&notes), NOTES_ACCEPTED, "the malformed group leaves notes committed");
     assert_eq!(read_view(&extra), EXTRA_ACCEPTED, "the valid sibling is not admitted alone");
+}
+
+/// ORNA-VFS-020 and profiles/vfs-1.md (editable candidate and grouped validation): a source
+/// module is validated together with the modules that import it. Renaming a function that
+/// another module calls is refused when only the callee is saved: both modules keep their
+/// committed bytes and the refused candidate is retained as a draft. The same rename saved
+/// with its importer validates as a group and commits both files. A group whose candidates
+/// both fail validation is refused as a unit, and neither module changes.
+#[tokio::test]
+async fn multi_file_source_edit_requires_grouped_validation() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    const CALLEE: &str = "pub fn answer(): Int = 42;\n";
+    const CALLER: &str = "use notes;\npub fn extra(): Int = notes.answer();\n";
+    const RENAMED_CALLEE: &str = "pub fn renamed(): Int = 42;\n";
+    const RENAMED_CALLER: &str = "use notes;\npub fn extra(): Int = notes.renamed();\n";
+    let (repository_directory, repository, _relation_id, _context) =
+        format3::format3_repository_with_context_and_modules(
+            "use notes;\nuse extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
+            "Music",
+            &[("notes.orna", CALLEE), ("extra.orna", CALLER)],
+        );
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let notes = mountpoint.join("notes.orna");
+    let extra = mountpoint.join("extra.orna");
+    mounted.await_path(&notes);
+    mounted.await_path(&extra);
+
+    // Saved alone, the rename leaves the importer calling a function that no longer exists.
+    let mut notes_handle = open_source_for_write(&notes);
+    notes_handle.write_all(RENAMED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
+    assert_errno(
+        notes_handle.sync_all(),
+        &[EINVAL],
+        "a rename that breaks an importer is refused when the callee is saved alone",
+    );
+    assert_eq!(read_view(&notes), CALLEE, "the refused callee keeps its committed bytes");
+    assert_eq!(read_view(&extra), CALLER, "the importer keeps its committed bytes");
+    assert!(
+        retained_drafts(&repository).iter().any(|draft| draft.contains("renamed")),
+        "the refused callee candidate is retained as a draft"
+    );
+    drop(notes_handle);
+
+    // Saved together, the callee and its importer validate as one group and commit together.
+    let mut notes_handle = open_source_for_write(&notes);
+    let mut extra_handle = open_source_for_write(&extra);
+    notes_handle.write_all(RENAMED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
+    extra_handle.write_all(RENAMED_CALLER.as_bytes()).expect("the importer candidate is accepted");
+    notes_handle.sync_all().expect("the grouped rename validates as a whole and is admitted");
+    assert_eq!(read_view(&notes), RENAMED_CALLEE, "the grouped callee is committed");
+    assert_eq!(read_view(&extra), RENAMED_CALLER, "the grouped importer is committed");
+    drop(extra_handle);
+    drop(notes_handle);
+
+    // Both candidates fail validation: the group is refused as a unit.
+    let mut notes_handle = open_source_for_write(&notes);
+    let mut extra_handle = open_source_for_write(&extra);
+    notes_handle.write_all(b"pub fn broken_callee( {\n").expect("the malformed callee is accepted");
+    extra_handle
+        .write_all(b"use notes;\npub fn extra(): Int = notes.missing();\n")
+        .expect("the dangling importer is accepted");
+    assert_errno(
+        notes_handle.sync_all(),
+        &[EINVAL],
+        "a group in which both candidates fail validation is refused as a unit with EINVAL",
+    );
+    assert_eq!(read_view(&notes), RENAMED_CALLEE, "the refused group leaves the callee");
+    assert_eq!(read_view(&extra), RENAMED_CALLER, "the refused group leaves the importer");
+    drop(extra_handle);
+    drop(notes_handle);
+    let drafts = retained_drafts(&repository);
+    assert!(
+        drafts.iter().any(|draft| draft.contains("broken_callee")),
+        "the malformed callee candidate is retained as a draft"
+    );
+    assert!(
+        drafts.iter().any(|draft| draft.contains("notes.missing")),
+        "the dangling importer candidate is retained as a draft"
+    );
+}
+
+/// Opens a source module for a whole-file replacement: the candidate starts empty.
+fn open_source_for_write(path: &Path) -> File {
+    OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .expect("a write-intent open of a source module is accepted")
 }
 
 /// ORNA-VFS-020/024 and 41-vfs.md: a source candidate written while its handle is still open
