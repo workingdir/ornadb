@@ -2732,6 +2732,20 @@ fn retained_record_texts(repository: &orna_repository_v1::Repository) -> Vec<Str
     }
 }
 
+/// The body bytes of every draft record recovery storage holds, sorted, without the record header.
+fn retained_record_bodies(repository: &orna_repository_v1::Repository) -> Vec<String> {
+    let mut bodies: Vec<String> = retained_record_texts(repository)
+        .into_iter()
+        .map(|record| {
+            // The header ends with an empty line; the candidate bytes follow it.
+            let body_start = record.find("\n\n").expect("draft record has a header") + 2;
+            record[body_start..].to_owned()
+        })
+        .collect();
+    bodies.sort();
+    bodies
+}
+
 /// The recovery directory of `repository`, where retained draft records are written.
 fn record_directory(repository: &orna_repository_v1::Repository) -> std::path::PathBuf {
     let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
@@ -2847,6 +2861,37 @@ async fn cwd_mount_truncate_after_same_inode_refusal_keeps_both_drafts() {
     assert!(
         records.iter().any(|record| record.contains("unsynced writes kept")),
         "the refused candidate is retained in full: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-009 and ORNA-VFS-024 (5il1.366.4): two candidates of one inode, each refused on release,
+/// are both kept at stop; the second refusal must not replace the first one's unretained draft.
+async fn cwd_mount_release_after_same_inode_refusal_keeps_both_drafts() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let mut first = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    first.write_all(b"{ title: \"unsynced writes kept\",\n").unwrap();
+    drop(first);
+    // FUSE release is asynchronous to close(2); let the release refuse retention first.
+    thread::sleep(Duration::from_millis(300));
+    let mut second = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    second.write_all(b"{ title: \"second draft is kept\",\n").unwrap();
+    drop(second);
+    thread::sleep(Duration::from_millis(300));
+    set_mode(&record_dir, 0o700);
+    send_sigterm(&mount.mounted);
+    wait_for_mount_exit(&mut mount.mounted);
+    assert_eq!(
+        retained_record_bodies(&mount.repository),
+        [
+            "{ title: \"second draft is kept\",\n",
+            "{ title: \"unsynced writes kept\",\n",
+        ],
+        "both refused candidates are retained in full"
     );
 }
 
