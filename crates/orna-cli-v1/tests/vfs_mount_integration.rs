@@ -4154,12 +4154,15 @@ async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
 #[tokio::test]
 /// ORNA-VFS-1 (41-vfs.md; ornadb-5il1.366.1 M3): a committed 64 MiB Blob served by a freshly started mount
 /// is read back in 1 MiB ranges. The restarted daemon's RSS growth past its post-mount high-water mark
-/// bounds the ranged read path for restored content.
+/// bounds the ranged read path for restored content. The bound is 24 MiB (25,165,824 B). Five measured
+/// runs of this test grew 15,912,960, 15,015,936, 15,912,960, 15,912,960 and 14,950,400 B. The largest
+/// sits 9,252,864 B (8.8 MiB) under 24 MiB; the earlier 16 MiB bound left 864,256 B (0.8 MiB). A
+/// non-streaming restore holds the whole 64 MiB Blob and grows by at least 64 MiB, far above 24 MiB.
 async fn cwd_mount_blob_64_mib_committed_restore_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
     const CAPTURE_LIMIT: usize = 65 << 20;
-    const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    const RSS_GROWTH_BOUND_BYTES: u64 = 24 * 1024 * 1024;
     let original = lcg_bytes(0x0064_0000_2000_0001, CHUNK_BYTES * CHUNKS);
     let Some(mut first) = mount_captured_media_with_limit(
         &original,
