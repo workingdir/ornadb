@@ -208,6 +208,13 @@ impl ResolvedTableSchema {
     pub fn binding(&self) -> &CommittedTableBinding {
         &self.binding
     }
+
+    /// The stored values the table's required fields are introduced with, keyed by field
+    /// ObjectId, as `project` frozen them (ORNA-EVOL-009). Used when a row written under an
+    /// earlier schema generation is admitted to this one.
+    pub fn introduced_values(&self, project: &LoadedProject) -> BTreeMap<[u8; 16], Raw> {
+        project.constant_default_stored_values(&self.table)
+    }
 }
 
 /// One exact accepted ORP Blob value paired with its field identity and pin.
@@ -1333,6 +1340,26 @@ impl ProjectLoader {
             &project,
             table_object_id,
         )
+    }
+
+    /// Like [`Self::resolve_committed_source_table_schema`], and also returns the stored
+    /// constant default of each defaulted field of the table as frozen by the source at
+    /// `commit` (ORNA-FIELD-003, ORNA-EVOL-009). A later source never changes these values.
+    pub fn resolve_committed_source_table_schema_with_introductions(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        table_object_id: TableObjectId,
+    ) -> Result<(ResolvedTableSchema, BTreeMap<[u8; 16], Raw>), ProjectLoadError> {
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let schema = resolve_committed_source_table_schema_for_project(
+            repository,
+            commit,
+            &project,
+            table_object_id,
+        )?;
+        let introductions = schema.introduced_values(&project);
+        Ok((schema, introductions))
     }
 
     /// Loads the root module and reachable imports from the immutable tree of
