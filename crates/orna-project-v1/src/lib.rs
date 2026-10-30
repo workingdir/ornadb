@@ -1342,6 +1342,26 @@ impl ProjectLoader {
         )
     }
 
+    /// Like [`Self::resolve_committed_source_table_schema`], and also returns the stored
+    /// constant default of each defaulted field of the table as frozen by the source at
+    /// `commit` (ORNA-FIELD-003, ORNA-EVOL-009). A later source never changes these values.
+    pub fn resolve_committed_source_table_schema_with_introductions(
+        &self,
+        repository: &Repository,
+        commit: &GitCommitRef,
+        table_object_id: TableObjectId,
+    ) -> Result<(ResolvedTableSchema, BTreeMap<[u8; 16], Raw>), ProjectLoadError> {
+        let project = self.load_committed_snapshot(repository, commit)?;
+        let schema = resolve_committed_source_table_schema_for_project(
+            repository,
+            commit,
+            &project,
+            table_object_id,
+        )?;
+        let introductions = schema.introduced_values(&project);
+        Ok((schema, introductions))
+    }
+
     /// Loads the root module and reachable imports from the immutable tree of
     /// a private publication candidate. The candidate capability, rather than
     /// a ref name or worktree path, is the source authority.
