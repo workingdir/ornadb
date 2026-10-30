@@ -785,3 +785,28 @@ async fn nested_optional_and_tuple_fields_project_and_nested_leaves_refuse_write
         "a write-open of a nested field is refused"
     );
 }
+
+/// profiles/vfs-1.md:71-75 and ORNA-VFS-016: a nested field whose name is a reserved host name
+/// projects its directory under the escaped spelling (`con` becomes `%63on`), and the raw name is
+/// not a host name in the row. Its children read under the escaped directory.
+#[tokio::test]
+async fn nested_directory_named_like_a_reserved_host_name_projects_escaped() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let document = "{ con: { x: 1, }, }\n";
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { con: { x: Int, }, }\n",
+        &[],
+        &[("london", document)],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let escaped = row.join("%63on/x");
+    mounted.await_path(&escaped);
+    assert_eq!(read_view(&escaped), "1", "the escaped nested directory reads its field");
+    assert!(!row.join("con").exists(), "the raw reserved name is not a host name");
+}
