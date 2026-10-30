@@ -349,7 +349,7 @@ limitations = ["Covers rename-over and owner-write replacement through the mount
 [[item]]
 gate = "E"
 id = "E8"
-title = "Schema changes, renamed MIME suffix, key and namespace collisions, long, empty and composite keys, nested collections, large Str, multi-file source edits, permissions and unsupported operations"
+title = "Schema changes, renamed MIME suffix, key and namespace collisions, long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_unsupported_ops" },
