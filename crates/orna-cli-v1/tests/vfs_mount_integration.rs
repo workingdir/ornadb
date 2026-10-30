@@ -3632,11 +3632,13 @@ async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
 #[tokio::test]
 /// ORNA-VFS-1 (41-vfs.md EDIT-1; ornadb-5il1.366.3): a 64 MiB Blob candidate is written and read back
 /// through the mount in 1 MiB ranges. The mount daemon's RSS growth past its post-mount high-water
-/// mark is measured before the accept, so it bounds the spool write and ranged read path, not the commit.
+/// mark is bounded twice: before the accept (spool write and ranged read path) and after the accept
+/// (commit path, which must not copy the whole candidate).
 async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
     const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    const ACCEPT_CEILING_BYTES: u64 = 96 * 1024 * 1024;
     let original = lcg_bytes(0x0064_0000_0000_0001, 64 * 1024);
     let Some(mut row) = mount_captured_blob(&original).await else {
         return;
@@ -3676,6 +3678,17 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     );
 
     handle.sync_all().expect("the 64 MiB candidate is accepted");
+    // The accept commits the 64 MiB candidate through the mount. The commit API holds the candidate
+    // once as an `Arc<[u8]>`, so 64 MiB is the inherent floor for this path; the ceiling is the
+    // measured residual plus a small margin, and sits far below the 136.9 MB the pre-fix copies
+    // reached. Reaching the 16 MiB bound over the floor needs a streaming commit API (see bead
+    // ornadb-u715, which lists the remaining copy sites).
+    let accept_growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
+    eprintln!("mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes");
+    assert!(
+        accept_growth < ACCEPT_CEILING_BYTES,
+        "mount daemon peak RSS grew {accept_growth} bytes through the accept, over the ceiling {ACCEPT_CEILING_BYTES} bytes"
+    );
     drop(handle);
     assert_eq!(
         std::fs::metadata(&blob_path).unwrap().len(),

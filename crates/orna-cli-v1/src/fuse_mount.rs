@@ -1769,10 +1769,17 @@ impl MountWriter {
     }
 }
 
+/// The row and the accepted candidate bytes of one settled replacement. The bytes are the
+/// same shared image the vfs published, so a caller never re-reads the scratch to get them.
+struct AcceptedReplacement {
+    row: Option<Vec<u8>>,
+    bytes: Arc<[u8]>,
+}
+
 /// Outcome of one Blob commit attempt: settled, or refused because the scratch
 /// candidate changed between hashing and admission (no row was touched).
 enum BlobAttempt {
-    Settled(Option<Vec<u8>>),
+    Settled(AcceptedReplacement),
     RacingWrite,
 }
 
@@ -2321,7 +2328,7 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
-    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
+    ) -> Result<AcceptedReplacement, DocumentCommitError> {
         if std::str::from_utf8(&replacement_bytes).is_err() {
             return Err(DocumentCommitError::Rejected(
                 "mounted text replacement must be valid UTF-8".into(),
@@ -2380,7 +2387,7 @@ impl RowSaveContext {
         field: &BlobField,
         replacement_bytes: Option<Arc<[u8]>>,
         record_baseline: bool,
-    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
+    ) -> Result<AcceptedReplacement, DocumentCommitError> {
         match outcome {
             Ok(TemporaryRenameOutcome::Applied { .. }) => {
                 let replacement_bytes = replacement_bytes.ok_or_else(|| {
@@ -2393,7 +2400,7 @@ impl RowSaveContext {
                     .iter_mut()
                     .find(|candidate| candidate.name == field.name)
                 {
-                    field.replacement_bytes = Some(replacement_bytes);
+                    field.replacement_bytes = Some(Arc::clone(&replacement_bytes));
                 } else {
                     return Err(DocumentCommitError::Failed(
                         "replaced field disappeared from its row".into(),
@@ -2406,7 +2413,10 @@ impl RowSaveContext {
                 if record_baseline {
                     self.record_accepted_row(row.clone());
                 }
-                Ok(row)
+                Ok(AcceptedReplacement {
+                    row,
+                    bytes: replacement_bytes,
+                })
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted replacement was rejected by semantic admission".into(),
@@ -2424,7 +2434,7 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
-    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
+    ) -> Result<AcceptedReplacement, DocumentCommitError> {
         if field.text {
             let replacement_bytes = self
                 .writer
@@ -2457,7 +2467,7 @@ impl RowSaveContext {
                 schema_identity.clone(),
                 record_baseline,
             )? {
-                BlobAttempt::Settled(row) => return Ok(row),
+                BlobAttempt::Settled(accepted) => return Ok(accepted),
                 BlobAttempt::RacingWrite if !retried => retried = true,
                 BlobAttempt::RacingWrite => {
                     return Err(DocumentCommitError::Failed(
@@ -2584,11 +2594,13 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
-    ) -> Result<(), DocumentCommitError> {
+    ) -> Result<Arc<[u8]>, DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
+        let accepted_bytes: Arc<Mutex<Option<Arc<[u8]>>>> = Arc::new(Mutex::new(None));
+        let accepted_bytes_output = Arc::clone(&accepted_bytes);
         let outcome = self
             .writer
             .runtime
@@ -2604,6 +2616,9 @@ impl RowSaveContext {
                     *accepted_row_output
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(row_bytes);
+                    *accepted_bytes_output
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bytes);
                     Ok(candidate)
                 },
                 &NoFault,
@@ -2617,7 +2632,20 @@ impl RowSaveContext {
                 if record_baseline {
                     self.record_accepted_row(accepted_row);
                 }
-                Ok(())
+                // A replayed save publishes no callback, so the accepted bytes are the
+                // scratch's own candidate, read once here.
+                match accepted_bytes
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
+                {
+                    Some(bytes) => Ok(bytes),
+                    None => self
+                        .writer
+                        .runtime
+                        .block_on(scratch.candidate_bytes())
+                        .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error))),
+                }
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "temporary mounted row document was rejected by semantic admission".into(),
@@ -4323,7 +4351,7 @@ impl WorkspaceFilesystem {
                 }
             }
         };
-        if let Err(error) = save.commit_blob_temporary(
+        let accepted = match save.commit_blob_temporary(
             target,
             scratch,
             field,
@@ -4331,20 +4359,20 @@ impl WorkspaceFilesystem {
             schema_identity.clone(),
             true,
         ) {
-            return Err(retain_refused_scratch(
-                draft_state,
-                save,
-                scratch,
-                inode,
-                &path,
-                error,
-            ));
-        }
-        let bytes = save
-            .writer
-            .runtime
-            .block_on(scratch.candidate_bytes())
-            .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error)))?;
+            Ok(accepted) => accepted,
+            Err(error) => {
+                return Err(retain_refused_scratch(
+                    draft_state,
+                    save,
+                    scratch,
+                    inode,
+                    &path,
+                    error,
+                ));
+            }
+        };
+        // The accepted image is the one the vfs published; it is not read back from scratch.
+        let bytes = accepted.bytes;
         let generation = self
             .state
             .lock()
@@ -5838,67 +5866,60 @@ impl Filesystem for WorkspaceFilesystem {
             _ => (target, scratch),
         };
         let committed = match &blob_field {
-            Some(field) => save.commit_blob_temporary(
-                &target,
-                &scratch,
-                field,
-                baseline,
-                schema_identity,
-                true,
-            ),
+            Some(field) => save
+                .commit_blob_temporary(
+                    &target,
+                    &scratch,
+                    field,
+                    baseline,
+                    schema_identity,
+                    true,
+                )
+                .map(|accepted| (accepted.row, accepted.bytes)),
             None => save
                 .commit_temporary(&scratch, baseline, schema_identity, true)
-                .map(|()| None),
+                .map(|bytes| (None, bytes)),
         };
-        let accepted_row = committed.as_ref().ok().and_then(Option::clone);
-        if let Err(error) = committed {
-            eprintln!("mounted replacement failed: {error}");
-            let stale = matches!(error, DocumentCommitError::Stale);
-            let path = self
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .display_path(source_inode);
-            // A refused candidate is retained before its rename replies (ORNA-VFS-009).
-            // When recovery storage cannot keep it, the rename replies that retention
-            // errno (EDQUOT when full) and the scratch stays in place.
-            let error = retain_refused_scratch(
-                &mut draft_state,
-                &save,
-                &scratch,
-                source_inode,
-                &path,
-                error,
-            );
-            if stale {
-                let mut state = self
+        let (accepted_row, accepted_bytes) = match committed {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                eprintln!("mounted replacement failed: {error}");
+                let stale = matches!(error, DocumentCommitError::Stale);
+                let path = self
                     .state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let document_inode = if blob_field.is_some() {
-                    state
-                        .lookup_child(newparent.0, OsStr::new("data.orna"))
-                        .ok()
-                        .flatten()
-                } else {
-                    Some(destination_inode)
-                };
-                if let Some(document_inode) = document_inode {
-                    let path = state.display_path(document_inode);
-                    state.report_refresh(document_inode, &save, &path);
-                }
-            }
-            reply.error(error.errno());
-            return;
-        }
-        let accepted_bytes = match save.writer.runtime.block_on(scratch.candidate_bytes()) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                eprintln!(
-                    "mounted replacement accepted but its candidate could not be read; cache not refreshed: {}",
-                    candidate_unreadable(error)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .display_path(source_inode);
+                // A refused candidate is retained before its rename replies (ORNA-VFS-009).
+                // When recovery storage cannot keep it, the rename replies that retention
+                // errno (EDQUOT when full) and the scratch stays in place.
+                let error = retain_refused_scratch(
+                    &mut draft_state,
+                    &save,
+                    &scratch,
+                    source_inode,
+                    &path,
+                    error,
                 );
-                reply.error(Errno::EIO);
+                if stale {
+                    let mut state = self
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    let document_inode = if blob_field.is_some() {
+                        state
+                            .lookup_child(newparent.0, OsStr::new("data.orna"))
+                            .ok()
+                            .flatten()
+                    } else {
+                        Some(destination_inode)
+                    };
+                    if let Some(document_inode) = document_inode {
+                        let path = state.display_path(document_inode);
+                        state.report_refresh(document_inode, &save, &path);
+                    }
+                }
+                reply.error(error.errno());
                 return;
             }
         };
@@ -8781,6 +8802,7 @@ fn commit_row_document(
             DocumentCommitError::Failed(format!("row document could not be staged: {error:?}"))
         })?;
     save.commit_temporary(&scratch, baseline, schema_identity, true)
+        .map(|_| ())
 }
 
 /// Swaps the admitted Blob field `field_name` for `replacement` (`None` removes it) and commits
