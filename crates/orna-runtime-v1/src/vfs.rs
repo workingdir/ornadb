@@ -354,14 +354,21 @@ impl<S> SnapshotPin<S> {
 /// admitted them.
 pub struct VfsFileSnapshot<S> {
     pin: SnapshotPin<S>,
-    bytes: Arc<[u8]>,
+    bytes: Arc<CandidateSnapshot>,
 }
 
 impl<S> VfsFileSnapshot<S> {
     pub fn new(pin: SnapshotPin<S>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        let bytes: Arc<[u8]> = bytes.into();
+        Self::from_candidate(pin, CandidateSnapshot::from(bytes))
+    }
+
+    /// Wraps a candidate view, which may stream from a private spool rather
+    /// than hold the bytes in memory.
+    pub fn from_candidate(pin: SnapshotPin<S>, bytes: CandidateSnapshot) -> Self {
         Self {
             pin,
-            bytes: bytes.into(),
+            bytes: Arc::new(bytes),
         }
     }
 
@@ -382,7 +389,7 @@ impl<S> VfsFileSnapshot<S> {
     }
 
     pub fn len(&self) -> u64 {
-        self.bytes.len() as u64
+        self.bytes.len()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -448,16 +455,10 @@ impl<S> SnapshotReadHandle<S> {
         self.image.is_empty()
     }
 
-    /// Reads at most `limit` bytes from this handle's captured image.
-    pub fn read_at(&self, offset: u64, limit: usize) -> Vec<u8> {
-        let Ok(start) = usize::try_from(offset) else {
-            return Vec::new();
-        };
-        if start >= self.image.bytes.len() || limit == 0 {
-            return Vec::new();
-        }
-        let end = start.saturating_add(limit).min(self.image.bytes.len());
-        self.image.bytes[start..end].to_vec()
+    /// Reads at most `limit` bytes from this handle's captured image. A
+    /// spool-backed image is read from its private file, never copied whole.
+    pub fn read_at(&self, offset: u64, limit: usize) -> io::Result<Vec<u8>> {
+        self.image.bytes.read_range(offset, limit)
     }
 }
 
@@ -680,7 +681,7 @@ impl<S> DraftState<S> {
     fn candidate_len(&self) -> u64 {
         self.candidate
             .as_ref()
-            .map_or(self.baseline.bytes.len() as u64, |spool| spool.len)
+            .map_or(self.baseline.bytes.len(), |spool| spool.len)
     }
 
     /// Materialises the whole candidate. Only retention and activation need
@@ -689,7 +690,7 @@ impl<S> DraftState<S> {
     fn candidate_arc(&self) -> Result<Arc<[u8]>, EditDraftError> {
         match &self.candidate {
             Some(spool) => spool.read_all().map_err(|_| EditDraftError::BackingIo),
-            None => Ok(Arc::clone(&self.baseline.bytes)),
+            None => self.baseline.bytes.to_arc().map_err(|_| EditDraftError::BackingIo),
         }
     }
 
@@ -705,10 +706,11 @@ impl<S> DraftState<S> {
                     spool.file.try_clone().map_err(|_| EditDraftError::BackingIo)?,
                 ),
             }),
-            None => Ok(CandidateSnapshot {
-                len: self.baseline.bytes.len() as u64,
-                source: CandidateSource::Baseline(Arc::clone(&self.baseline.bytes)),
-            }),
+            None => self
+                .baseline
+                .bytes
+                .duplicate()
+                .map_err(|_| EditDraftError::BackingIo),
         }
     }
 
@@ -719,15 +721,11 @@ impl<S> DraftState<S> {
             Some(spool) => spool
                 .read_range(offset, length)
                 .map_err(|_| EditDraftError::BackingIo),
-            None => {
-                let bytes = &self.baseline.bytes;
-                let start = usize::try_from(offset).unwrap_or(usize::MAX);
-                if start >= bytes.len() {
-                    return Ok(Vec::new());
-                }
-                let end = start.saturating_add(length).min(bytes.len());
-                Ok(bytes[start..end].to_vec())
-            }
+            None => self
+                .baseline
+                .bytes
+                .read_range(offset, length)
+                .map_err(|_| EditDraftError::BackingIo),
         }
     }
 
@@ -999,14 +997,29 @@ impl DraftSpool {
         Err(EditDraftError::BackingIo)
     }
 
-    fn from_baseline(bytes: &[u8], storage: &DraftStorage) -> Result<Self, EditDraftError> {
+    fn from_baseline(
+        bytes: &CandidateSnapshot,
+        storage: &DraftStorage,
+    ) -> Result<Self, EditDraftError> {
         let mut spool = Self::create(storage)?;
-        spool.set_len(u64::try_from(bytes.len()).map_err(|_| EditDraftError::OffsetOverflow)?)?;
-        spool
-            .file
-            .write_all_at(bytes, 0)
-            .map_err(|_| EditDraftError::BackingIo)?;
-        Ok(spool)
+        spool.set_len(bytes.len())?;
+        let mut reader = bytes.reader();
+        let chunk = usize::try_from(bytes.len())
+            .map_or(CANDIDATE_CHUNK_BYTES, |len| len.min(CANDIDATE_CHUNK_BYTES));
+        let mut buffer = vec![0; chunk];
+        let mut offset = 0_u64;
+        loop {
+            let count = io::Read::read(&mut reader, &mut buffer)
+                .map_err(|_| EditDraftError::BackingIo)?;
+            if count == 0 {
+                return Ok(spool);
+            }
+            spool
+                .file
+                .write_all_at(&buffer[..count], offset)
+                .map_err(|_| EditDraftError::BackingIo)?;
+            offset += count as u64;
+        }
     }
 
     /// Grows (sparse, zero-filled) or shrinks the spool to `length`, moving the
@@ -1086,6 +1099,15 @@ enum CandidateSource {
     Baseline(Arc<[u8]>),
 }
 
+impl From<Arc<[u8]>> for CandidateSnapshot {
+    fn from(bytes: Arc<[u8]>) -> Self {
+        Self {
+            len: bytes.len() as u64,
+            source: CandidateSource::Baseline(bytes),
+        }
+    }
+}
+
 impl CandidateSnapshot {
     /// The candidate's length in bytes.
     pub fn len(&self) -> u64 {
@@ -1097,6 +1119,35 @@ impl CandidateSnapshot {
         self.len == 0
     }
 
+    /// Another view of the same candidate. A spool gets a duplicate handle on
+    /// its private file and a baseline shares its bytes; no candidate bytes
+    /// are copied.
+    pub fn duplicate(&self) -> io::Result<Self> {
+        let source = match &self.source {
+            CandidateSource::Spool(file) => CandidateSource::Spool(file.try_clone()?),
+            CandidateSource::Baseline(bytes) => CandidateSource::Baseline(Arc::clone(bytes)),
+        };
+        Ok(Self {
+            len: self.len,
+            source,
+        })
+    }
+
+    /// Materialises the whole candidate in one allocation. Only retention and
+    /// whole-value activation need it; streaming consumers use
+    /// [`Self::reader`] or [`Self::read_range`].
+    pub fn to_arc(&self) -> io::Result<Arc<[u8]>> {
+        let length =
+            usize::try_from(self.len).map_err(|_| io::Error::other("candidate too large"))?;
+        // The zeroed buffer is read in place, so no intermediate copy is made.
+        let zeroed = Arc::<[u8]>::new_zeroed_slice(length);
+        // SAFETY: every byte of the buffer is zero, which is a valid `u8`, so it is initialised.
+        let mut bytes = unsafe { zeroed.assume_init() };
+        let buffer = Arc::get_mut(&mut bytes).expect("a fresh Arc is unique");
+        self.read_into(0, buffer)?;
+        Ok(bytes)
+    }
+
     /// Reads `[offset, offset + length)` clamped to the candidate length. Holds
     /// at most `length` bytes.
     pub fn read_range(&self, offset: u64, length: usize) -> io::Result<Vec<u8>> {
@@ -1106,15 +1157,48 @@ impl CandidateSnapshot {
         }
         let size = usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
         let mut bytes = vec![0; size];
+        self.read_into(offset, &mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// A sequential reader over the whole candidate. Each call holds at most
+    /// [`CANDIDATE_CHUNK_BYTES`] of it, so streaming never copies the candidate.
+    pub fn reader(&self) -> CandidateReader<'_> {
+        CandidateReader {
+            snapshot: self,
+            offset: 0,
+        }
+    }
+
+    /// Fills `buffer` from `offset`; the range must lie within the candidate.
+    fn read_into(&self, offset: u64, buffer: &mut [u8]) -> io::Result<()> {
         match &self.source {
-            CandidateSource::Spool(file) => file.read_exact_at(&mut bytes, offset)?,
+            CandidateSource::Spool(file) => file.read_exact_at(buffer, offset),
             CandidateSource::Baseline(source) => {
                 let start =
                     usize::try_from(offset).map_err(|_| io::Error::other("range too large"))?;
-                bytes.copy_from_slice(&source[start..start + size]);
+                buffer.copy_from_slice(&source[start..start + buffer.len()]);
+                Ok(())
             }
         }
-        Ok(bytes)
+    }
+}
+
+/// Sequential [`io::Read`] over a [`CandidateSnapshot`], one bounded chunk per call.
+pub struct CandidateReader<'a> {
+    snapshot: &'a CandidateSnapshot,
+    offset: u64,
+}
+
+impl io::Read for CandidateReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let remaining = usize::try_from(self.snapshot.len.saturating_sub(self.offset))
+            .unwrap_or(usize::MAX);
+        let size = buffer.len().min(CANDIDATE_CHUNK_BYTES).min(remaining);
+        self.snapshot
+            .read_into(self.offset, &mut buffer[..size])?;
+        self.offset += size as u64;
+        Ok(size)
     }
 }
 
@@ -3442,13 +3526,13 @@ impl std::error::Error for VfsBlobReplacementError {}
 
 fn capture_vfs_blob_replacement(
     capture: &RepositoryCaptureCapability,
-    bytes: &[u8],
+    bytes: &CandidateSnapshot,
     expected: ContentIdentity,
     media_type: &str,
     suffix: Option<&str>,
 ) -> Result<OrpBlobBinding, VfsBlobReplacementError> {
     let candidate = capture
-        .capture_blob_candidate(bytes, expected.length())
+        .capture_blob_candidate(bytes.reader(), expected.length())
         .map_err(VfsBlobReplacementError::Capture)?;
     let actual = candidate.content_identity();
     if actual != expected {
@@ -3503,6 +3587,7 @@ pub enum VfsSaveError<E> {
 enum VfsSaveAdmissionError {
     BlobCapture(VfsBlobReplacementError),
     Activation(TableActivationError),
+    Backing(EditDraftError),
 }
 impl<S: Send + Sync + 'static> ManagedFile<S> {
     /// Saves an editor document through the durable shared-row transaction.
@@ -3530,6 +3615,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             runtime,
             save,
             move |coordinates, bytes| async move {
+                let bytes = bytes
+                    .to_arc()
+                    .map_err(|_| VfsSaveAdmissionError::Backing(EditDraftError::BackingIo))?;
                 admit(coordinates, bytes)
                     .await
                     .map_err(VfsSaveAdmissionError::Activation)
@@ -3558,7 +3646,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         faults: &dyn FaultInjector,
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>, OrpBlobBinding) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, CandidateSnapshot, OrpBlobBinding) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         let result = self
@@ -3607,7 +3695,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         faults: &dyn FaultInjector,
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, CandidateSnapshot) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
     {
         let destination = self.state.lock().await;
@@ -3654,10 +3742,10 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         if draft_state.candidate.is_none() {
             return Err(VfsSaveError::NoCandidate);
         }
-        // One shared image of the candidate bytes is handed to the caller and
-        // published on acceptance, so no second copy is made at either end.
-        let candidate_bytes = draft_state
-            .candidate_arc()
+        // The candidate is a view over the draft's own bytes. The admitted row
+        // and the accepted image share it, so no candidate copy is made here.
+        let snapshot = draft_state
+            .candidate_snapshot()
             .map_err(VfsSaveError::Backing)?;
         drop(draft_state);
         drop(destination);
@@ -3676,11 +3764,14 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .is_some_and(|matches| !matches)
         {
             let diagnostic = stale_baseline_diagnostic();
+            let retained = snapshot
+                .to_arc()
+                .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
             draft
                 .state
                 .lock()
                 .await
-                .retain_retryable_conflict_with(revision, Arc::clone(&candidate_bytes), diagnostic)
+                .retain_retryable_conflict_with(revision, retained, diagnostic)
                 .map_err(VfsSaveError::Backing)?;
             return Err(VfsSaveError::Stale {
                 generation: *self.cache_epoch.generation.lock().await,
@@ -3689,16 +3780,19 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         }
         let writer = admission.writer;
         let coordinates = admission.coordinates();
-        let callback_bytes = Arc::clone(&candidate_bytes);
+        let callback_snapshot = snapshot
+            .duplicate()
+            .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
         let candidate =
             super::activation::with_activation_scope(runtime, writer, move || async move {
-                admit(coordinates, callback_bytes).await
+                admit(coordinates, callback_snapshot).await
             })
             .await
             .map_err(|error| VfsSaveError::Activation(TableActivationError::Runtime(error)))?
             .map_err(|error| match error {
                 VfsSaveAdmissionError::BlobCapture(error) => VfsSaveError::BlobCapture(error),
                 VfsSaveAdmissionError::Activation(error) => VfsSaveError::Activation(error),
+                VfsSaveAdmissionError::Backing(error) => VfsSaveError::Backing(error),
             })?;
         admission
             .validate_replacement(candidate.replacement())
@@ -3716,15 +3810,14 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         };
         match admission.commit(candidate).await {
             Err(TableActivationError::ValidationFailed(diagnostic)) => {
+                let retained = snapshot
+                    .to_arc()
+                    .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
                 draft
                     .state
                     .lock()
                     .await
-                    .retain_rejection_with(
-                        revision,
-                        Arc::clone(&candidate_bytes),
-                        diagnostic,
-                    )
+                    .retain_rejection_with(revision, retained, diagnostic)
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Rejected {
                     generation: *cache_generation,
@@ -3733,15 +3826,14 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             }
             Err(TableActivationError::Runtime(RuntimeError::StaleTableSchema)) => {
                 let diagnostic = stale_baseline_diagnostic();
+                let retained = snapshot
+                    .to_arc()
+                    .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
                 draft
                     .state
                     .lock()
                     .await
-                    .retain_retryable_conflict_with(
-                        revision,
-                        Arc::clone(&candidate_bytes),
-                        diagnostic,
-                    )
+                    .retain_retryable_conflict_with(revision, retained, diagnostic)
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Stale {
                     generation: *cache_generation,
@@ -3757,9 +3849,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             // destination and draft stable while those locks were released.
             let mut destination = self.state.lock().await;
             let mut draft_state = draft.state.lock().await;
-            let accepted = Arc::new(VfsFileSnapshot::new(
+            let accepted = Arc::new(VfsFileSnapshot::from_candidate(
                 draft_state.baseline.pin.clone_without_retention(),
-                Arc::clone(&candidate_bytes),
+                snapshot,
             ));
             let image = Arc::new(VfsFileSnapshot::with_projection(
                 &accepted,
@@ -3803,6 +3895,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             runtime,
             save,
             move |coordinates, bytes| async move {
+                let bytes = bytes
+                    .to_arc()
+                    .map_err(|_| VfsSaveAdmissionError::Backing(EditDraftError::BackingIo))?;
                 admit(coordinates, bytes)
                     .await
                     .map_err(VfsSaveAdmissionError::Activation)
@@ -3821,7 +3916,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         faults: &dyn FaultInjector,
     ) -> Result<TemporaryRenameOutcome<S>, VfsSaveError<TableActivationError>>
     where
-        A: FnOnce(VfsSaveCoordinates, Arc<[u8]>) -> AFut,
+        A: FnOnce(VfsSaveCoordinates, CandidateSnapshot) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, VfsSaveAdmissionError>>,
     {
         if !Arc::ptr_eq(self, &scratch.target) {
