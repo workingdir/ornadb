@@ -6888,7 +6888,7 @@ impl FsBuilder {
         if matches!(parent_kind, NodeKind::Row(_)) {
             self.ensure_row_loaded(parent)?;
         }
-        self.load_nested_children(parent)?;
+        self.load_nested_for_name(parent, name)?;
         if let Some(inode) = self
             .directory(parent)
             .and_then(|directory| directory.entry(name))
@@ -6987,7 +6987,17 @@ impl FsBuilder {
     }
 
     fn ensure_readdir(&mut self, inode: u64, start: u64) -> Result<(), String> {
-        self.load_nested_children(inode)?;
+        while self.nested_pending(inode) {
+            let directory = self
+                .directory(inode)
+                .ok_or_else(|| "mount directory is missing".to_owned())?;
+            // Pages only append, so the cursor's index stays valid across loads.
+            let target = directory.resume_index(start).saturating_add(ROW_PAGE_LIMIT);
+            if directory.entries.len() >= target {
+                break;
+            }
+            self.load_nested_page(inode)?;
+        }
         if matches!(
             self.nodes.get(&inode).map(|node| &node.kind),
             Some(NodeKind::Row(_))
@@ -7909,14 +7919,23 @@ impl FsBuilder {
         self.insert_node(parent, name, kind, file_type)
     }
 
-    /// Lists one level of a nested directory from its pinned value (profiles/vfs-1.md:75).
-    /// Container children become unloaded directories; other children become read-only leaves.
-    /// The directory is marked loaded only after every child is inserted; a failed insert removes
-    /// the children it added, so a later lookup lists the level again.
-    fn load_nested_children(&mut self, inode: u64) -> Result<(), String> {
-        let (root, path) = match self.nodes.get(&inode).map(|node| &node.kind) {
-            Some(NodeKind::NestedDirectory(nested)) if !nested.loaded => {
-                (Arc::clone(&nested.root), nested.path.clone())
+    /// Whether `inode` is a nested directory with children that have not been listed yet.
+    fn nested_pending(&self, inode: u64) -> bool {
+        matches!(
+            self.nodes.get(&inode).map(|node| &node.kind),
+            Some(NodeKind::NestedDirectory(nested)) if !nested.exhausted
+        )
+    }
+
+    /// Lists the next page of at most `ROW_PAGE_LIMIT` children of a nested directory from its
+    /// pinned value (profiles/vfs-1.md:75). Container children become unloaded directories; other
+    /// children become read-only leaves. A page is recorded as listed only after all its children
+    /// are inserted. A failed insert removes the children that page added, so a later lookup or
+    /// readdir retries the same page.
+    fn load_nested_page(&mut self, inode: u64) -> Result<(), String> {
+        let (root, path, start) = match self.nodes.get(&inode).map(|node| &node.kind) {
+            Some(NodeKind::NestedDirectory(nested)) if !nested.exhausted => {
+                (Arc::clone(&nested.root), nested.path.clone(), nested.next_index)
             }
             _ => return Ok(()),
         };
@@ -7925,8 +7944,9 @@ impl FsBuilder {
         let count = nested_entries(value)
             .map(NestedEntries::child_count)
             .ok_or_else(|| "a nested directory no longer holds a container value".to_owned())?;
-        let mut files = Vec::with_capacity(count);
-        for index in 0..count {
+        let end = count.min(start.saturating_add(ROW_PAGE_LIMIT));
+        let mut files = Vec::with_capacity(end - start);
+        for index in start..end {
             let (name, child) = nested_entry(value, index)
                 .ok_or_else(|| "a nested directory entry is malformed".to_owned())?;
             let kind = if has_nested_children(child) {
@@ -7939,11 +7959,12 @@ impl FsBuilder {
             files.push((name.project(index), kind));
         }
         {
-            let mut seen = std::collections::HashSet::with_capacity(files.len());
+            let mut seen = HashSet::with_capacity(files.len());
             if let Some((name, _)) = files.iter().find(|(name, _)| !seen.insert(name.as_str())) {
                 return Err(format!("nested directory projects two children as {name}"));
             }
         }
+        let first_cookie = self.directory(inode).map_or(0, |directory| directory.next_cookie);
         for (name, kind) in files {
             if let Err(error) = self.add_file(inode, &name, kind) {
                 if let Some(directory) = self
@@ -7951,7 +7972,7 @@ impl FsBuilder {
                     .get_mut(&inode)
                     .and_then(|node| node.kind.directory_mut())
                 {
-                    directory.retain_entries(|_| false);
+                    directory.retain_entries(|entry| entry.cookie < first_cookie);
                 }
                 return Err(error);
             }
@@ -7959,7 +7980,20 @@ impl FsBuilder {
         if let Some(NodeKind::NestedDirectory(nested)) =
             self.nodes.get_mut(&inode).map(|node| &mut node.kind)
         {
-            nested.loaded = true;
+            nested.next_index = end;
+            nested.exhausted = end == count;
+        }
+        Ok(())
+    }
+
+    /// Lists pages until `name` is listed or the level is exhausted. An absent name lists the
+    /// whole level, since no page can be ruled out without reading it.
+    fn load_nested_for_name(&mut self, inode: u64, name: &OsStr) -> Result<(), String> {
+        while self.nested_pending(inode) {
+            if self.directory(inode).is_some_and(|directory| directory.entry(name).is_some()) {
+                break;
+            }
+            self.load_nested_page(inode)?;
         }
         Ok(())
     }
@@ -8337,14 +8371,17 @@ impl Directory {
 }
 
 /// A nested record, tuple, list or map value's directory (profiles/vfs-1.md:71-75). It is created
-/// unloaded and lists one level from the pinned `root` on first lookup or readdir, so nothing below
-/// a directory the user has not entered is built.
+/// empty and lists its children from the pinned `root` one page at a time, on lookup or readdir,
+/// so nothing below a directory the user has not entered is built.
 struct NestedDirectory {
     directory: Directory,
     root: Arc<Raw>,
     /// Child positions from `root` down to this directory's value.
     path: Vec<usize>,
-    loaded: bool,
+    /// Index of the next child to list; children before it are in `directory`.
+    next_index: usize,
+    /// Set once every child has been listed.
+    exhausted: bool,
 }
 
 impl NestedDirectory {
@@ -8353,7 +8390,8 @@ impl NestedDirectory {
             directory: Directory::new(),
             root,
             path,
-            loaded: false,
+            next_index: 0,
+            exhausted: false,
         }
     }
 }
@@ -10419,10 +10457,13 @@ mod dirty_handle_ack_tests {
 
 #[cfg(test)]
 mod nested_projection_tests {
+    use std::{ffi::OsStr, sync::Arc};
+
     use orna_value_v1::Raw;
 
     use super::{
-        has_nested_children, nested_entries, nested_entry, nested_leaf_text, nested_value_at,
+        FsBuilder, NestedDirectory, NodeKind, ROOT_INODE, ROW_PAGE_LIMIT, has_nested_children,
+        nested_entries, nested_entry, nested_leaf_text, nested_value_at,
     };
 
     fn text(value: &str) -> Raw {
@@ -10546,6 +10587,33 @@ mod nested_projection_tests {
             Some(&Raw::Int(99_999_i64.into()))
         );
         assert!(nested_value_at(&list, &[100_000]).is_none());
+    }
+
+    #[test]
+    fn a_nested_list_is_paged_by_lookup() {
+        let mut builder = FsBuilder::new();
+        let items: Vec<Raw> = (0_i64..600).map(|index| Raw::Int(index.into())).collect();
+        let root = Arc::new(Raw::Array(items));
+        let list = builder
+            .add_file(
+                ROOT_INODE,
+                "list",
+                NodeKind::NestedDirectory(NestedDirectory::new(root, Vec::new())),
+            )
+            .expect("the list directory is added");
+        assert!(matches!(builder.lookup_child(list, OsStr::new("0")), Ok(Some(_))));
+        assert_eq!(listed(&builder, list), (ROW_PAGE_LIMIT, false, ROW_PAGE_LIMIT));
+        assert!(matches!(builder.lookup_child(list, OsStr::new("599")), Ok(Some(_))));
+        assert_eq!(listed(&builder, list), (600, true, 600));
+    }
+
+    /// (next page index, exhausted, listed entries) of a nested directory.
+    fn listed(builder: &FsBuilder, inode: u64) -> (usize, bool, usize) {
+        let kind = builder.nodes.get(&inode).map(|node| &node.kind);
+        let Some(NodeKind::NestedDirectory(nested)) = kind else {
+            panic!("the list is a nested directory");
+        };
+        (nested.next_index, nested.exhausted, nested.directory.entries.len())
     }
 }
 
