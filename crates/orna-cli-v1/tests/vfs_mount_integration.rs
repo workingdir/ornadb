@@ -2718,6 +2718,32 @@ fn wait_for_mount_exit(mounted: &mut MountedProcess) {
     }
 }
 
+/// Waits until the mount process writes a stderr line containing `needle`, failing after thirty
+/// seconds. A thread takes over stderr and reads it to its end, so the mount never blocks on a
+/// full pipe; lines written after the wait returns are read and discarded.
+fn wait_for_stderr_line(mounted: &mut MountedProcess, needle: &str) {
+    let stderr = mounted.child.stderr.take().expect("mount stderr is piped");
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.contains(needle) => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("mount did not report {needle:?} within thirty seconds")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("mount stopped before reporting {needle:?}")
+            }
+        }
+    }
+}
+
 /// The contents of every draft record recovery storage holds (ORNA-VFS-009); empty when none.
 fn retained_record_texts(repository: &orna_repository_v1::Repository) -> Vec<String> {
     let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
@@ -2769,8 +2795,9 @@ async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() 
     thread::sleep(Duration::from_millis(300));
     path_truncate(&mount.data_path, 13);
     send_sigterm(&mount.mounted);
-    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024).
-    thread::sleep(Duration::from_millis(500));
+    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024). The mount reports
+    // each failed retention before it waits to retry, so the check runs once that report arrives.
+    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
     assert!(
         mount.mounted.child.try_wait().unwrap().is_none(),
         "mount stopped while its drafts could not be kept"
@@ -4251,12 +4278,15 @@ async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
 #[tokio::test]
 /// ORNA-VFS-1 (41-vfs.md; ornadb-5il1.366.1 M3): a committed 64 MiB Blob served by a freshly started mount
 /// is read back in 1 MiB ranges. The restarted daemon's RSS growth past its post-mount high-water mark
-/// bounds the ranged read path for restored content.
+/// bounds the ranged read path for restored content. The bound is 24 MiB (25,165,824 B). Five measured
+/// runs of this test grew 15,912,960, 15,015,936, 15,912,960, 15,912,960 and 14,950,400 B. The largest
+/// sits 9,252,864 B (8.8 MiB) under 24 MiB; the earlier 16 MiB bound left 864,256 B (0.8 MiB). A
+/// non-streaming restore would hold the whole 64 MiB Blob, so it would grow by about 64 MiB [INFERENCE: not measured], far above 24 MiB.
 async fn cwd_mount_blob_64_mib_committed_restore_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
     const CAPTURE_LIMIT: usize = 65 << 20;
-    const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    const RSS_GROWTH_BOUND_BYTES: u64 = 24 * 1024 * 1024;
     let original = lcg_bytes(0x0064_0000_2000_0001, CHUNK_BYTES * CHUNKS);
     let Some(mut first) = mount_captured_media_with_limit(
         &original,
