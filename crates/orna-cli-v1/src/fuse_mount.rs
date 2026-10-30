@@ -4529,19 +4529,33 @@ impl WorkspaceFilesystem {
                 )
             }
         };
-        if let Some(superseded) = draft_state.rejected_documents.insert(
-            inode,
-            DraftRefusal {
-                cause,
-                path: path.clone(),
-                handle: Some(handle),
-                candidate: Some(Arc::clone(draft)),
-                draft: retained_draft,
-                unretained,
-            },
-        ) && !superseded.unretained.is_empty()
-        {
-            eprintln!("{path}: an earlier unretained candidate was superseded");
+        let refusal = DraftRefusal {
+            cause,
+            path: path.clone(),
+            handle: Some(handle),
+            candidate: Some(Arc::clone(draft)),
+            draft: retained_draft,
+            unretained,
+        };
+        match draft_state.rejected_documents.entry(inode) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let kept = entry.get_mut();
+                if kept.unretained.is_empty() {
+                    *kept = refusal;
+                } else {
+                    // An earlier refusal of this inode still holds an unretained source: keep it
+                    // alongside this one rather than replacing it, so neither live draft is lost.
+                    kept.unretained.extend(refusal.unretained);
+                    kept.handle = refusal.handle;
+                    kept.candidate = refusal.candidate;
+                    if kept.draft.is_none() {
+                        kept.draft = refusal.draft;
+                    }
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(refusal);
+            }
         }
         if refresh {
             state.report_refresh(inode, save, &path);
@@ -4805,11 +4819,10 @@ impl WorkspaceFilesystem {
                         .zip(refusal.candidate.as_ref())
                         .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
             });
-            if !refusal.unretained.is_empty() {
-                for (save, source) in refusal.unretained {
-                    candidates.push((inode, refusal.handle, refusal.cause, save, source));
-                }
-            } else if let Some(draft) = refusal.draft {
+            for (save, source) in refusal.unretained {
+                candidates.push((inode, refusal.handle, refusal.cause, save, source));
+            }
+            if let Some(draft) = refusal.draft {
                 let path = state.display_path(inode);
                 let report = format!(
                     "retained draft {draft} for {path} ({}; sys.vfs.draft_retained)",
