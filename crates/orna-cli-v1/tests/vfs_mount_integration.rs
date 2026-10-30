@@ -2833,6 +2833,86 @@ async fn cwd_mount_truncate_after_failed_release_retains_one_record() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-009 and EDIT-1 step 4: a refused candidate whose retention failed, then cut by a path
+/// truncate, is retained once as its truncated record; the untruncated refused copy is not retained.
+async fn cwd_mount_truncate_after_refused_unretained_candidate_retains_one_record() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let mut document = OpenOptions::new()
+        .write(true)
+        .truncate(true)
+        .open(&mount.data_path)
+        .unwrap();
+    document.write_all(b"{ title: \"rejected\",\n").unwrap();
+    assert!(
+        document.sync_all().is_err(),
+        "malformed candidate must be refused by fsync"
+    );
+    drop(document);
+    // FUSE release is asynchronous to close(2); let any release retention also fail first.
+    thread::sleep(Duration::from_millis(300));
+    path_truncate(&mount.data_path, 13);
+    send_sigterm(&mount.mounted);
+    // Stop keeps the mount up while the candidate cannot be kept, then retries retention.
+    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
+    assert!(
+        mount.mounted.child.try_wait().unwrap().is_none(),
+        "mount stopped while its candidate could not be kept"
+    );
+    set_mode(&record_dir, 0o700);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(
+        records.len(),
+        1,
+        "the truncated candidate is the only retained record: {records:?}"
+    );
+    assert!(
+        records[0].contains("\nbytes 13\n") && records[0].ends_with("{ title: \"rej"),
+        "retained record is not the 13-byte truncated prefix: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-024 and EDIT-1 steps 4-5: a path truncate applies to the accepted baseline. A close
+/// flush accepts the unsynced candidate, so the accepted baseline is that candidate; a reopen for
+/// write after a path truncate starts from that baseline cut to the truncated size.
+async fn cwd_mount_reopen_after_path_truncate_applies_truncate_to_accepted_baseline() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let mut earlier = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    earlier.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    drop(earlier);
+    // FUSE release is asynchronous to close(2); let the earlier writer's release run first.
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read_to_string(&mount.data_path).unwrap(),
+        "{ title: \"unsynced writes kept\", }\n",
+        "the close flush accepted the candidate as the baseline"
+    );
+    path_truncate(&mount.data_path, 13);
+    let mut reopened = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    let mut seen = Vec::new();
+    reopened.read_to_end(&mut seen).unwrap();
+    assert_eq!(
+        seen,
+        b"{ title: \"uns".to_vec(),
+        "the reopened writer must start from the accepted baseline cut to 13 bytes"
+    );
+    drop(reopened);
+    send_sigterm(&mount.mounted);
+    wait_for_mount_exit(&mut mount.mounted);
+}
+
+#[tokio::test]
 /// ORNA-VFS-009 and ORNA-VFS-024: a read-only open of a file with a pending path truncate retains
 /// nothing; the truncate stays pending and is retained once, when the mount stops.
 async fn cwd_mount_read_only_open_after_path_truncate_retains_nothing_early() {

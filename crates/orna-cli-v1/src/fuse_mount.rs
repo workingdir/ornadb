@@ -4797,13 +4797,17 @@ impl WorkspaceFilesystem {
             });
             match (refusal.draft, refusal.unretained) {
                 (_, Some((save, source))) => {
-                    candidates.push((
-                        inode,
-                        refusal.handle,
-                        refusal.cause,
-                        save,
-                        source,
-                    ));
+                    // A cut candidate is retained once, as its truncated record above; its
+                    // untruncated copy is not a second record (ORNA-VFS-009, EDIT-1 step 4).
+                    if !cut_by_truncate {
+                        candidates.push((
+                            inode,
+                            refusal.handle,
+                            refusal.cause,
+                            save,
+                            source,
+                        ));
+                    }
                 }
                 (Some(draft), None) => {
                     let path = state.display_path(inode);
