@@ -3631,9 +3631,9 @@ async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
 
 #[tokio::test]
 /// ORNA-VFS-1 (41-vfs.md EDIT-1; ornadb-5il1.366.3): a 64 MiB Blob candidate is written and read back
-/// through the mount in 1 MiB ranges. The mount daemon's RSS growth past its post-mount high-water
-/// mark is bounded twice: before the accept (spool write and ranged read path) and after the accept
-/// (commit path, which must not copy the whole candidate).
+/// through the mount in 1 MiB ranges. Peak RSS growth of the mount daemon above its post-mount baseline
+/// is checked after the write and read-back (16 MiB bound) and after the accept (96 MiB regression ceiling).
+/// The ceiling is a regression bound with about 12 MiB headroom, not proof that no whole-candidate copy remains.
 async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     const CHUNK_BYTES: usize = 1 << 20;
     const CHUNKS: usize = 64;
@@ -3678,11 +3678,11 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     );
 
     handle.sync_all().expect("the 64 MiB candidate is accepted");
-    // The accept commits the 64 MiB candidate through the mount. The commit API holds the candidate
-    // once as an `Arc<[u8]>`, so 64 MiB is the inherent floor for this path; the ceiling is the
-    // measured residual plus a small margin, and sits far below the 136.9 MB the pre-fix copies
-    // reached. Reaching the 16 MiB bound over the floor needs a streaming commit API (see bead
-    // ornadb-u715, which lists the remaining copy sites).
+    // The accept commits the 64 MiB candidate through the mount. The current commit API holds the
+    // candidate once as an `Arc<[u8]>` (the 64 MiB floor). Peak growth through the accept is 83.8 MiB
+    // (87,863,296 B) on this head and 130.6 MiB (136,937,472 B) on origin/main. The 96 MiB ceiling
+    // is a regression bound with about 12 MiB headroom. Reaching the 16 MiB bound over the floor needs
+    // a streaming commit API (bead ornadb-u715).
     let accept_growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
     eprintln!("mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes");
     assert!(
