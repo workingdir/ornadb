@@ -2877,23 +2877,19 @@ async fn cwd_mount_truncate_after_refused_unretained_candidate_retains_one_recor
 }
 
 #[tokio::test]
-/// ORNA-VFS-024 and EDIT-1 steps 4-5: a path truncate applies to the accepted baseline. A close
-/// flush accepts the unsynced candidate, so the accepted baseline is that candidate; a reopen for
-/// write after a path truncate starts from that baseline cut to the truncated size.
+/// ORNA-VFS-024 and EDIT-1 steps 1-2, 4: an fsync accepts the candidate, which becomes the accepted
+/// baseline. A path truncate then cuts that baseline, and a reopen for write starts from the cut.
+/// Regression pin for the baseline rule, not a fix: it also passes on the pre-fix `fuse_mount.rs`
+/// (b357b91f2). It does not depend on the close-time flush, because the handle is clean when it
+/// closes (EDIT-1 step 5 "may repeat or not occur").
 async fn cwd_mount_reopen_after_path_truncate_applies_truncate_to_accepted_baseline() {
     let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
         return;
     };
     let mut earlier = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
     earlier.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    earlier.sync_all().unwrap();
     drop(earlier);
-    // FUSE release is asynchronous to close(2); let the earlier writer's release run first.
-    thread::sleep(Duration::from_millis(300));
-    assert_eq!(
-        std::fs::read_to_string(&mount.data_path).unwrap(),
-        "{ title: \"unsynced writes kept\", }\n",
-        "the close flush accepted the candidate as the baseline"
-    );
     path_truncate(&mount.data_path, 13);
     let mut reopened = OpenOptions::new()
         .read(true)
