@@ -1359,12 +1359,10 @@ impl MountWriter {
         })?;
         let live_repository = self.repository.clone();
         let live_table = row.table.object_id();
+        let mut live_identity = crate::table_schema::LiveTableSchemaIdentity::new(live_table);
         let candidate = VfsSaveCandidate::new(replacement, validator)
             .with_protected_content_transfers(replacement_bytes.clone(), content_transfers)
-            .with_live_schema_identity(move || {
-                crate::table_schema::committed_table_schema_identity(&live_repository, live_table)
-                    .ok()
-            });
+            .with_live_schema_identity(move || live_identity.read(&live_repository));
         Ok((candidate, replacement_bytes))
     }
 }
