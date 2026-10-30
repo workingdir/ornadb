@@ -2806,6 +2806,51 @@ async fn cwd_mount_truncate_after_failed_release_retains_one_record() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-024 / EDIT-1 (5il1.366.4): a refused candidate and a truncated live draft of the same
+/// inode are both kept; the truncate cuts only the live draft, never the accepted baseline.
+async fn cwd_mount_truncate_after_same_inode_refusal_keeps_both_drafts() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let mut first = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    first.write_all(b"{ title: \"unsynced writes kept\",\n").unwrap();
+    drop(first);
+    // FUSE release is asynchronous to close(2); let the release refuse retention first.
+    thread::sleep(Duration::from_millis(300));
+    let mut second = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    second.write_all(b"{ title: \"second draft\",\n").unwrap();
+    path_truncate(&mount.data_path, 13);
+    send_sigterm(&mount.mounted);
+    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024).
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        mount.mounted.child.try_wait().unwrap().is_none(),
+        "mount stopped while its drafts could not be kept"
+    );
+    set_mode(&record_dir, 0o700);
+    drop(second);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(
+        records.len(),
+        2,
+        "the refused candidate and the truncated live draft are each retained once: {records:?}"
+    );
+    assert!(
+        records
+            .iter()
+            .any(|record| record.contains("\nbytes 13\n") && record.ends_with("{ title: \"sec")),
+        "the truncated live draft is retained as its 13-byte prefix: {records:?}"
+    );
+    assert!(
+        records.iter().any(|record| record.contains("unsynced writes kept")),
+        "the refused candidate is retained in full: {records:?}"
+    );
+}
+
+#[tokio::test]
 /// ORNA-VFS-009 and ORNA-VFS-024: a read-only open of a file with a pending path truncate retains
 /// nothing; the truncate stays pending and is retained once, when the mount stops.
 async fn cwd_mount_read_only_open_after_path_truncate_retains_nothing_early() {
