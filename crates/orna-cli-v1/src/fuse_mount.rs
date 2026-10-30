@@ -5928,6 +5928,23 @@ impl Filesystem for WorkspaceFilesystem {
                     }
                 }
             }
+            None if state.subtree_pinned(destination_inode) => {
+                // 41-vfs.md:38-40: a handle pinned to the replaced row keeps the generation it
+                // captured; the accepted bytes go to a new node that new opens show
+                // (profiles/vfs-1.md:126-133), the same policy adopt_accepted_document applies.
+                if let Err(error) = state.replace_child(
+                    newparent.0,
+                    newname,
+                    NodeKind::Document {
+                        bytes: accepted_bytes.to_vec(),
+                        save: Arc::clone(&save),
+                    },
+                ) {
+                    eprintln!("mounted replacement install failed: {error}");
+                    reply.error(Errno::EIO);
+                    return;
+                }
+            }
             None => {
                 let Some(NodeKind::Document {
                     bytes,
