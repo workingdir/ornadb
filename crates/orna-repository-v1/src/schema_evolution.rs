@@ -304,6 +304,23 @@ impl EvolutionPlan {
     }
 }
 
+/// Admits one committed row, as written under `historical`, to the `current` descriptor
+/// (ORNA-EVOL-002), for a row read from a live mount whose runtime baseline predates the
+/// committed schema. The plan is built for one row, so the strict rules of a rewritten
+/// relation apply: the key cannot change, a changed type must convert losslessly, and a new
+/// required field needs its introduced value.
+pub fn admit_row_under_descriptor(
+    relation_id: [u8; 16],
+    historical: &SchemaDescriptor,
+    current: &SchemaDescriptor,
+    introductions: &BTreeMap<[u8; 16], Raw>,
+    canonical_key: &[u8],
+    canonical_fields: &[u8],
+) -> Result<Vec<u8>, EvolutionRefusal> {
+    EvolutionPlan::new(relation_id, historical, current, 1, introductions)?
+        .rewrite_row(canonical_key, canonical_fields)
+}
+
 /// The key field ObjectIds and every field of a closed descriptor.
 fn fields(descriptor: &SchemaDescriptor) -> Result<(Vec<[u8; 16]>, Vec<Field<'_>>), EvolutionRefusal> {
     let Raw::Map(entries) = descriptor.raw() else {
