@@ -4820,7 +4820,11 @@ impl WorkspaceFilesystem {
                         .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
             });
             for (save, source) in refusal.unretained {
-                candidates.push((inode, refusal.handle, refusal.cause, save, source));
+                // A cut candidate is retained once, as its truncated record above; its
+                // untruncated copy is not a second record (ORNA-VFS-009, EDIT-1 step 4).
+                if !cut_by_truncate {
+                    candidates.push((inode, refusal.handle, refusal.cause, save, source));
+                }
             }
             if let Some(draft) = refusal.draft {
                 let path = state.display_path(inode);
@@ -4884,17 +4888,17 @@ impl WorkspaceFilesystem {
                         retained.id,
                         retained.record.display()
                     ));
-                if truncated {
-                    if let Some((old, _)) = superseded.remove(&inode) {
-                        if old != retained.id {
-                            if let Err(error) = save.writer.retained_drafts.remove(&old) {
-                                reports.insert(format!(
-                                    "superseded draft {old} for {path} could not be removed: {error}"
-                                ));
+                    if truncated {
+                        if let Some((old, _)) = superseded.remove(&inode) {
+                            if old != retained.id {
+                                if let Err(error) = save.writer.retained_drafts.remove(&old) {
+                                    reports.insert(format!(
+                                        "superseded draft {old} for {path} could not be removed: {error}"
+                                    ));
+                                }
                             }
                         }
                     }
-                }
                 }
                 Err(error) => {
                     refused = worst_retention_errno(refused, error.errno);
