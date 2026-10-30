@@ -598,9 +598,8 @@ async fn other_open_stat_after_refused_writer_reports_accepted_size() {
 
 /// ORNA-VFS-022, 41-vfs.md:39-40 and profiles/vfs-1.md:128: a clean handle opened
 /// before an owner-routed write keeps its generation, so its fstat reports the
-/// size of the generation it pinned. Ignored until ornadb-5il1.470: FUSE passes
-/// no file handle to fstat, so the server cannot tell this handle from a path stat.
-#[ignore = "ornadb-5il1.470: fstat on a handle opened before an owner write reports the accepted size"]
+/// size of the generation it pinned. FUSE passes no file handle to fstat, so the
+/// nodeid alone selects the generation the server reports.
 #[tokio::test]
 async fn reader_opened_before_owner_write_keeps_fstat_size() {
     if !require_fuse_or_skip() {
@@ -615,6 +614,41 @@ async fn reader_opened_before_owner_write_keeps_fstat_size() {
         reader.metadata().unwrap().len(),
         original.len() as u64,
         "fstat on a handle opened before the owner write reports its pinned size"
+    );
+    drop(reader);
+}
+
+/// ornadb-5il1.470: a temp rename over `data.orna` after an owner-routed write. The
+/// handle opened before the owner write keeps the bytes and size it pinned.
+#[tokio::test]
+async fn reader_opened_before_owner_write_survives_temp_rename_over_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let original = fresh_view(&fixture);
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut reader), original);
+    owner_routed_edit(&fixture, "Api write with a longer title");
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.replace-temp",
+        &music_row("Temp replacement"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the temp replacement");
+    assert!(
+        fresh_view(&fixture).contains("Temp replacement"),
+        "a new open sees the admitted replacement"
+    );
+    assert_eq!(
+        read_from_start(&mut reader),
+        original,
+        "a handle opened before the owner write reads its pinned bytes after the rename"
+    );
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on that handle reports the pinned size after the rename"
     );
     drop(reader);
 }

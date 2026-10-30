@@ -2974,9 +2974,11 @@ impl WorkspaceFilesystem {
     /// the accepted image its new opens read (`ManagedFile::stat`), so an owner
     /// write is visible to stat at once (profiles/vfs-1.md:133, ORNA-VFS-019).
     /// Open handles keep their own draft, captured baseline and generation, so
-    /// reads and stale-save refusal are unaffected. FUSE passes no handle to
-    /// fstat, so fstat on a clean handle opened before an owner write also
-    /// reports the accepted size; that is a known residual.
+    /// reads and stale-save refusal are unaffected. A document an owner write
+    /// superseded reports the size of the generation it captured, so fstat on a
+    /// handle opened before that write keeps its generation's size
+    /// (41-vfs.md:38-40, profiles/vfs-1.md:126-133). FUSE passes no handle to
+    /// fstat, so the nodeid alone selects the generation.
     fn attr_of(&self, inode: u64) -> Option<FileAttr> {
         let (mut attr, document) = {
             let state = self
@@ -2985,7 +2987,9 @@ impl WorkspaceFilesystem {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let attr = state.attr(inode)?;
             let document = match state.nodes.get(&inode).map(|node| &node.kind) {
-                Some(NodeKind::Document { save, .. }) => Some(Arc::clone(save)),
+                Some(NodeKind::Document { save, .. }) if !state.is_superseded(inode) => {
+                    Some(Arc::clone(save))
+                }
                 _ => None,
             };
             (attr, document)
@@ -3058,17 +3062,30 @@ impl WorkspaceFilesystem {
 
     /// Shows the row an owner-routed `edit --row` accepted: the document takes the accepted
     /// bytes, and a Str over 64 KiB is re-projected to its `.txt` sibling (profiles/vfs-1.md:76-80).
+    /// A document an open handle pins keeps the generation it captured: the accepted bytes go
+    /// to a new node that replaces it (41-vfs.md:38-40).
     fn adopt_accepted_document(&self, inode: u64, save: &Arc<RowSaveContext>, accepted: &[u8]) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(NodeKind::Document { bytes, .. }) =
-            state.nodes.get_mut(&inode).map(|node| &mut node.kind)
-        {
-            *bytes = accepted.to_vec();
-        }
-        if let Err(error) = state.project_accepted_document(inode, save) {
+        let document = if state.subtree_pinned(inode) {
+            match state.replace_document_generation(inode, accepted.to_vec()) {
+                Ok(document) => document,
+                Err(error) => {
+                    eprintln!("the accepted row document could not be shown: {error}");
+                    return;
+                }
+            }
+        } else {
+            if let Some(NodeKind::Document { bytes, .. }) =
+                state.nodes.get_mut(&inode).map(|node| &mut node.kind)
+            {
+                *bytes = accepted.to_vec();
+            }
+            inode
+        };
+        if let Err(error) = state.project_accepted_document(document, save) {
             eprintln!("the accepted row document could not be re-projected: {error}");
         }
     }
@@ -4466,6 +4483,8 @@ impl WorkspaceFilesystem {
         // inode -> (code, draft id, detail). The code is the spec code of the internal
         // cause; otherwise `draft_retained` when a candidate was kept; otherwise empty.
         let mut unresolved: BTreeMap<u64, (&'static str, String, String)> = BTreeMap::new();
+        // The path each refusal captured when recorded; the refused node may leave the tree first.
+        let mut captured: HashMap<u64, String> = HashMap::new();
         for (inode, refusal) in &draft_state.rejected_documents {
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.draft.as_ref().map(|_| DRAFT_RETAINED))
@@ -4483,6 +4502,7 @@ impl WorkspaceFilesystem {
                     format!("not accepted ({}); candidate not retained", refusal.cause),
                 ),
             };
+            captured.insert(*inode, refusal.path.clone());
             unresolved.insert(*inode, (code, draft, detail));
         }
         for (inode, source) in &draft_state.source_drafts {
@@ -4518,6 +4538,7 @@ impl WorkspaceFilesystem {
             unresolved.entry(*inode).or_insert((code, draft, detail));
         }
         for (inode, refusal) in &draft_state.rejected_scratch {
+            captured.insert(*inode, refusal.path.clone());
             let code = spec_code(refusal.cause)
                 .or_else(|| refusal.kept.then_some(DRAFT_RETAINED))
                 .unwrap_or("");
@@ -4543,7 +4564,10 @@ impl WorkspaceFilesystem {
         let mut drafts = Vec::with_capacity(unresolved.len());
         for (inode, (code, draft, detail)) in unresolved {
             drafts.push(UnresolvedDraft {
-                path: state.display_path(inode),
+                path: state
+                    .path_through(inode, true)
+                    .or_else(|| captured.get(&inode).cloned())
+                    .unwrap_or_else(|| state.display_path(inode)),
                 code,
                 draft,
                 detail,
@@ -5460,6 +5484,10 @@ impl Filesystem for WorkspaceFilesystem {
                 handle,
                 OpenFile::Document(save, draft, Arc::new(Mutex::new(schema_identity))),
             );
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .track_open(inode.0);
         if truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
@@ -6408,6 +6436,7 @@ impl Filesystem for WorkspaceFilesystem {
         if let Some(OpenFile::Source(source_inode)) = &released {
             self.source_release(&mut draft_state, *source_inode);
         }
+        let released_document = matches!(released, Some(OpenFile::Document(..)));
         match (draft_state.unresolved_handles.remove(&handle.0), released) {
             (Some(inode), Some(OpenFile::Temporary(_, _, _, _))) => {
                 draft_state.retained_scratch.insert(inode);
@@ -6418,6 +6447,12 @@ impl Filesystem for WorkspaceFilesystem {
                 self.retain_unsynced_document(&mut draft_state, inode, handle.0, &save, &draft);
             }
             _ => {}
+        }
+        if released_document {
+            self.state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .track_release(inode.0);
         }
         reply.ok();
     }
@@ -6653,6 +6688,9 @@ struct FsBuilder {
     /// Retired subtrees whose root has an open handle at or below it. Each stays loaded
     /// until the last such handle is released.
     superseded_nodes: HashSet<u64>,
+    /// The name each retired node was listed under. A diagnostic uses it to name the path of a
+    /// retained node that a replacement took out of its listing; dropped with the node.
+    retired_names: HashMap<u64, OsString>,
     /// Inodes of projected source modules and their directories. A table path
     /// that reaches one of these yields to the source path (profiles/vfs-1.md).
     source_nodes: HashSet<u64>,
@@ -6675,6 +6713,7 @@ impl FsBuilder {
             table_object_ids: Arc::new(BTreeMap::new()),
             open_handles: HashMap::new(),
             superseded_nodes: HashSet::new(),
+            retired_names: HashMap::new(),
             source_nodes: HashSet::new(),
         }
     }
@@ -7599,6 +7638,13 @@ impl FsBuilder {
 
     /// The mount-relative path of `inode`, as the user sees it.
     fn path_of(&self, inode: u64) -> Option<String> {
+        self.path_through(inode, false)
+    }
+
+    /// Walks up from `inode`. With `retired` set, a node no longer listed under its parent is
+    /// named by the name it was listed under, so a diagnostic still names the path of a handle
+    /// that a replacement left behind.
+    fn path_through(&self, inode: u64, retired: bool) -> Option<String> {
         let mut components = Vec::new();
         let mut current = inode;
         while current != ROOT_INODE {
@@ -7619,7 +7665,9 @@ impl FsBuilder {
                     .map(|(name, _)| name.clone()),
                 _ => None,
             };
-            components.push(listed.or_else(indexed)?.to_string_lossy().into_owned());
+            let retired_name = || self.retired_names.get(&current).cloned().filter(|_| retired);
+            let name = listed.or_else(indexed).or_else(retired_name)?;
+            components.push(name.to_string_lossy().into_owned());
             current = parent;
         }
         components.reverse();
@@ -7627,7 +7675,7 @@ impl FsBuilder {
     }
 
     fn display_path(&self, inode: u64) -> String {
-        self.path_of(inode)
+        self.path_through(inode, true)
             .unwrap_or_else(|| format!("inode {inode} (no longer in the mount)"))
     }
 
@@ -7679,6 +7727,35 @@ impl FsBuilder {
         }
         self.reconcile_row_files(document_inode, Some(document), others)?;
         Ok(true)
+    }
+
+    /// The save context a replacement generation of a row document takes once the mount has
+    /// accepted a new row: it compares against that accepted row, while the superseded
+    /// generation keeps the context it captured (ORNA-VFS-011, 41-vfs.md:38-40).
+    fn accepted_generation_save(
+        &self,
+        superseded: &Arc<RowSaveContext>,
+    ) -> Result<Arc<RowSaveContext>, String> {
+        let table = superseded
+            .source
+            .runtime_table
+            .as_ref()
+            .ok_or_else(|| "the accepted row has no runtime table".to_owned())?;
+        let key = runtime_table_key_bytes(&superseded.key)?;
+        let row = superseded
+            .writer
+            .live_row(table, &key)?
+            .ok_or_else(|| "the accepted row is missing after its save".to_owned())?;
+        let files = self.project_row_files(
+            &superseded.source,
+            &superseded.key,
+            Some(&row),
+            Some(row.clone()),
+        )?;
+        match files.into_iter().find(|(name, _)| name == "data.orna") {
+            Some((_, NodeKind::Document { save, .. })) => Ok(save),
+            _ => Err("the accepted row has no data.orna document".to_owned()),
+        }
     }
 
     /// Re-projects a row from the row the save has just accepted (profiles/vfs-1.md:76-80).
@@ -7864,7 +7941,7 @@ impl FsBuilder {
     /// Swaps the child `name` of `parent` for a new node at the same readdir position, so
     /// sibling offsets hold. The superseded node keeps its captured bytes for open handles,
     /// and a superseded directory stays loaded for a held listing.
-    fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<(), String> {
+    fn replace_child(&mut self, parent: u64, name: &OsStr, kind: NodeKind) -> Result<u64, String> {
         let inode = self.next_inode;
         self.next_inode = inode
             .checked_add(1)
@@ -7883,8 +7960,35 @@ impl FsBuilder {
         let superseded = std::mem::replace(&mut entry.inode, inode);
         entry.kind = file_type;
         self.nodes.insert(inode, FsNode { parent, kind });
+        self.retired_names.insert(superseded, name.to_owned());
         self.retire_node(superseded);
-        Ok(())
+        Ok(inode)
+    }
+
+    /// Replaces the accepted document `document` with a new generation that shows `bytes`.
+    /// The superseded node keeps the bytes and save context it captured, so a handle pinned to
+    /// it reports the size it opened with and its flush still compares against the row it
+    /// opened (profiles/vfs-1.md:126-133). The new generation saves against the row the mount
+    /// accepted (ORNA-VFS-011). Returns the new node's inode.
+    fn replace_document_generation(
+        &mut self,
+        document: u64,
+        bytes: Vec<u8>,
+    ) -> Result<u64, String> {
+        let (parent, superseded) = match self.nodes.get(&document) {
+            Some(FsNode {
+                parent,
+                kind: NodeKind::Document { save, .. },
+            }) => (*parent, Arc::clone(save)),
+            _ => return Err("replaced document is not a row document".into()),
+        };
+        let save = self.accepted_generation_save(&superseded)?;
+        let name = self
+            .directory(parent)
+            .and_then(|directory| directory.entries.iter().find(|entry| entry.inode == document))
+            .map(|entry| entry.name.clone())
+            .ok_or_else(|| "replaced document is missing from its row".to_owned())?;
+        self.replace_child(parent, name.as_os_str(), NodeKind::Document { bytes, save })
     }
 
     /// Refreshes a stale document and reports the outcome on stderr.
@@ -8030,6 +8134,21 @@ impl FsBuilder {
         false
     }
 
+    /// Whether `inode` or an ancestor was superseded by a replacement. Such a node is retired
+    /// and shows only the generation it captured.
+    fn is_superseded(&self, inode: u64) -> bool {
+        let mut current = inode;
+        loop {
+            if self.superseded_nodes.contains(&current) {
+                return true;
+            }
+            match self.nodes.get(&current) {
+                Some(node) if node.parent != current => current = node.parent,
+                _ => return false,
+            }
+        }
+    }
+
     /// Removes `root` and every node below it.
     fn remove_subtree(&mut self, root: u64) {
         let mut pending = vec![root];
@@ -8038,6 +8157,7 @@ impl FsBuilder {
                 pending.extend(directory.entries.iter().map(|entry| entry.inode));
             }
             self.nodes.remove(&inode);
+            self.retired_names.remove(&inode);
         }
     }
 
