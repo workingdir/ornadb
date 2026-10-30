@@ -5418,7 +5418,9 @@ impl Filesystem for WorkspaceFilesystem {
         };
         let is_scratch = scratch.is_some();
         let had_retained_scratch = draft_state.retained_scratch.contains(&inode.0);
-        if truncate_size.is_some() {
+        // A read-only open views a pending path truncate but is not a writer: it holds no
+        // candidate, so its release retains nothing and the truncate is retained once at stop.
+        if write_mode && truncate_size.is_some() {
             draft_state.unresolved_handles.insert(handle, inode.0);
             draft_state.candidate_written(handle, inode.0);
             if is_scratch {
@@ -5482,7 +5484,7 @@ impl Filesystem for WorkspaceFilesystem {
                     handle,
                     OpenFile::Temporary(save, target, scratch, blob_field),
                 );
-            if truncate_size.is_some() {
+            if write_mode && truncate_size.is_some() {
                 draft_state.pending_truncates.remove(&inode.0);
             }
             if write_mode {
@@ -5528,7 +5530,7 @@ impl Filesystem for WorkspaceFilesystem {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .track_open(inode.0);
-        if truncate_size.is_some() {
+        if write_mode && truncate_size.is_some() {
             draft_state.pending_truncates.remove(&inode.0);
         }
         if write_mode {
@@ -6010,6 +6012,9 @@ impl Filesystem for WorkspaceFilesystem {
             draft_state.unresolved_handles.remove(&refused);
         }
         draft_state.pending_truncates.remove(&source_inode);
+        // The accepted replacement supersedes the bytes a path truncate cut from the
+        // destination, so that truncate is not retained against the replaced file (ORNA-VFS-024).
+        draft_state.pending_truncates.remove(&destination_inode);
         state.nodes.remove(&source_inode);
         reply.ok();
     }
