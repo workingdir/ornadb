@@ -2615,6 +2615,250 @@ async fn truncate_after_close_keeps_unsynced_writes() {
     );
 }
 
+/// A `mount --cwd` of a one-row Music repository whose `london` row holds `initial`.
+struct CwdMusicMount {
+    repository_directory: TempDir,
+    repository: orna_repository_v1::Repository,
+    _mount_parent: TempDir,
+    mountpoint: std::path::PathBuf,
+    data_path: std::path::PathBuf,
+    mounted: MountedProcess,
+}
+
+async fn start_cwd_music_mount(initial: &str) -> Option<CwdMusicMount> {
+    if !fuse_test_available() {
+        return None;
+    }
+    let (repository_directory, repository, relation_id, format_context) =
+        format3::format3_repository_with_context(
+            "pub table Music(id: Str) { title: Str, }\n",
+            "Music",
+        );
+    let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
+    media_commit::commit_source_captures_for_table(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        relation_id,
+        &format_context,
+        "Music",
+        &[media_commit::SourceCaptureRow {
+            key: "london",
+            blob_fields: &[],
+            source_row: initial,
+            ordinal: 0x95,
+            insert_only: true,
+        }],
+    )
+    .await;
+    drop(state);
+
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mut mounted = spawn_cwd_mount(repository_directory.path(), &mountpoint);
+    let data_path = mountpoint.join("Music/london/data.orna");
+    if !wait_for_mount_paths(&mut mounted, &[data_path.as_path()]) {
+        return None;
+    }
+    Some(CwdMusicMount {
+        repository_directory,
+        repository,
+        _mount_parent: mount_parent,
+        mountpoint,
+        data_path,
+        mounted,
+    })
+}
+
+/// Sets the permission bits of `path`; a read-only directory is the fault retention hits.
+fn set_mode(path: &Path, mode: u32) {
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+}
+
+/// Truncates `path` by name, as `truncate(2)` does: the mount sees a setattr with no open handle.
+fn path_truncate(path: &Path, size: u64) {
+    let output = Command::new("python3")
+        .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+        .arg(path)
+        .arg(size.to_string())
+        .output()
+        .expect("run path-based truncate");
+    assert!(
+        output.status.success(),
+        "path-based truncate failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Sends SIGTERM to the mount process without waiting for it to exit.
+fn send_sigterm(mounted: &MountedProcess) {
+    let status = Command::new("kill")
+        .args(["-TERM", &mounted.child.id().to_string()])
+        .status()
+        .expect("send SIGTERM to mount child");
+    assert!(status.success(), "kill -TERM failed");
+}
+
+/// Waits for the mount process to exit after a stop, failing after thirty seconds.
+fn wait_for_mount_exit(mounted: &mut MountedProcess) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while mounted.child.try_wait().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The contents of every draft record recovery storage holds (ORNA-VFS-009); empty when none.
+fn retained_record_texts(repository: &orna_repository_v1::Repository) -> Vec<String> {
+    let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("list retained draft").path())
+            .filter(|path| path.is_file())
+            .map(|path| String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list retained drafts: {error}"),
+    }
+}
+
+/// The recovery directory of `repository`, where retained draft records are written.
+fn record_directory(repository: &orna_repository_v1::Repository) -> std::path::PathBuf {
+    let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    std::fs::create_dir_all(&directory).unwrap();
+    directory
+}
+
+#[tokio::test]
+/// ORNA-VFS-009 and EDIT-1 step 4: a path truncate of a candidate whose retention failed keeps the
+/// truncated prefix once retention recovers, and the untruncated copy is not retained as well.
+async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let mut document = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    document.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    drop(document);
+    // FUSE release is asynchronous to close(2); let the release refuse retention first.
+    thread::sleep(Duration::from_millis(300));
+    path_truncate(&mount.data_path, 13);
+    send_sigterm(&mount.mounted);
+    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024).
+    thread::sleep(Duration::from_millis(500));
+    assert!(
+        mount.mounted.child.try_wait().unwrap().is_none(),
+        "mount stopped while its drafts could not be kept"
+    );
+    set_mode(&record_dir, 0o700);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(
+        records.len(),
+        1,
+        "the truncated candidate is the only retained record: {records:?}"
+    );
+    assert!(
+        records[0].contains("\nbytes 13\n") && records[0].ends_with("{ title: \"uns"),
+        "retained record is not the 13-byte truncated prefix: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-009: a candidate whose release retention failed, then cut by a path truncate, is
+/// retained once as its truncated record; the untruncated copy is superseded, not retained again.
+async fn cwd_mount_truncate_after_failed_release_retains_one_record() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let mut document = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
+    document.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    drop(document);
+    // FUSE release is asynchronous to close(2); let the release refuse retention first.
+    thread::sleep(Duration::from_millis(300));
+    set_mode(&record_dir, 0o700);
+    path_truncate(&mount.data_path, 13);
+    send_sigterm(&mount.mounted);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(
+        records.len(),
+        1,
+        "one candidate must retain one record: {records:?}"
+    );
+    assert!(
+        records[0].contains("\nbytes 13\n") && records[0].ends_with("{ title: \"uns"),
+        "retained record is not the 13-byte truncated prefix: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-009 and ORNA-VFS-024: a read-only open of a file with a pending path truncate retains
+/// nothing; the truncate stays pending and is retained once, when the mount stops.
+async fn cwd_mount_read_only_open_after_path_truncate_retains_nothing_early() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let baseline = std::fs::read(&mount.data_path).unwrap();
+    path_truncate(&mount.data_path, 13);
+    let read = std::fs::read(&mount.data_path).unwrap();
+    assert_eq!(read, &baseline[..13], "a read sees the truncated view");
+    // FUSE release is asynchronous to close(2); give the read-only release time to run.
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        retained_record_texts(&mount.repository).is_empty(),
+        "a read-only open retained a draft before the mount stopped"
+    );
+    send_sigterm(&mount.mounted);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(records.len(), 1, "the pending truncate is retained once: {records:?}");
+    assert!(
+        records[0].contains("\nbytes 13\n")
+            && records[0].ends_with(std::str::from_utf8(&baseline[..13]).unwrap()),
+        "retained record is not the 13-byte truncated baseline: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-024 and bead 366.5: an accepted atomic replacement clears the pending path truncate of
+/// the file it replaces, so a clean unmount is not refused by a truncate of superseded bytes.
+async fn cwd_mount_atomic_replacement_clears_pending_path_truncate() {
+    let Some(mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    path_truncate(&mount.data_path, 13);
+    let scratch = mount.mountpoint.join("Music/london/.data.orna.replacement-tmp");
+    let mut replacement = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&scratch)
+        .expect("create replacement scratch beside data.orna");
+    replacement.write_all(b"{ title: \"replaced\", }\n").unwrap();
+    replacement.sync_all().expect("accept replacement scratch");
+    drop(replacement);
+    std::fs::rename(&scratch, &mount.data_path).expect("atomically replace data.orna");
+    let accepted = std::fs::read_to_string(&mount.data_path).unwrap();
+    assert!(accepted.contains("replaced"), "the accepted replacement reads back: {accepted:?}");
+
+    run_unmount_from(mount.repository_directory.path(), Path::new("."), &mount.mountpoint);
+    assert!(!mountinfo_contains(&mount.mountpoint));
+    assert!(mount.repository.mount_status().unwrap().is_empty());
+}
+
 #[tokio::test]
 /// ORNA-VFS-024: a rejected Document draft survives close and still blocks unmount until accepted.
 async fn cwd_mount_refuses_unmount_after_rejected_document_draft_is_released() {
