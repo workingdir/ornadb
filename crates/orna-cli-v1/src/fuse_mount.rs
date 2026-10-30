@@ -2256,23 +2256,15 @@ impl RowSaveContext {
             })
     }
 
-    fn commit_document(
-        self: &Arc<Self>,
-        draft: &EditDraft<RowMapSnapshot>,
-        record_baseline: bool,
-        opened: &TableSchemaIdentity,
-    ) -> Result<(), DocumentCommitError> {
-        self.commit_document_against(draft, record_baseline, self.recorded_baseline(), opened)
-    }
-
     /// Commits `draft` against `expected_baseline_row`, the durable row the save compares (CAS).
+    /// Returns the row the save accepted, which the committing handle captures as its baseline.
     fn commit_document_against(
         self: &Arc<Self>,
         draft: &EditDraft<RowMapSnapshot>,
         record_baseline: bool,
         expected_baseline_row: Option<Vec<u8>>,
         opened: &TableSchemaIdentity,
-    ) -> Result<(), DocumentCommitError> {
+    ) -> Result<Option<Vec<u8>>, DocumentCommitError> {
         let save = self
             .durable_save_with_baseline(expected_baseline_row, opened.clone())
             .map_err(DocumentCommitError::Failed)?;
@@ -2305,9 +2297,9 @@ impl RowSaveContext {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 if record_baseline {
-                    self.record_accepted_row(accepted_row);
+                    self.record_accepted_row(accepted_row.clone());
                 }
-                Ok(())
+                Ok(accepted_row)
             }
             Ok(TemporaryRenameOutcome::Rejected { .. }) => Err(DocumentCommitError::Rejected(
                 "mounted row document was rejected by semantic admission".into(),
@@ -2957,7 +2949,8 @@ impl WorkspaceFilesystem {
                         .explicit_edit_baseline(grouped_row)
                         .map_err(|error| retained_edit_error(&error, draft_path))?;
                     admit_edit_result(
-                        save.commit_document_against(&draft, record_baseline, expected, &opened),
+                        save.commit_document_against(&draft, record_baseline, expected, &opened)
+                            .map(|_| ()),
                         draft_path,
                     )
                 })
@@ -3063,14 +3056,14 @@ impl WorkspaceFilesystem {
     /// Shows the row an owner-routed `edit --row` accepted: the document takes the accepted
     /// bytes, and a Str over 64 KiB is re-projected to its `.txt` sibling (profiles/vfs-1.md:76-80).
     /// A document an open handle pins keeps the generation it captured: the accepted bytes go
-    /// to a new node that replaces it (41-vfs.md:38-40).
+    /// to a new node that shows the accepted row's projection and replaces it (41-vfs.md:38-40).
     fn adopt_accepted_document(&self, inode: u64, save: &Arc<RowSaveContext>, accepted: &[u8]) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let document = if state.subtree_pinned(inode) {
-            match state.replace_document_generation(inode, accepted.to_vec()) {
+            match state.replace_document_generation(inode) {
                 Ok(document) => document,
                 Err(error) => {
                     eprintln!("the accepted row document could not be shown: {error}");
@@ -3324,12 +3317,21 @@ fn fusermount_program() -> OsString {
     OsString::from("fusermount3")
 }
 
+/// The CAS baseline an open document handle captured at open (ORNA-VFS-011): the durable row its
+/// close flush compares against and the table schema it opened under. The row advances only when
+/// this handle's own candidate is accepted, so a row another writer accepted makes the next flush
+/// of this handle stale.
+struct DocumentBaseline {
+    schema_identity: TableSchemaIdentity,
+    row: Option<Vec<u8>>,
+}
+
 #[derive(Clone)]
 enum OpenFile {
     Document(
         Arc<RowSaveContext>,
         Arc<EditDraft<RowMapSnapshot>>,
-        Arc<Mutex<TableSchemaIdentity>>,
+        Arc<Mutex<DocumentBaseline>>,
     ),
     Temporary(
         Arc<RowSaveContext>,
@@ -4114,7 +4116,7 @@ impl WorkspaceFilesystem {
         inode: u64,
         save: &Arc<RowSaveContext>,
         draft: &Arc<EditDraft<RowMapSnapshot>>,
-        opened: &Arc<Mutex<TableSchemaIdentity>>,
+        opened: &Arc<Mutex<DocumentBaseline>>,
     ) -> Result<(), DocumentCommitError> {
         // A path truncate issued while this writer was open is recorded, not applied to
         // the draft. It is applied before the candidate is judged, so the accepted or
@@ -4130,25 +4132,52 @@ impl WorkspaceFilesystem {
                 })?;
             draft_state.pending_truncates.remove(&inode);
         }
-        let based_on = opened
+        // The handle commits against the row it captured at open and advances only with its
+        // own accepted candidate (ORNA-VFS-011), so a row another writer accepted since then
+        // fails the compare. A handle pinned to a superseded generation is refused before the
+        // compare: its generation is retired (see `replace_document_generation`).
+        let (based_on, schema_identity) = {
+            let baseline = opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (baseline.row.clone(), baseline.schema_identity.clone())
+        };
+        let superseded = self
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        if let Err(error) = save.commit_document(draft, true, &based_on) {
-            // NoCandidate: the handle submitted no bytes, so there is no candidate to
-            // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
-            if matches!(error, DocumentCommitError::NoCandidate) {
-                return Err(error);
+            .is_superseded(inode);
+        let outcome = if superseded {
+            Err(DocumentCommitError::Stale)
+        } else {
+            save.commit_document_against(draft, true, based_on, &schema_identity)
+        };
+        let accepted_row = match outcome {
+            Ok(accepted_row) => accepted_row,
+            Err(error) => {
+                // NoCandidate: the handle submitted no bytes, so there is no candidate to
+                // retain and nothing blocks unmount (ORNA-VFS-009, EDIT-1 step 2).
+                if matches!(error, DocumentCommitError::NoCandidate) {
+                    return Err(error);
+                }
+                // A candidate recovery storage cannot keep reports the retention errno
+                // and stays unresolved (ORNA-VFS-009).
+                let retained =
+                    self.refuse_document(draft_state, inode, handle, save, draft, &error);
+                return Err(match retained {
+                    Some(errno) => DocumentCommitError::Unretained {
+                        errno,
+                        cause: error.cause(),
+                    },
+                    None => error,
+                });
             }
-            // A candidate recovery storage cannot keep reports the retention errno
-            // and stays unresolved (ORNA-VFS-009).
-            return Err(match self.refuse_document(draft_state, inode, handle, save, draft, &error) {
-                Some(errno) => DocumentCommitError::Unretained {
-                    errno,
-                    cause: error.cause(),
-                },
-                None => error,
-            });
+        };
+        if let Some(row) = accepted_row {
+            let mut baseline = opened
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            baseline.row = Some(row);
         }
         let bytes = save
             .writer
@@ -4159,10 +4188,17 @@ impl WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A generation superseded while this commit ran keeps the bytes it captured
+        // (profiles/vfs-1.md:126-133), so only a live generation takes the accepted row.
+        let retired = state.is_superseded(inode);
         if let Some(NodeKind::Document {
             bytes: current,
             save: current_save,
-        }) = state.nodes.get_mut(&inode).map(|node| &mut node.kind)
+        }) = state
+            .nodes
+            .get_mut(&inode)
+            .map(|node| &mut node.kind)
+            .filter(|_| !retired)
         {
             *current = bytes.to_vec();
             // A handle opened before a refresh saves through its own
@@ -4172,7 +4208,7 @@ impl WorkspaceFilesystem {
             }
         }
         // The document shows the accepted row, so a Str over 64 KiB is named by its `.txt`.
-        if let Err(error) = state.project_accepted_document(inode, save) {
+        if !retired && let Err(error) = state.project_accepted_document(inode, save) {
             eprintln!("the accepted row document could not be re-projected: {error}");
         }
         let accepted_path = state.display_path(inode);
@@ -5477,13 +5513,14 @@ impl Filesystem for WorkspaceFilesystem {
                 return;
             }
         }
+        let baseline = Arc::new(Mutex::new(DocumentBaseline {
+            schema_identity,
+            row: save.recorded_baseline(),
+        }));
         self.open_files
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(
-                handle,
-                OpenFile::Document(save, draft, Arc::new(Mutex::new(schema_identity))),
-            );
+            .insert(handle, OpenFile::Document(save, draft, baseline));
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -7739,13 +7776,15 @@ impl FsBuilder {
         Ok(true)
     }
 
-    /// The save context a replacement generation of a row document takes once the mount has
-    /// accepted a new row: it compares against that accepted row, while the superseded
-    /// generation keeps the context it captured (ORNA-VFS-011, 41-vfs.md:38-40).
-    fn accepted_generation_save(
+    /// The save context and document bytes a replacement generation of a row document takes once
+    /// the mount has accepted a new row: the context compares against that accepted row, and the
+    /// bytes are the projection that context serves, so the generation's own edit reads the image
+    /// a fresh open reads. The superseded generation keeps the context it captured (ORNA-VFS-011,
+    /// 41-vfs.md:38-40).
+    fn accepted_generation_document(
         &self,
         superseded: &Arc<RowSaveContext>,
-    ) -> Result<Arc<RowSaveContext>, String> {
+    ) -> Result<(Arc<RowSaveContext>, Vec<u8>), String> {
         let table = superseded
             .source
             .runtime_table
@@ -7763,7 +7802,7 @@ impl FsBuilder {
             Some(row.clone()),
         )?;
         match files.into_iter().find(|(name, _)| name == "data.orna") {
-            Some((_, NodeKind::Document { save, .. })) => Ok(save),
+            Some((_, NodeKind::Document { save, bytes })) => Ok((save, bytes)),
             _ => Err("the accepted row has no data.orna document".to_owned()),
         }
     }
@@ -7975,19 +8014,16 @@ impl FsBuilder {
         Ok(inode)
     }
 
-    /// Replaces the accepted document `document` with a new generation that shows `bytes`.
+    /// Replaces the accepted document `document` with a generation that shows the accepted row.
     /// The superseded node keeps the bytes it captured, so a handle pinned to it reports the
-    /// size it opened with (profiles/vfs-1.md:126-133). Its save context is the one the pinned
-    /// handle holds, and its `expected_baseline_row` is not isolated: a grouped `edit --row`
-    /// committed through this generation before the replacement advances the baseline that the
-    /// pinned handle's flush compares against. That violates ORNA-VFS-011 for the pinned writer;
-    /// it is pre-existing (ornadb-5il1.470.1). The new generation saves against the row the
-    /// mount accepted (ORNA-VFS-011). Returns the new node's inode.
-    fn replace_document_generation(
-        &mut self,
-        document: u64,
-        bytes: Vec<u8>,
-    ) -> Result<u64, String> {
+    /// size it opened with (profiles/vfs-1.md:126-133). A handle pinned to a superseded
+    /// generation never commits: `accept_document` refuses its close flush as stale and
+    /// retained before the CAS compare, so a row that returns to the bytes that handle
+    /// captured is not accepted over the owner's row (ORNA-VFS-011; a conservative choice,
+    /// spec-silent on that return). The new generation saves against the row the mount
+    /// accepted and shows that row's projected document, the image a fresh open reads
+    /// (ORNA-VFS-011). Returns the new node's inode.
+    fn replace_document_generation(&mut self, document: u64) -> Result<u64, String> {
         let (parent, superseded) = match self.nodes.get(&document) {
             Some(FsNode {
                 parent,
@@ -7995,7 +8031,7 @@ impl FsBuilder {
             }) => (*parent, Arc::clone(save)),
             _ => return Err("replaced document is not a row document".into()),
         };
-        let save = self.accepted_generation_save(&superseded)?;
+        let (save, bytes) = self.accepted_generation_document(&superseded)?;
         let name = self
             .directory(parent)
             .and_then(|directory| directory.entries.iter().find(|entry| entry.inode == document))
