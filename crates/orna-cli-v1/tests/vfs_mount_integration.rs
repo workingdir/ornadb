@@ -4085,9 +4085,9 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
 
     handle.sync_all().expect("the 64 MiB candidate is accepted");
     // The accept commits the 64 MiB candidate through the mount. One-run measurements of the accept
-    // growth above are 20,045,824 B (19.1 MiB) on this head and 88,264,704 B (84.2 MiB) on origin/main
-    // 9eab295fd. The 96 MiB ceiling is a regression bound. The 16 MiB bound over the floor is not yet
-    // met (ornadb-u715, partial).
+    // growth above: 19,697,664 B (18.8 MiB) on d5afa463d (streaming commit 8f1cfe389 included), and
+    // 20,045,824 B (19.1 MiB) on 7fa27a6eb; 88,264,704 B (84.2 MiB) on origin/main 9eab295fd. The 96 MiB
+    // ceiling is a regression bound. The 16 MiB goal over the floor is not yet met (ornadb-u715, partial).
     let accept_growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
     eprintln!("mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes");
     assert!(
