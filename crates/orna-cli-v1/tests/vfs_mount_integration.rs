@@ -2718,6 +2718,32 @@ fn wait_for_mount_exit(mounted: &mut MountedProcess) {
     }
 }
 
+/// Waits until the mount process writes a stderr line containing `needle`, failing after thirty
+/// seconds. A thread takes over stderr and reads it to its end, so the mount never blocks on a
+/// full pipe; lines written after the wait returns are read and discarded.
+fn wait_for_stderr_line(mounted: &mut MountedProcess, needle: &str) {
+    let stderr = mounted.child.stderr.take().expect("mount stderr is piped");
+    let (sender, receiver) = std::sync::mpsc::channel::<String>();
+    thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(line) if line.contains(needle) => return,
+            Ok(_) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                panic!("mount did not report {needle:?} within thirty seconds")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("mount stopped before reporting {needle:?}")
+            }
+        }
+    }
+}
+
 /// The contents of every draft record recovery storage holds (ORNA-VFS-009); empty when none.
 fn retained_record_texts(repository: &orna_repository_v1::Repository) -> Vec<String> {
     let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
@@ -2755,8 +2781,9 @@ async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() 
     thread::sleep(Duration::from_millis(300));
     path_truncate(&mount.data_path, 13);
     send_sigterm(&mount.mounted);
-    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024).
-    thread::sleep(Duration::from_millis(500));
+    // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024). The mount reports
+    // each failed retention before it waits to retry, so the check runs once that report arrives.
+    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
     assert!(
         mount.mounted.child.try_wait().unwrap().is_none(),
         "mount stopped while its drafts could not be kept"
