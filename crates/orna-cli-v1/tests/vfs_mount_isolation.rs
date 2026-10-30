@@ -38,7 +38,8 @@ mod media_commit;
 mod editor_mount;
 use editor_mount::{
     EditorMount, assert_errno, await_draft_guard, fresh_view, open_rw, require_fuse_or_skip,
-    start_editor_mount, start_mount_process, wait_for_mount,
+    retained_drafts, start_editor_mount, start_editor_mount_with_source, start_mount_process,
+    wait_for_mount,
 };
 
 fn music_row(title: &str) -> String {
@@ -542,6 +543,47 @@ async fn writer_opened_before_owner_write_is_refused_with_eagain() {
     drop(writer);
 }
 
+/// ORNA-VFS-011 and ORNA-VFS-009 (41-vfs.md:38-40, 67-68): a writer handle pinned to
+/// `data.orna` before the owner's temp renames over the row. The handle's candidate is refused
+/// stale with EAGAIN and retained, and the owner's replacement stays. Both arms of the rename
+/// are covered by this and the large-Str tests; this one takes the pinned arm.
+#[tokio::test]
+async fn writer_handle_pinned_before_owner_rename_over_is_refused_and_candidate_retained() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+    let mut writer = open_rw(&fixture);
+    writer.set_len(0).unwrap();
+    writer
+        .write_all(music_row("Stale writer").as_bytes())
+        .unwrap();
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.replace-temp",
+        &music_row("Owner replacement"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("the owner's temp admits its replacement");
+
+    assert_errno(
+        writer.sync_all(),
+        &[libc::EAGAIN],
+        "a writer pinned before the owner's rename-over must be refused",
+    );
+    let view = fresh_view(&fixture);
+    assert!(
+        view.contains("Owner replacement") && !view.contains("Stale writer"),
+        "the refused writer leaves the owner's row in place, got {view}"
+    );
+    assert!(
+        retained_drafts(&fixture.repository)
+            .iter()
+            .any(|draft| draft.contains("Stale writer")),
+        "the refused candidate is retained (ORNA-VFS-009)"
+    );
+    drop(writer);
+}
+
 /// ORNA-VFS-019 and 41-vfs.md:38-39: a writer's stat reports its own draft size
 /// while the draft is open, before any owner write.
 #[tokio::test]
@@ -689,6 +731,91 @@ async fn reader_opened_on_live_row_survives_temp_rename_over_row() {
         "a handle pinned to the live row reads its pinned bytes after the rename"
     );
     drop(reader);
+}
+
+/// Source of the one-table fixture the large-Str tests mount (ornadb-5il1.470.3).
+const LARGE_STR_SOURCE: &str = "pub table Music(id: Str) { title: Str, artist: Str, }\n";
+
+/// A Str over the 64 KiB inline bound, so its row projects `title.txt` beside `data.orna`
+/// (profiles/vfs-1.md:76-80).
+fn large_title(fill: char) -> String {
+    fill.to_string().repeat(70_000)
+}
+
+/// Mounts the large-Str fixture. `./title.txt` is the projected row's readiness marker.
+async fn start_large_str_mount() -> EditorMount {
+    start_editor_mount_with_source(
+        LARGE_STR_SOURCE,
+        &music_row(&large_title('a')),
+        "./title.txt",
+        false,
+    )
+    .await
+}
+
+/// A new open shows the inline row, and the `.txt` sibling is gone from the row directory.
+fn assert_shrunk_to_inline(fixture: &EditorMount) {
+    let accepted = fresh_view(fixture);
+    assert!(
+        accepted.contains("\"small\"") && !accepted.contains("./title.txt"),
+        "a new open shows the inline row: {accepted}"
+    );
+    assert!(
+        !fixture.row_directory.join("title.txt").exists(),
+        "the stale title.txt sibling leaves the row directory"
+    );
+}
+
+/// ornadb-5il1.470.3 and 41-vfs.md:38-40, profiles/vfs-1.md:76-80: a handle pinned to
+/// `data.orna` keeps the bytes it captured when a temp renames over a row whose large Str
+/// shrinks to an inline literal. The stale `.txt` sibling leaves the directory.
+#[tokio::test]
+async fn pinned_reader_survives_temp_rename_shrinking_large_str_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_large_str_mount().await;
+    let original = fresh_view(&fixture);
+    assert!(
+        original.contains("./title.txt"),
+        "the large Str is projected as title.txt: {original}"
+    );
+    let mut reader = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut reader), original);
+
+    let temp = write_temporary_sibling(&fixture, ".data.orna.replace-temp", &music_row("small"));
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the inline replacement");
+    assert_shrunk_to_inline(&fixture);
+    assert_eq!(
+        read_from_start(&mut reader),
+        original,
+        "a handle pinned to the row reads its pinned bytes after the rename"
+    );
+    assert_eq!(
+        reader.metadata().unwrap().len(),
+        original.len() as u64,
+        "fstat on that handle reports the pinned size after the rename"
+    );
+    drop(reader);
+}
+
+/// ornadb-5il1.470.3: a temp renames over a large-Str row with no handle open on it, and the
+/// Str shrinks to an inline literal. The stale `.txt` sibling leaves the directory
+/// (profiles/vfs-1.md:76-80).
+#[tokio::test]
+async fn temp_rename_shrinking_large_str_row_removes_text_sibling() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_large_str_mount().await;
+    assert!(
+        fresh_view(&fixture).contains("./title.txt"),
+        "the large Str is projected as title.txt"
+    );
+
+    let temp = write_temporary_sibling(&fixture, ".data.orna.replace-temp", &music_row("small"));
+    std::fs::rename(&temp, &fixture.data_path).expect("rename admits the inline replacement");
+    assert_shrunk_to_inline(&fixture);
 }
 
 /// ornadb-5il1.470.4: a path `stat` taken right after each owner-routed write reports the

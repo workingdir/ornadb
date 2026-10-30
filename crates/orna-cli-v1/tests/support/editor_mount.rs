@@ -272,6 +272,16 @@ fn root_answers_before(path: &Path, deadline: Instant) -> bool {
 }
 
 pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedProcess {
+    spawn_editor_mount_showing(repository_path, mountpoint, "Original")
+}
+
+/// Mounts `repository_path` and waits until `data.orna` contains `ready_marker`, the row's
+/// accepted content, so the caller never races the first projection.
+pub fn spawn_editor_mount_showing(
+    repository_path: &Path,
+    mountpoint: &Path,
+    ready_marker: &str,
+) -> MountedProcess {
     let mut mounted = spawn_mount_process(repository_path, mountpoint);
     let data_path = mountpoint.join("Music/london/data.orna");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -285,7 +295,7 @@ pub fn spawn_editor_mount(repository_path: &Path, mountpoint: &Path) -> MountedP
     assert!(
         std::fs::read_to_string(&data_path)
             .unwrap()
-            .contains("Original")
+            .contains(ready_marker)
     );
     mounted
 }
@@ -528,14 +538,19 @@ pub async fn start_editor_mount(foreign_owner: bool) -> EditorMount {
     start_editor_mount_with_source(
         "pub table Music(id: Str) { title: Str, artist: Str, }\n",
         "{ title: \"Original\", artist: \"Kieran\", }\n",
+        "Original",
         foreign_owner,
     )
     .await
 }
 
+/// Mounts a repository whose `Music/london` row is `initial`, and waits until `data.orna`
+/// contains `ready_marker`. With `foreign_owner`, a live foreign writer owns the worktree for
+/// the fixture's lifetime, so the mount runs as a secondary participant.
 pub async fn start_editor_mount_with_source(
     source: &str,
     initial: &str,
+    ready_marker: &str,
     foreign_owner: bool,
 ) -> EditorMount {
     let (repository_directory, repository, relation_id) =
@@ -548,7 +563,8 @@ pub async fn start_editor_mount_with_source(
 
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
-    let mounted = spawn_editor_mount(repository_directory.path(), &mountpoint);
+    let mounted =
+        spawn_editor_mount_showing(repository_directory.path(), &mountpoint, ready_marker);
     let row_directory = mountpoint.join("Music/london");
     let data_path = row_directory.join("data.orna");
     EditorMount {
