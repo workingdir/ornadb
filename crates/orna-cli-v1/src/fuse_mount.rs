@@ -4435,15 +4435,17 @@ impl WorkspaceFilesystem {
                 .runtime
                 .block_on(next_target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
-        // The accepted image seeds the next candidate in bounded chunks, never as one copy.
+        // The next candidate is seeded one bounded chunk at a time; the accepted bytes are never
+        // copied whole.
+        let accepted_length = bytes.len();
         let mut seeded = 0_u64;
-        while seeded < bytes.len() {
+        while seeded < accepted_length {
             let chunk = bytes.read_range(seeded, CANDIDATE_CHUNK_BYTES).map_err(|error| {
                 DocumentCommitError::Failed(format!("next Blob candidate could not be read: {error}"))
             })?;
             if chunk.is_empty() {
                 return Err(DocumentCommitError::Failed(
-                    "accepted Blob ended before its length".into(),
+                    "next Blob candidate ended before its recorded length".into(),
                 ));
             }
             save.writer
@@ -6311,17 +6313,10 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.data(&bytes[start..end]);
                     return;
                 }
-                NodeKind::BlobBytes(bytes) => {
-                    if offset >= bytes.len() {
-                        reply.data(&[]);
-                        return;
-                    }
-                    match bytes.read_range(offset, size as usize) {
+                NodeKind::BlobBytes(candidate) => {
+                    match candidate.read_range(offset, size as usize) {
                         Ok(data) => reply.data(&data),
-                        Err(error) => {
-                            eprintln!("mounted replacement could not be read: {error}");
-                            reply.error(Errno::EIO);
-                        }
+                        Err(_) => reply.error(Errno::EIO),
                     }
                     return;
                 }
@@ -6930,7 +6925,9 @@ impl FsBuilder {
                 )
             }
             NodeKind::Bytes(bytes) => (FileType::RegularFile, bytes.len() as u64, 0o444, 1),
-            NodeKind::BlobBytes(bytes) => (FileType::RegularFile, bytes.len(), 0o444, 1),
+            NodeKind::BlobBytes(candidate) => {
+                (FileType::RegularFile, candidate.len(), 0o444, 1)
+            }
             NodeKind::Text { bytes, .. } => {
                 (FileType::RegularFile, bytes.len() as u64, 0o444, 1)
             }
