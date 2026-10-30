@@ -1882,6 +1882,13 @@ impl<S> EditDraft<S> {
         self.state.lock().await.candidate_len()
     }
 
+    /// Whether the draft holds submitted candidate bytes. A draft that never
+    /// submitted bytes has nothing for a commit to accept or refuse, the same
+    /// condition `commit_durable_save` tests before it judges staleness.
+    pub async fn has_candidate(&self) -> bool {
+        self.state.lock().await.candidate.is_some()
+    }
+
     /// Reads `[offset, offset + length)` of the candidate, clamped to its
     /// length. Live-mount paths pass a chunk-sized `length`, at most
     /// [`CANDIDATE_CHUNK_BYTES`], so no whole copy is made.

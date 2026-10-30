@@ -56,7 +56,7 @@ impl Drop for MountedProcess {
     }
 }
 
-/// A dirty handle on a mounted document, held by a helper process rather than
+/// A writable handle on a mounted document, held by a helper process rather than
 /// the test process. A fork from the test process while a handle is open copies
 /// its descriptor, and the copy's close during exec issues a FUSE FLUSH that
 /// EDIT-1 step 5 may accept. Keeping the handle out of the test process means
@@ -67,11 +67,13 @@ struct DirtyDocument {
 }
 
 const DIRTY_DOCUMENT_HELPER: &str = r#"import os, sys
-fd = os.open(sys.argv[1], os.O_WRONLY | os.O_TRUNC)
-data = sys.argv[2].encode()
+body = sys.argv[2:3]
+fd = os.open(sys.argv[1], os.O_WRONLY | (os.O_TRUNC if body else 0))
 try:
-    while data:
-        data = data[os.write(fd, data):]
+    for text in body:
+        data = text.encode()
+        while data:
+            data = data[os.write(fd, data):]
     print("ready", flush=True)
 except OSError as error:
     print("err%d" % error.errno, flush=True)
@@ -88,11 +90,22 @@ impl DirtyDocument {
     /// Opens `path` for writing with truncation in a helper process and writes
     /// `body` through that handle.
     fn open_and_write(path: &Path, body: &str) -> Self {
-        let mut child = Command::new("python3")
-            .arg("-c")
-            .arg(DIRTY_DOCUMENT_HELPER)
-            .arg(path)
-            .arg(body)
+        Self::spawn(path, Some(body))
+    }
+
+    /// Opens `path` for writing without truncation and writes nothing, so the
+    /// handle is clean: its fsync has no candidate to accept.
+    fn open_unwritten(path: &Path) -> Self {
+        Self::spawn(path, None)
+    }
+
+    fn spawn(path: &Path, body: Option<&str>) -> Self {
+        let mut command = Command::new("python3");
+        command.arg("-c").arg(DIRTY_DOCUMENT_HELPER).arg(path);
+        if let Some(body) = body {
+            command.arg(body);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -111,15 +124,21 @@ impl DirtyDocument {
         Self { child, replies }
     }
 
-    /// `fsync`s the handle through the helper, as `File::sync_all` would.
-    fn sync_all(&mut self) {
+    /// `fsync`s the handle through the helper, as `File::sync_all` would, and
+    /// returns the helper's reply: `ok`, or `err<errno>` when the fsync fails.
+    fn sync_reply(&mut self) -> String {
         let stdin = self.child.stdin.as_mut().expect("helper stdin");
         writeln!(stdin, "fsync").expect("send fsync to dirty document helper");
         let mut reply = String::new();
         self.replies
             .read_line(&mut reply)
             .expect("dirty document fsync reply");
-        assert_eq!(reply.trim_end(), "ok", "dirty document fsync failed");
+        reply.trim_end().to_owned()
+    }
+
+    /// `fsync`s the handle and requires it to succeed.
+    fn sync_all(&mut self) {
+        assert_eq!(self.sync_reply(), "ok", "dirty document fsync failed");
     }
 }
 
@@ -1038,6 +1057,19 @@ fn assert_saved(output: &std::process::Output, label: &str) {
     );
 }
 
+/// The draft files recovery storage keeps for `row` (ORNA-VFS-009); empty when none was retained.
+fn retained_drafts(row: &MountedMusicRow) -> Vec<std::path::PathBuf> {
+    let directory = row.repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    match std::fs::read_dir(&directory) {
+        Ok(entries) => entries
+            .map(|entry| entry.expect("list retained draft").path())
+            .filter(|path| path.is_file())
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("list {}: {error}", directory.display()),
+    }
+}
+
 fn assert_title(row: &[u8], expected: &str) {
     assert_eq!(
         orna_value_v1::Value::decode(row)
@@ -1153,6 +1185,230 @@ async fn cwd_mount_close_flush_after_owner_routed_edit_is_stale() {
     drop(resolving);
     row.unmount();
     assert_title(&row.stored_row().await, "after refresh");
+}
+
+#[tokio::test]
+/// ORNA-VFS-011: a pinned writer compares against the row it captured at open. A grouped
+/// `edit --row` the mount accepted while that writer is open advances the shared save context,
+/// not the writer's captured baseline, so the writer's close flush is refused as stale and
+/// retained, and the owner's grouped row is kept.
+async fn cwd_mount_close_flush_after_grouped_edit_is_stale() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let document = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"stale close\", }\n",
+    );
+    assert_saved(
+        &row.save("grouped", "{ title: \"grouped\", }"),
+        "grouped save while the document is open",
+    );
+    drop(document);
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount after the stale close");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted the stale candidate over the grouped row: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna")
+            && diagnostic.contains("sys.vfs.stale_edit"),
+        "unmount names the retained stale draft and its cause: {diagnostic}"
+    );
+    let shown = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        shown.contains("grouped") && !shown.contains("stale close"),
+        "the mount shows the owner's grouped row, not the stale candidate: {shown}"
+    );
+
+    let mut resolving = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"after refresh\", }\n",
+    );
+    resolving.sync_all();
+    drop(resolving);
+    row.unmount();
+    assert_title(&row.stored_row().await, "after refresh");
+}
+
+#[tokio::test]
+/// ORNA-VFS-011: each open writer compares against the row it captured at open. The second
+/// writer's close is accepted and advances the row; the first writer's close then compares
+/// against the row the second writer committed, so it is refused as stale and retained, and
+/// the second writer's row is kept (41-vfs.md:80).
+async fn cwd_mount_first_writer_close_after_second_writer_commit_is_stale() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let first = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"first writer\", }\n",
+    );
+    let second = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"second writer\", }\n",
+    );
+    drop(second);
+    drop(first);
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount after the stale close");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted the first writer's stale candidate over the second writer's row: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna")
+            && diagnostic.contains("sys.vfs.stale_edit"),
+        "unmount names the retained stale draft and its cause: {diagnostic}"
+    );
+    let shown = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        shown.contains("second writer") && !shown.contains("first writer"),
+        "the mount shows the second writer's row, not the stale candidate: {shown}"
+    );
+
+    let mut resolving = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"after refresh\", }\n",
+    );
+    resolving.sync_all();
+    drop(resolving);
+    row.unmount();
+    assert_title(&row.stored_row().await, "after refresh");
+}
+
+#[tokio::test]
+/// ORNA-VFS-011, 41-vfs.md:38-40: a grouped `edit --row` that supersedes the document a writer
+/// holds retires that generation. When a later grouped edit returns the row to the bytes the
+/// writer captured, the writer's compare would pass, but the superseded generation still refuses
+/// its fsync and close flush as stale and retained, so the owner's row is kept.
+async fn cwd_mount_close_flush_on_superseded_generation_is_stale_when_row_returns_to_capture() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let mut document = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"stale close\", }\n",
+    );
+    assert_saved(
+        &row.save("grouped", "{ title: \"grouped\", }"),
+        "grouped save while the document is open",
+    );
+    assert_saved(
+        &row.save("restore", "{ title: \"before\", }"),
+        "grouped save returning the row to the captured bytes",
+    );
+    assert_eq!(
+        document.sync_reply(),
+        "err11",
+        "the dirty superseded generation's fsync is refused with EAGAIN",
+    );
+    assert!(
+        !retained_drafts(&row).is_empty(),
+        "the refused candidate is retained in recovery storage (ORNA-VFS-009)",
+    );
+    drop(document);
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .args([
+            "--db",
+            row.repository_directory.path().to_str().unwrap(),
+            "unmount",
+        ])
+        .arg(&row.mounted.mountpoint)
+        .output()
+        .expect("run unmount after the stale close");
+    let diagnostic = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success(),
+        "unmount accepted the superseded generation's stale candidate: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("unresolved workspace drafts remain")
+            && diagnostic.contains("Music/london/data.orna")
+            && diagnostic.contains("sys.vfs.stale_edit"),
+        "unmount names the retained stale draft and its cause: {diagnostic}"
+    );
+    let shown = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
+    assert!(
+        shown.contains("before") && !shown.contains("stale close"),
+        "the mount shows the owner's grouped row, not the stale candidate: {shown}"
+    );
+
+    let mut resolving = DirtyDocument::open_and_write(
+        &row.row_path.join("data.orna"),
+        "{ title: \"after refresh\", }\n",
+    );
+    resolving.sync_all();
+    drop(resolving);
+    row.unmount();
+    assert_title(&row.stored_row().await, "after refresh");
+}
+
+#[tokio::test]
+/// ORNA-VFS-011 and EDIT-1 step 2 (41-vfs.md:38-40): a clean handle whose generation a grouped
+/// edit superseded submitted no bytes, so it has no candidate to refuse. Its fsync is
+/// acknowledged, no draft is retained, and unmount succeeds with the grouped row stored.
+async fn cwd_mount_clean_fsync_on_superseded_generation_is_acknowledged() {
+    if !dirty_document_helper_available() {
+        return;
+    }
+    let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let mut clean = DirtyDocument::open_unwritten(&row.row_path.join("data.orna"));
+    assert_saved(
+        &row.save("grouped", "{ title: \"grouped\", }"),
+        "grouped save while the clean document is open",
+    );
+    clean.sync_all();
+    drop(clean);
+    assert!(
+        retained_drafts(&row).is_empty(),
+        "a clean superseded handle retains no draft: {:?}",
+        retained_drafts(&row),
+    );
+    row.unmount();
+    assert_title(&row.stored_row().await, "grouped");
 }
 
 #[tokio::test]
