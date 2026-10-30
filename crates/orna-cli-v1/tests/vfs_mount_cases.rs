@@ -44,6 +44,18 @@ fn read_view(path: &Path) -> String {
     std::fs::read_to_string(path).expect("read accepted state through a new open")
 }
 
+/// The candidate of each retained record. A record is a header, a blank line, and the candidate
+/// exactly as it was refused (`orna-vfs-retained-draft 1` in `fuse_mount.rs`).
+fn retained_candidates(records: Vec<String>) -> Vec<String> {
+    records
+        .into_iter()
+        .map(|record| {
+            let (_, candidate) = record.split_once("\n\n").expect("a record has a header");
+            candidate.to_owned()
+        })
+        .collect()
+}
+
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(directory)
         .expect("list the collection directory")
@@ -497,7 +509,9 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
 /// another module calls is refused when only the callee is saved: both modules keep their
 /// committed bytes and the refused candidate is retained as a draft. The same rename saved
 /// with its importer validates as a group and commits both files. A group whose candidates
-/// both fail validation is refused as a unit, and neither module changes.
+/// both fail validation alone is refused, and neither module changes. A group whose candidates
+/// each pass alone but fail together is refused as a unit: the callee drops a function that the
+/// importer's candidate calls, and neither module changes.
 #[tokio::test]
 async fn multi_file_source_edit_requires_grouped_validation() {
     if !require_fuse_or_skip() {
@@ -507,6 +521,11 @@ async fn multi_file_source_edit_requires_grouped_validation() {
     const CALLER: &str = "use notes;\npub fn extra(): Int = notes.answer();\n";
     const RENAMED_CALLEE: &str = "pub fn renamed(): Int = 42;\n";
     const RENAMED_CALLER: &str = "use notes;\npub fn extra(): Int = notes.renamed();\n";
+    const BROKEN_CALLEE: &str = "pub fn broken_callee( {\n";
+    const DANGLING_CALLER: &str = "use notes;\npub fn extra(): Int = notes.missing();\n";
+    const SPARE_CALLEE: &str = "pub fn renamed(): Int = 42;\npub fn spare(): Int = 1;\n";
+    const SWAPPED_CALLEE: &str = "pub fn renamed(): Int = 42;\npub fn kept(): Int = 2;\n";
+    const SPARE_CALLER: &str = "use notes;\npub fn extra(): Int = notes.spare();\n";
     let (repository_directory, repository, _relation_id, _context) =
         format3::format3_repository_with_context_and_modules(
             "use notes;\nuse extra;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
@@ -531,8 +550,9 @@ async fn multi_file_source_edit_requires_grouped_validation() {
     );
     assert_eq!(read_view(&notes), CALLEE, "the refused callee keeps its committed bytes");
     assert_eq!(read_view(&extra), CALLER, "the importer keeps its committed bytes");
+    let candidates = retained_candidates(retained_drafts(&repository));
     assert!(
-        retained_drafts(&repository).iter().any(|draft| draft.contains("renamed")),
+        candidates.iter().any(|draft| draft.as_str() == RENAMED_CALLEE),
         "the refused callee candidate is retained as a draft"
     );
     drop(notes_handle);
@@ -548,30 +568,60 @@ async fn multi_file_source_edit_requires_grouped_validation() {
     drop(extra_handle);
     drop(notes_handle);
 
-    // Both candidates fail validation: the group is refused as a unit.
+    // Both candidates fail validation on their own: each is refused, so the group is refused.
     let mut notes_handle = open_source_for_write(&notes);
     let mut extra_handle = open_source_for_write(&extra);
-    notes_handle.write_all(b"pub fn broken_callee( {\n").expect("the malformed callee is accepted");
-    extra_handle
-        .write_all(b"use notes;\npub fn extra(): Int = notes.missing();\n")
-        .expect("the dangling importer is accepted");
+    notes_handle.write_all(BROKEN_CALLEE.as_bytes()).expect("the malformed callee is accepted");
+    extra_handle.write_all(DANGLING_CALLER.as_bytes()).expect("the dangling importer is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EINVAL],
-        "a group in which both candidates fail validation is refused as a unit with EINVAL",
+        "a group in which both candidates fail validation on their own is refused with EINVAL",
     );
     assert_eq!(read_view(&notes), RENAMED_CALLEE, "the refused group leaves the callee");
     assert_eq!(read_view(&extra), RENAMED_CALLER, "the refused group leaves the importer");
     drop(extra_handle);
     drop(notes_handle);
-    let drafts = retained_drafts(&repository);
+    let drafts = retained_candidates(retained_drafts(&repository));
     assert!(
-        drafts.iter().any(|draft| draft.contains("broken_callee")),
+        drafts.iter().any(|draft| draft.as_str() == BROKEN_CALLEE),
         "the malformed callee candidate is retained as a draft"
     );
     assert!(
-        drafts.iter().any(|draft| draft.contains("notes.missing")),
+        drafts.iter().any(|draft| draft.as_str() == DANGLING_CALLER),
         "the dangling importer candidate is retained as a draft"
+    );
+
+    // The callee gains `spare`, which no committed importer calls, so it is valid alone.
+    let mut notes_handle = open_source_for_write(&notes);
+    notes_handle.write_all(SPARE_CALLEE.as_bytes()).expect("the callee candidate is accepted");
+    notes_handle.sync_all().expect("the callee with an uncalled spare is admitted alone");
+    assert_eq!(read_view(&notes), SPARE_CALLEE, "the spare callee is committed");
+    drop(notes_handle);
+
+    // Each candidate passes alone against the other's committed bytes. The callee drops `spare`
+    // and the importer calls it, so together the importer calls a function that no longer exists.
+    let mut notes_handle = open_source_for_write(&notes);
+    let mut extra_handle = open_source_for_write(&extra);
+    notes_handle.write_all(SWAPPED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
+    extra_handle.write_all(SPARE_CALLER.as_bytes()).expect("the importer candidate is accepted");
+    assert_errno(
+        notes_handle.sync_all(),
+        &[EINVAL],
+        "a group whose candidates each pass alone but fail together is refused with EINVAL",
+    );
+    assert_eq!(read_view(&notes), SPARE_CALLEE, "the group-only refusal leaves the callee");
+    assert_eq!(read_view(&extra), RENAMED_CALLER, "the group-only refusal leaves the importer");
+    drop(extra_handle);
+    drop(notes_handle);
+    let drafts = retained_candidates(retained_drafts(&repository));
+    assert!(
+        drafts.iter().any(|draft| draft.as_str() == SWAPPED_CALLEE),
+        "the callee candidate that fails only together is retained as a draft"
+    );
+    assert!(
+        drafts.iter().any(|draft| draft.as_str() == SPARE_CALLER),
+        "the importer candidate that fails only together is retained as a draft"
     );
 }
 
