@@ -4523,6 +4523,14 @@ impl Filesystem for WorkspaceFilesystem {
                 Ok(()) => reply.ok(),
                 Err(EditError::Stale(message)) => {
                     eprintln!("explicit edit refused: {message}");
+                    // ESTALE is the stale signal on this xattr path. profiles/vfs-1.md:138 names
+                    // EAGAIN, but the kernel rewrites an EAGAIN setxattr reply to EOPNOTSUPP
+                    // (fs/xattr.c:245-246 on v6.19; tests/vfs_setxattr_errno_kernel_limit.rs), so
+                    // `orna edit` would report E2010 instead of E2000 (ornadb-eufo.1.1; spec
+                    // amendment ornadb-eufo.1.2). The kernel retries an ESTALE setxattr once with
+                    // LOOKUP_REVAL: the same proof observes 2 daemon calls on 6.19.10. Each call
+                    // reaches this arm before any row write (the digest check returns before
+                    // `prepared.commit`), so the retry refuses again and writes nothing.
                     reply.error(Errno::ESTALE);
                 }
                 Err(EditError::Failed(message)) => {
