@@ -38,7 +38,7 @@ use editor_mount::{
     assert_errno, require_fuse_or_skip, run_orna_unmount, spawn_mount_process, start_mount_process,
     wait_for_mount, write_and_sync,
 };
-use product::{commit_source, head, initialized_database, publish, repl_writes};
+use product::{commit_source, git, head, initialized_database, orna, publish, repl_writes};
 use tempfile::TempDir;
 
 const EAGAIN: i32 = 11;
@@ -52,8 +52,18 @@ const ORIGINAL: &str = "{\n    artist: \"Kieran\",\n    title: \"Original\",\n}\
 const STALE: &str = "{\n    artist: \"Kieran\",\n    title: \"Stale\",\n}\n";
 const NOTED: &str =
     "{\n    artist: \"Kieran\",\n    note: \"fresh\",\n    title: \"Original\",\n}\n";
+/// Orna-1.1.0.md:4064: an optional field a v1 row gains on admission is null.
 const ADMITTED_V2: &str =
     "{\n    artist: \"Kieran\",\n    note: null,\n    title: \"Original\",\n}\n";
+
+const ADMITTED_GENRE_FIRST: &str =
+    "{\n    artist: \"Kieran\",\n    genre: \"first\",\n    title: \"Original\",\n}\n";
+const V2_GENRE_FIRST: &str =
+    "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"first\",\n}\n";
+const V3_GENRE_SECOND: &str =
+    "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"second\",\n}\n";
+const V2_REQUIRED_NOTE: &str =
+    "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    note: Str,\n}\n";
 
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = fs::read_dir(directory)
@@ -80,9 +90,10 @@ fn same_row(actual: &str, expected: &str) -> bool {
     actual == expected
 }
 
-/// Initialises a v1 database with one committed `london` row and returns its root.
-fn seed_library(directory: &TempDir) -> PathBuf {
-    let root = initialized_database(directory, V1);
+/// Initialises a database declaring `source` with one committed `london` row and returns its
+/// root.
+fn seed_library_with(directory: &TempDir, source: &str) -> PathBuf {
+    let root = initialized_database(directory, source);
     commit_source(&root, "Declare Music");
     repl_writes(
         &root,
@@ -90,6 +101,11 @@ fn seed_library(directory: &TempDir) -> PathBuf {
     );
     publish(&root, "Add london");
     root
+}
+
+/// Initialises a v1 database with one committed `london` row and returns its root.
+fn seed_library(directory: &TempDir) -> PathBuf {
+    seed_library_with(directory, V1)
 }
 
 /// ORNA-VFS-019 live half: an owner-committed schema change under a live
@@ -206,10 +222,174 @@ fn vfs_019_remount_after_schema_change_shows_new_shape() {
     );
     write_and_sync(&london, NOTED).expect("the remounted v2 generation admits the optional field");
     assert!(
-        fs::read_to_string(&london)
-            .expect("read the admitted row")
-            .contains("note"),
-        "the admitted v2 row carries the new field"
+        same_row(
+            &fs::read_to_string(&london).expect("read the admitted row"),
+            NOTED
+        ),
+        "the admitted v2 row carries the written field"
+    );
+    run_orna_unmount(&root, &mountpoint);
+    let status = remounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the remounted process exits after unmount");
+    assert!(status.success(), "remounted process exited with {status}");
+}
+
+/// Proof for bead ornadb-eufo.2.1 (F4): a row written through the admitted v2 generation is still
+/// the written row after a further remount, where it validates the mounted schema directly.
+#[test]
+fn vfs_019_second_remount_keeps_admitted_v2_write() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let london = mountpoint.join("Music/london/data.orna");
+
+    let mut first = spawn_mount_process(&root, &mountpoint);
+    first.await_path(&london);
+    run_orna_unmount(&root, &mountpoint);
+    let status = first
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the first mount process exits after unmount");
+    assert!(status.success(), "first mount exited with {status}");
+    drop(first);
+
+    fs::write(root.join("main.orna"), V2).expect("write the v2 declaration");
+    commit_source(&root, "Add optional note to Music");
+
+    let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
+    remounted.await_path(&london);
+    write_and_sync(&london, NOTED).expect("the remounted v2 generation admits the optional field");
+    run_orna_unmount(&root, &mountpoint);
+    let status = remounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the remounted process exits after unmount");
+    assert!(status.success(), "remounted process exited with {status}");
+    drop(remounted);
+
+    let mut again = wait_for_mount(start_mount_process(&root, &mountpoint));
+    again.await_path(&london);
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the second remounted row"),
+            NOTED
+        ),
+        "the second remount keeps the written v2 row; mount stderr: {}",
+        again.stderr_text()
+    );
+    run_orna_unmount(&root, &mountpoint);
+    let status = again
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the second remounted process exits after unmount");
+    assert!(status.success(), "second remounted process exited with {status}");
+}
+
+/// Proof for bead ornadb-eufo.2.1 (F1): a field a later commit introduces is filled on remount with
+/// the default frozen by the commit that introduced it, not the default a later commit declares
+/// (ORNA-FIELD-003, ORNA-EVOL-009).
+#[test]
+fn vfs_019_remount_fills_introduced_field_with_default_frozen_at_introduction() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    let root = seed_library(&directory);
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let london = mountpoint.join("Music/london/data.orna");
+
+    let mut first = spawn_mount_process(&root, &mountpoint);
+    first.await_path(&london);
+    run_orna_unmount(&root, &mountpoint);
+    let status = first
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the first mount process exits after unmount");
+    assert!(status.success(), "first mount exited with {status}");
+    drop(first);
+
+    fs::write(root.join("main.orna"), V2_GENRE_FIRST).expect("write the v2 declaration");
+    commit_source(&root, "Add genre to Music");
+    fs::write(root.join("main.orna"), V3_GENRE_SECOND).expect("write the v3 declaration");
+    commit_source(&root, "Change the genre default");
+
+    let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
+    remounted.await_path(&london);
+    assert!(
+        same_row(
+            &fs::read_to_string(&london).expect("read the remounted row"),
+            ADMITTED_GENRE_FIRST
+        ),
+        "the introduced field carries the default frozen at its introduction; mount stderr: {}",
+        remounted.stderr_text()
+    );
+    run_orna_unmount(&root, &mountpoint);
+    let status = remounted
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the remounted process exits after unmount");
+    assert!(status.success(), "remounted process exited with {status}");
+}
+
+/// Proof for bead ornadb-eufo.2.1 (ORNA-EVOL-002): the owner cannot publish a schema change that
+/// a committed row cannot be admitted to. Here the row's optional field is null and the owner
+/// makes that field required with no default. The commit is refused before anything is staged,
+/// HEAD does not move, and the restarted mount keeps serving the row as it was served before.
+/// The mount-side refusal of an unadmittable row (F3) is defensive: an owner commit is checked
+/// against every committed row first, so an owner commit does not reach it.
+#[test]
+fn vfs_019_commit_the_row_cannot_admit_is_refused_and_mount_keeps_row() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("create the test directory");
+    // The row is written under V1 and V2 is committed afterwards, so V2 admits it with `note` null.
+    // The REPL rejects an insert under V2 that omits `note`, so seeding under V2 is not possible.
+    let root = seed_library(&directory);
+    fs::write(root.join("main.orna"), V2).expect("write the v2 declaration");
+    commit_source(&root, "Add optional note to Music");
+
+    let mount_parent = TempDir::new().expect("create the mount parent");
+    let mountpoint = mount_parent.path().join("library");
+    let london = mountpoint.join("Music/london/data.orna");
+
+    let mut first = spawn_mount_process(&root, &mountpoint);
+    first.await_path(&london);
+    let served = fs::read_to_string(&london).expect("read the row before the refused commit");
+    run_orna_unmount(&root, &mountpoint);
+    let status = first
+        .wait_for_exit(Duration::from_secs(10))
+        .expect("the first mount process exits after unmount");
+    assert!(status.success(), "first mount exited with {status}");
+    drop(first);
+
+    let head_before = head(&root);
+    fs::write(root.join("main.orna"), V2_REQUIRED_NOTE).expect("write the v2 declaration");
+    git(&root, &["add", "main.orna", ".orna/database.orna"]);
+    let refused = orna(&root, &["commit", "-m", "Add required note to Music"]);
+    let refusal = format!(
+        "{}{}",
+        String::from_utf8_lossy(&refused.stdout),
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    assert!(
+        !refused.status.success() && refusal.contains("E2101"),
+        "the commit the committed row cannot admit is refused: {refusal}"
+    );
+    assert_eq!(head(&root), head_before, "a refused commit does not move HEAD");
+    git(&root, &["checkout", "HEAD", "--", "main.orna"]);
+
+    let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
+    remounted.await_path(&london);
+    let after = fs::read_to_string(&london)
+        .expect("the committed row is still served after the refused commit");
+    assert!(
+        same_row(&after, &served),
+        "the restarted mount serves the row as before the refused commit; mount stderr: {}",
+        remounted.stderr_text()
     );
     run_orna_unmount(&root, &mountpoint);
     let status = remounted
