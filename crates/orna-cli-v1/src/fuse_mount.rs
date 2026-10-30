@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use fuser::{
     Config, Errno, FileAttr, FileType, Filesystem, Generation, INodeNo, MountOption, RenameFlags,
@@ -19,7 +19,7 @@ use orna_conformance_v1::transactional_loaded_project_candidate_validator;
 use orna_evaluator_v1::Limits as EvaluatorLimits;
 use orna_project_v1::{
     KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader, ResolvedTableSchema,
-    admit_source_row_with_owner_fields,
+    StoredSchema, admit_source_row_with_owner_fields,
 };
 use orna_repository_v1::{
     AdmittedBlobReference, CommittedTableBinding, ContentIdentity, GitCommitRef, GitHashAlgorithm,
@@ -68,6 +68,12 @@ const MAX_UNBOUND_SCRATCH: usize = 16;
 /// table whose CWD row predates the mounted schema (ORNA-EVOL-002). A longer history is
 /// refused rather than scanned partially.
 const HISTORY_LIMIT: usize = 1024;
+
+/// How long a failed committed-schema scan is kept before the table is scanned again.
+const HISTORICAL_SCAN_RETRY: Duration = Duration::from_secs(5);
+
+/// Refusal text for a CWD row that needs a table's committed schema history while it is scanned.
+const SCAN_PENDING: &str = "the committed schema history of this table is still being scanned";
 
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
@@ -1068,9 +1074,132 @@ struct MountWriter {
     retained_drafts: VfsRetainedDraftStore,
     owner_id: [u8; 16],
     row_baselines: Option<MountRowBaselines>,
-    /// Schema generations of each table on `HEAD`'s lineage, filled on the first CWD row the
-    /// mounted schema cannot validate (ORNA-EVOL-002).
-    historical_generations: Mutex<BTreeMap<[u8; 16], Arc<Vec<SchemaDescriptor>>>>,
+    /// Committed schema history of each table on `HEAD`'s lineage, scanned once per mount on a
+    /// background thread the first time a CWD row the mounted schema cannot validate needs it
+    /// (ORNA-EVOL-002).
+    historical_generations: Arc<Mutex<BTreeMap<[u8; 16], HistoricalState>>>,
+}
+
+/// The committed schema history of one table.
+struct HistoricalTableSchemas {
+    /// The distinct schema generations on `HEAD`'s lineage, newest first.
+    generations: Vec<SchemaDescriptor>,
+    /// The stored constant default of each field that schema evolution introduced, as frozen by
+    /// the commit that introduced it (ORNA-FIELD-003, ORNA-EVOL-009).
+    introductions: BTreeMap<[u8; 16], Raw>,
+}
+
+enum HistoricalState {
+    /// A scan thread is running.
+    Resolving,
+    Ready(Arc<HistoricalTableSchemas>),
+    /// The last scan failed; it is retried once `HISTORICAL_SCAN_RETRY` has elapsed.
+    Failed { reason: String, at: Instant },
+}
+
+/// Runs one committed-schema scan and returns the table's resulting state. A panicking scan is a
+/// failed scan, so a table is never left resolving.
+fn settle_historical_scan(repository: &Repository, relation_id: [u8; 16]) -> HistoricalState {
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        scan_historical_schemas(repository, relation_id)
+    }))
+    .unwrap_or_else(|_| Err("the committed schema scan panicked".to_owned()));
+    match outcome {
+        Ok(schemas) => HistoricalState::Ready(Arc::new(schemas)),
+        Err(reason) => HistoricalState::Failed {
+            reason,
+            at: Instant::now(),
+        },
+    }
+}
+
+/// Scans the committed schema history of `relation_id` along `repository`'s `HEAD` lineage,
+/// oldest commit first. A commit with no committed identity for the table predates it and is
+/// skipped (F7: identity-less commits are not scanned). Any other commit that cannot be read or
+/// resolved fails the scan: a generation is never silently left out (ORNA-EVOL-002). The
+/// introduced value of a field is the default frozen by the commit that most recently introduced
+/// it, read from that commit's own source (ORNA-EVOL-009).
+///
+/// The scan covers the history walked when it starts. A `HEAD` that moves after the table's first
+/// scan is not rescanned for the lifetime of this mount (F8).
+fn scan_historical_schemas(
+    repository: &Repository,
+    relation_id: [u8; 16],
+) -> Result<HistoricalTableSchemas, String> {
+    let history = repository
+        .committed_history(HISTORY_LIMIT + 1)
+        .map_err(|error| format!("committed history could not be read: {error:?}"))?;
+    if history.len() > HISTORY_LIMIT {
+        return Err(format!(
+            "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
+        ));
+    }
+    let mut introductions: BTreeMap<[u8; 16], Raw> = BTreeMap::new();
+    let mut previous_ids: HashSet<[u8; 16]> = HashSet::new();
+    let mut declared_oldest_first: Vec<SchemaDescriptor> = Vec::new();
+    for entry in history.iter().rev() {
+        let commit = entry.commit();
+        let identities = ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .map_err(|error| {
+                format!(
+                    "committed identities at {} could not be read: {error:?}",
+                    commit.as_str()
+                )
+            })?;
+        let Some(identities) = identities else {
+            continue;
+        };
+        let declared = identities.records().iter().any(|record| {
+            record.kind() == ObjectKind::Table
+                && !record.is_retired()
+                && *record.id() == relation_id
+        });
+        if !declared {
+            continue;
+        }
+        let (schema, defaults) = ProjectLoader::default()
+            .resolve_committed_source_table_schema_with_introductions(
+                repository,
+                commit,
+                TableObjectId::new(relation_id),
+            )
+            .map_err(|error| {
+                format!(
+                    "the table's committed schema at {} could not be resolved: {error:?}",
+                    commit.as_str()
+                )
+            })?;
+        let stored = StoredSchema::new(schema.descriptor()).map_err(|error| {
+            format!(
+                "the table's committed schema at {} is invalid: {error:?}",
+                commit.as_str()
+            )
+        })?;
+        let ids: HashSet<[u8; 16]> = stored
+            .fields()
+            .iter()
+            .filter(|field| field.role() == 1)
+            .map(|field| *field.id())
+            .collect();
+        for id in ids.iter().filter(|id| !previous_ids.contains(*id)) {
+            match defaults.get(id) {
+                Some(value) => introductions.insert(*id, value.clone()),
+                None => introductions.remove(id),
+            };
+        }
+        previous_ids = ids;
+        declared_oldest_first.push(schema.descriptor().clone());
+    }
+    let mut generations: Vec<SchemaDescriptor> = Vec::new();
+    for descriptor in declared_oldest_first.iter().rev() {
+        if !generations.contains(descriptor) {
+            generations.push(descriptor.clone());
+        }
+    }
+    Ok(HistoricalTableSchemas {
+        generations,
+        introductions,
+    })
 }
 
 impl MountWriter {
@@ -1119,28 +1248,31 @@ impl MountWriter {
             retained_drafts,
             owner_id,
             row_baselines,
-            historical_generations: Mutex::new(BTreeMap::new()),
+            historical_generations: Arc::new(Mutex::new(BTreeMap::new())),
         }))
     }
 
     /// Admits a CWD row the mounted schema cannot validate (ORNA-VFS-001, ORNA-EVOL-002).
-    /// Exactly one committed schema generation of the table must validate the row; the row
-    /// is then rewritten to the mounted generation. A row that no generation, or more than
-    /// one generation, validates is refused with the mounted-schema error.
+    /// Exactly one committed schema generation of the table must validate the row; the row is
+    /// then rewritten to the mounted generation, with the fields schema evolution introduced
+    /// filled from the defaults frozen by the commits that introduced them (ORNA-EVOL-009). A
+    /// row that no generation, or more than one, validates is refused with the mounted-schema
+    /// error. A row that needs the committed history while it is being scanned fails transiently.
     fn admit_runtime_row<'row>(
         &self,
         source: &TableSource,
         canonical_key: &[u8],
         row: &'row [u8],
-    ) -> Result<Cow<'row, [u8]>, String> {
+    ) -> Result<Cow<'row, [u8]>, RowLoadError> {
         let relation_id = *source.binding.relation_id();
         let descriptor = source.schema.descriptor();
         let mounted_error = match descriptor.validate_stored_row(relation_id, canonical_key, row) {
             Ok(()) => return Ok(Cow::Borrowed(row)),
             Err(error) => error,
         };
-        let generations = self.historical_descriptors(relation_id)?;
-        let matching: Vec<&SchemaDescriptor> = generations
+        let historical = self.historical_descriptors(relation_id)?;
+        let matching: Vec<&SchemaDescriptor> = historical
+            .generations
             .iter()
             .filter(|generation| {
                 generation
@@ -1148,93 +1280,108 @@ impl MountWriter {
                     .is_ok()
             })
             .collect();
-        let [historical] = matching.as_slice() else {
-            return Err(format!(
+        let [generation] = matching.as_slice() else {
+            return Err(RowLoadError::Fatal(format!(
                 "the CWD row failed validation against the mounted schema ({mounted_error:?}) \
                  and {} committed schema generation(s) validate it",
                 matching.len()
-            ));
+            )));
         };
-        let introductions = source.schema.introduced_values(&self.project);
         admit_row_under_descriptor(
             relation_id,
-            *historical,
-            source.schema.descriptor(),
-            &introductions,
+            *generation,
+            descriptor,
+            &historical.introductions,
             canonical_key,
             row,
         )
         .map(Cow::Owned)
         .map_err(|refusal| {
-            format!("the CWD row cannot be admitted to the mounted schema: {refusal}")
+            RowLoadError::Fatal(format!(
+                "the CWD row cannot be admitted to the mounted schema: {refusal}"
+            ))
         })
     }
 
-    /// The distinct schema generations `relation_id` has on `HEAD`'s lineage, newest first,
-    /// cached per table. A commit that carries no committed identity for the table predates
-    /// it and is skipped. Any other commit that cannot be read or resolved fails the scan:
-    /// a generation is never silently left out (ORNA-EVOL-002).
+    /// The committed schema history of `relation_id`, cached per table for this mount. The first
+    /// request starts a background scan and fails transiently; requests fail transiently until
+    /// the scan completes, after which they succeed. A failed scan is retried once
+    /// `HISTORICAL_SCAN_RETRY` has elapsed.
     fn historical_descriptors(
         &self,
         relation_id: [u8; 16],
-    ) -> Result<Arc<Vec<SchemaDescriptor>>, String> {
-        let mut cache = self
+    ) -> Result<Arc<HistoricalTableSchemas>, RowLoadError> {
+        let mut states = self
             .historical_generations
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(generations) = cache.get(&relation_id) {
-            return Ok(Arc::clone(generations));
+        match states.get(&relation_id) {
+            Some(HistoricalState::Ready(schemas)) => return Ok(Arc::clone(schemas)),
+            Some(HistoricalState::Resolving) => {
+                return Err(RowLoadError::Transient(SCAN_PENDING.to_owned()));
+            }
+            Some(HistoricalState::Failed { reason, at })
+                if at.elapsed() < HISTORICAL_SCAN_RETRY =>
+            {
+                return Err(RowLoadError::Transient(format!(
+                    "the committed schema history could not be scanned: {reason}"
+                )));
+            }
+            Some(HistoricalState::Failed { .. }) | None => {}
         }
-        let history = self
-            .repository
-            .committed_history(HISTORY_LIMIT + 1)
-            .map_err(|error| format!("committed history could not be read: {error:?}"))?;
-        if history.len() > HISTORY_LIMIT {
-            return Err(format!(
-                "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
-            ));
-        }
-        let mut generations: Vec<SchemaDescriptor> = Vec::new();
-        for entry in &history {
-            let commit = entry.commit();
-            let identities =
-                ObjectIdentityManifest::read_committed_if_present(&self.repository, commit)
-                    .map_err(|error| {
-                        format!(
-                            "committed identities at {} could not be read: {error:?}",
-                            commit.as_str()
-                        )
-                    })?;
-            let Some(identities) = identities else {
-                continue;
-            };
-            let declared = identities.records().iter().any(|record| {
-                record.kind() == ObjectKind::Table
-                    && !record.is_retired()
-                    && *record.id() == relation_id
+        states.insert(relation_id, HistoricalState::Resolving);
+        drop(states);
+        let repository = self.repository.clone();
+        let shared = Arc::clone(&self.historical_generations);
+        let spawned = std::thread::Builder::new()
+            .name("orna-historical-scan".to_owned())
+            .spawn(move || {
+                let state = settle_historical_scan(&repository, relation_id);
+                shared
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(relation_id, state);
             });
-            if !declared {
-                continue;
-            }
-            let schema = ProjectLoader::default()
-                .resolve_committed_source_table_schema(
-                    &self.repository,
-                    commit,
-                    TableObjectId::new(relation_id),
-                )
-                .map_err(|error| {
-                    format!(
-                        "the table's committed schema at {} could not be resolved: {error:?}",
-                        commit.as_str()
-                    )
-                })?;
-            if !generations.contains(schema.descriptor()) {
-                generations.push(schema.descriptor().clone());
+        match spawned {
+            Ok(_) => Err(RowLoadError::Transient(SCAN_PENDING.to_owned())),
+            Err(error) => {
+                let reason = format!("the scan thread could not start: {error}");
+                self.historical_generations
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(
+                        relation_id,
+                        HistoricalState::Failed {
+                            reason: reason.clone(),
+                            at: Instant::now(),
+                        },
+                    );
+                Err(RowLoadError::Transient(format!(
+                    "the committed schema history could not be scanned: {reason}"
+                )))
             }
         }
-        let generations = Arc::new(generations);
-        cache.insert(relation_id, Arc::clone(&generations));
-        Ok(generations)
+    }
+
+    /// Settles the committed schema history of `relation_id` on the calling thread. It runs
+    /// before the mount serves requests, so persisted temporary scratch of the table can be
+    /// restored (ORNA-VFS-019); a table whose history is already settled keeps that result.
+    fn resolve_historical_blocking(&self, relation_id: [u8; 16]) {
+        let settled = matches!(
+            self.historical_generations
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&relation_id),
+            Some(HistoricalState::Ready(_))
+        );
+        if settled {
+            return;
+        }
+        let state = settle_historical_scan(&self.repository, relation_id);
+        self.historical_generations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(relation_id, state);
     }
 
     fn capture_mount_activation(&self, tables: &[RuntimeTableIdentity]) -> Result<(), String> {
@@ -3534,6 +3681,17 @@ impl WorkspaceFilesystem {
                     record.path.display(),
                     record.reason
                 );
+            }
+            // Restoring a row may need its table's committed schema history (ORNA-VFS-019). The
+            // mount serves nothing yet, so each such scan settles here rather than failing the
+            // restore on a background scan that has not started.
+            let relations: HashSet<[u8; 16]> = records
+                .iter()
+                .filter(|record| record.schema_identity.is_some())
+                .map(|record| record.identity.relation_id)
+                .collect();
+            for relation_id in relations {
+                writer.resolve_historical_blocking(relation_id);
             }
             for record in records {
                 let logical_path = record.identity.logical_path.clone();
@@ -6661,7 +6819,7 @@ impl FsBuilder {
             self.nodes.get(&inode).map(|node| &node.kind),
             Some(NodeKind::Row(_))
         ) {
-            return self.ensure_row_loaded(inode);
+            return self.ensure_row_loaded(inode).map_err(String::from);
         }
         let table_inode = match self.nodes.get(&inode).map(|node| &node.kind) {
             Some(NodeKind::Table(_)) => Some(inode),
@@ -6900,7 +7058,7 @@ impl FsBuilder {
         )
     }
 
-    fn ensure_row_loaded(&mut self, inode: u64) -> Result<(), String> {
+    fn ensure_row_loaded(&mut self, inode: u64) -> Result<(), RowLoadError> {
         let (source, key, state) = match self.nodes.get(&inode).map(|node| &node.kind) {
             Some(NodeKind::Row(row)) => (
                 Arc::clone(&row.source),
@@ -6908,7 +7066,7 @@ impl FsBuilder {
                 match &row.state {
                     RowLoadState::Unloaded => None,
                     RowLoadState::Ready => Some(Ok(())),
-                    RowLoadState::Failed(error) => Some(Err(error.clone())),
+                    RowLoadState::Failed(error) => Some(Err(RowLoadError::Fatal(error.clone()))),
                 },
             ),
             _ => return Err("mount row directory is missing".into()),
@@ -6916,30 +7074,45 @@ impl FsBuilder {
         if let Some(state) = state {
             return state;
         }
-        let result = self.row_file_specs(&source, &key).and_then(|files| {
-            let directory = self
-                .directory(inode)
-                .ok_or_else(|| "mount row directory is missing".to_owned())?;
-            let mut names = HashMap::with_capacity(files.len());
-            for (name, _) in &files {
-                let name = OsString::from(name);
-                if directory.entry(name.as_os_str()).is_some() || names.insert(name, ()).is_some() {
-                    return Err("projected row file names collide".into());
+        let result = self
+            .row_file_specs(&source, &key)
+            .and_then(|files| -> Result<(), RowLoadError> {
+                let directory = self
+                    .directory(inode)
+                    .ok_or_else(|| "mount row directory is missing".to_owned())?;
+                let mut names = HashMap::with_capacity(files.len());
+                for (name, _) in &files {
+                    let name = OsString::from(name);
+                    if directory.entry(name.as_os_str()).is_some() || names.insert(name, ()).is_some()
+                    {
+                        return Err("projected row file names collide".into());
+                    }
+                }
+                for (name, kind) in files {
+                    self.add_file(inode, &name, kind)?;
+                }
+                Ok(())
+            });
+        match &result {
+            Ok(()) => {
+                if let Some(NodeKind::Row(row)) =
+                    self.nodes.get_mut(&inode).map(|node| &mut node.kind)
+                {
+                    row.state = RowLoadState::Ready;
                 }
             }
-            for (name, kind) in files {
-                self.add_file(inode, &name, kind)?;
+            // A transient failure leaves the row Unloaded, so the next access retries it.
+            Err(RowLoadError::Transient(error)) => {
+                eprintln!("FUSE row projection deferred: {error}");
             }
-            Ok(())
-        });
-        if let Some(NodeKind::Row(row)) = self.nodes.get_mut(&inode).map(|node| &mut node.kind) {
-            row.state = match &result {
-                Ok(()) => RowLoadState::Ready,
-                Err(error) => RowLoadState::Failed(error.clone()),
-            };
-        }
-        if let Err(error) = &result {
-            eprintln!("FUSE row projection failed: {error}");
+            Err(RowLoadError::Fatal(error)) => {
+                if let Some(NodeKind::Row(row)) =
+                    self.nodes.get_mut(&inode).map(|node| &mut node.kind)
+                {
+                    row.state = RowLoadState::Failed(error.clone());
+                }
+                eprintln!("FUSE row projection failed: {error}");
+            }
         }
         result
     }
@@ -6948,7 +7121,7 @@ impl FsBuilder {
         &self,
         source: &Arc<TableSource>,
         key: &TypedKey,
-    ) -> Result<Vec<(String, NodeKind)>, String> {
+    ) -> Result<Vec<(String, NodeKind)>, RowLoadError> {
         // Runtime rows are joined by current table identity and the exact pinned
         // key. Rekeys have no row-lineage metadata, so they remain pinned here.
         let runtime_row = match (&self.writer, &source.runtime_table) {
@@ -6970,7 +7143,7 @@ impl FsBuilder {
         key: &TypedKey,
         runtime_row: Option<&[u8]>,
         refreshed_baseline: Option<Vec<u8>>,
-    ) -> Result<Vec<(String, NodeKind)>, String> {
+    ) -> Result<Vec<(String, NodeKind)>, RowLoadError> {
         let row_scope = source
             .graph
             .open_read_scope()
@@ -7070,7 +7243,8 @@ impl FsBuilder {
                         if stored.reference().content_identity() != identity {
                             return Err(format!(
                                 "committed Blob field {field_name} does not match its selected identity"
-                            ));
+                            )
+                            .into());
                         }
                         (
                             selected.media_type().to_owned(),
@@ -7098,7 +7272,8 @@ impl FsBuilder {
                     Err(error) => {
                         return Err(format!(
                             "committed Blob reference could not be admitted: {error:?}"
-                        ));
+                        )
+                        .into());
                     }
                 };
                 let file_name = orna_runtime_v1::vfs::project_content_name(
@@ -7984,6 +8159,35 @@ enum RowLoadState {
     Unloaded,
     Ready,
     Failed(String),
+}
+
+/// Why a row's projection failed. A transient failure (the table's committed schema history is
+/// still being scanned, or a recent scan failed) leaves the row unloaded so a later access
+/// retries it; a fatal failure is sticky for the row.
+#[derive(Debug)]
+enum RowLoadError {
+    Transient(String),
+    Fatal(String),
+}
+
+impl From<String> for RowLoadError {
+    fn from(message: String) -> Self {
+        Self::Fatal(message)
+    }
+}
+
+impl From<&str> for RowLoadError {
+    fn from(message: &str) -> Self {
+        Self::Fatal(message.to_owned())
+    }
+}
+
+impl From<RowLoadError> for String {
+    fn from(error: RowLoadError) -> Self {
+        match error {
+            RowLoadError::Transient(message) | RowLoadError::Fatal(message) => message,
+        }
+    }
 }
 
 struct TableSource {
