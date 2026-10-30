@@ -612,7 +612,7 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
     );
 
     // Nested directories and leaves refuse every mutation with EPERM (profiles/vfs-1.md:139).
-    let refusals: [(&str, std::io::Result<()>); 5] = [
+    let refusals: [(&str, std::io::Result<()>); 8] = [
         (
             "create in a record directory",
             std::fs::File::create(row.join("meta/extra")).map(drop),
@@ -635,6 +635,22 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
                 .write(true)
                 .truncate(true)
                 .open(tags.join("0"))
+                .map(drop),
+        ),
+        (
+            "remove a record directory",
+            std::fs::remove_dir(row.join("meta")),
+        ),
+        (
+            "rename a list directory",
+            std::fs::rename(&tags, row.join("tags2")),
+        ),
+        (
+            "read-write open a record field",
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&label)
                 .map(drop),
         ),
     ];
@@ -809,4 +825,83 @@ async fn nested_directory_named_like_a_reserved_host_name_projects_escaped() {
     mounted.await_path(&escaped);
     assert_eq!(read_view(&escaped), "1", "the escaped nested directory reads its field");
     assert!(!row.join("con").exists(), "the raw reserved name is not a host name");
+}
+
+/// profiles/vfs-1.md:71-75 and :132: a list longer than one page lists a page at a time, and a
+/// lookup loads the page that holds its position. Every element lists and reads under its index.
+#[tokio::test]
+async fn nested_list_longer_than_one_page_lists_every_element() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let items: Vec<String> = (0..600).map(|index| format!("\"t{index}\"")).collect();
+    let document = nested_row("x", 1, &format!("[{}]", items.join(", ")));
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, tags: [Str], }\n",
+        &[],
+        &[("london", document.as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let tags = row.join("tags");
+    mounted.await_path(&tags.join("599"));
+
+    assert_eq!(
+        positions_of(std::fs::read_dir(&tags).unwrap()),
+        (0..600).collect::<Vec<usize>>(),
+        "every list element is listed across pages"
+    );
+    assert_eq!(read_view(&tags.join("0")), "t0");
+    assert_eq!(
+        read_view(&tags.join("256")),
+        "t256",
+        "the first element of the second page reads"
+    );
+    assert_eq!(
+        read_view(&tags.join("599")),
+        "t599",
+        "the last element of the last page reads"
+    );
+}
+
+/// profiles/vfs-1.md:91-92 and :138: a read-write handle on `data.orna` captures the whole-row
+/// version it was opened on. Another writer's accepted save advances the row past that handle,
+/// so the handle's save is refused with EAGAIN, and the other writer's nested fields stay visible.
+#[tokio::test]
+async fn held_read_write_row_handle_refuses_a_stale_save() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let document = nested_row("x", 1, NESTED_TAGS);
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { meta: { label: Str, rank: Int, }, tags: [Str], }\n",
+        &[],
+        &[("london", document.as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let row = mountpoint.join("Music/london");
+    let label = row.join("meta/label");
+    let data = row.join("data.orna");
+    mounted.await_path(&label);
+
+    let mut held = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&data)
+        .expect("a read-write open of data.orna");
+    edit_outside_mount(repository_directory.path(), "london", &nested_row("yy", 3, "[\"q\"]"));
+    let error = std::io::Write::write_all(&mut held, nested_row("zzz", 4, "[\"r\"]").as_bytes())
+        .and_then(|()| held.sync_all())
+        .expect_err("a save from a read-write handle on a changed row is stale");
+    assert_eq!(error.raw_os_error(), Some(EAGAIN), "the stale save is refused with EAGAIN");
+    drop(held);
+
+    assert_eq!(read_view(&label), "yy", "a new open shows the other writer's nested field");
+    assert_eq!(read_view(&row.join("tags/0")), "q");
 }
