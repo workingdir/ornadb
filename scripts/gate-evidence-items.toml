@@ -304,8 +304,9 @@ select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "fsync_acknowledges_valid_draft_and_rejects_invalid_draft" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sync_semantics", test = "rejected_sync_retains_recoverable_draft_listed_by_id" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "speculative_source_writes_validate_on_sync_and_reject_stale_generation" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
 ]
-limitations = ["The rejected candidate is kept by the unmount-time retain request, and the test asserts the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
+limitations = ["The rejected candidate is kept by the unmount-time retain request, and the test asserts the listed draft id names a retained record holding the exact candidate bytes (profiles/vfs-1.md:101-102). The SIGTERM selector shows unresolved drafts are retained in general, not that the rejected candidate specifically is. The orna edit --row draft admission and report path is not covered by this item (ornadb-5il1.140)."]
 
 [[item]]
 gate = "E"
@@ -348,15 +349,26 @@ limitations = ["Covers rename-over and owner-write replacement through the mount
 [[item]]
 gate = "E"
 id = "E8"
-title = "Schema changes, renamed MIME suffix, key and namespace collisions, long, empty and composite keys, nested collections, large Str, multi-file source edits, permissions and unsupported operations"
+title = "Schema changes, renamed MIME suffix, key and namespace collisions, long and composite keys (empty keys: test ignored, ornadb-5il1.462.1), nested collections, large Str, multi-file source edits, permissions and unsupported operations"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_save_after_head_renames_table_keeps_pinned_declaration" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_unsupported_ops" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_rejects_unsupported_links_devices_and_shared_mmap" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "reserved_spelling_beyond_vfs_1_text_is_conservative" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_composite_key_mount", test = "composite_key_components_project_as_nested_directories" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "profile_nested_collection_directories_follow_the_module_path" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "nested_record_and_list_fields_project_as_pinned_directories" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "long_key_over_200_encoded_bytes_projects_as_sha256_key_alias" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "key_over_300_characters_is_admitted_and_projects_as_alias" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "large_str_projects_as_txt_and_utf8_write_replaces_the_str" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_projection_features", test = "large_str_bound_is_exclusive_at_64_kib" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_cases", test = "multi_file_source_edit_requires_grouped_validation" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_cases", test = "vfs_020_source_module_group_is_admitted_together_or_not_at_all" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "editor_mount_refuses_chmod_and_chown_with_eperm" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_integration", test = "cwd_mount_chmod_of_document_fails_eperm_without_row_change" },
 ]
-limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text (any-case or any-extension device names, CLOCK$, lookalikes) are a conservative, spec-silent selector, not a spec requirement. Composite keys, nested collections, large Str and multi-file source edits have no selector for this item (ornadb-5il1.63)."]
+limitations = ["Only the selectors above are claimed. Reserved-name escapes beyond the literal profiles/vfs-1.md:46 text are a conservative, spec-silent selector, not a spec requirement. Not covered: empty keys (test ignored: vfs_projection_features 'empty text key cannot be stored', ornadb-5il1.462.1); namespace collisions have no selector; schema change is covered only for a head table rename; the composite-key selector is one fixture; grouped source edits do not assert no-evaluation during speculative writes (ORNA-VFS-020 proper, ornadb-9npn) (ornadb-5il1.63)."]
 
 [[item]]
 gate = "E"
@@ -365,8 +377,9 @@ title = "Kernel caching does not leak private drafts into another handle or gene
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sigkill_remount" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_isolation", test = "repeated_observer_reads_never_show_private_draft_and_read_handles_pin_generation" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "bin:orna", test = "editor_open_flags_bypass_kernel_cache_without_writeback_capability" },
 ]
-limitations = ["Only the mount-level selectors above are claimed. The mount-flag unit test (editor_open_flags_bypass_kernel_cache_without_writeback_capability, bin:orna) is not selected by this record (ornadb-5il1.64)."]
+limitations = ["Mount-level selectors above are claimed. The bin:orna selector is a constant check of the editable open flags and init capabilities (fuse_mount.rs), not an observation of kernel caching through a mount; it is named here, not counted as mount-level evidence (ornadb-5il1.64)."]
 
 [[item]]
 gate = "E"
