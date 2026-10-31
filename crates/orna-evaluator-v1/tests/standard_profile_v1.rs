@@ -1438,8 +1438,11 @@ fn pinned_collection_overloads_preserve_relation_result_kinds() {
         Type::Function { result, .. } => result.as_ref(),
         other => panic!("{name} should be a function, got {other:?}"),
     };
-    let sample = Type::Named("Sample".into());
-    let tag = Type::Named("Tag".into());
+    // ORNA-OBJECT-001: nominal types carry stable identities, and a type declared
+    // in a module is identified as `<module>.<Name>`. The relation and element
+    // shape asserted below are unchanged; only the identity spelling is qualified.
+    let sample = Type::Named("relation_collection_consumer.Sample".into());
+    let tag = Type::Named("relation_collection_consumer.Tag".into());
     let relation = |element| Type::Relation(Box::new(element));
 
     for name in ["chunked", "windowed", "split", "piped_chunks"] {
