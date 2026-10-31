@@ -7463,7 +7463,10 @@ impl RuntimeState {
                 }
                 Err(TableActivationError::ValidationFailed(diagnostic))
             }
-            Ok(committed) => Ok(committed),
+            Ok(committed) => {
+                orna_repository_v1::publication_crash_barrier("row-commit");
+                Ok(committed)
+            }
             Err(RequestActivationTransactionError::Runtime(error)) => {
                 Err(TableActivationError::Runtime(error))
             }
