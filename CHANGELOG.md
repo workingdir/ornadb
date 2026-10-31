@@ -19,7 +19,7 @@ been published.
   `binary_run_refuses_an_assertion_naming_an_undeclared_table`, and
   `binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keeps_rows_unchanged`, which pins a refused violating
   run (E2200 with the evaluator code `ORNA-EVAL-TABLE-ASSERT`), byte-identical committed rows, and a later valid run still admitted.
-  Open: the one-shot invocation still builds a second standard catalogue for evaluation. `BoundedEvaluator::load_standard_sources`
+  Open: the one-shot invocation still builds a second standard catalogue, used only as a verification gate. `BoundedEvaluator::load_standard_sources`
   (conformance-owned, `orna-conformance-v1` `semantic_adapter.rs:757-764`) verifies the captured sources and calls
   `Catalogue::from_standard_sources`, after analysis resolved through `production_catalogue`. `orna-cli-v1` takes
   `orna-conformance-v1` as a normal dependency for this path, the REPL and the table validator. Not changed here.
