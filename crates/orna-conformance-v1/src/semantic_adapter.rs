@@ -4573,6 +4573,12 @@ struct TransactionalTableCandidateValidator {
     limits: EvaluatorLimits,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
     tables: Vec<String>,
+    /// Tables whose primary keys admission could not lower (bead ornadb-gq4g).
+    /// A check that reads one of them is refused, never skipped.
+    unsupported: BTreeSet<String>,
+    /// Owner and span of the module assertion the last `validate_changed` found
+    /// false; the commit gate reads it to name the refusal (ORNA-A091-009).
+    refused_module_assertion: Option<String>,
 }
 
 /// Reports whether any committed module declares a table-level or module-level
@@ -4603,6 +4609,43 @@ pub fn transactional_loaded_project_candidate_validator(
     cwd_generation: Option<orna_repository_v1::CwdGeneration>,
     table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
     limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    transactional_loaded_project_validator(
+        loaded,
+        identities,
+        cwd_generation,
+        table_object_ids,
+        limits,
+        admit_transaction_project,
+    )
+}
+
+/// Builds the commit gate's validator (bead ornadb-gq4g). A table whose primary
+/// key cannot be lowered is admitted without its key, and only the checks that
+/// read such a table are refused.
+pub fn transactional_loaded_project_commit_validator(
+    loaded: &orna_project_v1::LoadedProject,
+    identities: &orna_project_v1::ObjectIdentityManifest,
+    table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
+    limits: EvaluatorLimits,
+) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
+    transactional_loaded_project_validator(
+        loaded,
+        identities,
+        None,
+        table_object_ids,
+        limits,
+        admit_transaction_project_tolerant,
+    )
+}
+
+fn transactional_loaded_project_validator(
+    loaded: &orna_project_v1::LoadedProject,
+    identities: &orna_project_v1::ObjectIdentityManifest,
+    cwd_generation: Option<orna_repository_v1::CwdGeneration>,
+    table_object_ids: Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>,
+    limits: EvaluatorLimits,
+    admit: fn(&ProjectUnit, EvaluatorLimits, &str, &Catalogue) -> Result<AdmittedTransaction, AdmissionFailure>,
 ) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
     let mut modules = loaded
         .modules()
@@ -4642,8 +4685,7 @@ pub fn transactional_loaded_project_candidate_validator(
     let catalogue = loaded
         .production_catalogue()
         .map_err(|_| StageOutcome::Failed(standard_profile_diagnostic()))?;
-    let admitted = admit_transaction_project(&project, limits, "", &catalogue)
-        .map_err(|failure| *failure)?;
+    let admitted = admit(&project, limits, "", &catalogue).map_err(|failure| *failure)?;
     let candidate_table_fields = candidate_table_fields_in_stable_id_order(
         loaded,
         identities,
@@ -4663,6 +4705,14 @@ pub fn transactional_loaded_project_candidate_validator(
         limits,
     );
     validator.candidate_table_fields = candidate_table_fields;
+    // A table whose key admission could not lower (bead ornadb-gq4g) holds rows
+    // and assertions but no key; the commit gate refuses only the checks that read it.
+    validator.unsupported = admitted
+        .table_fields
+        .keys()
+        .filter(|table| !admitted.key_fields.contains_key(*table))
+        .cloned()
+        .collect();
     Ok(Box::new(validator))
 }
 
@@ -4738,6 +4788,8 @@ impl TransactionalTableCandidateValidator {
             functions: lower_relation_bindings(functions, key_fields, float_fields, table_fields),
             limits,
             tables: tables.into_iter().collect(),
+            unsupported: BTreeSet::new(),
+            refused_module_assertion: None,
         }
     }
 }
@@ -4759,13 +4811,21 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
         self.validate_changed(rows, &all)
     }
 
+    fn failed_module_assertion(&self) -> Option<String> {
+        self.refused_module_assertion.clone()
+    }
+
     fn validate_changed(
         &mut self,
         rows: &orna_runtime_v1::RuntimeTableRows,
         changed_tables: &BTreeSet<String>,
     ) -> Result<(), SafeDiagnostic> {
+        self.refused_module_assertion = None;
         let mut budget = StepBudget::new(self.limits.max_steps);
         for (table, assertions) in &self.table_assertions {
+            if self.unsupported.contains(table) {
+                return Err(table_evaluation_diagnostic());
+            }
             for assertion in assertions {
                 if table_assertion_function(&assertion.expression, &self.functions).is_some() {
                     let mut effects = CandidateRelationEffectHandler { rows };
@@ -4835,13 +4895,29 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
             .filter(|assertion| {
                 assertion_dependencies_apply(&assertion.dependencies, changed_tables)
             })
+            .cloned()
             .collect::<Vec<_>>();
         if !applicable.is_empty() {
+            // A module assertion that reads an unsupported table cannot be
+            // evaluated, so it is refused rather than skipped (bead ornadb-gq4g).
+            if applicable.iter().any(|assertion| {
+                assertion
+                    .dependencies
+                    .iter()
+                    .any(|table| self.unsupported.contains(table))
+            }) {
+                return Err(table_evaluation_diagnostic());
+            }
             // Module assertions read whole rows by field name, so candidate rows
             // are named from their key and stable field order, exactly as the
-            // table assertions above name them.
+            // table assertions above name them. Unsupported tables are left out.
+            let scoped = rows
+                .iter()
+                .filter(|(table, _)| !self.unsupported.contains(table.as_str()))
+                .map(|(table, entries)| (table.clone(), entries.clone()))
+                .collect::<orna_runtime_v1::RuntimeTableRows>();
             let named = named_candidate_rows(
-                rows,
+                &scoped,
                 &self.candidate_table_fields,
                 &self.candidate_key_fields,
             )?;
@@ -4857,6 +4933,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 )
                 .map_err(|_| table_evaluation_diagnostic())?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                    self.refused_module_assertion = Some(module_assertion_site(&assertion));
                     return Err(table_assertion_diagnostic());
                 }
             }
@@ -5075,6 +5152,19 @@ fn table_assertion_diagnostic() -> SafeDiagnostic {
         code: DiagnosticCode::TableAssertionFalse,
         class: DiagnosticClass::Permanent,
     }
+}
+
+/// Names a module assertion that a commit refused: its owner module and the
+/// source span of its declaration (ORNA-A091-009).
+fn module_assertion_site(assertion: &AdmittedAssertion) -> String {
+    let span = &assertion.declaration_span;
+    format!(
+        "module {} assertion at {}{}..{}",
+        assertion.owner_name,
+        span.file.as_deref().unwrap_or("source"),
+        span.start,
+        span.end,
+    )
 }
 
 fn table_evaluation_diagnostic() -> SafeDiagnostic {
@@ -6655,7 +6745,7 @@ fn admit_transaction_source_inner(
         )));
     }
     let mut admitted =
-        admitted_transaction_module(&parsed.value.items, None, Some(&unit.source_id))
+        admitted_transaction_module(&parsed.value.items, None, Some(&unit.source_id), false)
             .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
     let plans = analysis
         .assertions
@@ -6701,11 +6791,12 @@ fn admit_transaction_source_inner(
 /// evaluator receives qualified function identities (for example
 /// `main.seed` and `inventory.add`) so its native qualified-call resolver
 /// preserves module boundaries rather than relying on source concatenation.
-fn admit_transaction_project(
+fn admit_transaction_project_with(
     project: &ProjectUnit,
     limits: EvaluatorLimits,
     entry: &str,
     catalogue: &Catalogue,
+    tolerant_keys: bool,
 ) -> Result<AdmittedTransaction, AdmissionFailure> {
     if project.expectations.environment.stdlib.is_some() {
         return Err(Box::new(StageOutcome::Failed(standard_profile_diagnostic())));
@@ -6779,7 +6870,7 @@ fn admit_transaction_project(
             })
         })?;
         let mut module =
-            admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace))
+            admitted_transaction_module(&parsed.value.items, Some(&namespace), Some(&namespace), tolerant_keys)
                 .map_err(|reason| Box::new(StageOutcome::Skipped { reason }))?;
         if !is_standard_source(unit) {
             let plans = analysis
@@ -6891,6 +6982,29 @@ fn admit_transaction_project(
         module_assertions,
         nominal_definitions,
     })
+}
+
+/// Admits a project for the strict seam: a table whose primary key cannot be
+/// lowered skips the whole project, as before.
+fn admit_transaction_project(
+    project: &ProjectUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+    catalogue: &Catalogue,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
+    admit_transaction_project_with(project, limits, entry, catalogue, false)
+}
+
+/// Admits a project for the commit gate (bead ornadb-gq4g): a table whose
+/// primary key cannot be lowered is admitted without its key, so the checks
+/// that do not read it still validate.
+fn admit_transaction_project_tolerant(
+    project: &ProjectUnit,
+    limits: EvaluatorLimits,
+    entry: &str,
+    catalogue: &Catalogue,
+) -> Result<AdmittedTransaction, AdmissionFailure> {
+    admit_transaction_project_with(project, limits, entry, catalogue, true)
 }
 
 fn is_standard_source(unit: &SourceUnit) -> bool {
@@ -7481,6 +7595,7 @@ fn admitted_transaction_module(
     items: &[orna_syntax_v1::Item],
     namespace: Option<&str>,
     module_owner_name: Option<&str>,
+    tolerant_keys: bool,
 ) -> Result<AdmittedTransaction, String> {
     let mut functions = Functions::new();
     let mut key_fields = BTreeMap::new();
@@ -7516,28 +7631,38 @@ fn admitted_transaction_module(
                         _ => Err("transactional source seam requires named table keys".into()),
                     })
                     .collect::<Result<Vec<_>, String>>()?;
-                let key_types = keys
-                    .iter()
-                    .map(|key| {
-                        key.annotation
-                            .as_ref()
-                            .ok_or_else(|| {
-                                "transactional source seam requires typed table keys".to_owned()
-                            })
-                            .and_then(TransactionKeyType::from_syntax)
-                    })
-                    .collect::<Result<Vec<_>, String>>()?;
                 // ORNA-AUTOID-001: a keyless table carries the implicit automatic
                 // key `id: Int`, matching the admission the semantic model records.
                 let (fields, key_types) = if keys.is_empty() {
-                    (vec![String::from("id")], vec![TransactionKeyType::Int])
+                    (vec![String::from("id")], Ok(vec![TransactionKeyType::Int]))
                 } else {
-                    (fields, key_types)
+                    (
+                        fields,
+                        keys.iter()
+                            .map(|key| {
+                                key.annotation
+                                    .as_ref()
+                                    .ok_or_else(|| {
+                                        "transactional source seam requires typed table keys".to_owned()
+                                    })
+                                    .and_then(TransactionKeyType::from_syntax)
+                            })
+                            .collect::<Result<Vec<_>, String>>(),
+                    )
                 };
-                key_fields.insert(
-                    name.clone(),
-                    TransactionTableKey::new(name.clone(), fields, key_types)?,
-                );
+                match key_types {
+                    Ok(key_types) => {
+                        key_fields.insert(
+                            name.clone(),
+                            TransactionTableKey::new(name.clone(), fields, key_types)?,
+                        );
+                    }
+                    // Bead ornadb-gq4g: a key admission cannot lower yet. The
+                    // tolerant commit path keeps the table's rows and assertions
+                    // without its key; every other path refuses the project.
+                    Err(reason) if !tolerant_keys => return Err(reason),
+                    Err(_) => {}
+                }
                 table_fields.insert(
                     name.clone(),
                     members
@@ -13192,7 +13317,7 @@ mod durable_tests {
             let parsed = parse_module(&source);
             assert!(parsed.is_ok(), "{operation}: {:?}", parsed.diagnostics);
             let admitted =
-                admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
+                admitted_transaction_module(&parsed.value.items, None, None, false).expect("valid source");
             let lowered = lower_relation_bindings(
                 &admitted.functions,
                 &admitted.key_fields,
@@ -13235,7 +13360,7 @@ mod durable_tests {
             let parsed = parse_module(source);
             assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
             let admitted =
-                admitted_transaction_module(&parsed.value.items, None, None).expect("valid source");
+                admitted_transaction_module(&parsed.value.items, None, None, false).expect("valid source");
             let lowered = lower_relation_bindings(
                 &admitted.functions,
                 &admitted.key_fields,
@@ -13271,7 +13396,7 @@ mod durable_tests {
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
 
         let admitted =
-            admitted_transaction_module(&parsed.value.items, Some("notes"), Some("notes"))
+            admitted_transaction_module(&parsed.value.items, Some("notes"), Some("notes"), false)
                 .expect("valid assertions");
         let table_assertion = &admitted.table_assertions["Note"][0];
         let table_expression_span = table_assertion.expression.span();
