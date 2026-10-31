@@ -575,7 +575,7 @@ pub struct RetainedInvalidDraft<S> {
     id: [u8; 16],
     baseline: SnapshotPin<S>,
     revision: u64,
-    replacement: Arc<[u8]>,
+    replacement: Arc<CandidateSnapshot>,
     diagnostic: SafeDiagnostic,
 }
 
@@ -607,8 +607,13 @@ impl<S> RetainedInvalidDraft<S> {
         self.revision
     }
 
-    pub fn replacement_bytes(&self) -> &[u8] {
-        &self.replacement
+    /// The retained candidate bytes, read from the retained view. The copy is
+    /// made only for the caller, so the retained record holds no bytes in RAM.
+    pub fn replacement_bytes(&self) -> Result<Vec<u8>, EditDraftError> {
+        self.replacement
+            .to_arc()
+            .map(|bytes| bytes.to_vec())
+            .map_err(|_| EditDraftError::BackingIo)
     }
 
     pub fn diagnostic(&self) -> SafeDiagnostic {
@@ -632,8 +637,10 @@ struct DraftState<S> {
 /// The retained copy is charged to the draft quota for as long as it is held
 /// (profiles/vfs-1.md: rejected candidates are quota accounted).
 struct RetainedRejection<S> {
-    id: [u8; 16],
     charge: QuotaCharge,
+    /// True while `draft` aliases the candidate spool's file; the candidate then
+    /// holds the charge until a change moves it here (`unalias_retained`).
+    live: bool,
     draft: RetainedInvalidDraft<S>,
 }
 
@@ -669,6 +676,42 @@ impl QuotaCharge {
     pub fn bytes(&self) -> u64 {
         self.bytes
     }
+
+    /// A charge that holds no bytes yet, to be grown or absorbed into.
+    pub fn empty(quota: &Arc<DraftQuota>) -> Self {
+        Self {
+            quota: Arc::clone(quota),
+            bytes: 0,
+        }
+    }
+
+    /// Charges `bytes` more, refusing (and changing nothing) when the quota cannot hold them.
+    fn grow(&mut self, bytes: u64) -> Result<(), EditDraftError> {
+        self.quota.reserve(bytes)?;
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    /// Releases up to `bytes` of this charge.
+    fn shrink(&mut self, bytes: u64) {
+        let released = bytes.min(self.bytes);
+        self.quota.release(released);
+        self.bytes -= released;
+    }
+
+    /// Moves every byte of `other` into this charge, which must share its quota.
+    /// `other` is left holding none.
+    pub fn absorb(&mut self, other: &mut QuotaCharge) {
+        self.bytes += other.bytes;
+        other.bytes = 0;
+    }
+
+    /// Moves every byte of this charge into a new charge, leaving this one holding none.
+    pub fn take(&mut self) -> QuotaCharge {
+        let mut moved = QuotaCharge::empty(&self.quota);
+        moved.absorb(self);
+        moved
+    }
 }
 
 impl Drop for QuotaCharge {
@@ -684,9 +727,8 @@ impl<S> DraftState<S> {
             .map_or(self.baseline.bytes.len(), |spool| spool.len)
     }
 
-    /// Materialises the whole candidate. Only retention and activation need
-    /// this; ranged reads and writes stay on the spool. A spool read failure is
-    /// a typed backing error, never a panic.
+    /// Materialises the whole candidate for activation. Ranged reads and writes
+    /// stay on the spool, and a spool read failure is a typed backing error.
     fn candidate_arc(&self) -> Result<Arc<[u8]>, EditDraftError> {
         match &self.candidate {
             Some(spool) => spool.read_all().map_err(|_| EditDraftError::BackingIo),
@@ -736,6 +778,8 @@ impl<S> DraftState<S> {
     ) -> Result<&mut DraftSpool, EditDraftError> {
         if self.candidate.is_none() {
             self.candidate = Some(DraftSpool::from_baseline(&self.baseline.bytes, storage)?);
+        } else if self.retained_is_live() {
+            self.unalias_retained(storage)?;
         }
         self.candidate.as_mut().ok_or(EditDraftError::BackingIo)
     }
@@ -748,81 +792,95 @@ impl<S> DraftState<S> {
         revision: u64,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        let replacement = self.candidate_arc()?;
-        self.retain_rejection_with(revision, replacement, diagnostic)
-    }
-
-    /// As [`Self::retain_rejection`], for a caller that already holds the
-    /// candidate bytes of `revision`, so the spool is read once, not twice.
-    fn retain_rejection_with(
-        &mut self,
-        revision: u64,
-        replacement: Arc<[u8]>,
-        diagnostic: SafeDiagnostic,
-    ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, replacement, diagnostic)?;
+        self.retain_draft(revision, diagnostic)?;
         self.last_rejection = Some((revision, diagnostic));
         Ok(())
     }
 
     /// Retains a stale compare-and-swap candidate without caching the outcome.
     /// A caller may retry these same bytes against a newly captured baseline.
-    /// The caller already holds the candidate bytes of `revision`, so the spool is read once.
-    fn retain_retryable_conflict_with(
+    fn retain_retryable_conflict(
         &mut self,
         revision: u64,
-        replacement: Arc<[u8]>,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        self.retain_draft(revision, replacement, diagnostic)
+        self.retain_draft(revision, diagnostic)
     }
 
-    /// Keeps `replacement` as the retained copy of `revision`. A revision keeps
-    /// its identity and its existing copy and charge (the same revision has the
-    /// same bytes). A new revision reserves its bytes first; a refused
-    /// reservation (EDQUOT) leaves the previous retained copy in place.
+    /// Keeps the candidate of `revision` as its retained copy without copying
+    /// its bytes. While the candidate is a spool, the copy aliases that spool's
+    /// file and the candidate keeps the charge. A baseline-only candidate shares
+    /// the baseline bytes and reserves their length. A revision keeps its identity
+    /// and its existing copy. A new revision reserves before anything is
+    /// replaced, so a refused reservation (EDQUOT) leaves the previous copy in place.
     fn retain_draft(
         &mut self,
         revision: u64,
-        replacement: Arc<[u8]>,
         diagnostic: SafeDiagnostic,
     ) -> Result<(), EditDraftError> {
-        let retained = match self.retained_invalid.take() {
-            Some(previous) if previous.draft.revision == revision => RetainedRejection {
-                id: previous.id,
-                charge: previous.charge,
-                draft: RetainedInvalidDraft {
-                    id: previous.id,
-                    baseline: self.baseline.pin.clone(),
-                    revision,
-                    replacement: previous.draft.replacement,
-                    diagnostic,
-                },
-            },
-            previous => {
-                let charge = match QuotaCharge::reserve(&self.quota, replacement.len() as u64) {
-                    Ok(charge) => charge,
-                    Err(error) => {
-                        self.retained_invalid = previous;
-                        return Err(error);
-                    }
-                };
-                let id = *Uuid::new_v4().as_bytes();
-                RetainedRejection {
-                    id,
-                    charge,
-                    draft: RetainedInvalidDraft {
-                        id,
-                        baseline: self.baseline.pin.clone(),
-                        revision,
-                        replacement,
-                        diagnostic,
-                    },
-                }
-            }
+        if let Some(previous) = self.retained_invalid.as_mut()
+            && previous.draft.revision == revision
+        {
+            previous.draft.baseline = self.baseline.pin.clone();
+            previous.draft.diagnostic = diagnostic;
+            return Ok(());
+        }
+        let replacement = Arc::new(self.candidate_snapshot()?);
+        let live = self.candidate.is_some();
+        let charge = if live {
+            QuotaCharge::empty(&self.quota)
+        } else {
+            QuotaCharge::reserve(&self.quota, replacement.len())?
         };
-        self.retained_invalid = Some(retained);
+        let id = *Uuid::new_v4().as_bytes();
+        self.retained_invalid = Some(RetainedRejection {
+            charge,
+            live,
+            draft: RetainedInvalidDraft {
+                id,
+                baseline: self.baseline.pin.clone(),
+                revision,
+                replacement,
+                diagnostic,
+            },
+        });
         Ok(())
+    }
+
+    /// Whether the retained copy aliases the live candidate's spool file.
+    fn retained_is_live(&self) -> bool {
+        self.retained_invalid
+            .as_ref()
+            .is_some_and(|retained| retained.live)
+    }
+
+    /// Moves the retained copy off the candidate spool before the spool changes.
+    /// The old spool's file and its charge move to the retained copy, and the
+    /// candidate continues on a copy of those bytes. A refused copy (EDQUOT)
+    /// changes nothing.
+    fn unalias_retained(&mut self, storage: &DraftStorage) -> Result<(), EditDraftError> {
+        let copy = DraftSpool::from_baseline(&self.candidate_snapshot()?, storage)?;
+        let mut previous = self
+            .candidate
+            .replace(copy)
+            .ok_or(EditDraftError::BackingIo)?;
+        if let Some(retained) = self.retained_invalid.as_mut() {
+            retained.charge.absorb(&mut previous.charge);
+            retained.live = false;
+        }
+        Ok(())
+    }
+
+    /// Drops the candidate spool. A retained copy that aliases it takes over the
+    /// spool's charge, so the bytes stay charged while they are retained.
+    fn drop_candidate(&mut self) {
+        if let Some(mut spool) = self.candidate.take()
+            && let Some(retained) = self.retained_invalid.as_mut()
+            && retained.live
+        {
+            retained.charge.absorb(&mut spool.charge);
+            retained.live = false;
+        }
     }
 }
 
@@ -970,7 +1028,7 @@ pub const CANDIDATE_CHUNK_BYTES: usize = 1 << 20;
 struct DraftSpool {
     file: fs::File,
     len: u64,
-    quota: Arc<DraftQuota>,
+    charge: QuotaCharge,
 }
 
 impl DraftSpool {
@@ -987,7 +1045,7 @@ impl DraftSpool {
                     return Ok(Self {
                         file,
                         len: 0,
-                        quota: Arc::clone(&storage.quota),
+                        charge: QuotaCharge::empty(&storage.quota),
                     });
                 }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
@@ -1027,16 +1085,16 @@ impl DraftSpool {
     fn set_len(&mut self, length: u64) -> Result<(), EditDraftError> {
         if length > self.len {
             let grow = length - self.len;
-            self.quota.reserve(grow)?;
+            self.charge.grow(grow)?;
             if self.file.set_len(length).is_err() {
-                self.quota.release(grow);
+                self.charge.shrink(grow);
                 return Err(EditDraftError::BackingIo);
             }
         } else if length < self.len {
             self.file
                 .set_len(length)
                 .map_err(|_| EditDraftError::BackingIo)?;
-            self.quota.release(self.len - length);
+            self.charge.shrink(self.len - length);
         }
         self.len = length;
         Ok(())
@@ -1076,12 +1134,6 @@ impl DraftSpool {
         let mut bytes = vec![0; size];
         self.file.read_exact_at(&mut bytes, offset)?;
         Ok(bytes)
-    }
-}
-
-impl Drop for DraftSpool {
-    fn drop(&mut self) {
-        self.quota.release(self.len);
     }
 }
 
@@ -1972,6 +2024,27 @@ impl<S> EditDraft<S> {
         self.state.lock().await.candidate_len()
     }
 
+    /// Moves the live candidate's quota charge to the caller, which returns
+    /// what is left through [`Self::restore_candidate_charge`]. A baseline-only
+    /// candidate holds no charge, so this returns an empty one.
+    pub async fn take_candidate_charge(&self) -> QuotaCharge {
+        let mut guard = self.state.lock().await;
+        let state = &mut *guard;
+        match state.candidate.as_mut() {
+            Some(spool) => spool.charge.take(),
+            None => QuotaCharge::empty(&state.quota),
+        }
+    }
+
+    /// Returns a charge taken by [`Self::take_candidate_charge`] to the live
+    /// candidate. Bytes still held when no candidate is live are released.
+    pub async fn restore_candidate_charge(&self, mut charge: QuotaCharge) {
+        let mut guard = self.state.lock().await;
+        if let Some(spool) = guard.candidate.as_mut() {
+            spool.charge.absorb(&mut charge);
+        }
+    }
+
     /// Whether the draft holds submitted candidate bytes. A draft that never
     /// submitted bytes has nothing for a commit to accept or refuse, the same
     /// condition `commit_durable_save` tests before it judges staleness.
@@ -2041,7 +2114,7 @@ impl<S> EditDraft<S> {
         match decision {
             ActivationDecision::Accepted(pin) => {
                 let image = Arc::new(VfsFileSnapshot::new(pin, bytes));
-                state.candidate = None;
+                state.drop_candidate();
                 state.baseline = Arc::clone(&image);
                 state.last_rejection = None;
                 state.last_accepted = Some((revision, Arc::clone(&image)));
@@ -2049,7 +2122,7 @@ impl<S> EditDraft<S> {
             }
             ActivationDecision::Rejected(diagnostic) => {
                 state
-                    .retain_rejection_with(revision, bytes, diagnostic)
+                    .retain_rejection(revision, diagnostic)
                     .map_err(FsyncFailure::Backing)?;
                 Ok(FsyncOutcome::Rejected(diagnostic))
             }
@@ -3764,14 +3837,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             .is_some_and(|matches| !matches)
         {
             let diagnostic = stale_baseline_diagnostic();
-            let retained = snapshot
-                .to_arc()
-                .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
             draft
                 .state
                 .lock()
                 .await
-                .retain_retryable_conflict_with(revision, retained, diagnostic)
+                .retain_retryable_conflict(revision, diagnostic)
                 .map_err(VfsSaveError::Backing)?;
             return Err(VfsSaveError::Stale {
                 generation: *self.cache_epoch.generation.lock().await,
@@ -3810,14 +3880,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         };
         match admission.commit(candidate).await {
             Err(TableActivationError::ValidationFailed(diagnostic)) => {
-                let retained = snapshot
-                    .to_arc()
-                    .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
                 draft
                     .state
                     .lock()
                     .await
-                    .retain_rejection_with(revision, retained, diagnostic)
+                    .retain_rejection(revision, diagnostic)
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Rejected {
                     generation: *cache_generation,
@@ -3826,14 +3893,11 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
             }
             Err(TableActivationError::Runtime(RuntimeError::StaleTableSchema)) => {
                 let diagnostic = stale_baseline_diagnostic();
-                let retained = snapshot
-                    .to_arc()
-                    .map_err(|_| VfsSaveError::Backing(EditDraftError::BackingIo))?;
                 draft
                     .state
                     .lock()
                     .await
-                    .retain_retryable_conflict_with(revision, retained, diagnostic)
+                    .retain_retryable_conflict(revision, diagnostic)
                     .map_err(VfsSaveError::Backing)?;
                 return Err(VfsSaveError::Stale {
                     generation: *cache_generation,
@@ -3860,7 +3924,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                     generation: next_generation,
                 },
             ));
-            draft_state.candidate = None;
+            draft_state.drop_candidate();
             draft_state.last_rejection = None;
             draft_state.retained_invalid = None;
             draft_state.baseline = Arc::clone(&image);
@@ -3970,7 +4034,7 @@ mod tests {
         RuntimeIdentity, RuntimeState, RuntimeTableRows, TableActivationCandidateValidator,
         TableObjectId,
     };
-    use orna_repository_v1::{ProtectedContentTransfer, Repository, RuntimeGeneration};
+    use orna_repository_v1::{ProtectedContentTransfer, Repository};
     use orna_value_v1::{Raw, SchemaDescriptor};
     use std::sync::{
         Mutex as TestMutex,
@@ -4764,7 +4828,8 @@ mod tests {
                 .retained_invalid_draft()
                 .await
                 .unwrap()
-                .replacement_bytes(),
+                .replacement_bytes()
+                .unwrap(),
             rejected_bytes.as_bytes()
         );
         assert_ne!(baseline.as_bytes(), accepted_bytes.as_bytes());
@@ -4926,6 +4991,32 @@ mod tests {
         assert_eq!(quota.used.load(Ordering::Acquire), baseline_len + 16);
     }
 
+    /// A refused candidate is charged once, by the live spool that already holds
+    /// it. Its retained copy adds no charge, so the disk record of the same
+    /// candidate (its header plus its bytes, one reservation) still fits beside
+    /// the spool at a quota of exactly `2 * candidate + header`.
+    #[tokio::test]
+    async fn refused_candidate_is_charged_once_and_leaves_room_for_its_disk_record() {
+        const HEADER: u64 = 64;
+        let len = fixture_image().bytes.len().max(32 << 10) as u64;
+        let quota = Arc::new(DraftQuota::new(2 * len + HEADER));
+        let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
+        let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
+        draft.write_at(0, &[0x58; 32 << 10]).await.unwrap();
+        assert_eq!(draft.candidate_len().await, len);
+        assert_eq!(quota.used.load(Ordering::Acquire), len);
+
+        let mut state = draft.state.lock().await;
+        let revision = state.revision;
+        state
+            .retain_rejection(revision, stale_baseline_diagnostic())
+            .unwrap();
+        drop(state);
+        assert_eq!(quota.used.load(Ordering::Acquire), len);
+        let disk = QuotaCharge::reserve(&quota, HEADER + len);
+        assert!(disk.is_ok(), "the disk record of the refused candidate must fit");
+    }
+
     /// Several drafts edited at once stay within the 1 GiB default limit when
     /// each grows to a 64 MiB compact file: 8 * 64 MiB = 512 MiB.
     #[tokio::test]
@@ -4945,11 +5036,10 @@ mod tests {
     }
 
     /// A retained rejected draft is quota accounted (profiles/vfs-1.md): its
-    /// copy adds to the aggregate charge while held, and the charge is released
-    /// when the draft drops.
+    /// copy aliases the live spool, so the spool's single charge is carried
+    /// over while held and released when the draft drops.
     #[tokio::test]
     async fn retained_rejected_draft_is_charged_and_released() {
-        let baseline_len = fixture_image().bytes.len();
         let quota = Arc::new(DraftQuota::new(1 << 20));
         let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
         let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
@@ -4962,10 +5052,7 @@ mod tests {
             .await
             .retain_rejection(revision, rejected())
             .unwrap();
-        assert_eq!(
-            quota.used.load(Ordering::Acquire) - used_before,
-            baseline_len
-        );
+        assert_eq!(quota.used.load(Ordering::Acquire), used_before);
         drop(draft);
         assert_eq!(quota.used.load(Ordering::Acquire), 0);
     }
@@ -5080,7 +5167,7 @@ mod tests {
 
         let retained = draft.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.diagnostic(), rejected());
-        assert_ne!(retained.replacement_bytes(), &fixture_image().bytes.to_arc().unwrap()[..]);
+        assert_ne!(retained.replacement_bytes().unwrap(), &fixture_image().bytes.to_arc().unwrap()[..]);
 
         let second = draft
             .fsync_with(|_| {
@@ -5291,7 +5378,7 @@ mod tests {
             row_text
         );
         let retained = save.retained_invalid_draft().await.unwrap();
-        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.replacement_bytes().unwrap(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
         assert_ne!(retained.id(), [0u8; 16]);
 
@@ -5338,7 +5425,7 @@ mod tests {
             row_text
         );
         let retained = draft.retained_invalid_draft().await.unwrap();
-        assert_eq!(retained.replacement_bytes(), invalid);
+        assert_eq!(retained.replacement_bytes().unwrap(), invalid);
         assert_eq!(retained.diagnostic(), rejected());
         assert_eq!(repository.generation().await, 0);
 
@@ -5380,7 +5467,7 @@ mod tests {
             row_text
         );
         let parked = draft.retained_invalid_draft().await.unwrap();
-        assert_eq!(parked.replacement_bytes(), invalid);
+        assert_eq!(parked.replacement_bytes().unwrap(), invalid);
         assert_eq!(parked.diagnostic(), stale_diagnostic);
         assert_ne!(parked.id(), [0u8; 16]);
         // A stale rejection of the same unchanged revision keeps the identity
@@ -5452,7 +5539,7 @@ mod tests {
         assert_eq!(target.cache_generation().await, 0);
         assert_eq!(old_handle.read_at(0, old_bytes.len()).unwrap(), old_bytes);
         let retained = scratch.retained_invalid_draft().await.unwrap();
-        assert_eq!(retained.replacement_bytes(), &[0x58]);
+        assert_eq!(retained.replacement_bytes().unwrap(), &[0x58]);
         assert_eq!(*retained.baseline().snapshot(), 7);
 
         let repeated = target
@@ -5493,7 +5580,8 @@ mod tests {
                 .retained_invalid_draft()
                 .await
                 .unwrap()
-                .replacement_bytes(),
+                .replacement_bytes()
+                .unwrap(),
             &[0x58]
         );
     }
@@ -5630,7 +5718,8 @@ mod tests {
                 .retained_invalid_draft()
                 .await
                 .unwrap()
-                .replacement_bytes(),
+                .replacement_bytes()
+                .unwrap(),
             &[0x58]
         );
     }
@@ -5796,7 +5885,8 @@ mod tests {
                 .retained_invalid_draft()
                 .await
                 .expect("a refused read-baseline save keeps its draft")
-                .replacement_bytes(),
+                .replacement_bytes()
+                .unwrap(),
             draft_bytes.as_bytes()
         );
         // The REPL change is still what the row holds, and the read handle
