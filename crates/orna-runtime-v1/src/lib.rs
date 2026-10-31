@@ -23113,6 +23113,93 @@ mod tests {
         assert_eq!(state.capture().await.unwrap(), before_capture);
     }
 
+    /// ORNA-VFS-019 (ornadb-eufo.2.2), residual window: a committed schema
+    /// change that lands after the second in-transaction read and before COMMIT
+    /// is not observed by the save, because no SQLite lock covers the Git head.
+    /// The save is accepted and commits its row. Publication does not publish
+    /// that row under an unvalidated schema: it re-reads the head, re-validates
+    /// every frozen row against it, and advances the ref by CAS against that
+    /// same head (`cli_publish.rs` `validate_candidate_source_rows`;
+    /// `advance_current_ref_bound`). This test pins the save-side behaviour.
+    #[tokio::test]
+    async fn schema_commit_landing_after_final_read_is_accepted_by_the_save() {
+        /// Admits the schema for the two in-transaction reads and reports a
+        /// changed identity from a third read on. The save makes exactly two
+        /// reads, so the change lands after the last one.
+        struct ChangeAfterFinalRead {
+            tables: Vec<String>,
+            admitted: TableSchemaIdentity,
+            reads: usize,
+        }
+
+        impl TableActivationCandidateValidator for ChangeAfterFinalRead {
+            fn tables(&self) -> &[String] {
+                &self.tables
+            }
+
+            fn cwd_generation(&self) -> Option<&CwdGeneration> {
+                None
+            }
+
+            fn schema_identity(&mut self) -> Option<TableSchemaIdentity> {
+                self.reads += 1;
+                if self.reads <= 2 {
+                    Some(self.admitted.clone())
+                } else {
+                    Some(TableSchemaIdentity::new([8; 32]))
+                }
+            }
+
+            fn validate(&mut self, _: &RuntimeTableRows) -> Result<(), SafeDiagnostic> {
+                Ok(())
+            }
+        }
+
+        let (_temp, repo) = repository();
+        let state = open_state(&repo).await;
+        let lease = state.acquire_lease(id(4)).await.unwrap();
+        let mutations = [table_mutation(5, 1, Some(9))];
+        let admitted = activation_test_schema();
+        let before = state
+            .latest_checkpoint()
+            .await
+            .unwrap()
+            .map(|checkpoint| checkpoint.generation);
+        let context = state.begin_activation().await.unwrap();
+        let mut validator = ChangeAfterFinalRead {
+            tables: vec!["books".into()],
+            admitted: admitted.clone(),
+            reads: 0,
+        };
+        let result = state
+            .commit_validated_table_activation(ValidatedTableActivationCommit {
+                writer: lease,
+                context: &context,
+                cwd_generation: None,
+                expected_schema: Some(admitted),
+                mutations: &mutations,
+                content_pins: &mut [],
+                next_digest: digest(6),
+                validator: &mut validator,
+                faults: &NoFault,
+            })
+            .await;
+        assert!(result.is_ok(), "the save is accepted: no read follows the change");
+        assert_eq!(
+            validator.reads, 2,
+            "the save reads the committed schema exactly twice"
+        );
+        assert_ne!(
+            state
+                .latest_checkpoint()
+                .await
+                .unwrap()
+                .map(|checkpoint| checkpoint.generation),
+            before,
+            "the accepted save publishes its checkpoint"
+        );
+    }
+
     /// ORNA-VFS-008/VFS-021: a VFS save whose durable commit succeeded but
     /// whose acknowledgement was lost is not committed a second time. The
     /// replay of the identical candidate publishes the accepted image and
