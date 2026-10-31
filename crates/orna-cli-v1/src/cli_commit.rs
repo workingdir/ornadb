@@ -463,7 +463,7 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             "table assertion is false",
             "change the staged rows so every table assertion holds, stage them, then retry `orna commit -m MESSAGE`; no commit was created",
         ),
-        // ORNA-ASSERT-048: the candidate could not be validated, so it is refused whole.
+        // ORNA-ASSERT-048, ORNA-ASSERT-050: the candidate could not be validated whole, so it is refused whole.
         RepositoryError::CandidateAssertionRefused(CandidateAssertionRefusal::Unvalidated(_)) => (
             "E2300",
             "staged candidate could not be validated against its table assertions",
