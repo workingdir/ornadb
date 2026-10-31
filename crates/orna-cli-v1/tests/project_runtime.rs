@@ -1883,8 +1883,8 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
 }
 
 /// Pins `stdlib/std` to a snapshot holding the standard root plus `standard`, and
-/// commits the project root holding `project` beside the pinned gitlink.
-fn captured_standard_project_with(
+/// stages the project root holding `project` beside the pinned gitlink.
+fn staged_standard_project_with(
     standard: &[(&str, &str)],
     project: &[(&str, &str)],
 ) -> (tempfile::TempDir, String) {
@@ -1922,7 +1922,27 @@ fn captured_standard_project_with(
         directory.path(),
         &["update-index", "--add", "--cacheinfo", &link],
     );
+    (directory, module_commit)
+}
+
+/// Publishes the snapshot with a raw git commit. `orna commit` would refuse fixture-only table names,
+/// so the run-time refusal stays the guard under test.
+fn captured_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
+    let (directory, module_commit) = staged_standard_project_with(standard, project);
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+    (directory, module_commit)
+}
+
+/// Publishes the snapshot through `orna commit`, which writes the table identity inventory.
+fn committed_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
+    let (directory, module_commit) = staged_standard_project_with(standard, project);
+    commit_orna(directory.path(), "capture std snapshot");
     (directory, module_commit)
 }
 
@@ -2019,6 +2039,151 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     assert!(check.status.success(), "check stderr: {:?}", check.stderr);
     assert_eq!(check.stdout, b"project valid\n");
     assert!(check.stderr.is_empty());
+}
+
+#[test]
+/// A run admits a pinned standard import in a project that also declares a table with an assertion. `answer` writes no rows, so the assertion is not evaluated on this path; commit-time evaluation is pinned separately.
+fn binary_run_admits_a_standard_import_alongside_a_table_assertion() {
+    let (directory, _module_commit) = committed_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub table Sample(id: Str) {\n    label: Str,\n    assert every(row => row.label != \"\");\n}\npub fn answer(): Int = increment(41);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "main.answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+/// A table assertion naming a table the project does not declare (`Contact` exists only in a conformance fixture) is refused with a compile diagnostic; no run is admitted.
+fn binary_run_refuses_an_assertion_naming_an_undeclared_table() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub table Sample(id: Str) {\n    label: Str,\n    assert every(row => exists(Contact, contact => contact.name == row.label));\n}\npub fn answer(): Int = increment(41);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "main.answer");
+
+    assert!(
+        !output.status.success(),
+        "fixture-only table name was admitted"
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = std::str::from_utf8(&output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.starts_with("error["), "{stderr}");
+}
+
+#[tokio::test(flavor = "current_thread")]
+/// A committed row that violates a table assertion is refused on the run path. The run exits non-zero with empty stdout and
+/// a diagnostic on stderr, the committed rows stay byte-identical, and a valid row is still accepted. The run path does not
+/// yet name the violated assertion or a deterministic safe witness (ornadb-a3jt), so this test asserts neither that text nor
+/// the internal code. The project imports a pinned standard module, so admission runs through the production catalogue.
+async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keeps_rows_unchanged() {
+    let (directory, _module_commit) = committed_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            concat!(
+                "use std.math.{increment};\n",
+                "pub table Sample(id: Int) {\n",
+                "    label: Str,\n",
+                "    assert every(row => row.label != \"\");\n",
+                "}\n",
+                "fn insert_sample(id: Int, label: Str): Bool {\n",
+                "    Sample.insert({ id: id, label: label });\n",
+                "    true\n",
+                "}\n",
+                "pub fn seed_valid(): Bool = insert_sample(increment(0), \"present\");\n",
+                "pub fn seed_violation(): Bool = insert_sample(increment(1), \"\");\n",
+                "pub fn seed_more(): Bool = insert_sample(increment(2), \"present\");\n",
+            ),
+        )],
+    );
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+
+    let accepted = invoke(directory.path(), "run", "main.seed_valid");
+    assert!(
+        accepted.status.success(),
+        "valid run stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
+    assert_eq!(accepted.stdout, b"invocation completed\n");
+    assert!(accepted.stderr.is_empty());
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after valid row");
+    let rows_before = state
+        .committed_table_rows("Sample")
+        .await
+        .expect("read committed rows");
+    drop(state);
+    assert_eq!(rows_before.len(), 1);
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+            "main.seed_violation",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!refused.status.success(), "violating row was admitted");
+    assert!(refused.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.starts_with("error["), "stderr: {stderr}");
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after refused row");
+    let rows_after = state
+        .committed_table_rows("Sample")
+        .await
+        .expect("read committed rows");
+    drop(state);
+    assert_eq!(rows_after, rows_before);
+
+    let accepted_again = invoke(directory.path(), "run", "main.seed_more");
+    assert!(
+        accepted_again.status.success(),
+        "second valid run stderr: {}",
+        String::from_utf8_lossy(&accepted_again.stderr)
+    );
+    assert_eq!(accepted_again.stdout, b"invocation completed\n");
+    assert!(accepted_again.stderr.is_empty());
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after second valid row");
+    assert_eq!(
+        state
+            .committed_table_rows("Sample")
+            .await
+            .expect("read committed rows")
+            .len(),
+        2
+    );
 }
 
 #[test]
