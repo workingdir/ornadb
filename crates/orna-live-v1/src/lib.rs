@@ -39,8 +39,9 @@ use orna_runtime_v1::{
     Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
     RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
     RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    ActivationEffectReport, StagedTableActivation, TableMutation, TerminalOutcome, WriterLease,
-    admin_invocation_id, with_terminal_admin_effect,
+    ActivationEffectReport, StagedTableActivation, TableActivationCandidateValidator,
+    TableActivationError, TableMutation, TerminalOutcome, ValidatedTableRequestActivationCommit,
+    WriterLease, admin_invocation_id, with_terminal_admin_effect,
 };
 use orna_security_v1::{
     AttachOutcome, AttachmentId, BoundaryError, CredentialIssuer, OpaqueCredential, Origin,
@@ -109,6 +110,9 @@ pub enum Error {
     SnapshotExpired,
     /// The retained session credential or lifetime has expired.
     SessionExpired,
+    /// The table candidate validator rejected the staged commit. No row,
+    /// checkpoint, or terminal success was published for it.
+    ValidationRejected,
 }
 
 impl Error {
@@ -132,6 +136,7 @@ impl Error {
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
             Self::SessionExpired => "wire.session_expired",
+            Self::ValidationRejected => "live.validation_rejected",
         }
     }
 }
@@ -1674,6 +1679,7 @@ impl HttpResponse {
                 Error::Closed | Error::SessionExpired => 410,
                 Error::Limit => 413,
                 Error::UnsupportedSubprotocol => 426,
+                Error::ValidationRejected => 422,
                 Error::DeletionFailed
                 | Error::ApplicationDrainRequired
                 | Error::InvalidFrame
@@ -1696,6 +1702,14 @@ impl HttpResponse {
 pub trait DeletionAdapter: SessionDeletionAdapter {}
 impl<T: SessionDeletionAdapter> DeletionAdapter for T {}
 
+/// Builds the table candidate validator for one staged commit. It receives the
+/// activation context that the staged mutations were admitted under. Commits
+/// use the validated runtime path only when a factory is installed.
+pub type TableCandidateValidatorFactory = Box<
+    dyn Fn(&RuntimeActivationContext) -> Result<Box<dyn TableActivationCandidateValidator>>
+        + Send,
+>;
+
 /// Concrete async request/frame host adapter. Its async methods make it fit
 /// ordinary async routers while keeping I/O explicit at the edges.
 pub struct LiveHost {
@@ -1715,6 +1729,7 @@ pub struct LiveHost {
     recovered_owner: Option<RequestOwner>,
     takeover_recovery_complete: bool,
     application_work: LiveApplicationWorkSupervisor,
+    table_candidate_validator: Option<TableCandidateValidatorFactory>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1865,6 +1880,18 @@ impl LiveHost {
         )
     }
 
+    /// Installs the factory that builds the table candidate validator for each
+    /// staged table commit. Commits then publish rows, checkpoint, and terminal
+    /// success only after the candidate validates.
+    #[must_use]
+    pub fn with_table_candidate_validator(
+        mut self,
+        factory: TableCandidateValidatorFactory,
+    ) -> Self {
+        self.table_candidate_validator = Some(factory);
+        self
+    }
+
     fn build(
         limits: Limits,
         security: SessionBoundary,
@@ -1890,6 +1917,7 @@ impl LiveHost {
             recovered_owner,
             takeover_recovery_complete: false,
             application_work: LiveApplicationWorkSupervisor::new(),
+            table_candidate_validator: None,
         })
     }
 
@@ -4409,10 +4437,43 @@ impl LiveHost {
             effects,
         )
         .map_err(|error| map_runtime(&error))?;
-        let committed = runtime
-            .commit_staged_table_request_activation(lease, identity, fingerprint, &staged, terminal)
-            .await
-            .map_err(|error| map_runtime(&error))?;
+        let committed = match self.table_candidate_validator.as_ref() {
+            Some(factory) => {
+                let mut validator = factory(staged.context())?;
+                runtime
+                    .commit_validated_table_request_activation(
+                        ValidatedTableRequestActivationCommit {
+                            writer: lease,
+                            identity,
+                            fingerprint,
+                            context: staged.context(),
+                            mutations: staged.mutations(),
+                            next_digest: staged.next_digest(),
+                            outcome: terminal,
+                            validator: &mut *validator,
+                            faults: staged.faults(),
+                            effects: staged.effects(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        TableActivationError::Runtime(error) => map_runtime(&error),
+                        TableActivationError::ValidationFailed(_) => Error::ValidationRejected,
+                    })?
+            }
+            None => {
+                runtime
+                    .commit_staged_table_request_activation(
+                        lease,
+                        identity,
+                        fingerprint,
+                        &staged,
+                        terminal,
+                    )
+                    .await
+                    .map_err(|error| map_runtime(&error))?
+            }
+        };
         if let Some(after_commit) = after_commit {
             after_commit();
         }
@@ -8314,6 +8375,7 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
+        Error::ValidationRejected => (422, "live.validation_rejected"),
         // A session whose application work must first be joined is
         // temporarily unavailable on a route that cannot join it; the
         // request itself is well formed.
@@ -11052,6 +11114,136 @@ mod tests {
             drop(host);
             fs::remove_dir_all(root).unwrap();
         }
+    }
+
+    struct RejectingTableCandidateValidator {
+        tables: Vec<String>,
+    }
+
+    impl TableActivationCandidateValidator for RejectingTableCandidateValidator {
+        fn tables(&self) -> &[String] {
+            &self.tables
+        }
+
+        fn validate(
+            &mut self,
+            _rows: &orna_runtime_v1::RuntimeTableRows,
+        ) -> std::result::Result<(), SafeDiagnostic> {
+            Err(SafeDiagnostic {
+                code: DiagnosticCode::TableAssertionFalse,
+                class: DiagnosticClass::Permanent,
+            })
+        }
+    }
+
+    fn rejecting_validator(
+        _context: &RuntimeActivationContext,
+    ) -> Result<Box<dyn TableActivationCandidateValidator>> {
+        Ok(Box::new(RejectingTableCandidateValidator {
+            tables: vec!["Hook".into()],
+        }))
+    }
+
+    #[test]
+    fn transaction_rejected_by_candidate_validator_publishes_nothing() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("orna-live-candidate-reject-{nonce}"));
+        fs::create_dir(&root).unwrap();
+        assert!(
+            Command::new("git")
+                .args(["init", "-b", "main"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let repository = Repository::discover(&root).unwrap();
+        let runtime = futures::executor::block_on(RuntimeState::open(
+            &repository,
+            RuntimeIdentity {
+                database_id: [26; 16],
+                repository_id: [27; 16],
+            },
+            [28; 32],
+        ))
+        .unwrap();
+        let owner = futures::executor::block_on(runtime.acquire_lease([9; 16])).unwrap();
+        let identity = RequestIdentity {
+            session_id: [1; 16],
+            request_id: [29; 16],
+        };
+        let fingerprint = [30; 32];
+        let (_, capability) = futures::executor::block_on(
+            runtime.reserve_request_with_admission(identity, fingerprint),
+        )
+        .unwrap();
+        futures::executor::block_on(runtime.start_request_with_owner_and_admission(
+            identity,
+            fingerprint,
+            owner,
+            capability.expect("reservation should have an owner capability"),
+        ))
+        .unwrap();
+        let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
+        let mut host = subscribed_host(Some(runtime))
+            .with_table_candidate_validator(Box::new(rejecting_validator));
+        let after_commit = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let value = CanonicalValue::unit().encode().unwrap();
+        let expected_key = value.clone();
+        let mutation = TableMutation::new([23; 16], "Hook", value.clone(), Some(value)).unwrap();
+        let response = Envelope {
+            request: Some(identity.request_id),
+            watch: None,
+            message: Message::Result {
+                status: ResultStatus::Success,
+                value: Some(CanonicalValue::unit()),
+                fingerprint,
+                diagnostic: None,
+            },
+            extensions: BTreeMap::new(),
+        };
+        let after_commit_flag = Arc::clone(&after_commit);
+        let transaction = LiveEvalTransaction::new(
+            vec![mutation],
+            [24; 32],
+            ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            Arc::new(NoFault),
+        )
+        .for_request(identity)
+        .after_commit(move || {
+            after_commit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let result = futures::executor::block_on(host.commit_eval_transaction(
+            identity.session_id,
+            identity.request_id,
+            fingerprint,
+            None,
+            &context,
+            response,
+            transaction,
+        ));
+        assert!(
+            matches!(&result, Err(Error::ValidationRejected)),
+            "the candidate validator must reject the staged commit: {result:?}"
+        );
+        assert!(!after_commit.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            futures::executor::block_on(
+                host.runtime
+                    .as_ref()
+                    .unwrap()
+                    .committed_table_row("Hook", &expected_key)
+            )
+            .unwrap(),
+            None,
+            "a rejected candidate publishes no table row"
+        );
+
+        drop(host);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
