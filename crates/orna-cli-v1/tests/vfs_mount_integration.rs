@@ -4238,6 +4238,68 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
 }
 
 #[tokio::test]
+/// ORNA-VFS-010 / profiles/vfs-1.md:93 (ornadb-5il1.366): an unbound editor scratch inside a
+/// Blob-field row is disk-backed extents. A 64 MiB scratch written in 1 MiB ranges and read back
+/// through the mount must finish within a wall-clock bound, and the mount daemon's peak RSS growth
+/// must stay under 16 MiB. Regression guard: a whole-candidate copy per FUSE write would raise the
+/// high-water mark by the candidate size, which exceeds that 16 MiB bound.
+async fn cwd_mount_scratch_64_mib_chunked_write_is_bounded_time_and_rss() {
+    const CHUNK_BYTES: usize = 1 << 20;
+    const CHUNKS: usize = 64;
+    const RSS_GROWTH_BOUND_BYTES: u64 = 16 * 1024 * 1024;
+    const WALL_BOUND: Duration = Duration::from_secs(10);
+    let original = lcg_bytes(0x0366_0000_0000_0001, 4 * 1024 + 9);
+    let Some(mut row) = mount_captured_blob(&original).await else {
+        return;
+    };
+    let row_path = row.mounted.mountpoint.join("Music/london");
+    let scratch_path = row_path.join(".bounded64.wav.replace");
+    let chunks: Vec<Vec<u8>> = (0..CHUNKS)
+        .map(|chunk| lcg_bytes(0x0366_0000_1000_0000 + chunk as u64, CHUNK_BYTES))
+        .collect();
+    // VmHWM is a high-water mark: the growth past this baseline is what the scratch adds.
+    let baseline = peak_rss_bytes(row.mounted.child.id());
+
+    let mut handle = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&scratch_path)
+        .expect("creating an unbound scratch inside a Blob-field row directory is supported");
+    let started = Instant::now();
+    for chunk in &chunks {
+        handle.write_all(chunk).expect("write a 1 MiB scratch chunk");
+    }
+    handle.seek(SeekFrom::Start(0)).unwrap();
+    let mut read_back = vec![0u8; CHUNK_BYTES];
+    for chunk in &chunks {
+        handle.read_exact(&mut read_back).expect("read a 1 MiB scratch chunk");
+        assert!(read_back == *chunk, "scratch chunk reads back unchanged");
+    }
+    let elapsed = started.elapsed();
+    let growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
+    eprintln!(
+        "64 MiB unbound scratch write and read-back took {elapsed:?}; mount daemon peak RSS growth {growth} bytes"
+    );
+    assert_eq!(
+        handle.metadata().unwrap().len(),
+        (CHUNK_BYTES * CHUNKS) as u64,
+        "the scratch reports its full 64 MiB length"
+    );
+    assert!(
+        elapsed < WALL_BOUND,
+        "64 MiB scratch write and read-back took {elapsed:?}, over the bound {WALL_BOUND:?}"
+    );
+    assert!(
+        growth < RSS_GROWTH_BOUND_BYTES,
+        "mount daemon peak RSS grew {growth} bytes during the scratch, reaching the bound {RSS_GROWTH_BOUND_BYTES} bytes"
+    );
+    drop(handle);
+    std::fs::remove_file(&scratch_path).expect("removing the unbound scratch before unmount");
+    unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
+}
+
+#[tokio::test]
 /// ORNA-VFS-011 / EDIT-1 step 1: the expected baseline is captured when a write-open handle opens.
 /// A sibling handle that accepts first changes the row, so the older handle's fsync must be refused
 /// and the accepted bytes must stay on disk (no last-writer-wins overwrite).
