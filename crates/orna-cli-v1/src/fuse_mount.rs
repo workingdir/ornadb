@@ -819,7 +819,8 @@ fn retain_scratch_candidate(
     len: u64,
     read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
 ) -> Result<(), RetentionError> {
-    let retained = save.writer.retained_drafts.retain(path, cause, len, read_chunk)?;
+    let mut candidate = QuotaCharge::empty(&save.writer.retained_drafts.quota);
+    let retained = save.writer.retained_drafts.retain(path, cause, len, &mut candidate, read_chunk)?;
     eprintln!(
         "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
         retained.id,
@@ -947,11 +948,14 @@ impl VfsRetainedDraftStore {
     /// same candidate for the same path again keeps its first record and ID.
     /// Holds one chunk at a time: `read_chunk(offset, length)` supplies the
     /// candidate, which is digested and written in two streaming passes.
+    /// A live candidate passes its charge as `candidate`: a new record absorbs it, so
+    /// its bytes are charged once. A record already on disk leaves `candidate` alone.
     fn retain(
         &self,
         path: &str,
         cause: &str,
         len: u64,
+        candidate: &mut QuotaCharge,
         read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
     ) -> Result<RetainedDraft, RetentionError> {
         let mut prefix = Sha256::new();
@@ -1013,8 +1017,13 @@ impl VfsRetainedDraftStore {
             "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
         );
         // The whole record is charged before any byte is staged, so a refused
-        // reservation (EDQUOT) leaves nothing behind.
-        let charge = QuotaCharge::reserve(&self.quota, header.len() as u64 + len).map_err(|_| {
+        // reservation (EDQUOT) leaves nothing behind. Bytes the candidate already
+        // holds are not charged again.
+        let mut charge = QuotaCharge::reserve(
+            &self.quota,
+            (header.len() as u64 + len).saturating_sub(candidate.bytes()),
+        )
+        .map_err(|_| {
             RetentionError {
                 errno: Errno::EDQUOT,
                 message: format!(
@@ -1051,6 +1060,7 @@ impl VfsRetainedDraftStore {
                 &error.error,
             )
         })?;
+        charge.absorb(candidate);
         self.records
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3951,6 +3961,7 @@ impl WorkspaceFilesystem {
                 &record.identity.logical_path,
                 "sys.vfs.stale_edit",
                 candidate.len,
+                &mut QuotaCharge::empty(&writer.retained_drafts.quota),
                 &mut |offset, length| {
                     file.seek(SeekFrom::Start(candidate.offset + offset)).map_err(|error| {
                         RetentionError::io(
@@ -4528,6 +4539,7 @@ impl WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
         let len = save.writer.runtime.block_on(draft.candidate_len());
+        let mut candidate = save.writer.runtime.block_on(draft.take_candidate_charge());
         let retained = {
             let mut read_chunk = |offset: u64, length: usize| {
                 save.writer
@@ -4537,8 +4549,9 @@ impl WorkspaceFilesystem {
             };
             save.writer
                 .retained_drafts
-                .retain(&path, cause, len, &mut read_chunk)
+                .retain(&path, cause, len, &mut candidate, &mut read_chunk)
         };
+        save.writer.runtime.block_on(draft.restore_candidate_charge(candidate));
         let (retained_draft, unretained, failure) = match retained {
             Ok(retained) => {
                 eprintln!(
@@ -4903,11 +4916,22 @@ impl WorkspaceFilesystem {
                     },
                 },
             };
-            match save
+            let mut candidate = match &source {
+                CandidateSource::Draft(draft) => {
+                    save.writer.runtime.block_on(draft.take_candidate_charge())
+                }
+                CandidateSource::Truncated { .. } => {
+                    QuotaCharge::empty(&save.writer.retained_drafts.quota)
+                }
+            };
+            let retained = save
                 .writer
                 .retained_drafts
-                .retain(&path, cause, len, &mut read_chunk)
-            {
+                .retain(&path, cause, len, &mut candidate, &mut read_chunk);
+            if let CandidateSource::Draft(draft) = &source {
+                save.writer.runtime.block_on(draft.restore_candidate_charge(candidate));
+            }
+            match retained {
                 Ok(retained) => {
                     reports.insert(format!(
                         "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
@@ -10457,8 +10481,9 @@ mod hardening_tests {
             total_read.set(total_read.get() + length as u64);
             Ok((offset..offset + length as u64).map(|index| (index % 251) as u8).collect())
         };
+        let mut candidate = orna_runtime_v1::vfs::QuotaCharge::empty(&store.quota);
         let retained = store
-            .retain("/music/big.orna", "refused", LEN, &mut read_chunk)
+            .retain("/music/big.orna", "refused", LEN, &mut candidate, &mut read_chunk)
             .unwrap();
         assert!(largest_read.get() > 0);
         assert!(largest_read.get() <= super::CANDIDATE_CHUNK_BYTES);
