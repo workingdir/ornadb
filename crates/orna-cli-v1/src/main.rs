@@ -55,7 +55,7 @@ use orna_application_v1::{
 use orna_conformance_v1::{
     AdmittedReplSession, BoundedEvaluator, DurableTransactionalEvaluator, ProjectEnvironment,
     ProjectExpectations, ProjectUnit, ReplError, RuntimeEvaluator, SourceUnit, StageOutcome,
-    transactional_loaded_project_candidate_validator,
+    project_declares_assertions, transactional_loaded_project_candidate_validator,
 };
 use orna_evaluator_v1::{Environment, Limits, SysHostBindingRegistry};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
@@ -3575,11 +3575,6 @@ fn run_repl_input(
             return Err(abandon(repl_evaluation_failure(failure)));
         }
     };
-    // Known once evaluation succeeded: an external binding may already have run.
-    let external_possible = matches!(
-        activation.effects(),
-        orna_runtime_v1::ActivationEffectReport::ExternalPossible
-    );
     // The request is committed, so an observation write failure is only a
     // warning and never reports the committed input as uncertain.
     let record_committed = |status: orna_runtime_v1::InvocationObservationStatus| {
@@ -3587,10 +3582,11 @@ fn run_repl_input(
             eprintln!("warning: committed; query observation not recorded");
         }
     };
-    // Failure after evaluation: uncertain when external effects may have run
-    // (the row stays Running for fenced recovery); otherwise cancelled.
+    // Failure after evaluation: uncertain when an external binding was
+    // dispatched (the row stays Running for fenced recovery); otherwise
+    // cancelled, the same rule as the commit arm below.
     let unsettled_after_evaluation = || -> repl::ReplFailure {
-        if external_possible {
+        if external_dispatched {
             let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
             REPL_EFFECT_UNCERTAIN.to_owned().into()
         } else {
@@ -3598,7 +3594,7 @@ fn run_repl_input(
         }
     };
     let unsettled_after_evaluation_because = |cause: String| -> repl::ReplFailure {
-        if external_possible {
+        if external_dispatched {
             let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
             repl_effect_uncertain(cause)
         } else {
@@ -3642,72 +3638,92 @@ fn run_repl_input(
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
         return Err(unsettled_after_evaluation());
     };
-    // ORNA-ASSERT-042: the post-mutation candidate is checked against the
-    // project's assertions before any row, checkpoint or terminal is
-    // published. The request-scoped activation publishes the request identity,
-    // fingerprint and terminal outcome in the same step as the rows.
-    let cwd_generation = u64::try_from(request_staged.context().capture().generation())
-        .ok()
-        .and_then(|runtime| {
-            repository
-                .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
-                .ok()
-        });
-    let Some(cwd_generation) = cwd_generation else {
-        return Err(unsettled_after_evaluation());
-    };
-    let mut validator = match transactional_loaded_project_candidate_validator(
-        &transactions.project,
-        &transactions.identities,
-        Some(cwd_generation),
-        Arc::clone(&transactions.table_object_ids),
-        Limits::default(),
-    ) {
-        Ok(validator) => validator,
-        Err(outcome) => {
-            return Err(unsettled_after_evaluation_because(stage_outcome_cause(
-                &outcome,
-            )));
+    // ORNA-ASSERT-042: a project that declares assertions checks the
+    // post-mutation candidate against them before any row, checkpoint or
+    // terminal is published. The request-scoped activation publishes the
+    // request identity, fingerprint and terminal outcome in the same step as
+    // the rows. A project without assertions has nothing to check, so its
+    // commit keeps the unvalidated activation path.
+    if project_declares_assertions(&transactions.project) {
+        let cwd_generation = u64::try_from(request_staged.context().capture().generation())
+            .ok()
+            .and_then(|runtime| {
+                repository
+                    .cwd_generation(orna_repository_v1::RuntimeGeneration::new(runtime))
+                    .ok()
+            });
+        let Some(cwd_generation) = cwd_generation else {
+            return Err(unsettled_after_evaluation());
+        };
+        let mut validator = match transactional_loaded_project_candidate_validator(
+            &transactions.project,
+            &transactions.identities,
+            Some(cwd_generation),
+            Arc::clone(&transactions.table_object_ids),
+            Limits::default(),
+        ) {
+            Ok(validator) => validator,
+            Err(outcome) => {
+                return Err(unsettled_after_evaluation_because(stage_outcome_cause(
+                    &outcome,
+                )));
+            }
+        };
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_validated_table_request_activation(
+                ValidatedTableRequestActivationCommit {
+                    writer,
+                    identity: request,
+                    fingerprint,
+                    context: request_staged.context(),
+                    mutations: request_staged.mutations(),
+                    next_digest: request_staged.next_digest(),
+                    outcome,
+                    validator: &mut *validator,
+                    faults: request_staged.faults(),
+                    effects: request_staged.effects(),
+                },
+            ));
+        match committed {
+            Ok(_) => {}
+            // Validation runs before any publication, so a failed validation
+            // leaves the input uncommitted. It is cancelled unless an external
+            // binding was actually dispatched during evaluation. Only a false
+            // assertion is ORNA-A091-009; other validator failures keep their
+            // diagnostic in the detail.
+            Err(TableActivationError::ValidationFailed(diagnostic)) if !external_dispatched => {
+                let failure = if orna_conformance_v1::is_table_assertion_false(diagnostic) {
+                    repl::ReplFailure::from("ORNA-A091-009".to_owned())
+                } else {
+                    repl_effect_cancelled(format!(
+                        "table assertion validation did not complete: {diagnostic:?}"
+                    ))
+                };
+                return Err(abandon(failure));
+            }
+            Err(error) => {
+                finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+                return Err(repl_effect_uncertain(format!(
+                    "table commit failed with {}",
+                    table_activation_cause(&error)
+                )));
+            }
         }
-    };
-    let committed = transactions
-        .runtime
-        .block_on(state.commit_validated_table_request_activation(
-            ValidatedTableRequestActivationCommit {
+    } else {
+        let committed = transactions
+            .runtime
+            .block_on(state.commit_staged_table_request_activation(
                 writer,
-                identity: request,
+                request,
                 fingerprint,
-                context: request_staged.context(),
-                mutations: request_staged.mutations(),
-                next_digest: request_staged.next_digest(),
+                &request_staged,
                 outcome,
-                validator: &mut *validator,
-                faults: request_staged.faults(),
-                effects: request_staged.effects(),
-            },
-        ));
-    match committed {
-        Ok(_) => {}
-        // Validation runs before any publication, so a failed validation
-        // leaves the input uncommitted. It is cancelled unless an external
-        // binding was actually dispatched during evaluation. Only a false
-        // assertion is ORNA-A091-009; other validator failures keep their
-        // diagnostic in the detail.
-        Err(TableActivationError::ValidationFailed(diagnostic)) if !external_dispatched => {
-            let failure = if orna_conformance_v1::is_table_assertion_false(diagnostic) {
-                repl::ReplFailure::from("ORNA-A091-009".to_owned())
-            } else {
-                repl_effect_cancelled(format!(
-                    "table assertion validation did not complete: {diagnostic:?}"
-                ))
-            };
-            return Err(abandon(failure));
-        }
-        Err(error) => {
+            ));
+        if let Err(error) = committed {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
             return Err(repl_effect_uncertain(format!(
-                "table commit failed with {}",
-                table_activation_cause(&error)
+                "table commit failed with {error}"
             )));
         }
     }
@@ -6314,6 +6330,46 @@ mod repl_request_effect_tests {
         assert!(
             running.is_empty(),
             "a failure before any external effect cancels its reserved row"
+        );
+    }
+
+    #[test]
+    fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
+        // The candidate seam accepts only scalar primary-key components, so an
+        // assertion cannot be checked against an enum-keyed candidate. The write
+        // is refused and its reserved row cancelled; it is never admitted.
+        let (_directory, repository, _relation) = format3_repository_for_table(
+            "pub enum Level {\n    low,\n    high,\n}\n\
+             pub table Task(level: Level) {\n    title: Str,\n    \
+             assert every(row => row.title != \"\");\n}\n",
+            "Task",
+        );
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            r#"main.Task.insert({ level: main.Level.low, title: "Ship" })"#,
+        )
+        .err()
+        .expect("the enum-keyed write is refused before it is published");
+        assert_eq!(failure.code, "ORNA-REPL-EFFECT");
+        let state = transactions
+            .state
+            .as_ref()
+            .expect("the effectful input opened the runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(
+            running.is_empty(),
+            "a refused candidate cancels its reserved row"
         );
     }
 }

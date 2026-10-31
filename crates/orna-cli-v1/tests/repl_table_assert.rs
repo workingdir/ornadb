@@ -90,6 +90,8 @@ fn false_table_assertion_rejects_the_update() {
         &orna_repl(&root, "main.Book.insert({ id: 1, title: \"Dune\" })"),
         "admit valid row",
     );
+    let head = git(&root, &["rev-parse", "HEAD"]);
+    let status = git(&root, &["status", "--porcelain"]);
 
     let output = orna_repl(
         &root,
@@ -98,6 +100,43 @@ fn false_table_assertion_rejects_the_update() {
     );
     let text = transcript(&output);
     assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    assert_eq!(git(&root, &["status", "--porcelain"]), status);
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("1 : Int"),
+        "{text}"
+    );
+    let title = orna_repl(
+        &root,
+        "main.Book | map(row => row.title) | first() ?? \"none\"",
+    );
+    assert_success(&title, "read the admitted title");
+    assert!(
+        String::from_utf8_lossy(&title.stdout).contains("\"Dune\" : Str"),
+        "{}",
+        transcript(&title)
+    );
+}
+
+const ENUM_KEYED_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
+pub table Task(level: Level) {\n    title: Str,\n}\n";
+
+#[test]
+fn enum_keyed_table_without_assertion_admits_the_write() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
+    commit_source(&root, "enum keyed table fixture");
+
+    // No assertion is declared, so the write keeps the unvalidated commit path
+    // and the scalar-only candidate seam is never reached.
+    let output = orna_repl(
+        &root,
+        "main.Task.insert({ level: main.Level.low, title: \"Ship\" })\n\
+         main.Task | count()",
+    );
+    let text = transcript(&output);
+    assert_success(&output, "REPL session");
+    assert!(!text.contains("ORNA-REPL-EFFECT"), "{text}");
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("1 : Int"),
         "{text}"
