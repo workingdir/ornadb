@@ -136,7 +136,7 @@ impl Error {
             Self::RuntimeUnavailable => "live.runtime_unavailable",
             Self::SnapshotExpired => "wire.snapshot_expired",
             Self::SessionExpired => "wire.session_expired",
-            Self::ValidationRejected => "live.validation_rejected",
+            Self::ValidationRejected => "ORNA-A091-009",
         }
     }
 }
@@ -4458,7 +4458,14 @@ impl LiveHost {
                     .await
                     .map_err(|error| match error {
                         TableActivationError::Runtime(error) => map_runtime(&error),
-                        TableActivationError::ValidationFailed(_) => Error::ValidationRejected,
+                        TableActivationError::ValidationFailed(diagnostic)
+                            if diagnostic.code == DiagnosticCode::TableAssertionFalse =>
+                        {
+                            Error::ValidationRejected
+                        }
+                        // Only a proven false assertion is a verdict on the
+                        // candidate. Any other validator failure fails closed.
+                        TableActivationError::ValidationFailed(_) => Error::RuntimeUnavailable,
                     })?
             }
             None => {
@@ -8375,7 +8382,7 @@ fn host_error(error: Error) -> WireResponse {
         Error::Denied => (403, "live.denied"),
         Error::ApplicationDeferred => (503, "live.application_deferred"),
         Error::RuntimeUnavailable => (503, "live.runtime_unavailable"),
-        Error::ValidationRejected => (422, "live.validation_rejected"),
+        Error::ValidationRejected => (422, "ORNA-A091-009"),
         // A session whose application work must first be joined is
         // temporarily unavailable on a route that cannot join it; the
         // request itself is well formed.
@@ -11118,6 +11125,7 @@ mod tests {
 
     struct RejectingTableCandidateValidator {
         tables: Vec<String>,
+        code: DiagnosticCode,
     }
 
     impl TableActivationCandidateValidator for RejectingTableCandidateValidator {
@@ -11130,27 +11138,53 @@ mod tests {
             _rows: &orna_runtime_v1::RuntimeTableRows,
         ) -> std::result::Result<(), SafeDiagnostic> {
             Err(SafeDiagnostic {
-                code: DiagnosticCode::TableAssertionFalse,
+                code: self.code,
                 class: DiagnosticClass::Permanent,
             })
         }
     }
 
-    fn rejecting_validator(
-        _context: &RuntimeActivationContext,
+    fn rejecting_validator(code: DiagnosticCode) -> TableCandidateValidatorFactory {
+        Box::new(move |_: &RuntimeActivationContext| rejecting_candidate(code))
+    }
+
+    fn rejecting_candidate(
+        code: DiagnosticCode,
     ) -> Result<Box<dyn TableActivationCandidateValidator>> {
         Ok(Box::new(RejectingTableCandidateValidator {
             tables: vec!["Hook".into()],
+            code,
         }))
     }
 
     #[test]
     fn transaction_rejected_by_candidate_validator_publishes_nothing() {
+        assert_candidate_rejection_publishes_nothing(
+            "assertion",
+            DiagnosticCode::TableAssertionFalse,
+            Error::ValidationRejected,
+        );
+    }
+
+    #[test]
+    fn non_assertion_candidate_validator_failure_fails_closed_without_publishing() {
+        assert_candidate_rejection_publishes_nothing(
+            "validator",
+            DiagnosticCode::ExecutionRejected,
+            Error::RuntimeUnavailable,
+        );
+    }
+
+    fn assert_candidate_rejection_publishes_nothing(
+        label: &str,
+        code: DiagnosticCode,
+        expected: Error,
+    ) {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("orna-live-candidate-reject-{nonce}"));
+        let root = std::env::temp_dir().join(format!("orna-live-candidate-{label}-{nonce}"));
         fs::create_dir(&root).unwrap();
         assert!(
             Command::new("git")
@@ -11189,7 +11223,7 @@ mod tests {
         .unwrap();
         let context = futures::executor::block_on(runtime.begin_activation()).unwrap();
         let mut host = subscribed_host(Some(runtime))
-            .with_table_candidate_validator(Box::new(rejecting_validator));
+            .with_table_candidate_validator(rejecting_validator(code));
         let after_commit = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let value = CanonicalValue::unit().encode().unwrap();
         let expected_key = value.clone();
@@ -11225,9 +11259,10 @@ mod tests {
             response,
             transaction,
         ));
-        assert!(
-            matches!(&result, Err(Error::ValidationRejected)),
-            "the candidate validator must reject the staged commit: {result:?}"
+        assert_eq!(
+            result.as_ref().err(),
+            Some(&expected),
+            "the candidate validator must fail the staged commit closed: {result:?}"
         );
         assert!(!after_commit.load(std::sync::atomic::Ordering::SeqCst));
         assert_eq!(
