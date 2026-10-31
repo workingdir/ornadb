@@ -6335,9 +6335,10 @@ mod repl_request_effect_tests {
 
     #[test]
     fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
-        // The candidate seam accepts only scalar primary-key components, so an
-        // assertion cannot be checked against an enum-keyed candidate. The write
-        // is refused and its reserved row cancelled; it is never admitted.
+        // The candidate seam accepts only scalar primary-key components and
+        // checks every table of an asserting project, so an enum key anywhere in
+        // the project refuses the write before it is published (ornadb-gq4g).
+        // The refused write's reserved row is cancelled; it is never admitted.
         let (_directory, repository, _relation) = format3_repository_for_table(
             "pub enum Level {\n    low,\n    high,\n}\n\
              pub table Task(level: Level) {\n    title: Str,\n    \
