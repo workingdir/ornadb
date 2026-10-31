@@ -394,11 +394,10 @@ impl LoadedProject {
             .transpose()
     }
 
-    /// The semantic catalogue `orna check` and the CLI's semantic catalogue
-    /// callers resolve: the authoritative core, extended by the pinned
-    /// standard profile and its verified sources when this project captured
-    /// one. Run, VFS and stream fixture admission resolve their own catalogues
-    /// and are not covered here.
+    /// The production catalogue of this project, used by `orna check`, `orna run`
+    /// (table and stream roots) and VFS admission: the authoritative core,
+    /// extended by the pinned standard profile and its verified sources when
+    /// this project captured one.
     pub fn production_catalogue(&self) -> Result<Catalogue, StandardCatalogueError> {
         let catalogue = Catalogue::authoritative_core();
         let Some(profile) = self.standard_profile.as_ref() else {

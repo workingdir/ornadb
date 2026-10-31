@@ -1812,14 +1812,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
                 network: false,
                 credentials: false,
                 intrinsics: "Orna 1.1.0 core".into(),
-                stdlib: project.standard_profile().map(|profile| {
-                    // Verify the full graph-bound bundle in the durable
-                    // evaluator while loading only import-reachable modules.
-                    serde_json::json!({
-                        "snapshot": profile.snapshot(),
-                        "sources": project.standard_sources().iter().cloned().collect::<BTreeMap<_, _>>(),
-                    })
-                }),
+                stdlib: None,
                 initial_tables: "empty".into(),
             },
             steps: Vec::new(),
@@ -1831,13 +1824,12 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
 /// The bounded pure path receives reachable standard modules through
 /// `load_standard_sources`, which verifies them against the captured profile.
 /// The project unit therefore carries neither those source units nor a
-/// standard dependency that the bounded evaluator would reject.
+/// standard dependency, so admission has nothing further to verify.
 fn pure_execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
     let mut execution = execution_project(project);
     execution
         .modules
         .retain(|unit| !project.standard_runtime_modules().contains(&unit.source_id));
-    execution.expectations.environment.stdlib = None;
     execution
 }
 
@@ -1918,7 +1910,7 @@ fn run_project_function(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
     let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1948,12 +1940,16 @@ fn run_project_function(
         ));
     }
     let execution = execution_project(&project);
-    if DurableTransactionalEvaluator::default().project_stream_root_admitted(&execution, target) {
+    if DurableTransactionalEvaluator::default()
+        .with_catalogue(std::sync::Arc::clone(&catalogue))
+        .project_stream_root_admitted(&execution, target)
+    {
         return run_project_stream_invocation_with_project(
             endpoint,
             target,
             &execution,
             sys_host::std_snapshot_pin(&project),
+            catalogue,
             color_enabled,
         );
     }
@@ -1965,7 +1961,7 @@ fn run_project_stream_invocation(
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
     let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -1980,6 +1976,7 @@ fn run_project_stream_invocation(
         root_entry,
         &execution,
         sys_host::std_snapshot_pin(&project),
+        catalogue,
         color_enabled,
     )
 }
@@ -1998,7 +1995,7 @@ fn run_project_invocation_with_arguments(
             )
         })?;
     let project = load_project(endpoint)?;
-    let catalogue = semantic_catalogue(&project)?;
+    let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
     let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
@@ -2038,6 +2035,7 @@ fn run_project_invocation_with_arguments(
         })?
         .block_on(
             DurableTransactionalEvaluator::default()
+                .with_catalogue(catalogue)
                 .with_sys_host_context(sys_host::sys_host_context(
                     repository.worktree(),
                     identity,
@@ -2098,6 +2096,7 @@ fn run_project_stream_invocation_with_project(
     root_entry: &str,
     project: &ProjectUnit,
     std_snapshot: StdSnapshotPin,
+    catalogue: std::sync::Arc<orna_semantic_v1::Catalogue>,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
     let repository = orna_repository_v1::Repository::discover(local_project_path(endpoint)?)
@@ -2122,6 +2121,7 @@ fn run_project_stream_invocation_with_project(
         })?
         .block_on(
             DurableTransactionalEvaluator::default()
+                .with_catalogue(catalogue)
                 .with_sys_host_context(sys_host::sys_host_context(
                     repository.worktree(),
                     identity,
