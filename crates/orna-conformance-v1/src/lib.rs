@@ -40,6 +40,7 @@ pub use semantic_adapter::{
     SemanticAdapter, TransactionalEvaluator, project_declares_assertions,
     is_table_assertion_false,
     transactional_loaded_project_candidate_validator,
+    transactional_loaded_project_commit_validator,
 };
 pub use syntax_adapter::SyntaxAdapter;
 pub use vector_suites::{VectorSuiteEvidence, run_vector_suites};
