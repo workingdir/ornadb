@@ -3575,11 +3575,6 @@ fn run_repl_input(
             return Err(abandon(repl_evaluation_failure(failure)));
         }
     };
-    // Known once evaluation succeeded: an external binding may already have run.
-    let external_possible = matches!(
-        activation.effects(),
-        orna_runtime_v1::ActivationEffectReport::ExternalPossible
-    );
     // The request is committed, so an observation write failure is only a
     // warning and never reports the committed input as uncertain.
     let record_committed = |status: orna_runtime_v1::InvocationObservationStatus| {
@@ -3587,10 +3582,11 @@ fn run_repl_input(
             eprintln!("warning: committed; query observation not recorded");
         }
     };
-    // Failure after evaluation: uncertain when external effects may have run
-    // (the row stays Running for fenced recovery); otherwise cancelled.
+    // Failure after evaluation: uncertain when an external binding was
+    // dispatched (the row stays Running for fenced recovery); otherwise
+    // cancelled, the same rule as the commit arm below.
     let unsettled_after_evaluation = || -> repl::ReplFailure {
-        if external_possible {
+        if external_dispatched {
             let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
             REPL_EFFECT_UNCERTAIN.to_owned().into()
         } else {
@@ -3598,7 +3594,7 @@ fn run_repl_input(
         }
     };
     let unsettled_after_evaluation_because = |cause: String| -> repl::ReplFailure {
-        if external_possible {
+        if external_dispatched {
             let _ = finish_query(orna_runtime_v1::InvocationObservationStatus::Failed);
             repl_effect_uncertain(cause)
         } else {
@@ -3644,8 +3640,10 @@ fn run_repl_input(
     };
     // ORNA-ASSERT-042: a project that declares assertions checks the
     // post-mutation candidate against them before any row, checkpoint or
-    // terminal is published. A project without assertions has nothing to
-    // check, so its commit keeps the unvalidated activation path.
+    // terminal is published. The request-scoped activation publishes the
+    // request identity, fingerprint and terminal outcome in the same step as
+    // the rows. A project without assertions has nothing to check, so its
+    // commit keeps the unvalidated activation path.
     if project_declares_assertions(&transactions.project) {
         let cwd_generation = u64::try_from(request_staged.context().capture().generation())
             .ok()
@@ -6332,6 +6330,47 @@ mod repl_request_effect_tests {
         assert!(
             running.is_empty(),
             "a failure before any external effect cancels its reserved row"
+        );
+    }
+
+    #[test]
+    fn repl_enum_keyed_assertion_write_is_refused_as_repl_effect() {
+        // The candidate seam accepts only scalar primary-key components and
+        // checks every table of an asserting project, so an enum key anywhere in
+        // the project refuses the write before it is published (ornadb-gq4g).
+        // The refused write's reserved row is cancelled; it is never admitted.
+        let (_directory, repository, _relation) = format3_repository_for_table(
+            "pub enum Level {\n    low,\n    high,\n}\n\
+             pub table Task(level: Level) {\n    title: Str,\n    \
+             assert every(row => row.title != \"\");\n}\n",
+            "Task",
+        );
+        let ReplRuntime {
+            repository,
+            mut session,
+            transactions,
+        } = repl_runtime(Some(repository)).expect("repl runtime");
+        let mut transactions = transactions.expect("repl transactions");
+        let failure = run_repl_input(
+            repository.as_ref(),
+            Some(&mut transactions),
+            &mut session,
+            r#"main.Task.insert({ level: main.Level.low, title: "Ship" })"#,
+        )
+        .err()
+        .expect("the enum-keyed write is refused before it is published");
+        assert_eq!(failure.code, "ORNA-REPL-EFFECT");
+        let state = transactions
+            .state
+            .as_ref()
+            .expect("the effectful input opened the runtime state");
+        let running = transactions
+            .runtime
+            .block_on(state.running_requests())
+            .expect("running requests");
+        assert!(
+            running.is_empty(),
+            "a refused candidate cancels its reserved row"
         );
     }
 }
