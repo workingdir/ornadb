@@ -18130,11 +18130,16 @@ fn resolve_qualified_module_member(
             effects: symbol.effects.clone(),
         },
         None => {
+            // The note names the module the member was looked up in: its canonical
+            // namespace, so an alias such as `query_ops` reports `std.query`.
+            let module = module_member_namespace(path, scope).map_or_else(
+                || path[..path.len() - 1].join("."),
+                |namespace| namespace.display(),
+            );
             diagnostics.push(
                 diag(DIAG_UNRESOLVED, "module member cannot be resolved").with_note(
                     SafeText::new(format!(
-                        "{UNRESOLVED_MEMBER_NOTE}{}.{}",
-                        path[..path.len() - 1].join("."),
+                        "{UNRESOLVED_MEMBER_NOTE}{module}.{}",
                         path[path.len() - 1]
                     ))
                     .expect("identifier text is safe"),
