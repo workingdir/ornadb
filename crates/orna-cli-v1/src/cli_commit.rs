@@ -10,7 +10,7 @@
 //! branch's first commit creates the branch ref.
 
 use orna_repository_v1::{
-    FormatContextError,
+    CandidateAssertionGate, CandidateAssertionRefusal, FormatContextError, PrivateCommit,
     relation_admission::{
         CommittedRelationChanges, OBJECT_IDENTITY_RELATION_ID, RelationAdmissionError,
     },
@@ -303,6 +303,121 @@ fn admission_error(
     }
 }
 
+/// The commit's table-assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-046,
+/// ORNA-ASSERT-048): the staged candidate's own rows must satisfy every
+/// admitted table assertion before any ref advances.
+struct CommitAssertionGate;
+
+impl CandidateAssertionGate for CommitAssertionGate {
+    fn validate(
+        &self,
+        repository: &orna_repository_v1::Repository,
+        candidate: &PrivateCommit,
+    ) -> Result<(), CandidateAssertionRefusal> {
+        validate_candidate_assertions(repository, candidate)
+    }
+}
+
+fn unvalidated(cause: &str) -> CandidateAssertionRefusal {
+    CandidateAssertionRefusal::Unvalidated(cause.to_owned())
+}
+
+/// Evaluates every admitted table assertion over the candidate's own rows.
+/// The transactional seam admits only scalar primary keys (interim gap, bead
+/// ornadb-gq4g), so an asserting project with any other key is refused whole
+/// rather than validated over rows that were never read.
+fn validate_candidate_assertions(
+    repository: &orna_repository_v1::Repository,
+    candidate: &PrivateCommit,
+) -> Result<(), CandidateAssertionRefusal> {
+    let project = orna_project_v1::ProjectLoader::default()
+        .load_private_candidate(repository, candidate)
+        .map_err(|_| unvalidated("staged project could not be loaded"))?;
+    if !orna_conformance_v1::project_declares_assertions(&project) {
+        return Ok(());
+    }
+    let catalogue = semantic_catalogue(&project)
+        .map_err(|_| unvalidated("staged project has no semantic catalogue"))?;
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
+    if !analysis.is_ok() {
+        return Err(unvalidated("staged project failed semantic analysis"));
+    }
+    let (table_names, schemas) = admitted_project_tables(&analysis)
+        .ok_or_else(|| unvalidated("staged project tables could not be identified"))?;
+    if table_names.is_empty() {
+        return Ok(());
+    }
+    if !schemas.values().all(has_scalar_keys) {
+        return Err(unvalidated("staged table primary keys are not scalar yet"));
+    }
+    let manifest = orna_project_v1::ObjectIdentityManifest::read_private_candidate(
+        repository, candidate,
+    )
+    .ok()
+    .flatten()
+    .ok_or_else(|| unvalidated("staged object identities are unavailable"))?;
+    let identities = table_identities_from_manifest(&manifest, table_names)
+        .map_err(|_| unvalidated("staged table identities are unavailable"))?;
+    let table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId> = identities
+        .iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect();
+    let format = repository
+        .open_private_candidate_format_context(candidate)
+        .map_err(|_| unvalidated("staged format context could not be opened"))?;
+    let committed = orna_project_v1::private_candidate_tables(
+        repository,
+        candidate,
+        &format,
+        &schemas,
+        &table_object_ids,
+        orna_application_v1::ApplicationAuthority::committed_read_limits(),
+    )
+    .map_err(|_| unvalidated("staged committed rows could not be read"))?;
+    let mut rows = orna_runtime_v1::RuntimeTableRows::new();
+    for (name, schema) in &schemas {
+        let table = committed
+            .get(name)
+            .ok_or_else(|| unvalidated("staged table rows are missing"))?;
+        let encoded = orna_project_v1::evaluator_rows(table, schema)
+            .map_err(|_| unvalidated("staged table rows could not be encoded"))?;
+        rows.insert(name.clone(), encoded);
+    }
+    let mut validator = orna_conformance_v1::transactional_loaded_project_candidate_validator(
+        &project,
+        &manifest,
+        None,
+        std::sync::Arc::new(table_object_ids),
+        orna_evaluator_v1::Limits::default(),
+    )
+    .map_err(|outcome| unvalidated(&stage_outcome_cause(&outcome)))?;
+    validator.validate(&rows).map_err(|diagnostic| {
+        if orna_conformance_v1::is_table_assertion_false(diagnostic) {
+            CandidateAssertionRefusal::AssertionFalse
+        } else {
+            unvalidated("table assertion could not be evaluated over the staged rows")
+        }
+    })
+}
+
+fn has_scalar_keys(schema: &orna_semantic_v1::TableSchema) -> bool {
+    schema.admission.as_ref().is_some_and(|admission| {
+        admission.keys.iter().all(|(_, ty)| {
+            matches!(
+                ty,
+                orna_semantic_v1::Type::Bool
+                    | orna_semantic_v1::Type::Int
+                    | orna_semantic_v1::Type::Decimal
+                    | orna_semantic_v1::Type::Text
+            )
+        })
+    })
+}
+
 /// Reports one review or commit failure with its own code and remedy
 /// (16-administration failure classes, ORNA-UX-004). Failures without a
 /// dedicated class keep the command's generic code with `generic_title`.
@@ -341,6 +456,18 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             "E2304",
             NOTHING_TO_COMMIT_TITLE,
             NOTHING_TO_COMMIT_HELP,
+        ),
+        // ORNA-ASSERT-046: a table assertion evaluates false over the staged rows.
+        RepositoryError::CandidateAssertionRefused(CandidateAssertionRefusal::AssertionFalse) => (
+            "ORNA-A091-009",
+            "table assertion is false",
+            "change the staged rows so every table assertion holds, stage them, then retry `orna commit -m MESSAGE`; no commit was created",
+        ),
+        // ORNA-ASSERT-048: the candidate could not be validated, so it is refused whole.
+        RepositoryError::CandidateAssertionRefused(CandidateAssertionRefusal::Unvalidated(_)) => (
+            "E2300",
+            "staged candidate could not be validated against its table assertions",
+            "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created",
         ),
         _ => (
             "E2300",
@@ -464,7 +591,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         .review_current_candidate(&capture)
         .map_err(|error| failure(&error, "staged candidate could not be reviewed"))?;
     let commit = repository
-        .commit_reviewed_candidate(&review, message)
+        .commit_reviewed_candidate(&review, message, &CommitAssertionGate)
         .map_err(|error| failure(&error, "reviewed candidate could not be committed"))?;
     for line in admitted {
         println!("{line}");

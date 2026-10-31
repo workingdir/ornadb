@@ -10780,6 +10780,7 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
+    use crate::AcceptAllAssertions;
     use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
     #[cfg(target_os = "linux")]
