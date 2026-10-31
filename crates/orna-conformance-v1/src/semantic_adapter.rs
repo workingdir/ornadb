@@ -4575,27 +4575,6 @@ struct TransactionalTableCandidateValidator {
     tables: Vec<String>,
 }
 
-pub fn transactional_table_candidate_validator(
-    unit: &SourceUnit,
-    entry: &str,
-    cwd_generation: Option<orna_repository_v1::CwdGeneration>,
-    limits: EvaluatorLimits,
-) -> Result<Box<dyn TableActivationCandidateValidator>, StageOutcome<Diagnostic>> {
-    let admitted = admit_transaction_source_inner(unit, limits, entry, false, &Catalogue::authoritative_core())
-        .map_err(|failure| *failure)?;
-    Ok(Box::new(TransactionalTableCandidateValidator::new(
-        cwd_generation,
-        &admitted.functions,
-        &admitted.key_fields,
-        &admitted.float_fields,
-        &admitted.table_fields,
-        &admitted.table_assertions,
-        &admitted.module_assertions,
-        Arc::new(BTreeMap::new()),
-        limits,
-    )))
-}
-
 /// Reports whether any committed module declares a table-level or module-level
 /// assertion. Projects without assertions have nothing for the assertion
 /// validator to check.
