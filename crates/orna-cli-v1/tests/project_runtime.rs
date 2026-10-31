@@ -2042,8 +2042,8 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
 }
 
 #[test]
-/// ORNA-ASSERT-042: a run admits a pinned standard import and a table assertion through the production catalogue.
-fn binary_run_admits_a_standard_import_and_table_assertion_through_the_production_catalogue() {
+/// A run admits a pinned standard import in a project that also declares a table with an assertion. `answer` writes no rows, so the assertion is not evaluated on this path; commit-time evaluation is pinned separately.
+fn binary_run_admits_a_standard_import_alongside_a_table_assertion() {
     let (directory, _module_commit) = committed_standard_project_with(
         &[(
             "math.orna",
@@ -2063,8 +2063,8 @@ fn binary_run_admits_a_standard_import_and_table_assertion_through_the_productio
 }
 
 #[test]
-/// ORNA-ASSERT-042: a table assertion naming a fixture-only table is refused before the run is admitted.
-fn binary_run_refuses_a_fixture_only_table_name_through_the_production_catalogue() {
+/// A table assertion naming a table the project does not declare (`Contact` exists only in a conformance fixture) is refused with a compile diagnostic; no run is admitted.
+fn binary_run_refuses_an_assertion_naming_an_undeclared_table() {
     let (directory, _module_commit) = captured_standard_project_with(
         &[(
             "math.orna",
