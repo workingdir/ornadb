@@ -2022,6 +2022,52 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
 }
 
 #[test]
+/// ORNA-ASSERT-042: a run admits a pinned standard import and a table assertion through the production catalogue.
+fn binary_run_admits_a_standard_import_and_table_assertion_through_the_production_catalogue() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub table Sample(id: Str) {\n    label: Str,\n    assert every(row => row.label != \"\");\n}\npub fn answer(): Int = increment(41);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "answer");
+
+    assert!(output.status.success(), "run stderr: {:?}", output.stderr);
+    assert_eq!(output.stdout, b"invocation completed\n");
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+/// ORNA-ASSERT-042: a table assertion naming a fixture-only table is refused before the run is admitted.
+fn binary_run_refuses_a_fixture_only_table_name_through_the_production_catalogue() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{increment};\npub table Sample(id: Str) {\n    label: Str,\n    assert every(row => exists(Contact, contact => contact.name == row.label));\n}\npub fn answer(): Int = increment(41);\n",
+        )],
+    );
+
+    let output = invoke(directory.path(), "run", "answer");
+
+    assert!(
+        !output.status.success(),
+        "fixture-only table name was admitted"
+    );
+    assert!(output.stdout.is_empty());
+    let stderr = std::str::from_utf8(&output.stderr).expect("UTF-8 diagnostic");
+    assert!(stderr.starts_with("error["), "{stderr}");
+}
+
+#[test]
 fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
     let (directory, _module_commit) = captured_standard_project();
 
