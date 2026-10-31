@@ -2056,6 +2056,8 @@ enum DocumentCommitError {
     Stale,
     Rejected(String),
     Failed(String),
+    /// The aggregate draft quota refused the candidate (41-vfs.md:105, EDQUOT).
+    Quota(String),
     /// The save did not commit and recovery storage could not keep its candidate;
     /// `errno` is the retention errno (ORNA-VFS-009, EDIT-1 step 4).
     Unretained { errno: Errno, cause: &'static str },
@@ -2063,12 +2065,14 @@ enum DocumentCommitError {
 
 impl DocumentCommitError {
     /// Errno for a save that did not commit (profiles/vfs-1 errno table):
-    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EIO for backing I/O.
+    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EDQUOT for resource limits,
+    /// EIO for backing I/O.
     fn errno(&self) -> Errno {
         match self {
             Self::Rejected(_) => Errno::EINVAL,
             Self::Unretained { errno, .. } => *errno,
             Self::Stale => Errno::EAGAIN,
+            Self::Quota(_) => Errno::EDQUOT,
             Self::NoCandidate | Self::Failed(_) => Errno::EIO,
         }
     }
@@ -2079,6 +2083,7 @@ impl DocumentCommitError {
         match self {
             Self::Stale => "sys.vfs.stale_edit",
             Self::Rejected(_) => "sys.vfs.invalid_document",
+            Self::Quota(_) => "draft quota exhausted",
             Self::Unretained { cause, .. } => *cause,
             Self::NoCandidate | Self::Failed(_) => "backing I/O failure",
         }
@@ -2093,7 +2098,7 @@ fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'static str {
 
 /// Classifies a failed durable save. Semantic admission and malformed-draft
 /// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
-/// backing I/O `Failed`.
+/// backing I/O `Failed`; a draft-quota refusal is `Quota` (EDQUOT).
 fn save_failure(
     context: &str,
     error: VfsSaveError<orna_runtime_v1::TableActivationError>,
@@ -2110,6 +2115,9 @@ fn save_failure(
         }
         VfsSaveError::Stale { .. } => DocumentCommitError::Stale,
         VfsSaveError::NoCandidate => DocumentCommitError::NoCandidate,
+        VfsSaveError::Backing(error @ (EditDraftError::QuotaExceeded | EditDraftError::FileTooLarge)) => {
+            DocumentCommitError::Quota(format!("{context}: {error:?}"))
+        }
         error => DocumentCommitError::Failed(format!("{context}: {error:?}")),
     }
 }
@@ -2128,7 +2136,9 @@ impl std::fmt::Display for DocumentCommitError {
                 formatter.write_str("mounted save is stale against its captured baseline")
             }
             Self::Unretained { cause, .. } => formatter.write_str(cause),
-            Self::Rejected(message) | Self::Failed(message) => formatter.write_str(message),
+            Self::Rejected(message) | Self::Failed(message) | Self::Quota(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -9890,6 +9900,25 @@ mod tests {
             super::draft_errno(&Err(EditDraftError::BackingIo)).code(),
             5
         );
+    }
+
+    #[test]
+    fn aggregate_quota_refusal_at_save_is_edquot_on_every_commit_path() {
+        use orna_runtime_v1::vfs::{EditDraftError, VfsSaveError};
+        // The document, fsync and flush replies all return `DocumentCommitError::errno()`
+        // of the error `save_failure` classifies (41-vfs.md:105: EDQUOT for resource limits).
+        for error in [EditDraftError::QuotaExceeded, EditDraftError::FileTooLarge] {
+            let failure = super::save_failure(
+                "mounted row save failed",
+                VfsSaveError::<orna_runtime_v1::TableActivationError>::Backing(error),
+            );
+            assert_eq!(failure.errno().code(), 122, "{failure:?}");
+        }
+        let io = super::save_failure(
+            "mounted row save failed",
+            VfsSaveError::<orna_runtime_v1::TableActivationError>::Backing(EditDraftError::BackingIo),
+        );
+        assert_eq!(io.errno().code(), 5, "{io:?}");
     }
 
     use std::ffi::OsStr;
