@@ -311,7 +311,10 @@ fn a_pending_row_saved_before_a_schema_commit_lands_is_refused_at_publish_under_
     let task = admitted_relations(&commit_source(&root, "Declare Task"))["Task"].clone();
     let declared = head(&root);
     // The save encodes the row under TASKS and leaves it in the pending range.
-    repl_writes(&root, "main.Task.insert({ id: \"write\", title: \"Write the report\" })");
+    repl_writes(
+        &root,
+        "main.Task.insert({ id: \"write\", title: \"Write the report\" })",
+    );
     let owner = clone_schema_owner(&directory, &root);
 
     // A schema commit lands on HEAD while the row is pending. Publication
