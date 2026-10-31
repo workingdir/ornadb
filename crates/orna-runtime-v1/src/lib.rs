@@ -3493,6 +3493,13 @@ pub trait TableActivationCandidateValidator {
         self.validate(rows)
     }
 
+    /// The owner and span of the first module assertion that the last
+    /// `validate_changed` found false, for the commit gate to name it. Validators
+    /// without module assertions keep the default.
+    fn failed_module_assertion(&self) -> Option<String> {
+        None
+    }
+
     /// Confirms protected native content is represented by the accepted rows.
     /// Legacy validators accept only candidates without content pins.
     fn validate_content_pins(

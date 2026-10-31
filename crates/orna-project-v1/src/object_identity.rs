@@ -13,7 +13,7 @@ use std::{
 
 use num_bigint::BigInt;
 use orna_repository_v1::{
-    GitCommitRef, Repository, RepositoryError, Uuid,
+    GitCommitRef, PrivateCommit, Repository, RepositoryError, Uuid,
     relation_admission::{RelationAdmissionError, StagedCandidate, StoredObjectIdentity},
 };
 use orna_semantic_v1::{
@@ -635,6 +635,29 @@ impl ObjectIdentityManifest {
         }
         repository
             .read_staged_legacy_identity_sidecar(staged, MAX_OBJECT_IDENTITY_MANIFEST_BYTES)
+            .map_err(|_| ObjectIdentityError::Io)?
+            .map(|bytes| Self::decode(&bytes))
+            .transpose()
+    }
+
+    /// Reads the inventory a private publication candidate's tree carries: its
+    /// candidate store's inventory relation, or else the legacy sidecar its tree
+    /// tracks. `Ok(None)` before any identity was allocated.
+    pub fn read_private_candidate(
+        repository: &Repository,
+        candidate: &PrivateCommit,
+    ) -> Result<Option<Self>, ObjectIdentityError> {
+        if let Some(stored) = repository
+            .read_private_candidate_object_identities(candidate)
+            .map_err(|_| ObjectIdentityError::Io)?
+        {
+            return Self::from_stored(&stored).map(Some);
+        }
+        repository
+            .read_private_candidate_legacy_identity_sidecar(
+                candidate,
+                MAX_OBJECT_IDENTITY_MANIFEST_BYTES,
+            )
             .map_err(|_| ObjectIdentityError::Io)?
             .map(|bytes| Self::decode(&bytes))
             .transpose()
