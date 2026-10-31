@@ -4575,25 +4575,6 @@ struct TransactionalTableCandidateValidator {
     tables: Vec<String>,
 }
 
-/// Reports whether any committed module declares a table-level or module-level
-/// assertion. Projects without assertions have nothing for the assertion
-/// validator to check.
-pub fn project_declares_assertions(loaded: &orna_project_v1::LoadedProject) -> bool {
-    loaded.modules().iter().any(|module| {
-        parse_module(&module.source)
-            .value
-            .items
-            .iter()
-            .any(|item| match &item.declaration {
-                Declaration::Assertion { .. } => true,
-                Declaration::Table { members, .. } => members
-                    .iter()
-                    .any(|member| matches!(member, orna_syntax_v1::TableMember::Assertion { .. })),
-                _ => false,
-            })
-    })
-}
-
 /// Builds a transaction validator from every committed project module. This
 /// keeps mounted row saves on the same cross-module assertion and effect
 /// admission path as project-backed transactions.
