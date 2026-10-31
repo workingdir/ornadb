@@ -2119,8 +2119,8 @@ async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keep
     let accepted = invoke(directory.path(), "run", "main.seed_valid");
     assert!(
         accepted.status.success(),
-        "valid run stderr: {:?}",
-        accepted.stderr
+        "valid run stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
     );
     assert_eq!(accepted.stdout, b"invocation completed\n");
     assert!(accepted.stderr.is_empty());
@@ -2168,8 +2168,8 @@ async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keep
     let accepted_again = invoke(directory.path(), "run", "main.seed_more");
     assert!(
         accepted_again.status.success(),
-        "second valid run stderr: {:?}",
-        accepted_again.stderr
+        "second valid run stderr: {}",
+        String::from_utf8_lossy(&accepted_again.stderr)
     );
     assert_eq!(accepted_again.stdout, b"invocation completed\n");
     assert!(accepted_again.stderr.is_empty());
