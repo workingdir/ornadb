@@ -1362,8 +1362,18 @@ impl Repository {
         &self,
         staged: &StagedCandidate,
     ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
-        let format = self.open_private_candidate_format_context(&staged.candidate)?;
-        self.read_object_identities_in(&format, staged.candidate.tree.as_str())
+        self.read_private_candidate_object_identities(&staged.candidate)
+    }
+
+    /// The identity inventory a private candidate commit's store carries. The
+    /// commit gate reads it before publication, so table identities resolve
+    /// against exactly the serialized candidate (ORNA-ASSERT-046).
+    pub fn read_private_candidate_object_identities(
+        &self,
+        candidate: &PrivateCommit,
+    ) -> Result<Option<Vec<StoredObjectIdentity>>, RelationAdmissionError> {
+        let format = self.open_private_candidate_format_context(candidate)?;
+        self.read_object_identities_in(&format, candidate.tree().as_str())
     }
 
     /// The bytes of a legacy commit's tracked identity sidecar, or `None` when
@@ -1391,7 +1401,16 @@ impl Repository {
         staged: &StagedCandidate,
         max_bytes: usize,
     ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
-        let tree = staged.candidate.tree.as_str();
+        self.read_private_candidate_legacy_identity_sidecar(&staged.candidate, max_bytes)
+    }
+
+    /// The legacy identity sidecar a private candidate commit's tree tracks.
+    pub fn read_private_candidate_legacy_identity_sidecar(
+        &self,
+        candidate: &PrivateCommit,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, RelationAdmissionError> {
+        let tree = candidate.tree().as_str();
         if !self.tracks_legacy_identity_sidecar(tree)? {
             return Ok(None);
         }
@@ -3361,7 +3380,7 @@ mod tests {
                 .any(|path| path == "main.orna")
         );
         let committed = repository
-            .commit_reviewed_candidate(&review, "initial source")
+            .commit_reviewed_candidate(&review, "initial source", &crate::AcceptAllAssertions)
             .expect("the first reviewed commit creates the branch");
 
         // "The first actual commit creates that branch ref": a root commit of
@@ -3389,7 +3408,7 @@ mod tests {
         // The recorded result answers a retry without a second commit.
         assert_eq!(
             repository
-                .commit_reviewed_candidate(&review, "initial source")
+                .commit_reviewed_candidate(&review, "initial source", &crate::AcceptAllAssertions)
                 .unwrap(),
             committed
         );
@@ -3408,7 +3427,7 @@ mod tests {
             )
             .expect("review the staged candidate");
         repository
-            .commit_reviewed_candidate(&review, message)
+            .commit_reviewed_candidate(&review, message, &crate::AcceptAllAssertions)
             .expect("commit the reviewed candidate")
     }
 
@@ -3494,7 +3513,7 @@ mod tests {
         fs::create_dir(&loose).unwrap();
 
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "initial source"),
+            repository.commit_reviewed_candidate(&review, "initial source", &crate::AcceptAllAssertions),
             Err(RepositoryError::Graph(GraphError::DurabilityFailed))
         ));
         assert!(
@@ -3505,7 +3524,7 @@ mod tests {
         fs::remove_dir(&loose).unwrap();
         fs::rename(&aside, &loose).unwrap();
         let committed = repository
-            .commit_reviewed_candidate(&review, "initial source")
+            .commit_reviewed_candidate(&review, "initial source", &crate::AcceptAllAssertions)
             .expect("the flushed candidate creates the branch");
         assert_eq!(repository.head().unwrap(), Some(committed));
     }

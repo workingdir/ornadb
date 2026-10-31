@@ -254,6 +254,35 @@ pub struct PrivateCommit {
     commit: GitCommitRef,
 }
 
+/// Refuses a private candidate commit before anything publishes it. The
+/// repository crate cannot evaluate table assertions itself, so the publication
+/// path asks this gate over the serialized candidate before its journal or any
+/// ref names it (ORNA-ASSERT-042, ORNA-ASSERT-045, ORNA-ASSERT-046).
+pub trait CandidateAssertionGate {
+    fn validate(
+        &self, repository: &Repository, candidate: &PrivateCommit,
+    ) -> Result<(), CandidateAssertionRefusal>;
+}
+
+/// Why the assertion gate refused a candidate commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CandidateAssertionRefusal {
+    /// A table assertion evaluated false over the serialized candidate.
+    AssertionFalse,
+    /// Validation could not complete, so the candidate is refused whole.
+    Unvalidated(String),
+}
+
+#[cfg(test)]
+pub(crate) struct AcceptAllAssertions;
+
+#[cfg(test)]
+impl CandidateAssertionGate for AcceptAllAssertions {
+    fn validate(&self, _: &Repository, _: &PrivateCommit) -> Result<(), CandidateAssertionRefusal> {
+        Ok(())
+    }
+}
+
 /// Opaque, repository-local review of one exact staged index generation.
 /// Construction is restricted to this crate so callers cannot forge a review.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -4283,10 +4312,17 @@ impl Repository {
         Ok(review)
     }
 
+    fn validate_candidate_assertions(
+        &self, gate: &dyn CandidateAssertionGate, candidate: &PrivateCommit,
+    ) -> Result<(), RepositoryError> {
+        gate.validate(self, candidate).map_err(RepositoryError::CandidateAssertionRefused)
+    }
+
     pub fn commit_reviewed_candidate(
         &self, review: &ReviewedCandidateReview, message: &str,
+        gate: &dyn CandidateAssertionGate,
     ) -> Result<GitCommitRef, RepositoryError> {
-        self.commit_reviewed_candidate_with_stage_hook(review, message, |_| {})
+        self.commit_reviewed_candidate_with_stage_hook(review, message, gate, |_| {})
     }
     fn resume_reviewed_candidate_publication(
         &self,
@@ -4334,6 +4370,7 @@ impl Repository {
         &self,
         review: &ReviewedCandidateReview,
         message: &str,
+        gate: &dyn CandidateAssertionGate,
         mut on_stage: impl FnMut(PublicationJournalStage),
     ) -> Result<GitCommitRef, RepositoryError> {
         if message.is_empty() || message.contains('\0') {
@@ -4391,9 +4428,10 @@ impl Repository {
             return Err(RepositoryError::StaleReviewedCandidate);
         }
 
-        // 16-administration `commit`: the staged candidate is validated before
-        // its commit is created, and a missing identity fails before any commit
-        // object exists. A refused candidate therefore leaves no object or ref.
+        // 16-administration `commit`: a missing identity fails before any commit
+        // object exists. The table assertions are evaluated over the serialized
+        // candidate before its journal or any ref names it, so a refused
+        // candidate leaves at most an unreachable commit object and no ref.
         self.require_configured_commit_identity()?;
         if review.repository_format != RepositoryFormat::Format3 {
             return Err(RepositoryError::InvalidCommitCandidate);
@@ -4404,6 +4442,7 @@ impl Repository {
             return self.commit_reviewed_root_candidate(
                 review,
                 message,
+                gate,
                 &result_path,
                 &intent_hex,
                 &message_digest_hex,
@@ -4420,6 +4459,7 @@ impl Repository {
             tree: review.index_tree.clone(),
             commit: self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?,
         };
+        self.validate_candidate_assertions(gate, &candidate)?;
         let mut diff = self.command();
         diff.args(["diff", "--no-renames", "--name-status", "-z"]).arg(old_head.as_str()).arg(candidate.commit().as_str());
         let changed_paths = self.run(diff)?.stdout;
@@ -4482,6 +4522,7 @@ impl Repository {
         &self,
         review: &ReviewedCandidateReview,
         message: &str,
+        gate: &dyn CandidateAssertionGate,
         result_path: &Path,
         intent_hex: &str,
         message_digest_hex: &str,
@@ -4515,6 +4556,7 @@ impl Repository {
         {
             return Err(RepositoryError::InvalidFormatMigration);
         }
+        self.validate_candidate_assertions(gate, &candidate)?;
         // PUB-3 step 3: complete objects and their durability barriers
         // precede the visible ref. A ref backend whose refs cannot be
         // flushed is refused before the branch is created.
@@ -10417,6 +10459,7 @@ fn valid_branch_name(name: &str) -> bool {
 pub enum RepositoryError {
     GitUnavailable,
     GitOperationFailed,
+    CandidateAssertionRefused(CandidateAssertionRefusal),
     LocalStateUnavailable,
     NotAWorktree,
     InvalidObjectId,
@@ -10481,6 +10524,7 @@ impl fmt::Display for RepositoryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::GitUnavailable => f.write_str("Git is unavailable"),
+            Self::CandidateAssertionRefused(_) => f.write_str("candidate table assertions refused the commit"),
             Self::GitOperationFailed => f.write_str("Git repository operation failed"),
             Self::LocalStateUnavailable => f.write_str("local Orna state is unavailable"),
             Self::NotAWorktree => f.write_str("not inside a Git worktree"),
@@ -13078,7 +13122,7 @@ mod tests {
         // Same length, restored mtime: only a content compare can see this edit.
         overwrite_keeping_mtime(&root.path().join("main.orna"), b"module main;\n// edited!\n");
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "reviewed"),
+            repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions),
             Err(RepositoryError::StaleReviewedCandidate)
         ));
         assert_eq!(repository.head().unwrap(), head_before, "a stale review must not advance the ref");
@@ -13162,7 +13206,7 @@ mod tests {
             super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
             super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
         ).unwrap();
-        let committed = repository.commit_reviewed_candidate(&review, "reviewed").unwrap();
+        let committed = repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).unwrap();
         assert_eq!(repository.head().unwrap(), Some(committed.clone()));
         assert_eq!(repository.index_generation().unwrap().tree(), Some(&review.index_tree));
         assert_eq!(repository.read_committed_file(&committed, "main.orna", 1 << 20).unwrap(), staged);
@@ -13175,7 +13219,7 @@ mod tests {
         assert!(!git(root.path(), &["status", "--porcelain"]).is_empty());
         git(root.path(), &["commit", "--allow-empty", "-m", "later unrelated commit"]);
         assert_ne!(repository.head().unwrap(), Some(committed.clone()));
-        let replay = repository.commit_reviewed_candidate(&review, "reviewed").unwrap();
+        let replay = repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).unwrap();
         assert_eq!(replay, committed);
     }
 
@@ -13205,11 +13249,11 @@ mod tests {
         let head_before = repository.head().unwrap();
 
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, ""),
+            repository.commit_reviewed_candidate(&review, "", &AcceptAllAssertions),
             Err(RepositoryError::InvalidCommitMessage)
         ));
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "drop the store root"),
+            repository.commit_reviewed_candidate(&review, "drop the store root", &AcceptAllAssertions),
             Err(RepositoryError::InvalidCommitCandidate)
         ));
         assert_eq!(objects(), objects_before, "a refused candidate creates no Git object");
@@ -13237,12 +13281,12 @@ mod tests {
             super::Uuid::from_bytes([10; 16]), super::Uuid::from_bytes([11; 16]), 3,
             super::RepositoryFormat::Format3, RuntimeGeneration::new(4), vec![0x81, 0x00],
         ).unwrap();
-        let committed = repository.commit_reviewed_candidate(&review, "reviewed").unwrap();
+        let committed = repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).unwrap();
 
-        let replay = repository.commit_reviewed_candidate(&review, "reviewed").unwrap();
+        let replay = repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).unwrap();
         assert_eq!(replay, committed);
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "corrected message"),
+            repository.commit_reviewed_candidate(&review, "corrected message", &AcceptAllAssertions),
             Err(RepositoryError::StaleReviewedCandidate)
         ));
     }
@@ -13270,7 +13314,7 @@ mod tests {
         let old_head = repository.head().unwrap();
         let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             repository.commit_reviewed_candidate_with_stage_hook(
-                &review, "reviewed",
+                &review, "reviewed", &AcceptAllAssertions,
                 |stage| if stage == PublicationJournalStage::WorktreeReconciled { panic!("simulated crash before reviewed result recording"); },
             ).unwrap();
         }));
@@ -13289,7 +13333,7 @@ mod tests {
         ).unwrap();
         assert!(retry_review.candidate_paths.is_empty());
         assert_eq!(super::reviewed_candidate_runtime_intent_id(&retry_review, "reviewed"), intent);
-        let retried = repository.commit_reviewed_candidate(&retry_review, "reviewed").unwrap();
+        let retried = repository.commit_reviewed_candidate(&retry_review, "reviewed", &AcceptAllAssertions).unwrap();
         assert_eq!(retried, published);
         assert!(repository.read_publication_journal().unwrap().is_none());
         assert!(result_path.exists());
@@ -13316,9 +13360,9 @@ mod tests {
         let index = repository.git_path("index").unwrap();
         let lock = index.with_extension("lock");
         fs::write(&lock, b"occupied").unwrap();
-        assert!(repository.commit_reviewed_candidate(&review, "reviewed").is_err());
+        assert!(repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).is_err());
         fs::remove_file(&lock).unwrap();
-        assert!(repository.commit_reviewed_candidate(&review, "reviewed").is_ok());
+        assert!(repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions).is_ok());
         assert!(repository.read_publication_journal().unwrap().is_none());
     }
 
@@ -13336,7 +13380,7 @@ mod tests {
             super::RepositoryFormat::Format3, RuntimeGeneration::new(9), vec![0x81, 0x00],
         ).unwrap();
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "reviewed"),
+            repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions),
             Err(RepositoryError::SysGitNothingToCommit)
         ));
     }
@@ -13374,14 +13418,14 @@ mod tests {
         let mut forged = review.clone();
         forged.pending_generation += 1;
         assert!(matches!(
-            repository.commit_reviewed_candidate(&forged, "reviewed"),
+            repository.commit_reviewed_candidate(&forged, "reviewed", &AcceptAllAssertions),
             Err(RepositoryError::StaleReviewedCandidate)
         ));
 
         fs::write(root.path().join("main.orna"), "module main;\n// newer staged\n").unwrap();
         git(root.path(), &["add", "main.orna"]);
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "reviewed"),
+            repository.commit_reviewed_candidate(&review, "reviewed", &AcceptAllAssertions),
             Err(RepositoryError::StaleReviewedCandidate)
         ));
         assert_eq!(repository.head().unwrap(), head_before);
