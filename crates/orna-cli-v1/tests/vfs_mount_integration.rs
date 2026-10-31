@@ -2700,6 +2700,30 @@ fn path_truncate(path: &Path, size: u64) {
     );
 }
 
+/// Truncates `path` by name like `path_truncate`, retrying while the mount refuses with EBUSY. A stop
+/// retry holds the mount quiescing only while it probes retention and resumes it right after, so a
+/// refused cut succeeds once that probe has finished.
+fn path_truncate_retrying_busy(path: &Path, size: u64) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let output = Command::new("python3")
+            .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+            .arg(path)
+            .arg(size.to_string())
+            .output()
+            .expect("run path-based truncate");
+        if output.status.success() {
+            return;
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            stderr.contains("Device or resource busy") && Instant::now() < deadline,
+            "path-based truncate failed: {stderr}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Sends SIGTERM to the mount process without waiting for it to exit.
 fn send_sigterm(mounted: &MountedProcess) {
     let status = Command::new("kill")
@@ -2813,6 +2837,40 @@ async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() 
     assert!(
         records[0].contains("\nbytes 13\n") && records[0].ends_with("{ title: \"uns"),
         "retained record is not the 13-byte truncated prefix: {records:?}"
+    );
+}
+
+#[tokio::test]
+/// ORNA-VFS-009 and EDIT-1 step 4 (ornadb-s5gh): a second path truncate that lands while a stop-retry
+/// is pending cuts the same candidate again. Exactly one record must be retained, holding the newest cut.
+async fn cwd_mount_truncate_during_pending_stop_retry_keeps_one_record() {
+    let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
+        return;
+    };
+    let record_dir = record_directory(&mount.repository);
+    set_mode(&record_dir, 0o500);
+    let baseline = std::fs::read(&mount.data_path).unwrap();
+    path_truncate(&mount.data_path, 13);
+    send_sigterm(&mount.mounted);
+    // Stop keeps the mount up while the cut cannot be kept, then retries retention.
+    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
+    assert!(
+        mount.mounted.child.try_wait().unwrap().is_none(),
+        "mount stopped while its truncate could not be kept"
+    );
+    path_truncate_retrying_busy(&mount.data_path, 9);
+    set_mode(&record_dir, 0o700);
+    wait_for_mount_exit(&mut mount.mounted);
+    let records = retained_record_texts(&mount.repository);
+    assert_eq!(
+        records.len(),
+        1,
+        "the newest truncate is the only retained record: {records:?}"
+    );
+    let cut = std::str::from_utf8(&baseline[..9]).unwrap();
+    assert!(
+        records[0].contains("\nbytes 9\n") && records[0].ends_with(cut),
+        "retained record is not the 9-byte prefix of the accepted baseline {cut:?}: {records:?}"
     );
 }
 
