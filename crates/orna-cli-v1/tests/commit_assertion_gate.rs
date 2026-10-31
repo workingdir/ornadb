@@ -7,9 +7,10 @@
 //! then stages the asserting source.
 //!
 //! Interim gap (bead ornadb-gq4g): the transactional seam reads only scalar
-//! primary keys. An asserting project with a table of any other key is refused
-//! whole at commit (E2300); no subset of its assertions is validated
-//! (ORNA-ASSERT-050).
+//! primary keys. A check that reads a table of any other key is refused as
+//! unvalidated at commit (E2300), and no subset of the candidate's assertions is
+//! published (ORNA-ASSERT-049, ORNA-ASSERT-050). A project whose assertions do
+//! not read such a table is not refused for it.
 
 #[path = "support/product.rs"]
 mod product;
@@ -112,12 +113,13 @@ fn assert_free_project_commits_its_published_rows() {
     assert_ne!(head(&root), before);
 }
 
-/// Interim gap (bead ornadb-gq4g): an asserting project whose table has an
-/// enum key is refused whole at commit, even with no rows to validate. An
-/// enum-keyed row cannot be published (`E2300 source row key is not
-/// canonical`), so this test stages the table with no rows.
+/// Interim gap (bead ornadb-gq4g): the enum-keyed `Task` table's own assertion
+/// reads a table the seam cannot lower, so the commit is refused as unvalidated
+/// with its cause, even with no rows to validate. An enum-keyed row cannot be
+/// published (`E2300 source row key is not canonical`), so this test stages the
+/// table with no rows.
 #[test]
-fn interim_non_scalar_key_asserting_project_is_refused_whole() {
+fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
     commit_source(&root, "enum keyed table fixture");
@@ -128,15 +130,19 @@ fn interim_non_scalar_key_asserting_project_is_refused_whole() {
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
     assert!(text.contains("E2300"), "{text}");
+    assert!(
+        text.contains("could not be validated against its assertions"),
+        "{text}"
+    );
     assert_eq!(head(&root), before, "{text}");
 }
 
-/// Interim gap (bead ornadb-gq4g): a violating scalar table beside an
-/// enum-keyed table is refused whole with E2300. The published row `Dune`
-/// violates the scalar `Book` assertion, but that assertion is not evaluated
-/// on its own, so the refusal does not name `ORNA-A091-009`.
+/// Interim gap (bead ornadb-gq4g), checked per assertion: the violating scalar
+/// `Book` assertion is still evaluated beside the enum-keyed `Task` table, which
+/// declares no assertion. The published row `Dune` violates the scalar `Book`
+/// assertion, so the refusal names `ORNA-A091-009` and no unvalidated cause.
 #[test]
-fn interim_non_scalar_key_refuses_a_violating_scalar_table_whole() {
+fn scalar_table_assertion_beside_enum_keyed_table_is_still_evaluated() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, ENUM_KEYED_BESIDE_BOOK_LIBRARY);
     commit_source(&root, "enum-keyed table beside a scalar table");
@@ -154,8 +160,9 @@ fn interim_non_scalar_key_refuses_a_violating_scalar_table_whole() {
     );
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
-    assert!(text.contains("E2300"), "{text}");
-    assert!(!text.contains("ORNA-A091-009"), "{text}");
+    assert!(text.contains("ORNA-A091-009"), "{text}");
+    assert!(text.contains("table assertion is false"), "{text}");
+    assert!(!text.contains("could not be validated"), "{text}");
     assert_eq!(head(&root), before, "{text}");
 }
 
