@@ -787,9 +787,14 @@ fn retain_source_candidate(
         let end = start.saturating_add(length).min(candidate.len());
         Ok(candidate[start..end].to_vec())
     };
-    let retained = writer
-        .retained_drafts
-        .retain(path, cause, candidate.len() as u64, &mut read_chunk)?;
+    let mut charge = orna_runtime_v1::vfs::QuotaCharge::empty(&writer.retained_drafts.quota);
+    let retained = writer.retained_drafts.retain(
+        path,
+        cause,
+        candidate.len() as u64,
+        &mut charge,
+        &mut read_chunk,
+    )?;
     eprintln!(
         "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
         retained.id,
