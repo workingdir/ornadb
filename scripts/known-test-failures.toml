@@ -67,3 +67,248 @@ target = "check:clippy"
 test = "clippy"
 bead = "ornadb-5il1.256"
 reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: inherited from origin/main d35b7c0c3: bisect first bad 340674955 (ornadb-5il1.434 ORNA-PIPE-004); fails on main itself; spec adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "affine_collection_aggregates_keep_mean_and_admit_extrema"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: bisect first bad a7fcbc2c6 (5il1.250 diag codes); spec 33-diagnostics adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "chained_extension_omissions_keep_sibling_depth_labels_scoped"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "distinct_nominal_types_require_named_conversions"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: bisect first bad 1013615391 (5il1.138 CONVERSION-CHAIN); ORNA-CONVERT-007 adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "late_paired_omission_rolls_back_only_crossed_nested_sibling_depths"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "multi_level_paired_boundary_depths_stay_stable_through_selector_storms"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_bottom_cascade_preserves_tuple_pin_identity_by_capture_depth_wave"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_extension_list_rollbacks_preserve_unaffected_depth_identities"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_container_omission_rolls_back_only_the_conflicting_depth"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_extension_omissions_preserve_sibling_depth_identities"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_paired_boundary_depths_stay_stable_through_selector_storms"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_omission_checkpoint_storms_preserve_depth_labels_transactionally"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_paired_omissions_keep_each_reconciled_fold_depth_identity"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "omitted_sibling_preserves_width_of_paired_tuple_rebinds"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "omitted_nested_fold_rolls_back_only_the_rejected_depth_scope"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_boundary_depth_topology_accumulates_through_selector_storms"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_checkpoint_outputs_keep_lane_to_snapshot_mapping"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_collapse_rebinds_preserve_global_depth_label_topology"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_checkpoints_retain_their_selected_lane_contexts"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_depth_omissions_restore_each_crossed_anchor"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_nested_omission_reset_replay_restores_lane_pin_maps"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_pin_identities_survive_omissions_at_outer_and_middle_depths"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: bisect first bad ad0de85dc (#6984 selector depth); spec-silent paired topology. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_reproductions_remain_stable_across_alternating_storm_orders"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_rollback_omissions_keep_extension_depth_identities"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "paired_tuple_identity_survives_sequential_three_way_omission_chains"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "qualified_kwh_units_share_the_closed_cross_database_identity"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: bisect first bad a7fcbc2c6 (5il1.250 diag codes); adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "sequential_three_way_tuple_folds_anchor_late_rebound_widths"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "sparse_paired_rebind_chains_preserve_identity_across_omitted_rows"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "table_keys_reject_float_and_affine_temperatures_reject_addition"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: bisect first bad a7fcbc2c6 (5il1.250 diag codes); adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "unknown_paired_width_suppresses_sibling_pin_promotion"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
+test = "tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
