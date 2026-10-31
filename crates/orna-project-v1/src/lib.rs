@@ -16,7 +16,7 @@ use std::{
 use orna_repository_v1::{
     CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
     GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
-    TypedKey,
+    RepositoryFormatContext, TypedKey,
 };
 use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime_v1::{TableMutation, TableObjectId};
@@ -49,7 +49,7 @@ pub use object_identity::{
 pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 pub use table_storage::{
     CommittedReadError, CommittedReadLimits, CommittedTable, TableStorageError,
-    admitted_table_schemas, blob_placeholder, committed_tables,
+    admitted_table_schemas, blob_placeholder, committed_tables, private_candidate_tables,
     evaluator_rows, evaluator_rows_from_stored, has_text_primary_key, holds_blob,
     restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
     stored_rows_hold_blob,
@@ -1361,6 +1361,31 @@ impl ProjectLoader {
         Ok((schema, introductions))
     }
 
+    /// Private-candidate variant of [`Self::resolve_committed_source_table_schema`]:
+    /// resolves the table from the identity manifest, source declaration and format
+    /// context of one private publication candidate, before any ref names it.
+    pub fn resolve_private_candidate_source_table_schema(
+        &self,
+        repository: &Repository,
+        candidate: &PrivateCommit,
+        table_object_id: TableObjectId,
+    ) -> Result<ResolvedTableSchema, ProjectLoadError> {
+        let project = self.load_private_candidate(repository, candidate)?;
+        let manifest = ObjectIdentityManifest::read_private_candidate(repository, candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?
+            .ok_or(ProjectLoadError::InvalidTableSchema)?;
+        let context = repository
+            .open_private_candidate_format_context(candidate)
+            .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+        resolve_source_table_schema(
+            candidate.commit(),
+            &project,
+            &manifest,
+            &context,
+            table_object_id,
+        )
+    }
+
     /// Loads the root module and reachable imports from the immutable tree of
     /// a private publication candidate. The candidate capability, rather than
     /// a ref name or worktree path, is the source authority.
@@ -1579,6 +1604,21 @@ fn resolve_committed_source_table_schema_for_project(
 ) -> Result<ResolvedTableSchema, ProjectLoadError> {
     let manifest = ObjectIdentityManifest::read_committed(repository, commit)
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    let context = repository
+        .open_pinned_format_context(commit.as_str())
+        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
+    resolve_source_table_schema(commit, project, &manifest, &context, table_object_id)
+}
+
+/// Resolves one table against the identity `manifest` and format `context` of the
+/// exact snapshot `commit`, which must be the snapshot `project` was loaded from.
+fn resolve_source_table_schema(
+    commit: &GitCommitRef,
+    project: &LoadedProject,
+    manifest: &ObjectIdentityManifest,
+    context: &RepositoryFormatContext,
+    table_object_id: TableObjectId,
+) -> Result<ResolvedTableSchema, ProjectLoadError> {
     let table_identity = manifest
         .records()
         .iter()
@@ -1603,9 +1643,6 @@ fn resolve_committed_source_table_schema_for_project(
     let snapshot_id = project
         .source_snapshot_id()
         .ok_or(ProjectLoadError::InvalidTableSchema)?;
-    let context = repository
-        .open_pinned_format_context(commit.as_str())
-        .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
     if context.snapshot_pin().snapshot_id() != snapshot_id {
         return Err(ProjectLoadError::InvalidTableSchema);
     }
@@ -1613,7 +1650,7 @@ fn resolve_committed_source_table_schema_for_project(
         .require_database_id()
         .map_err(|_| ProjectLoadError::InvalidTableSchema)?;
     let table = project.source_table_schema_in_database(
-        &manifest,
+        manifest,
         *expected_database_id.as_bytes(),
         module_name,
         declaration_name,
