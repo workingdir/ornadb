@@ -18,14 +18,16 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use num_bigint::BigInt;
-use orna_repository_v1::{GitCommitRef, KeyRange, Repository, RepositoryFormatContext};
+use orna_repository_v1::{
+    GitCommitRef, KeyRange, PrivateCommit, Repository, RepositoryFormatContext,
+};
 use orna_runtime_v1::TableObjectId;
 use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value_v1::{
     decode_canonical_storage_value, encode_canonical_storage_value, Raw, Value, ROV3_BLOB_TAG,
 };
 
-use crate::ProjectLoader;
+use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
 
 /// Committed table storage violates the descriptor or row contract.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -135,6 +137,41 @@ pub fn committed_tables(
     table_ids: &BTreeMap<String, TableObjectId>,
     limits: CommittedReadLimits,
 ) -> Result<BTreeMap<String, CommittedTable>, CommittedReadError> {
+    read_tables(format_context, tables, table_ids, limits, |object_id| {
+        ProjectLoader::default()
+            .resolve_committed_source_table_schema(repository, commit, object_id)
+    })
+}
+
+/// Reads every table's rows of one private publication candidate, keyed in the
+/// runtime keyspace, before any ref names it. `format_context` must be the
+/// candidate's own format context.
+pub fn private_candidate_tables(
+    repository: &Repository,
+    candidate: &PrivateCommit,
+    format_context: &RepositoryFormatContext,
+    tables: &BTreeMap<String, TableSchema>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+    limits: CommittedReadLimits,
+) -> Result<BTreeMap<String, CommittedTable>, CommittedReadError> {
+    read_tables(format_context, tables, table_ids, limits, |object_id| {
+        ProjectLoader::default().resolve_private_candidate_source_table_schema(
+            repository,
+            candidate,
+            object_id,
+        )
+    })
+}
+
+/// Shared reader behind [`committed_tables`] and [`private_candidate_tables`].
+/// `resolve` supplies each table's schema for the snapshot the caller names.
+fn read_tables(
+    format_context: &RepositoryFormatContext,
+    tables: &BTreeMap<String, TableSchema>,
+    table_ids: &BTreeMap<String, TableObjectId>,
+    limits: CommittedReadLimits,
+    resolve: impl Fn(TableObjectId) -> Result<ResolvedTableSchema, ProjectLoadError>,
+) -> Result<BTreeMap<String, CommittedTable>, CommittedReadError> {
     let mut result = BTreeMap::new();
     let mut budget = CommittedReadBudget::new(limits);
     for (table_name, table_schema) in tables {
@@ -142,9 +179,7 @@ pub fn committed_tables(
             .get(table_name)
             .copied()
             .ok_or(TableStorageError)?;
-        let resolved_schema = ProjectLoader::default()
-            .resolve_committed_source_table_schema(repository, commit, object_id)
-            .map_err(|_| TableStorageError)?;
+        let resolved_schema = resolve(object_id).map_err(|_| TableStorageError)?;
         let binding = resolved_schema.binding();
         let row_map = format_context
             .load_row_map(object_id.bytes())
