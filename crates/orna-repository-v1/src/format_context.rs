@@ -1298,7 +1298,7 @@ impl Repository {
     /// Opens metadata for a private candidate while it is still unreachable.
     /// The candidate capability is repository-issued and validation reads its
     /// exact private tree; no public snapshot pin is created or exposed.
-    pub(crate) fn open_private_candidate_format_context(
+    pub fn open_private_candidate_format_context(
         &self,
         candidate: &crate::PrivateCommit,
     ) -> Result<RepositoryFormatContext, FormatContextError> {
