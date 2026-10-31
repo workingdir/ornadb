@@ -95,6 +95,14 @@ fn candidate_unreadable(error: EditDraftError) -> String {
     format!("private candidate could not be read: {error:?}")
 }
 
+/// Copies a row document candidate into an owned buffer for its node. Row documents are
+/// bounded by the row schema, so one bounded read is the whole document.
+fn candidate_document_bytes(bytes: &CandidateSnapshot) -> std::io::Result<Vec<u8>> {
+    let length =
+        usize::try_from(bytes.len()).map_err(|_| std::io::Error::other("candidate too large"))?;
+    bytes.read_range(0, length)
+}
+
 /// Errno for a mutation refused on the live writable mount. Every such refusal
 /// is a denied or unsupported operation, so it is EPERM (41-vfs.md:103-105;
 /// profiles/vfs-1.md:139). EROFS is reserved for the kernel read-only snapshot
@@ -811,7 +819,8 @@ fn retain_scratch_candidate(
     len: u64,
     read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
 ) -> Result<(), RetentionError> {
-    let retained = save.writer.retained_drafts.retain(path, cause, len, read_chunk)?;
+    let mut candidate = QuotaCharge::empty(&save.writer.retained_drafts.quota);
+    let retained = save.writer.retained_drafts.retain(path, cause, len, &mut candidate, read_chunk)?;
     eprintln!(
         "{path}: not accepted ({cause}); candidate retained as draft {} in {} (sys.vfs.draft_retained)",
         retained.id,
@@ -939,11 +948,14 @@ impl VfsRetainedDraftStore {
     /// same candidate for the same path again keeps its first record and ID.
     /// Holds one chunk at a time: `read_chunk(offset, length)` supplies the
     /// candidate, which is digested and written in two streaming passes.
+    /// A live candidate passes its charge as `candidate`: a new record absorbs it, so
+    /// its bytes are charged once. A record already on disk leaves `candidate` alone.
     fn retain(
         &self,
         path: &str,
         cause: &str,
         len: u64,
+        candidate: &mut QuotaCharge,
         read_chunk: &mut dyn FnMut(u64, usize) -> Result<Vec<u8>, RetentionError>,
     ) -> Result<RetainedDraft, RetentionError> {
         let mut prefix = Sha256::new();
@@ -1005,8 +1017,13 @@ impl VfsRetainedDraftStore {
             "{VFS_RETAINED_DRAFT_HEADER}\ndraft {id}\npath {path}\ncause {cause}\nbytes {len}\n\n"
         );
         // The whole record is charged before any byte is staged, so a refused
-        // reservation (EDQUOT) leaves nothing behind.
-        let charge = QuotaCharge::reserve(&self.quota, header.len() as u64 + len).map_err(|_| {
+        // reservation (EDQUOT) leaves nothing behind. Bytes the candidate already
+        // holds are not charged again.
+        let mut charge = QuotaCharge::reserve(
+            &self.quota,
+            (header.len() as u64 + len).saturating_sub(candidate.bytes()),
+        )
+        .map_err(|_| {
             RetentionError {
                 errno: Errno::EDQUOT,
                 message: format!(
@@ -1043,6 +1060,7 @@ impl VfsRetainedDraftStore {
                 &error.error,
             )
         })?;
+        charge.absorb(candidate);
         self.records
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1629,7 +1647,7 @@ impl MountWriter {
                             )
                         })?;
                     let candidate = capture
-                        .capture_blob_candidate(bytes.as_ref(), bytes.len() as u64)
+                        .capture_blob_candidate(bytes.reader(), bytes.len())
                         .map_err(|_| {
                             orna_runtime_v1::TableActivationError::Runtime(
                                 orna_runtime_v1::RuntimeError::InvalidTableMutation,
@@ -1783,7 +1801,7 @@ impl MountWriter {
 /// same shared image the vfs published, so a caller never re-reads the scratch to get them.
 struct AcceptedReplacement {
     row: Option<Vec<u8>>,
-    bytes: Arc<[u8]>,
+    bytes: Arc<CandidateSnapshot>,
 }
 
 /// Outcome of one Blob commit attempt: settled, or refused because the scratch
@@ -1800,7 +1818,7 @@ struct BlobField {
     media_type: String,
     suffix: Option<String>,
     reference: Option<AdmittedBlobReference>,
-    replacement_bytes: Option<Arc<[u8]>>,
+    replacement_bytes: Option<Arc<CandidateSnapshot>>,
     /// Whether the row schema requires this field: a required Blob is never unlinked (VFS-013).
     required: bool,
     /// A large Str projected as a sibling text file (profiles/vfs-1.md), not a Blob. Its
@@ -2038,6 +2056,8 @@ enum DocumentCommitError {
     Stale,
     Rejected(String),
     Failed(String),
+    /// The aggregate draft quota refused the candidate (41-vfs.md:105, EDQUOT).
+    Quota(String),
     /// The save did not commit and recovery storage could not keep its candidate;
     /// `errno` is the retention errno (ORNA-VFS-009, EDIT-1 step 4).
     Unretained { errno: Errno, cause: &'static str },
@@ -2045,12 +2065,14 @@ enum DocumentCommitError {
 
 impl DocumentCommitError {
     /// Errno for a save that did not commit (profiles/vfs-1 errno table):
-    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EIO for backing I/O.
+    /// EINVAL for malformed drafts, EAGAIN for stale CAS, EDQUOT for resource limits,
+    /// EIO for backing I/O.
     fn errno(&self) -> Errno {
         match self {
             Self::Rejected(_) => Errno::EINVAL,
             Self::Unretained { errno, .. } => *errno,
             Self::Stale => Errno::EAGAIN,
+            Self::Quota(_) => Errno::EDQUOT,
             Self::NoCandidate | Self::Failed(_) => Errno::EIO,
         }
     }
@@ -2061,6 +2083,7 @@ impl DocumentCommitError {
         match self {
             Self::Stale => "sys.vfs.stale_edit",
             Self::Rejected(_) => "sys.vfs.invalid_document",
+            Self::Quota(_) => "draft quota exhausted",
             Self::Unretained { cause, .. } => *cause,
             Self::NoCandidate | Self::Failed(_) => "backing I/O failure",
         }
@@ -2075,7 +2098,7 @@ fn release_retention_cause(refusal: Option<&DraftRefusal>) -> &'static str {
 
 /// Classifies a failed durable save. Semantic admission and malformed-draft
 /// refusals are `Rejected`; CAS staleness is `Stale`; everything else is
-/// backing I/O `Failed`.
+/// backing I/O `Failed`; a draft-quota refusal is `Quota` (EDQUOT).
 fn save_failure(
     context: &str,
     error: VfsSaveError<orna_runtime_v1::TableActivationError>,
@@ -2092,6 +2115,9 @@ fn save_failure(
         }
         VfsSaveError::Stale { .. } => DocumentCommitError::Stale,
         VfsSaveError::NoCandidate => DocumentCommitError::NoCandidate,
+        VfsSaveError::Backing(error @ (EditDraftError::QuotaExceeded | EditDraftError::FileTooLarge)) => {
+            DocumentCommitError::Quota(format!("{context}: {error:?}"))
+        }
         error => DocumentCommitError::Failed(format!("{context}: {error:?}")),
     }
 }
@@ -2110,7 +2136,9 @@ impl std::fmt::Display for DocumentCommitError {
                 formatter.write_str("mounted save is stale against its captured baseline")
             }
             Self::Unretained { cause, .. } => formatter.write_str(cause),
-            Self::Rejected(message) | Self::Failed(message) => formatter.write_str(message),
+            Self::Rejected(message) | Self::Failed(message) | Self::Quota(message) => {
+                formatter.write_str(message)
+            }
         }
     }
 }
@@ -2347,7 +2375,11 @@ impl RowSaveContext {
         let document = self.writer.runtime.block_on(self.target.open_read());
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
-        let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
+        let document_bytes: Arc<[u8]> = Arc::from(
+            document
+                .read_at(0, document_length)
+                .map_err(|_| "mounted row document could not be read".to_owned())?,
+        );
         let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
@@ -2380,7 +2412,7 @@ impl RowSaveContext {
             outcome,
             &accepted_row,
             field,
-            Some(replacement_bytes),
+            Some(Arc::new(CandidateSnapshot::from(Arc::clone(&replacement_bytes)))),
             record_baseline,
         )
     }
@@ -2395,7 +2427,7 @@ impl RowSaveContext {
         >,
         accepted_row: &Mutex<Option<Vec<u8>>>,
         field: &BlobField,
-        replacement_bytes: Option<Arc<[u8]>>,
+        replacement_bytes: Option<Arc<CandidateSnapshot>>,
         record_baseline: bool,
     ) -> Result<AcceptedReplacement, DocumentCommitError> {
         match outcome {
@@ -2539,13 +2571,17 @@ impl RowSaveContext {
         let document = self.writer.runtime.block_on(self.target.open_read());
         let document_length = usize::try_from(document.len())
             .map_err(|_| "mounted row document length is invalid".to_owned())?;
-        let document_bytes: Arc<[u8]> = Arc::from(document.read_at(0, document_length));
+        let document_bytes: Arc<[u8]> = Arc::from(
+            document
+                .read_at(0, document_length)
+                .map_err(|_| "mounted row document could not be read".to_owned())?,
+        );
         let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let field_name = field.name.clone();
         let accepted_row = Arc::new(Mutex::new(None));
         let accepted_row_output = Arc::clone(&accepted_row);
-        let blob_slot: Arc<Mutex<Option<Arc<[u8]>>>> = Arc::new(Mutex::new(None));
+        let blob_slot: Arc<Mutex<Option<Arc<CandidateSnapshot>>>> = Arc::new(Mutex::new(None));
         let blob_output = Arc::clone(&blob_slot);
         let outcome = self
             .writer
@@ -2562,7 +2598,7 @@ impl RowSaveContext {
                 move |coordinates, blob_bytes, binding| async move {
                     *blob_output
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(blob_bytes);
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::new(blob_bytes));
                     let (candidate, row_bytes) = row_context.writer.candidate(
                         &row_context,
                         &coordinates,
@@ -2604,7 +2640,7 @@ impl RowSaveContext {
         expected_baseline_row: Option<Vec<u8>>,
         schema_identity: TableSchemaIdentity,
         record_baseline: bool,
-    ) -> Result<Arc<[u8]>, DocumentCommitError> {
+    ) -> Result<Arc<CandidateSnapshot>, DocumentCommitError> {
         let save = self.durable_save_with_baseline(expected_baseline_row, schema_identity)?;
         let row_context = Arc::clone(self);
         let accepted_row = Arc::new(Mutex::new(None));
@@ -2649,11 +2685,12 @@ impl RowSaveContext {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take()
                 {
-                    Some(bytes) => Ok(bytes),
+                    Some(bytes) => Ok(Arc::new(CandidateSnapshot::from(bytes))),
                     None => self
                         .writer
                         .runtime
                         .block_on(scratch.candidate_bytes())
+                        .map(|bytes| Arc::new(CandidateSnapshot::from(bytes)))
                         .map_err(|error| DocumentCommitError::Failed(candidate_unreadable(error))),
                 }
             }
@@ -3934,6 +3971,7 @@ impl WorkspaceFilesystem {
                 &record.identity.logical_path,
                 "sys.vfs.stale_edit",
                 candidate.len,
+                &mut QuotaCharge::empty(&writer.retained_drafts.quota),
                 &mut |offset, length| {
                     file.seek(SeekFrom::Start(candidate.offset + offset)).map_err(|error| {
                         RetentionError::io(
@@ -4418,15 +4456,28 @@ impl WorkspaceFilesystem {
                 .runtime
                 .block_on(next_target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
         );
-        if !bytes.is_empty() {
+        // The next candidate is seeded one bounded chunk at a time; the accepted bytes are never
+        // copied whole.
+        let accepted_length = bytes.len();
+        let mut seeded = 0_u64;
+        while seeded < accepted_length {
+            let chunk = bytes.read_range(seeded, CANDIDATE_CHUNK_BYTES).map_err(|error| {
+                DocumentCommitError::Failed(format!("next Blob candidate could not be read: {error}"))
+            })?;
+            if chunk.is_empty() {
+                return Err(DocumentCommitError::Failed(
+                    "next Blob candidate ended before its recorded length".into(),
+                ));
+            }
             save.writer
                 .runtime
-                .block_on(next_scratch.write_at(0, &bytes))
+                .block_on(next_scratch.write_at(seeded, &chunk))
                 .map_err(|error| {
                     DocumentCommitError::Failed(format!(
                         "next Blob candidate could not be seeded: {error:?}"
                     ))
                 })?;
+            seeded += chunk.len() as u64;
         }
         let next_path = {
             let mut state = self
@@ -4498,6 +4549,7 @@ impl WorkspaceFilesystem {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = state.display_path(inode);
         let len = save.writer.runtime.block_on(draft.candidate_len());
+        let mut candidate = save.writer.runtime.block_on(draft.take_candidate_charge());
         let retained = {
             let mut read_chunk = |offset: u64, length: usize| {
                 save.writer
@@ -4507,8 +4559,9 @@ impl WorkspaceFilesystem {
             };
             save.writer
                 .retained_drafts
-                .retain(&path, cause, len, &mut read_chunk)
+                .retain(&path, cause, len, &mut candidate, &mut read_chunk)
         };
+        save.writer.runtime.block_on(draft.restore_candidate_charge(candidate));
         let (retained_draft, unretained, failure) = match retained {
             Ok(retained) => {
                 eprintln!(
@@ -4877,11 +4930,22 @@ impl WorkspaceFilesystem {
                     },
                 },
             };
-            match save
+            let mut candidate = match &source {
+                CandidateSource::Draft(draft) => {
+                    save.writer.runtime.block_on(draft.take_candidate_charge())
+                }
+                CandidateSource::Truncated { .. } => {
+                    QuotaCharge::empty(&save.writer.retained_drafts.quota)
+                }
+            };
+            let retained = save
                 .writer
                 .retained_drafts
-                .retain(&path, cause, len, &mut read_chunk)
-            {
+                .retain(&path, cause, len, &mut candidate, &mut read_chunk);
+            if let CandidateSource::Draft(draft) = &source {
+                save.writer.runtime.block_on(draft.restore_candidate_charge(candidate));
+            }
+            match retained {
                 Ok(retained) => {
                     reports.insert(format!(
                         "retained draft {} for {path} ({cause}; sys.vfs.draft_retained) in {}",
@@ -5990,11 +6054,19 @@ impl Filesystem for WorkspaceFilesystem {
                 // 41-vfs.md:38-40: a handle pinned to the replaced row keeps the generation it
                 // captured; the accepted bytes go to a new node that new opens show
                 // (profiles/vfs-1.md:126-133), the same policy adopt_accepted_document applies.
+                let document_bytes = match candidate_document_bytes(&accepted_bytes) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        eprintln!("mounted replacement could not be read: {error}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                };
                 let new_inode = match state.replace_child(
                     newparent.0,
                     newname,
                     NodeKind::Document {
-                        bytes: accepted_bytes.to_vec(),
+                        bytes: document_bytes,
                         save: Arc::clone(&save),
                     },
                 ) {
@@ -6014,6 +6086,14 @@ impl Filesystem for WorkspaceFilesystem {
                 }
             }
             None => {
+                let document_bytes = match candidate_document_bytes(&accepted_bytes) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        eprintln!("mounted replacement could not be read: {error}");
+                        reply.error(Errno::EIO);
+                        return;
+                    }
+                };
                 let Some(NodeKind::Document {
                     bytes,
                     save: destination_save,
@@ -6025,7 +6105,7 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EIO);
                     return;
                 };
-                *bytes = accepted_bytes.to_vec();
+                *bytes = document_bytes;
                 // New opens continue from the row this scratch's context accepted.
                 if !Arc::ptr_eq(destination_save, &save) {
                     *destination_save = Arc::clone(&save);
@@ -6271,7 +6351,14 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.data(&bytes[start..end]);
                     return;
                 }
-                NodeKind::BlobBytes(bytes) | NodeKind::Text { bytes, .. } => {
+                NodeKind::BlobBytes(candidate) => {
+                    match candidate.read_range(offset, size as usize) {
+                        Ok(data) => reply.data(&data),
+                        Err(_) => reply.error(Errno::EIO),
+                    }
+                    return;
+                }
+                NodeKind::Text { bytes, .. } => {
                     let start = match usize::try_from(offset) {
                         Ok(start) if start < bytes.len() => start,
                         _ => {
@@ -6876,7 +6963,10 @@ impl FsBuilder {
                 )
             }
             NodeKind::Bytes(bytes) => (FileType::RegularFile, bytes.len() as u64, 0o444, 1),
-            NodeKind::BlobBytes(bytes) | NodeKind::Text { bytes, .. } => {
+            NodeKind::BlobBytes(candidate) => {
+                (FileType::RegularFile, candidate.len(), 0o444, 1)
+            }
+            NodeKind::Text { bytes, .. } => {
                 (FileType::RegularFile, bytes.len() as u64, 0o444, 1)
             }
             NodeKind::Document { bytes, .. } => {
@@ -7683,7 +7773,9 @@ impl FsBuilder {
                     media_type: "text/plain".to_owned(),
                     suffix: None,
                     reference: None,
-                    replacement_bytes: Some(Arc::from(text.as_bytes())),
+                    replacement_bytes: Some(Arc::new(CandidateSnapshot::from(Arc::<[u8]>::from(
+                        text.as_bytes(),
+                    )))),
                     required,
                     text: true,
                 });
@@ -7756,8 +7848,10 @@ impl FsBuilder {
             if file.is_text() {
                 let bytes = candidate_field
                     .replacement_bytes
-                    .clone()
-                    .ok_or_else(|| "projected text file has no captured text".to_owned())?;
+                    .as_ref()
+                    .ok_or_else(|| "projected text file has no captured text".to_owned())?
+                    .to_arc()
+                    .map_err(|error| format!("projected text file could not be read: {error}"))?;
                 files.push((file.name().to_owned(), NodeKind::Text { bytes, candidate }));
                 continue;
             }
@@ -8371,7 +8465,7 @@ impl FsBuilder {
         parent: u64,
         name: &OsStr,
         superseded: u64,
-        bytes: Arc<[u8]>,
+        bytes: Arc<CandidateSnapshot>,
     ) -> Result<u64, String> {
         let (text, candidate) = match self.nodes.get(&superseded).map(|node| &node.kind) {
             Some(NodeKind::Blob { .. } | NodeKind::BlobBytes(_)) => (false, None),
@@ -8383,6 +8477,17 @@ impl FsBuilder {
                 }),
             ),
             _ => return Err("replaced mount entry is not a blob".into()),
+        };
+        // Text nodes keep contiguous bytes; a Blob keeps the streamed candidate. A failed
+        // copy is reported before the directory is touched.
+        let text_bytes = if text {
+            Some(
+                bytes
+                    .to_arc()
+                    .map_err(|error| format!("replacement text could not be read: {error}"))?,
+            )
+        } else {
+            None
         };
         let generation = self.next_inode;
         let next_inode = generation
@@ -8410,10 +8515,9 @@ impl FsBuilder {
             generation,
             FsNode {
                 parent,
-                kind: if text {
-                    NodeKind::Text { bytes, candidate }
-                } else {
-                    NodeKind::BlobBytes(bytes)
+                kind: match text_bytes {
+                    Some(bytes) => NodeKind::Text { bytes, candidate },
+                    None => NodeKind::BlobBytes(bytes),
                 },
             },
         );
@@ -8481,7 +8585,7 @@ enum NodeKind {
         /// write-intent opens are refused (41-vfs.md EDIT-1 candidates require a writer).
         candidate: Option<BlobCandidate>,
     },
-    BlobBytes(Arc<[u8]>),
+    BlobBytes(Arc<CandidateSnapshot>),
     /// A large Str projected as a sibling text file. Its bytes are captured in the row; a
     /// writable file carries the row save context and its field (profiles/vfs-1.md).
     Text {
@@ -9536,12 +9640,18 @@ fn substitute_text_fields(
             continue;
         }
         validate_text_descriptor(&entry.value, field)?;
-        let bytes = match replacement {
+        let owned;
+        let bytes: &[u8] = match replacement {
             Some((replaced, bytes)) if replaced == name => bytes,
-            _ => field
-                .replacement_bytes
-                .as_deref()
-                .ok_or_else(|| format!("Str field {name} has no captured text"))?,
+            _ => {
+                owned = field
+                    .replacement_bytes
+                    .as_ref()
+                    .ok_or_else(|| format!("Str field {name} has no captured text"))?
+                    .to_arc()
+                    .map_err(|error| format!("Str field {name} text could not be read: {error}"))?;
+                &owned[..]
+            }
         };
         edits.push((
             entry.span.start..entry.span.end,
@@ -9794,6 +9904,25 @@ mod tests {
             super::draft_errno(&Err(EditDraftError::BackingIo)).code(),
             5
         );
+    }
+
+    #[test]
+    fn aggregate_quota_refusal_at_save_is_edquot_on_every_commit_path() {
+        use orna_runtime_v1::vfs::{EditDraftError, VfsSaveError};
+        // The document, fsync and flush replies all return `DocumentCommitError::errno()`
+        // of the error `save_failure` classifies (41-vfs.md:105: EDQUOT for resource limits).
+        for error in [EditDraftError::QuotaExceeded, EditDraftError::FileTooLarge] {
+            let failure = super::save_failure(
+                "mounted row save failed",
+                VfsSaveError::<orna_runtime_v1::TableActivationError>::Backing(error),
+            );
+            assert_eq!(failure.errno().code(), 122, "{failure:?}");
+        }
+        let io = super::save_failure(
+            "mounted row save failed",
+            VfsSaveError::<orna_runtime_v1::TableActivationError>::Backing(EditDraftError::BackingIo),
+        );
+        assert_eq!(io.errno().code(), 5, "{io:?}");
     }
 
     use std::ffi::OsStr;
@@ -10385,8 +10514,9 @@ mod hardening_tests {
             total_read.set(total_read.get() + length as u64);
             Ok((offset..offset + length as u64).map(|index| (index % 251) as u8).collect())
         };
+        let mut candidate = orna_runtime_v1::vfs::QuotaCharge::empty(&store.quota);
         let retained = store
-            .retain("/music/big.orna", "refused", LEN, &mut read_chunk)
+            .retain("/music/big.orna", "refused", LEN, &mut candidate, &mut read_chunk)
             .unwrap();
         assert!(largest_read.get() > 0);
         assert!(largest_read.get() <= super::CANDIDATE_CHUNK_BYTES);

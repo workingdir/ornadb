@@ -22868,7 +22868,8 @@ mod tests {
                 .retained_invalid_draft()
                 .await
                 .unwrap()
-                .replacement_bytes(),
+                .replacement_bytes()
+                .unwrap(),
             b"refused"
         );
         assert_eq!(state.pending().await.unwrap().len(), 1);
@@ -23943,7 +23944,7 @@ mod tests {
             .retained_invalid_draft()
             .await
             .expect("the refused save retains its draft");
-        assert_eq!(retained.replacement_bytes(), second_row.as_slice());
+        assert_eq!(retained.replacement_bytes().unwrap(), second_row.as_slice());
         assert_eq!(retained.diagnostic(), diagnostic);
         assert_eq!(
             admitted_row(&state, &identity, &[1]).await.as_deref(),

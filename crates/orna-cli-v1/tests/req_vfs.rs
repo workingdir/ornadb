@@ -88,10 +88,10 @@ async fn read_handles_and_readdir_cursors_keep_their_open_generation() {
     let cursor = SnapshotReaddirCursor::new(open.pin().clone_pin(), 3_u64);
 
     assert_eq!(open.pin().snapshot(), &17);
-    assert_eq!(open.read_at(0, 32), b"opened generation");
-    let mut private_copy = open.read_at(0, 32);
+    assert_eq!(open.read_at(0, 32).unwrap(), b"opened generation");
+    let mut private_copy = open.read_at(0, 32).unwrap();
     private_copy[0] = b'X';
-    assert_eq!(open.read_at(0, 32), b"opened generation");
+    assert_eq!(open.read_at(0, 32).unwrap(), b"opened generation");
     assert_eq!(cursor.pin().snapshot(), &17);
     assert_eq!(*cursor.continuation(), 3);
 }
@@ -130,8 +130,8 @@ async fn speculative_file_candidates_are_admitted_individually() {
 
     let validations = Arc::new(AtomicUsize::new(0));
     assert_eq!(validations.load(Ordering::SeqCst), 0);
-    assert_eq!(first.open_read().await.read_at(0, 32), b"first source");
-    assert_eq!(second.open_read().await.read_at(0, 32), b"second source");
+    assert_eq!(first.open_read().await.read_at(0, 32).unwrap(), b"first source");
+    assert_eq!(second.open_read().await.read_at(0, 32).unwrap(), b"second source");
 
     let first_validations = Arc::clone(&validations);
     let first_result = first
@@ -144,8 +144,8 @@ async fn speculative_file_candidates_are_admitted_individually() {
         .expect("explicit admission of first candidate");
     assert!(matches!(first_result, TemporaryRenameOutcome::Applied { .. }));
     assert_eq!(validations.load(Ordering::SeqCst), 1);
-    assert_eq!(first.open_read().await.read_at(0, 32), b"first candidate");
-    assert_eq!(second.open_read().await.read_at(0, 32), b"second source");
+    assert_eq!(first.open_read().await.read_at(0, 32).unwrap(), b"first candidate");
+    assert_eq!(second.open_read().await.read_at(0, 32).unwrap(), b"second source");
 
     let second_validations = Arc::clone(&validations);
     let second_result = second
