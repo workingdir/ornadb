@@ -154,11 +154,27 @@ const ENUM_KEYED_ASSERTED_LIBRARY: &str = "pub enum Level {\n    low,\n    high,
 pub table Task(level: Level) {\n    title: Str,\n    \
 assert every(row => row.title != \"\");\n}\n";
 
+/// Commits `asserting` over the committed source with plain git. The commit gate
+/// refuses an asserting project with a non-scalar key (ORNA-ASSERT-050, interim
+/// ornadb-gq4g), so the asserting source reaches HEAD the way a repository
+/// committed before that gate would hold it. The store already admitted the
+/// tables through `orna commit`; only the source changes here.
+fn commit_asserting_source_outside_the_gate(root: &std::path::Path, asserting: &str) {
+    std::fs::write(root.join("main.orna"), asserting).expect("write asserting source");
+    git(root, &["add", "main.orna"]);
+    git(root, &["commit", "-m", "asserting source outside the gate"]);
+}
+
+const MIXED_KEY_PLAIN_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
+pub table Book(id: Int) {\n    title: Str,\n}\n\
+pub table Journal(level: Level) {\n    note: Str,\n}\n";
+
 #[test]
 fn enum_keyed_assertion_write_is_refused_and_leaves_the_store_unchanged() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let root = initialized_database(&directory, ENUM_KEYED_ASSERTED_LIBRARY);
-    commit_source(&root, "enum keyed asserted table fixture");
+    let root = initialized_database(&directory, ENUM_KEYED_LIBRARY);
+    commit_source(&root, "enum keyed table fixture");
+    commit_asserting_source_outside_the_gate(&root, ENUM_KEYED_ASSERTED_LIBRARY);
     let head = git(&root, &["rev-parse", "HEAD"]);
 
     let output = orna_repl(
@@ -181,8 +197,9 @@ fn unrelated_enum_keyed_table_refuses_a_valid_write_in_an_asserting_project() {
     // key is checked project-wide, so the valid write is refused. The read-only
     // count still answers. Expect admission here once the seam accepts enums.
     let directory = tempfile::tempdir().expect("temporary directory");
-    let root = initialized_database(&directory, MIXED_KEY_LIBRARY);
+    let root = initialized_database(&directory, MIXED_KEY_PLAIN_LIBRARY);
     commit_source(&root, "mixed key fixture");
+    commit_asserting_source_outside_the_gate(&root, MIXED_KEY_LIBRARY);
     let head = git(&root, &["rev-parse", "HEAD"]);
 
     let output = orna_repl(
