@@ -10,7 +10,10 @@
 #[path = "support/product.rs"]
 mod product;
 
-use std::fs;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use orna_value_v1::Raw;
 use product::*;
@@ -258,4 +261,83 @@ fn schema_changes_wait_for_unpublished_rows_and_refuse_rows_that_do_not_fit() {
     let listed = orna(&root, &["query", &task, "--format", "json"]);
     assert_ne!(listed.status.code(), Some(0), "{}", transcript(&listed));
     assert_eq!(stored_rows(&root, &committed, relation_bytes(&task)).len(), 1);
+}
+
+/// A second clone of the library stands in for the schema owner. Its
+/// `orna commit` runs against its own runtime state, so it never sees the
+/// pending rows of this worktree's save.
+fn clone_schema_owner(directory: &TempDir, root: &Path) -> PathBuf {
+    let owner = directory.path().join("owner");
+    git(
+        directory.path(),
+        &[
+            "clone",
+            "--quiet",
+            root.to_str().expect("UTF-8 test path"),
+            owner.to_str().expect("UTF-8 test path"),
+        ],
+    );
+    git(&owner, &["config", "user.name", "Orna Test"]);
+    git(&owner, &["config", "user.email", "orna-test@example.invalid"]);
+    git(&owner, &["config", "commit.gpgsign", "false"]);
+    owner
+}
+
+/// The owner commits `source` with `orna commit`, and the commit reaches this
+/// worktree's HEAD by fast-forward, as a pulled schema change does. Returns the
+/// new HEAD.
+fn schema_commit_lands_from_owner(owner: &Path, root: &Path, source: &str, message: &str) -> String {
+    fs::write(owner.join("main.orna"), source).expect("write the owner's main.orna");
+    commit_source(owner, message);
+    git(
+        root,
+        &[
+            "pull",
+            "--ff-only",
+            "--quiet",
+            owner.to_str().expect("UTF-8 test path"),
+            "HEAD",
+        ],
+    );
+    head(root)
+}
+
+#[test]
+fn a_pending_row_saved_before_a_schema_commit_lands_is_refused_at_publish_under_that_schema() {
+    const TASKS: &str = "pub table Task(id: Str) {\n    title: Str,\n}\n";
+    const REQUIRED_DONE: &str = "pub table Task(id: Str) {\n    title: Str,\n    done: Bool,\n}\n";
+    let directory = TempDir::new().expect("create the test directory");
+    let root = initialized_database(&directory, TASKS);
+    let task = admitted_relations(&commit_source(&root, "Declare Task"))["Task"].clone();
+    let declared = head(&root);
+    // The save encodes the row under TASKS and leaves it in the pending range.
+    repl_writes(&root, "main.Task.insert({ id: \"write\", title: \"Write the report\" })");
+    let owner = clone_schema_owner(&directory, &root);
+
+    // A schema commit lands on HEAD while the row is pending. Publication
+    // re-reads HEAD and re-validates the row against REQUIRED_DONE, which the
+    // row does not fit: nothing is published, HEAD stays on the owner's commit,
+    // and the row stays pending so a retry refuses it again.
+    let required = schema_commit_lands_from_owner(&owner, &root, REQUIRED_DONE, "Require done");
+    assert_ne!(required, declared);
+    assert_eq!(head(&root), required);
+    for attempt in ["first", "retried"] {
+        let refused = orna(&root, &["publish", "--message", "Add a task"]);
+        assert_ne!(
+            refused.status.code(),
+            Some(0),
+            "{attempt} publish: {}",
+            transcript(&refused)
+        );
+        let message = transcript(&refused);
+        assert!(
+            message.contains("does not match its committed schema"),
+            "{attempt} publish: {message}"
+        );
+        assert_eq!(head(&root), required, "{attempt} publish moved HEAD");
+        assert!(
+            stored_rows(&root, &head(&root), relation_bytes(&task)).is_empty(),
+            "{attempt} publish committed the row under the stale schema"
+        );
+    }
 }
