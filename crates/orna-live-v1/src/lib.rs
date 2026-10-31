@@ -2953,6 +2953,26 @@ impl LiveHost {
                     .await;
                 match committed {
                     Ok(response) => response,
+                    Err(error @ Error::ValidationRejected)
+                        if !self.deleted_sessions.contains_key(&session) =>
+                    {
+                        // A refused transaction keeps its correlated diagnostic
+                        // rather than a generic failure, so a retry on a resumed
+                        // attachment replays the same ORNA-A091-009 response.
+                        let envelope = Envelope {
+                            request: Some(request),
+                            watch,
+                            message: message.clone(),
+                            extensions: BTreeMap::new(),
+                        };
+                        if let Some(outcome) =
+                            self.operational_error_outcome(Some(session), &envelope, error, true)?
+                        {
+                            return self.complete(session, request, &envelope, outcome).await;
+                        }
+                        self.retain_failure(session, request, fingerprint).await?;
+                        return Err(error);
+                    }
                     Err(error) => {
                         if !self.deleted_sessions.contains_key(&session) {
                             self.retain_failure(session, request, fingerprint).await?;
@@ -3153,6 +3173,10 @@ impl LiveHost {
             Error::Limit => ("wire.limit", event_watch),
             Error::SessionExpired => ("wire.session_expired", event_watch),
             Error::AdminBusy => (Error::AdminBusy.code(), event_watch),
+            // A proven false table assertion refuses a well-formed request with
+            // nothing published: its correlated diagnostic carries the portable
+            // code without closing unrelated watches (30-protocol, forbidden effect).
+            Error::ValidationRejected => (Error::ValidationRejected.code(), event_watch),
             // A denied event admitted on a live watch is an action-handle
             // rejection; a pre-admission event without a live watch
             // (including resync) is an unknown handle. Attachment-boundary

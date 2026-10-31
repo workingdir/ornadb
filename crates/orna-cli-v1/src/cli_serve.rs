@@ -32,7 +32,7 @@ use orna_security_v1::{
 };
 use orna_serving_v1::Serving;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -617,7 +617,11 @@ fn served_table_candidate_validator(
         orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
             .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)?
             .ok_or(orna_live_v1::Error::RuntimeUnavailable)?;
-    let table_object_ids = served_committed_table_object_ids(&identities)?;
+    ensure_unambiguous_live_table_names(&identities)?;
+    // The validator admits exactly the identities this activation admitted, so a
+    // commit carrying them passes and a commit under any other identity is refused.
+    // A name-addressed activation admits none.
+    let table_object_ids = Arc::new(context.table_object_ids().clone());
     orna_conformance_v1::transactional_loaded_project_candidate_validator(
         project,
         &identities,
@@ -628,28 +632,22 @@ fn served_table_candidate_validator(
     .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)
 }
 
-/// The committed identity of every live table, keyed by qualified name. Two
-/// live identities under one name are ambiguous, so they fail the commit
-/// rather than picking one. The REPL's `committed_table_identities` checks
-/// only the names it binds; this host binds every live table, so a duplicate
-/// under any name fails the commit.
-fn served_committed_table_object_ids(
+/// Fails closed when two live table identities share one qualified name, so
+/// the commit cannot pick one committed identity for that name. This host binds
+/// every live table, so a duplicate under any name fails the commit.
+fn ensure_unambiguous_live_table_names(
     identities: &orna_project_v1::ObjectIdentityManifest,
-) -> orna_live_v1::Result<Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>> {
-    let mut table_object_ids = BTreeMap::new();
+) -> orna_live_v1::Result<()> {
+    let mut names = BTreeSet::new();
     for record in identities.records() {
         if record.kind() != orna_project_v1::ObjectKind::Table || record.is_retired() {
             continue;
         }
-        let identity = orna_runtime_v1::TableObjectId::new(*record.id());
-        if table_object_ids
-            .insert(record.qualified_name().to_owned(), identity)
-            .is_some()
-        {
+        if !names.insert(record.qualified_name()) {
             return Err(orna_live_v1::Error::RuntimeUnavailable);
         }
     }
-    Ok(Arc::new(table_object_ids))
+    Ok(())
 }
 
 /// Loads and admits the serving entry. A broken `main.orna` is reported on
@@ -4377,6 +4375,114 @@ mod tests {
             committed_rows(directory.path(), "Note"),
             rows,
             "the replay does not write again"
+        );
+    }
+
+    /// ORNA-A091-009 and 30-protocol forbidden effect (A13-live-serving-04): an
+    /// Eval whose table commit fails the table assertion is refused with a
+    /// correlated diagnostic, writes no row, and leaves the socket open, so the
+    /// next request on it commits as usual.
+    #[test]
+    fn served_eval_refused_by_table_assertion_reports_its_diagnostic() {
+        let directory = tempfile::tempdir().expect("temporary project");
+        orna_repository_v1::initialize_repository(directory.path()).expect("orna init");
+        std::fs::write(
+            directory.path().join("main.orna"),
+            "pub table Book(id: Int) {\n    title: Str,\n    \
+             assert every(row => row.title != \"\");\n}\n",
+        )
+        .expect("project source");
+        commit_project_with_identities(directory.path());
+        let endpoint = Endpoint::Path(
+            directory
+                .path()
+                .to_str()
+                .expect("UTF-8 project path")
+                .to_owned(),
+        );
+        let clone = open_served_clone(&endpoint).expect("`orna serve` resolves the clone");
+        let database = clone.identity.database_id;
+        let (address, _state) = serve_clone(clone, ServeOptions::default());
+        let session = create_session_in(address, database);
+        let mut socket = open_websocket(address, &session);
+
+        let refused = eval_over_socket(
+            &mut socket,
+            &session,
+            [41; 16],
+            r#"main.Book.insert({ id: 1, title: "" })"#,
+        );
+        let Message::Diagnostic { diagnostic, .. } = &refused.message else {
+            panic!("Eval answers with a Diagnostic, not {refused:?}");
+        };
+        assert_eq!(refused.request, Some([41; 16]), "the refusal is correlated");
+        assert_eq!(
+            diagnostic.code().expect("a portable diagnostic code"),
+            "ORNA-A091-009"
+        );
+        assert!(
+            committed_rows(directory.path(), "Book").is_empty(),
+            "a refused write commits no row"
+        );
+
+        let row = CanonicalValue::new(OvbRaw::Map(vec![
+            (OvbRaw::Text("id".into()), OvbRaw::Int(2.into())),
+            (OvbRaw::Text("title".into()), OvbRaw::Text("Dune".into())),
+        ]))
+        .expect("canonical row");
+        let admitted = eval_over_socket(
+            &mut socket,
+            &session,
+            [42; 16],
+            r#"main.Book.insert({ id: 2, title: "Dune" })"#,
+        );
+        assert_success_value(&admitted, &row);
+        assert_eq!(
+            committed_rows(directory.path(), "Book").len(),
+            1,
+            "the admitted write commits exactly one row"
+        );
+    }
+
+    /// Commits the clone's `main.orna` with the identity inventory `orna
+    /// commit` stages for it, so the served host reads each live table's
+    /// committed identity from HEAD. The sources are committed first, as the
+    /// LSP fixtures do, and the identities follow in a second commit.
+    fn commit_project_with_identities(root: &Path) {
+        git_succeeds(root, &["add", "main.orna", ".orna/database.orna"]);
+        git_commit(root, "base");
+        let source = std::fs::read_to_string(root.join("main.orna")).expect("project source");
+        let module = orna_semantic_v1::ModuleInput::new("main.orna", source.as_str());
+        let identities = orna_project_v1::ObjectIdentityManifest::reconcile(
+            std::slice::from_ref(&module),
+            None,
+        )
+        .expect("object identities");
+        let repository = Repository::discover(root).expect("served clone");
+        let staged = repository
+            .capture_staged_candidate()
+            .expect("staged candidate");
+        repository
+            .stage_object_identities(&staged, &identities.to_stored(), &[])
+            .expect("stage object identities");
+        git_commit(root, "identities");
+    }
+
+    fn git_commit(directory: &Path, message: &str) {
+        git_succeeds(
+            directory,
+            &[
+                "-c",
+                "user.name=orna-test",
+                "-c",
+                "user.email=orna-test@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "-m",
+                message,
+            ],
         );
     }
 
