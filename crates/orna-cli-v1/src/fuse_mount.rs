@@ -1121,6 +1121,9 @@ struct HistoricalTableSchemas {
     /// The stored constant default of each field that schema evolution introduced, as frozen by
     /// the commit that introduced it (ORNA-FIELD-003, ORNA-EVOL-009).
     introductions: BTreeMap<[u8; 16], Raw>,
+    /// The number of commits that carry no committed identities for the table and so declare
+    /// nothing (F7). They are counted rather than skipped silently.
+    unidentified_commits: usize,
 }
 
 enum HistoricalState {
@@ -1147,6 +1150,16 @@ struct HistoricalDeclaration<G> {
     defaults: BTreeMap<[u8; 16], Raw>,
 }
 
+/// How one commit of a table's history relates to the table.
+enum CommitDeclaration<G> {
+    /// The commit declares the table.
+    Declares(HistoricalDeclaration<G>),
+    /// The commit has committed identities but does not declare the table.
+    Undeclared,
+    /// The commit has no committed identities, so it cannot declare the table.
+    Unidentified,
+}
+
 /// A scan of one table's committed history, oldest commit first, which stops when its budget runs
 /// out and resumes at the next commit.
 struct ScanProgress<C, G> {
@@ -1158,6 +1171,9 @@ struct ScanProgress<C, G> {
     introductions: BTreeMap<[u8; 16], Raw>,
     /// The generation declared by each declaring commit, oldest first.
     declared: Vec<G>,
+    /// Commits without committed identities. They declare nothing and are counted, not skipped
+    /// silently (ORNA-EVOL-002, F7).
+    unidentified: usize,
 }
 
 impl<C, G: PartialEq> ScanProgress<C, G> {
@@ -1168,24 +1184,33 @@ impl<C, G: PartialEq> ScanProgress<C, G> {
             previous_ids: HashSet::new(),
             introductions: BTreeMap::new(),
             declared: Vec::new(),
+            unidentified: 0,
         }
     }
 
     /// Visits the commits from `next` on. Returns `true` once the history is exhausted, or `false`
-    /// when `within_budget` refuses the next commit. `declare` reads one commit and returns `None`
-    /// when the commit does not declare the table.
+    /// when `within_budget` refuses the next commit. `declare` classifies one commit; commits that
+    /// do not declare the table, and commits without committed identities, are skipped.
     fn advance(
         &mut self,
         mut within_budget: impl FnMut() -> bool,
-        declare: &impl Fn(&C) -> Result<Option<HistoricalDeclaration<G>>, String>,
+        declare: &impl Fn(&C) -> Result<CommitDeclaration<G>, String>,
     ) -> Result<bool, String> {
         while self.next < self.commits.len() {
             if !within_budget() {
                 return Ok(false);
             }
-            let Some(declaration) = declare(&self.commits[self.next])? else {
-                self.next += 1;
-                continue;
+            let declaration = match declare(&self.commits[self.next])? {
+                CommitDeclaration::Declares(declaration) => declaration,
+                CommitDeclaration::Undeclared => {
+                    self.next += 1;
+                    continue;
+                }
+                CommitDeclaration::Unidentified => {
+                    self.unidentified += 1;
+                    self.next += 1;
+                    continue;
+                }
             };
             let previous_ids = &self.previous_ids;
             for id in declaration
@@ -1207,14 +1232,14 @@ impl<C, G: PartialEq> ScanProgress<C, G> {
 
     /// The declared generations, newest first and each distinct, with the introduced values. Only
     /// meaningful once `advance` has returned `true`.
-    fn finish(self) -> (Vec<G>, BTreeMap<[u8; 16], Raw>) {
+    fn finish(self) -> (Vec<G>, BTreeMap<[u8; 16], Raw>, usize) {
         let mut generations: Vec<G> = Vec::new();
         for generation in self.declared.into_iter().rev() {
             if !generations.contains(&generation) {
                 generations.push(generation);
             }
         }
-        (generations, self.introductions)
+        (generations, self.introductions, self.unidentified)
     }
 }
 
@@ -1278,29 +1303,38 @@ fn advance_historical_scan(
             )
         }
     };
-    let complete = scan.advance(
-        || Instant::now() < deadline,
-        &|commit: &GitCommitRef| declare_historical_commit(repository, relation_id, commit),
-    )?;
+    let complete = scan.advance(|| Instant::now() < deadline, &|commit: &GitCommitRef| {
+        declare_historical_commit(repository, relation_id, commit)
+    })?;
     if !complete {
         return Ok(HistoricalStep::Paused(Box::new(scan)));
     }
-    let (generations, introductions) = scan.finish();
+    let (generations, introductions, unidentified) = scan.finish();
+    if unidentified > 0 {
+        eprintln!(
+            "committed schema scan of table {}: skipped {unidentified} commit(s) without committed identities",
+            relation_id
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        );
+    }
     Ok(HistoricalStep::Settled(HistoricalTableSchemas {
         generations,
         introductions,
+        unidentified_commits: unidentified,
     }))
 }
 
 /// Reads one commit of a table's history. A commit with no committed identity for the table
-/// predates it and does not declare it (F7: identity-less commits are not scanned). Any other
-/// commit that cannot be read or resolved fails the scan: a generation is never silently left out
-/// (ORNA-EVOL-002).
+/// predates it and does not declare it (F7: identity-less commits are skipped and counted). Any
+/// other commit that cannot be read or resolved fails the scan: a generation is never silently
+/// left out (ORNA-EVOL-002).
 fn declare_historical_commit(
     repository: &Repository,
     relation_id: [u8; 16],
     commit: &GitCommitRef,
-) -> Result<Option<HistoricalDeclaration<SchemaDescriptor>>, String> {
+) -> Result<CommitDeclaration<SchemaDescriptor>, String> {
     let identities = ObjectIdentityManifest::read_committed_if_present(repository, commit)
         .map_err(|error| {
             format!(
@@ -1309,13 +1343,13 @@ fn declare_historical_commit(
             )
         })?;
     let Some(identities) = identities else {
-        return Ok(None);
+        return Ok(CommitDeclaration::Unidentified);
     };
     let declared = identities.records().iter().any(|record| {
         record.kind() == ObjectKind::Table && !record.is_retired() && *record.id() == relation_id
     });
     if !declared {
-        return Ok(None);
+        return Ok(CommitDeclaration::Undeclared);
     }
     let (schema, defaults) = ProjectLoader::default()
         .resolve_committed_source_table_schema_with_introductions(
@@ -1341,7 +1375,7 @@ fn declare_historical_commit(
         .filter(|field| field.role() == 1)
         .map(|field| *field.id())
         .collect();
-    Ok(Some(HistoricalDeclaration {
+    Ok(CommitDeclaration::Declares(HistoricalDeclaration {
         generation: schema.descriptor().clone(),
         field_ids,
         defaults,
@@ -11007,7 +11041,7 @@ mod nested_projection_tests {
 
 #[cfg(test)]
 mod historical_scan_budget_tests {
-    use super::{HistoricalDeclaration, ScanProgress};
+    use super::{CommitDeclaration, HistoricalDeclaration, ScanProgress};
     use std::cell::Cell;
     use std::collections::{BTreeMap, HashSet};
 
@@ -11017,8 +11051,8 @@ mod historical_scan_budget_tests {
         ScanProgress::new(vec![1, 2, 2, 3])
     }
 
-    fn declare(commit: &u32) -> Result<Option<HistoricalDeclaration<u32>>, String> {
-        Ok(Some(HistoricalDeclaration {
+    fn declare(commit: &u32) -> Result<CommitDeclaration<u32>, String> {
+        Ok(CommitDeclaration::Declares(HistoricalDeclaration {
             generation: *commit,
             field_ids: HashSet::new(),
             defaults: BTreeMap::new(),
@@ -11080,5 +11114,36 @@ mod historical_scan_budget_tests {
             .expect("the uninterrupted pass should not fail");
         assert_eq!(resumed, uninterrupted.finish());
         assert_eq!(resumed.0, vec![3, 2, 1]);
+    }
+
+    /// Commit `0` has no committed identities and commit `9` does not declare the table. The other
+    /// commits declare their own generation.
+    fn classify(commit: &u32) -> Result<CommitDeclaration<u32>, String> {
+        match commit {
+            0 => Ok(CommitDeclaration::Unidentified),
+            9 => Ok(CommitDeclaration::Undeclared),
+            generation => Ok(CommitDeclaration::Declares(HistoricalDeclaration {
+                generation: *generation,
+                field_ids: HashSet::new(),
+                defaults: BTreeMap::new(),
+            })),
+        }
+    }
+
+    #[test]
+    fn identity_less_commits_are_counted_and_declare_no_generation() {
+        let mut progress = ScanProgress::new(vec![0, 1, 9, 0, 2]);
+        let complete = progress
+            .advance(|| true, &classify)
+            .expect("the pass should not fail");
+        assert!(complete);
+        let (generations, introductions, unidentified) = progress.finish();
+        assert_eq!(unidentified, 2, "each identity-less commit is counted");
+        assert_eq!(
+            generations,
+            vec![2, 1],
+            "identity-less commits declare no generation"
+        );
+        assert!(introductions.is_empty());
     }
 }
