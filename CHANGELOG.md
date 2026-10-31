@@ -5,17 +5,24 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
-- Project admission uses one production catalogue (ornadb-5il1.384, partial; product change, not test-only).
+- Project admission uses the production catalogue (ornadb-5il1.384, partial; product change, not test-only).
   `orna check`, `orna run`, commit and serve admission, the VFS source-write check and the LSP project loader resolve
   `LoadedProject::production_catalogue`: the authoritative core, extended by the pinned standard profile and its verified
-  sources when the project captured one. A standard source without a pinned profile is refused with ORNA-STANDARD-PROFILE.
-  `admit_transaction_project` takes that catalogue as an explicit argument and refuses a project unit whose `stdlib` block is
-  present; it no longer rebuilds a catalogue from that block. The transactional evaluator defaults to the production
-  catalogue; the conformance-fixture catalogue is opted into only by the conformance harness (`with_fixture_catalogue`).
+  sources when the project captured one. CLI project loading (`load_project`) refuses a reachable import of a standard module
+  when the project captured no standard dependency, with ORNA-S010-IMPORT. `admit_transaction_project` refuses a project whose
+  environment expectations declare a `stdlib` entry, and refuses a standard source unit with ORNA-STANDARD-PROFILE when the
+  catalogue has no pinned profile or the profile rejects the source. It takes the catalogue as an explicit argument and does not
+  rebuild one. Table-write validation (`transactional_loaded_project_candidate_validator`) admits against `production_catalogue`.
+  `TransactionalEvaluator::new` admits source against `AdmissionCatalogue::Production`, the authoritative core without a project's
+  pinned profile; only the conformance harness opts into the fixture catalogue (`with_fixture_catalogue`).
   Tests in `crates/orna-cli-v1/tests/project_runtime.rs`: `binary_run_admits_a_standard_import_alongside_a_table_assertion`,
   `binary_run_refuses_an_assertion_naming_an_undeclared_table`, and
   `binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keeps_rows_unchanged`, which pins a refused violating
   run (E2200 with the evaluator code `ORNA-EVAL-TABLE-ASSERT`), byte-identical committed rows, and a later valid run still admitted.
+  Open: the one-shot invocation still builds a second standard catalogue for evaluation. `BoundedEvaluator::load_standard_sources`
+  (conformance-owned, `orna-conformance-v1` `semantic_adapter.rs:757-764`) verifies the captured sources and calls
+  `Catalogue::from_standard_sources`, after analysis resolved through `production_catalogue`. `orna-cli-v1` takes
+  `orna-conformance-v1` as a normal dependency for this path, the REPL and the table validator. Not changed here.
   Open: a false committed-row table assertion reports `ORNA-EVAL-TABLE-ASSERT` on the run path, while the Orna 1.1.0
   diagnostics reference assigns `ORNA-A091-009` to a false table or cross-table assertion and the REPL path emits that code.
   Aligning the run path is not done here. The REPL write gate (S3) remains open and is not covered by this change.
