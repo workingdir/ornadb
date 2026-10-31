@@ -514,6 +514,11 @@ struct ServedClone {
     /// request is durably admitted and an Eval's writes commit together with
     /// its terminal outcome (30-protocol REQUEST-1).
     runtime: RuntimeState,
+    /// The factory for the served project's table-assertion validator, or
+    /// `None` when the project declares no assertion. The factory runs once per
+    /// commit against that commit's generation, so a false assertion refuses the
+    /// write before any row is published (ORNA-ASSERT-042).
+    table_candidate_validator: Option<orna_live_v1::TableCandidateValidatorFactory>,
 }
 
 /// Resolves the clone at `endpoint` before the listener binds.
@@ -558,6 +563,15 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
                 format!("runtime error: {error:?}"),
             )
         })?;
+    // A project that declares assertions checks each committed mounted-row
+    // write against them (ORNA-ASSERT-042). A project without assertions keeps
+    // the unvalidated activation path, as the REPL commit does.
+    let table_candidate_validator = project
+        .as_ref()
+        .filter(|project| orna_conformance_v1::project_declares_assertions(project))
+        .map(|project| {
+            served_table_candidate_validator_factory(repository.clone(), project.clone())
+        });
     Ok(ServedClone {
         root: repository.worktree().to_path_buf(),
         identity,
@@ -565,7 +579,77 @@ fn open_served_clone(endpoint: &Endpoint) -> Result<ServedClone, Diagnostic> {
         project,
         app,
         runtime,
+        table_candidate_validator,
     })
+}
+
+/// Builds the factory that checks each committed mounted-row write against
+/// the served project's table assertions. The factory runs once per commit,
+/// against that commit's own generation, so the validator and the row it
+/// checks share one HEAD.
+fn served_table_candidate_validator_factory(
+    repository: Repository,
+    project: orna_project_v1::LoadedProject,
+) -> orna_live_v1::TableCandidateValidatorFactory {
+    Box::new(move |context: &orna_runtime_v1::RuntimeActivationContext| {
+        served_table_candidate_validator(&repository, &project, context)
+    })
+}
+
+/// Builds the table-assertion validator for one staged commit. Any failure to
+/// read the generation, its committed identities or the admitted project
+/// fails the commit closed as `RuntimeUnavailable`, so the write is refused
+/// before any row is published.
+fn served_table_candidate_validator(
+    repository: &Repository,
+    project: &orna_project_v1::LoadedProject,
+    context: &orna_runtime_v1::RuntimeActivationContext,
+) -> orna_live_v1::Result<Box<dyn orna_runtime_v1::TableActivationCandidateValidator>> {
+    let generation = u64::try_from(context.capture().generation())
+        .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)?;
+    let cwd_generation = repository
+        .cwd_generation(RuntimeGeneration::new(generation))
+        .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)?;
+    let commit = cwd_generation
+        .head()
+        .ok_or(orna_live_v1::Error::RuntimeUnavailable)?;
+    let identities =
+        orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)?
+            .ok_or(orna_live_v1::Error::RuntimeUnavailable)?;
+    let table_object_ids = served_committed_table_object_ids(&identities)?;
+    orna_conformance_v1::transactional_loaded_project_candidate_validator(
+        project,
+        &identities,
+        Some(cwd_generation),
+        table_object_ids,
+        Limits::default(),
+    )
+    .map_err(|_| orna_live_v1::Error::RuntimeUnavailable)
+}
+
+/// The committed identity of every live table, keyed by qualified name. Two
+/// live identities under one name are ambiguous, so they fail the commit
+/// rather than picking one. The REPL's `committed_table_identities` checks
+/// only the names it binds; this host binds every live table, so a duplicate
+/// under any name fails the commit.
+fn served_committed_table_object_ids(
+    identities: &orna_project_v1::ObjectIdentityManifest,
+) -> orna_live_v1::Result<Arc<BTreeMap<String, orna_runtime_v1::TableObjectId>>> {
+    let mut table_object_ids = BTreeMap::new();
+    for record in identities.records() {
+        if record.kind() != orna_project_v1::ObjectKind::Table || record.is_retired() {
+            continue;
+        }
+        let identity = orna_runtime_v1::TableObjectId::new(*record.id());
+        if table_object_ids
+            .insert(record.qualified_name().to_owned(), identity)
+            .is_some()
+        {
+            return Err(orna_live_v1::Error::RuntimeUnavailable);
+        }
+    }
+    Ok(Arc::new(table_object_ids))
 }
 
 /// Loads and admits the serving entry. A broken `main.orna` is reported on
@@ -630,6 +714,7 @@ fn new_serve_state(
         project,
         app,
         runtime,
+        table_candidate_validator,
     } = clone;
     let loopback = LoopbackAuthority {
         port: listener_address.port(),
@@ -664,6 +749,13 @@ fn new_serve_state(
             "retry `serve`; the local serving state is unavailable",
         )
     })?;
+    // The served project's table assertions gate every committed mounted-row
+    // write. A project without assertions installs no validator.
+    let host = match table_candidate_validator {
+        Some(factory) => host.with_table_candidate_validator(factory),
+        None => host,
+    };
+
     // The listener is plaintext HTTP on loopback, the explicitly trusted
     // transport 30-protocol:5 permits. `Secure` is reserved for TLS
     // (30-protocol:15), so the session cookie omits it here.
@@ -4335,6 +4427,7 @@ mod tests {
             project: None,
             app: None,
             runtime,
+            table_candidate_validator: None,
         }
     }
 
