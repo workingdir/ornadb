@@ -2481,6 +2481,16 @@ fn committed_table_identities(
                     "the commit carries no object identity inventory".to_owned(),
                 )
             })?;
+    table_identities_from_manifest(&identities, table_names)
+}
+
+/// Resolves each named table to its one live identity in `identities`. Each
+/// name must resolve to exactly one live table record, so no caller binds a
+/// table by name alone.
+fn table_identities_from_manifest(
+    identities: &orna_project_v1::ObjectIdentityManifest,
+    table_names: Vec<String>,
+) -> Result<Vec<RuntimeTableIdentity>, Diagnostic> {
     let mut tables = Vec::with_capacity(table_names.len());
     for name in table_names {
         let mut matching = identities.records().iter().filter(|record| {
@@ -3016,26 +3026,8 @@ fn repl_transactions(
     if !analysis.is_ok() {
         return None;
     }
-    let mut table_names = Vec::new();
-    let mut table_schemas = BTreeMap::new();
-    for (namespace, module) in &analysis.modules {
-        for (name, symbol) in &module.symbols {
-            let Some(schema) = symbol.table_schema.as_ref() else {
-                continue;
-            };
-            if symbol.kind == orna_semantic_v1::SymbolKind::Table && schema.admission.is_some() {
-                let table = match namespace.display().as_str() {
-                    "" => name.clone(),
-                    prefix => format!("{prefix}.{name}"),
-                };
-                table_schemas.insert(table.clone(), schema.clone());
-                table_names.push(table);
-            }
-        }
-    }
-    if table_names.is_empty()
-        || table_names.iter().collect::<BTreeSet<_>>().len() != table_names.len()
-    {
+    let (table_names, table_schemas) = admitted_project_tables(&analysis)?;
+    if table_names.is_empty() {
         return None;
     }
     let tables = committed_table_identities(repository, &commit, table_names).ok()?;
@@ -3082,6 +3074,35 @@ fn repl_transactions(
         host_bindings: Rc::new(RefCell::new(None)),
         faults: Arc::new(NoFault),
     })
+}
+
+/// Collects the admitted tables of an analyzed project: every table whose
+/// schema carries an admission, under its qualified name, in module order.
+/// Returns `None` when two admitted tables share a qualified name.
+fn admitted_project_tables(
+    analysis: &orna_semantic_v1::Analysis,
+) -> Option<(Vec<String>, BTreeMap<String, orna_semantic_v1::TableSchema>)> {
+    let mut table_names = Vec::new();
+    let mut table_schemas = BTreeMap::new();
+    for (namespace, module) in &analysis.modules {
+        for (name, symbol) in &module.symbols {
+            let Some(schema) = symbol.table_schema.as_ref() else {
+                continue;
+            };
+            if symbol.kind == orna_semantic_v1::SymbolKind::Table && schema.admission.is_some() {
+                let table = match namespace.display().as_str() {
+                    "" => name.clone(),
+                    prefix => format!("{prefix}.{name}"),
+                };
+                table_schemas.insert(table.clone(), schema.clone());
+                table_names.push(table);
+            }
+        }
+    }
+    if table_names.iter().collect::<BTreeSet<_>>().len() != table_names.len() {
+        return None;
+    }
+    Some((table_names, table_schemas))
 }
 
 fn same_repl_project_inputs(
