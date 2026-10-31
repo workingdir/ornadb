@@ -1883,8 +1883,8 @@ fn captured_standard_project() -> (tempfile::TempDir, String) {
 }
 
 /// Pins `stdlib/std` to a snapshot holding the standard root plus `standard`, and
-/// commits the project root holding `project` beside the pinned gitlink.
-fn captured_standard_project_with(
+/// stages the project root holding `project` beside the pinned gitlink.
+fn staged_standard_project_with(
     standard: &[(&str, &str)],
     project: &[(&str, &str)],
 ) -> (tempfile::TempDir, String) {
@@ -1922,7 +1922,27 @@ fn captured_standard_project_with(
         directory.path(),
         &["update-index", "--add", "--cacheinfo", &link],
     );
+    (directory, module_commit)
+}
+
+/// Publishes the snapshot with a raw git commit. `orna commit` would refuse fixture-only table names,
+/// so the run-time refusal stays the guard under test.
+fn captured_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
+    let (directory, module_commit) = staged_standard_project_with(standard, project);
     git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+    (directory, module_commit)
+}
+
+/// Publishes the snapshot through `orna commit`, which writes the table identity inventory.
+fn committed_standard_project_with(
+    standard: &[(&str, &str)],
+    project: &[(&str, &str)],
+) -> (tempfile::TempDir, String) {
+    let (directory, module_commit) = staged_standard_project_with(standard, project);
+    commit_orna(directory.path(), "capture std snapshot");
     (directory, module_commit)
 }
 
@@ -2024,7 +2044,7 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
 #[test]
 /// ORNA-ASSERT-042: a run admits a pinned standard import and a table assertion through the production catalogue.
 fn binary_run_admits_a_standard_import_and_table_assertion_through_the_production_catalogue() {
-    let (directory, _module_commit) = captured_standard_project_with(
+    let (directory, _module_commit) = committed_standard_project_with(
         &[(
             "math.orna",
             include_str!("fixtures/captured-standard-math.orna"),
@@ -2035,7 +2055,7 @@ fn binary_run_admits_a_standard_import_and_table_assertion_through_the_productio
         )],
     );
 
-    let output = invoke(directory.path(), "run", "answer");
+    let output = invoke(directory.path(), "run", "main.answer");
 
     assert!(output.status.success(), "run stderr: {:?}", output.stderr);
     assert_eq!(output.stdout, b"invocation completed\n");
@@ -2056,7 +2076,7 @@ fn binary_run_refuses_a_fixture_only_table_name_through_the_production_catalogue
         )],
     );
 
-    let output = invoke(directory.path(), "run", "answer");
+    let output = invoke(directory.path(), "run", "main.answer");
 
     assert!(
         !output.status.success(),
