@@ -2087,6 +2087,106 @@ fn binary_run_refuses_an_assertion_naming_an_undeclared_table() {
     assert!(stderr.starts_with("error["), "{stderr}");
 }
 
+#[tokio::test(flavor = "current_thread")]
+/// A committed row that violates a table assertion is refused on the run path: the run fails with the assertion failure code, the committed rows stay byte-identical, and a valid row is still accepted. The project imports a pinned standard module, so admission runs through the production catalogue.
+async fn binary_run_refuses_a_committed_row_violating_a_table_assertion_and_keeps_rows_unchanged() {
+    let (directory, _module_commit) = committed_standard_project_with(
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            concat!(
+                "use std.math.{increment};\n",
+                "pub table Sample(id: Int) {\n",
+                "    label: Str,\n",
+                "    assert every(row => row.label != \"\");\n",
+                "}\n",
+                "fn insert_sample(id: Int, label: Str): Bool {\n",
+                "    Sample.insert({ id: id, label: label });\n",
+                "    true\n",
+                "}\n",
+                "pub fn seed_valid(): Bool = insert_sample(increment(0), \"present\");\n",
+                "pub fn seed_violation(): Bool = insert_sample(increment(1), \"\");\n",
+                "pub fn seed_more(): Bool = insert_sample(increment(2), \"present\");\n",
+            ),
+        )],
+    );
+    let repository = Repository::discover(directory.path()).expect("repository");
+    let (runtime_identity, initial_digest) = identity(directory.path());
+
+    let accepted = invoke(directory.path(), "run", "main.seed_valid");
+    assert!(
+        accepted.status.success(),
+        "valid run stderr: {:?}",
+        accepted.stderr
+    );
+    assert_eq!(accepted.stdout, b"invocation completed\n");
+    assert!(accepted.stderr.is_empty());
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after valid row");
+    let rows_before = state
+        .committed_table_rows("Sample")
+        .await
+        .expect("read committed rows");
+    drop(state);
+    assert_eq!(rows_before.len(), 1);
+
+    let refused = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "--debug",
+            "run",
+            "main.seed_violation",
+        ])
+        .output()
+        .expect("CLI process");
+    assert!(!refused.status.success(), "violating row was admitted");
+    assert!(refused.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(stderr.contains("E2200"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("failure code: ORNA-EVAL-TABLE-ASSERT"),
+        "stderr: {stderr}"
+    );
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after refused row");
+    let rows_after = state
+        .committed_table_rows("Sample")
+        .await
+        .expect("read committed rows");
+    drop(state);
+    assert_eq!(rows_after, rows_before);
+
+    let accepted_again = invoke(directory.path(), "run", "main.seed_more");
+    assert!(
+        accepted_again.status.success(),
+        "second valid run stderr: {:?}",
+        accepted_again.stderr
+    );
+    assert_eq!(accepted_again.stdout, b"invocation completed\n");
+    assert!(accepted_again.stderr.is_empty());
+
+    let state = RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .expect("open runtime after second valid row");
+    assert_eq!(
+        state
+            .committed_table_rows("Sample")
+            .await
+            .expect("read committed rows")
+            .len(),
+        2
+    );
+}
+
 #[test]
 fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
     let (directory, _module_commit) = captured_standard_project();
