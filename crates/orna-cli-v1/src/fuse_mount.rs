@@ -4867,10 +4867,13 @@ impl WorkspaceFilesystem {
             // truncated record once that record is retained.
             let cut_by_truncate = truncations.iter().any(|(truncated, _, _, latest)| {
                 *truncated == inode
-                    && latest
-                        .as_ref()
-                        .zip(refusal.candidate.as_ref())
-                        .is_some_and(|(latest, candidate)| Arc::ptr_eq(latest, candidate))
+                    && match (latest, refusal.candidate.as_ref()) {
+                        (Some(latest), Some(candidate)) => Arc::ptr_eq(latest, candidate),
+                        // Neither a writer nor a refusal candidate: the cut is of
+                        // the refusal itself, so its untruncated copy is superseded.
+                        (None, None) => true,
+                        _ => false,
+                    }
             });
             for (save, source) in refusal.unretained {
                 // A cut candidate is retained once, as its truncated record above; its
