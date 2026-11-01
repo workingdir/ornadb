@@ -1,4 +1,5 @@
-use orna_evaluator_v1::{Environment, Limits, evaluate_expression};
+use orna_evaluator_v1::{AdmittedReplSession, Environment, Limits, evaluate_expression};
+use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
@@ -115,4 +116,62 @@ fn scalar_min_and_max_follow_float_extrema_rules() {
     assert_eq!(float_bits("std.math.max(0.0f, -0.0f)"), 0.0f64.to_bits());
     assert_eq!(float_bits("std.math.min(0.0f / 0.0f, 1.0f)"), CANONICAL_NAN_BITS);
     assert_eq!(float_bits("std.math.max(1.0f, 0.0f / 0.0f)"), CANONICAL_NAN_BITS);
+}
+
+fn session() -> AdmittedReplSession {
+    AdmittedReplSession::with_reference_standard(Limits::default())
+        .expect("production reference standard modules are admitted")
+}
+
+fn submit(session: &mut AdmittedReplSession, source: &str) -> CanonicalValue {
+    session
+        .submit(source)
+        .unwrap_or_else(|error| panic!("{source}: {}", error.code()))
+        .expect("codec expression returns a value")
+}
+
+fn canonical(raw: Raw) -> CanonicalValue {
+    CanonicalValue::new(raw).expect("expected canonical test value")
+}
+
+// Specified: ORNA-CODEC-003; the canonical nonfinite Float spellings of 29-formats.md:125 decode
+// to their IEEE-754 values, and encoding the decoded value reproduces the spelling exactly.
+#[test]
+fn canonical_nonfinite_float_spellings_decode_and_re_encode() {
+    let mut repl = session();
+    for spelling in ["Float.nan", "Float.infinity", "-Float.infinity"] {
+        let round_trip = format!(
+            "std.encoding.orna.encode(std.encoding.orna.decode(\"{spelling}\\n\", as: Float))"
+        );
+        assert_eq!(
+            submit(&mut repl, &round_trip),
+            canonical(Raw::Text(format!("{spelling}\n"))),
+        );
+    }
+}
+
+// Specified: ORNA-CODEC-003; encoding a Float, decoding it and encoding again yields the same
+// canonical text, which preserves NaN, both infinities, the sign of zero and finite magnitudes.
+#[test]
+fn float_values_survive_an_encode_decode_round_trip() {
+    let mut repl = session();
+    for value in ["0.0f / 0.0f", "1.0f / 0.0f", "-1.0f / 0.0f", "-0.0f", "0.1f"] {
+        let encoded = format!("std.encoding.orna.encode({value})");
+        let round_trip = format!(
+            "std.encoding.orna.encode(std.encoding.orna.decode(std.encoding.orna.encode({value}), as: Float))"
+        );
+        let expected = submit(&mut repl, &encoded);
+        assert_eq!(submit(&mut repl, &round_trip), expected, "{value}");
+    }
+}
+
+// Specified: ORNA-FORMAT-004; only the canonical nonfinite spellings are admitted as Float data,
+// so any other Float path in decoded text is rejected as a non-data expression.
+#[test]
+fn non_canonical_float_paths_are_rejected_as_decode_input() {
+    let mut repl = session();
+    let failure = repl
+        .submit("std.encoding.orna.decode(\"Float.pi\\n\", as: Float)")
+        .expect_err("Float.pi is not canonical Orna data");
+    assert_eq!(failure.code(), "ORNA-EVAL-VALUE");
 }
