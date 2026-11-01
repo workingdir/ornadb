@@ -5374,14 +5374,28 @@ mod graph_bridge_tests {
         ));
     }
 
-    #[test]
-    fn captured_ogb2_protected_pin_is_admitted_through_committed_orp_row() {
-        let directory = repository();
-        let root = directory.path();
-        let relation_id = [0x73; 16];
-        let initial = context(root);
-        install_overflow_row_store(root, &initial, relation_id, None);
+    /// A deterministic payload that the Gear chunker splits into several chunks.
+    fn gear_chunked_payload() -> Vec<u8> {
+        let payload_length = 2 * crate::blob_store::GEAR_MAXIMUM + 73;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        (0..payload_length)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
 
+    /// Captures `payload` as a protected OGB-2 closure and commits it as the Blob
+    /// row at key 7 of `relation_id`. Returns the identity, the descriptor OID and
+    /// the committed store root.
+    fn commit_gear_chunked_blob_row(
+        root: &Path,
+        relation_id: [u8; 16],
+        payload: &[u8],
+    ) -> (crate::blob_store::ContentIdentity, NativeOid, NativeOid) {
         let writing_context = context(root);
         let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
@@ -5391,26 +5405,7 @@ mod graph_bridge_tests {
             .open_native_graph(&snapshot)
             .expect("admit the repository-owned graph context");
         let write_scope = graph.open_read_scope().expect("owner write scope");
-
-        let payload_length = 2 * crate::blob_store::GEAR_MAXIMUM + 73;
-        let mut state = 0x9e37_79b9_7f4a_7c15u64;
-        let payload: Vec<u8> = (0..payload_length)
-            .map(|_| {
-                state ^= state << 13;
-                state ^= state >> 7;
-                state ^= state << 17;
-                state as u8
-            })
-            .collect();
-        let chunk_spans = crate::blob_store::GearChunker::new()
-            .spans(&payload)
-            .expect("chunk the test payload");
-        assert!(
-            chunk_spans.len() > 1,
-            "fixture must contain multiple chunks"
-        );
-        let chunk_boundary = chunk_spans[0].offset() + chunk_spans[0].length();
-        let mut input = std::io::Cursor::new(payload.clone());
+        let mut input = std::io::Cursor::new(payload.to_vec());
         let candidate = graph
             .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
             .expect("write a private OGB-2 candidate closure");
@@ -5423,7 +5418,7 @@ mod graph_bridge_tests {
         let identity = binding.content_identity();
         let descriptor_oid = binding.descriptor_oid().clone();
         let transfer = binding.transfer_record();
-        assert_eq!(identity, crate::blob_store::digest_bytes(&payload));
+        assert_eq!(identity, crate::blob_store::digest_bytes(payload));
         assert_eq!(transfer.content_identity(), identity);
 
         let algorithm = writing_context
@@ -5466,6 +5461,28 @@ mod graph_bridge_tests {
         );
         let store_root = write_native_node(root, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(root, algorithm, &store_root);
+        (identity, descriptor_oid, store_root)
+    }
+
+    #[test]
+    fn captured_ogb2_protected_pin_is_admitted_through_committed_orp_row() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x73; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        let payload = gear_chunked_payload();
+
+        let chunk_spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk the test payload");
+        assert!(
+            chunk_spans.len() > 1,
+            "fixture must contain multiple chunks"
+        );
+        let (identity, descriptor_oid, store_root) =
+            commit_gear_chunked_blob_row(root, relation_id, &payload);
 
         let admitted_context = context(root);
         let admitted_snapshot = admitted_context
@@ -5506,46 +5523,8 @@ mod graph_bridge_tests {
             Err(crate::native_graph::GraphError::DescriptorNotInRow)
         ));
 
-        // Ranges that start, end, or straddle the GEAR_MAXIMUM boundary must
-        // return exactly the matching payload bytes, whatever chunk cuts the
-        // Gear chunker chose inside the blob.
         let maximum = crate::blob_store::GEAR_MAXIMUM as u64;
         let length = identity.length();
-        for range in [
-            0..1,
-            chunk_boundary - 1..chunk_boundary + 1,
-            maximum - 1..maximum + 1,
-            maximum..2 * maximum,
-            length - 1..length,
-            5..length - 5,
-            7..7,
-        ] {
-            let range_scope = admitted_graph.open_read_scope().unwrap();
-            let expected_payload_reads = if range.is_empty() {
-                0
-            } else {
-                chunk_spans
-                    .iter()
-                    .filter(|span| {
-                        span.offset() < range.end && span.offset() + span.length() > range.start
-                    })
-                    .map(crate::blob_store::ChunkSpan::length)
-                    .sum::<u64>()
-            };
-            let read = admitted_graph
-                .read_blob_range(&reference, range.clone(), &range_scope)
-                .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
-            assert_eq!(
-                read.bytes(),
-                &payload[range.start as usize..range.end as usize],
-                "range {range:?} returned the wrong bytes"
-            );
-            assert_eq!(
-                range_scope.payload_bytes_read_for_test(),
-                expected_payload_reads,
-                "range {range:?} reads only payload from intersecting chunks"
-            );
-        }
 
         // Pack boundary: move every reachable object, including the OGB-2
         // chunks, into a packfile and drop the loose copies. Reads must still
@@ -5610,6 +5589,122 @@ mod graph_bridge_tests {
             later_graph.resolve_row_node(&row, &descriptor_oid, &later_scope),
             Err(crate::native_graph::GraphError::ContextMismatch)
         ));
+    }
+
+    #[test]
+    fn range_reads_report_whole_chunk_overfetch_against_requested_bytes() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x74; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        let payload = gear_chunked_payload();
+        let chunk_spans = crate::blob_store::GearChunker::new()
+            .spans(&payload)
+            .expect("chunk the test payload");
+        assert!(
+            chunk_spans.len() > 1,
+            "fixture must contain multiple chunks"
+        );
+        let chunk_boundary = chunk_spans[0].offset() + chunk_spans[0].length();
+        let (identity, descriptor_oid, _store_root) =
+            commit_gear_chunked_blob_row(root, relation_id, &payload);
+
+        let admitted_context = context(root);
+        let admitted_snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("admit the committed ORP row map");
+        let admitted_graph = admitted_context
+            .open_native_graph(&admitted_snapshot)
+            .expect("bind row reads to the committed graph");
+        let read_scope = admitted_graph.open_read_scope().unwrap();
+        let row = admitted_graph
+            .lookup_row(&TypedKey::UInt(7), &read_scope)
+            .unwrap()
+            .expect("committed Blob row");
+        let reference = admitted_graph
+            .admit_blob_reference(&row, &descriptor_oid, &read_scope)
+            .expect("admit the descriptor only through its stored row");
+
+        // ORNA-BLOB-012: a range fetches its intersecting chunks. The whole
+        // Git-object overfetch is measured against the requested bytes, not
+        // called exact range transfer. Only the first and last intersecting
+        // chunk can extend past the range, so the overfetch is exactly that
+        // overhang and stays below two GEAR_MAXIMUM chunks.
+        let maximum = crate::blob_store::GEAR_MAXIMUM as u64;
+        let length = identity.length();
+        for range in [
+            0..1,
+            100..200,
+            5..length - 5,
+            7..7,
+            chunk_boundary - 1..chunk_boundary + 1,
+            maximum - 1..maximum + 1,
+            maximum..2 * maximum,
+            length - 1..length,
+            0..length,
+        ] {
+            let range_scope = admitted_graph.open_read_scope().unwrap();
+            let intersecting: Vec<&crate::blob_store::ChunkSpan> = if range.is_empty() {
+                Vec::new()
+            } else {
+                chunk_spans
+                    .iter()
+                    .filter(|span| {
+                        span.offset() < range.end && span.offset() + span.length() > range.start
+                    })
+                    .collect()
+            };
+            let intersecting_bytes: u64 = intersecting.iter().map(|span| span.length()).sum();
+            let read = admitted_graph
+                .read_blob_range(&reference, range.clone(), &range_scope)
+                .unwrap_or_else(|error| panic!("range {range:?} failed: {error:?}"));
+            assert_eq!(
+                read.bytes(),
+                &payload[range.start as usize..range.end as usize],
+                "range {range:?} returned the wrong bytes"
+            );
+            let requested = range.end - range.start;
+            let fetched = range_scope.payload_bytes_read();
+            assert_eq!(
+                fetched, intersecting_bytes,
+                "range {range:?} must charge exactly its intersecting chunks"
+            );
+            assert!(
+                fetched >= requested,
+                "range {range:?} returned more bytes than it read"
+            );
+            let overfetch = fetched - requested;
+            let overhang = match (intersecting.first(), intersecting.last()) {
+                (Some(first), Some(last)) => {
+                    (range.start - first.offset()) + (last.offset() + last.length() - range.end)
+                }
+                _ => 0,
+            };
+            assert_eq!(
+                overfetch, overhang,
+                "range {range:?} overfetch is the whole-chunk overhang at both ends"
+            );
+            assert!(
+                overfetch < 2 * maximum,
+                "range {range:?} overfetched {overfetch} bytes"
+            );
+            let expected_verification = if range.start == 0 && range.end == length {
+                crate::native_graph::RangeVerification::FullBlob
+            } else {
+                crate::native_graph::RangeVerification::ReturnedChunks
+            };
+            assert_eq!(
+                read.verification(),
+                expected_verification,
+                "range {range:?} verification"
+            );
+            eprintln!(
+                "Gate B: range requested bytes={requested}; range payload bytes read={fetched}; range overfetch bytes={overfetch}; range chunks read={}; blob bytes={length}",
+                intersecting.len()
+            );
+        }
     }
 
     #[test]
