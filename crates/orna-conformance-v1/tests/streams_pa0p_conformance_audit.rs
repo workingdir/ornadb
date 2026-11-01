@@ -75,6 +75,7 @@ const RENAMED_CONSUMER: &str = include_str!("fixtures/streams-pa0p-renamed-consu
 const MULTIPLE_ROOTS: &str = include_str!("fixtures/streams-pa0p-multiple-roots.orna");
 const FUNCTION_CALLBACK: &str = include_str!("fixtures/streams-pa0p-function-callback.orna");
 const HELPER_ITEM_STREAM: &str = include_str!("fixtures/streams-s9-helper-item.orna");
+const REFUSED_ITEM_STREAM: &str = include_str!("fixtures/streams-s9-refused-item.orna");
 const PREDICATE_NESTED_PAIRS: &str =
     include_str!("fixtures/streams-jyy6a-predicate-nested-pairs.orna");
 const PREDICATE_NESTED_PAIRS_DUPLICATE: &str =
@@ -374,6 +375,60 @@ async fn finite_item_calling_helper_function_commits_a_row_per_item() {
         checkpoint.committed.unwrap().token.as_str(),
         "2",
         "the finite source returns at exhaustion after both helper-call items"
+    );
+}
+
+#[tokio::test]
+async fn refused_stream_item_names_its_owner_and_does_not_advance_checkpoint() {
+    let (_directory, repository) = repository(REFUSED_ITEM_STREAM);
+    let identity = identity();
+    let source = source_unit_with(REFUSED_ITEM_STREAM, "streams-s9-refused-item");
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    assert_eq!(evaluator.admit_list_stream_source(&source), StageOutcome::Passed);
+    let outcome = evaluator
+        .execute_list_stream_source(&repository, identity, [0x55; 16], [0x53; 32], &source)
+        .await
+        .expect("explicit finite dispatch with a refused item");
+    let StageOutcome::Failed(diagnostic) = outcome else {
+        panic!("a refused item must fail the stream, got {outcome:?}");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-LIST-STREAM-ITEM");
+    assert!(
+        diagnostic
+            .message()
+            .contains("fixture:streams-s9-refused-item"),
+        "the refusal must name the owning source: {}",
+        diagnostic.message()
+    );
+    let state = RuntimeState::open(&repository, identity, [0x53; 32])
+        .await
+        .expect("reopen runtime state");
+    let key = Value::int(1.into()).encode().expect("encoded table key");
+    assert!(
+        state
+            .committed_table_row("Reading", &key)
+            .await
+            .expect("read first item row")
+            .is_some(),
+        "the item before the refusal keeps its own checkpointed row"
+    );
+    let key = Value::int(2.into()).encode().expect("encoded table key");
+    assert!(
+        state
+            .committed_table_row("Reading", &key)
+            .await
+            .expect("read refused item row")
+            .is_none(),
+        "the refused item must not commit a row"
+    );
+    let key = list_checkpoint_key("main", "fixture:streams-s9-refused-item", &[1, 2]);
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("checkpoint after the refusal");
+    assert_eq!(
+        checkpoint.version, 1,
+        "the checkpoint must not advance past the refused item"
     );
 }
 
