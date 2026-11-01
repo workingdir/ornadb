@@ -9563,19 +9563,29 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
         result
     }
 
-    assert!(
-        pin_contexts("left")[0][0].is_empty(),
-        "omitted left depth stays Bottom"
+    // Learned-fill ruling (ornadb-3iqo): an omitted extension slot takes its snapshot identity
+    // from the first accepted row. Row 0 omits left depth 0; rows 1 and 3 supply HEAD~300 and
+    // HEAD~600, so the learned identity is {300, 600}. Row 2 crosses HEAD~200 into the right
+    // pin and is rejected as a whole, so its labels (for example HEAD~500, HEAD~510, HEAD~1000)
+    // reach no sibling. The Bottom, {HEAD~200}-only and HEAD~510 expectations came from the
+    // #7161 test-only generation and are superseded by the ruling.
+    assert_eq!(
+        pin_contexts("left")[0][0],
+        BTreeSet::from(["selector:HEAD~300".into(), "selector:HEAD~600".into()]),
+        "omitted left depth learns its identity from the first accepted row"
     );
     assert_eq!(
         pin_contexts("right")[0][0],
-        BTreeSet::from(["selector:HEAD~200".into()]),
-        "crossed right depth returns to its first extension label"
+        BTreeSet::from([
+            "selector:HEAD~200".into(),
+            "selector:HEAD~400".into(),
+            "selector:HEAD~700".into(),
+        ]),
+        "a rejected crossing applies no rollback; accepted rows keep their labels"
     );
     let continuing_left = BTreeSet::from([
         "selector:HEAD~110".into(),
         "selector:HEAD~310".into(),
-        "selector:HEAD~510".into(),
         "selector:HEAD~610".into(),
     ]);
     assert_eq!(pin_contexts("left")[1][0], continuing_left);
@@ -9602,11 +9612,15 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
     let Type::Tuple(right_first_depth) = &right_depths[0] else {
         panic!("right crossed extension depth");
     };
-    let restored_right = BTreeSet::from(["selector:HEAD~200".into()]);
+    let accepted_right = BTreeSet::from([
+        "selector:HEAD~200".into(),
+        "selector:HEAD~400".into(),
+        "selector:HEAD~700".into(),
+    ]);
     assert_eq!(
         extension_depth_contexts(&right_first_depth[0]),
-        [restored_right.clone(), restored_right],
-        "rolling back one sibling restores its full extension depth as a unit"
+        [accepted_right.clone(), accepted_right],
+        "accepted rows keep their extension labels as a unit"
     );
     assert_eq!(
         pin_contexts("steady"),
@@ -9615,13 +9629,11 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
                 BTreeSet::from([
                     "selector:HEAD~800".into(),
                     "selector:HEAD~900".into(),
-                    "selector:HEAD~1000".into(),
                     "selector:HEAD~1100".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~801".into(),
                     "selector:HEAD~901".into(),
-                    "selector:HEAD~1001".into(),
                     "selector:HEAD~1101".into(),
                 ]),
             ],
@@ -9629,18 +9641,16 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
                 BTreeSet::from([
                     "selector:HEAD~810".into(),
                     "selector:HEAD~910".into(),
-                    "selector:HEAD~1010".into(),
                     "selector:HEAD~1110".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~811".into(),
                     "selector:HEAD~911".into(),
-                    "selector:HEAD~1011".into(),
                     "selector:HEAD~1111".into(),
                 ]),
             ],
         ],
-        "the uninvolved sibling retains every depth label across the rejected row"
+        "the uninvolved sibling keeps the labels of every accepted row; the rejected row adds none"
     );
 }
 
