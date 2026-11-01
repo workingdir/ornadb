@@ -9342,10 +9342,16 @@ fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
     let Type::Tuple(left_first_depth) = &left_depths[0] else {
         panic!("left extension must retain its first paired depth");
     };
+    // Learned-fill ruling (bead ornadb-3iqo): an omitted tuple slot takes its
+    // snapshot identity from the first accepted row's topology instead of
+    // restoring Bottom. Row 0 omits this callback slot, so it carries the
+    // learned HEAD~200 identity, with the HEAD~300 context from row 3 folded in.
+    let mut learned_contexts = BTreeSet::new();
+    collect_snapshot_contexts(&left_first_depth[0], &mut learned_contexts);
     assert_eq!(
-        left_first_depth[0],
-        Type::Bottom,
-        "the omitted callback slot must restore its computed bottom value"
+        learned_contexts,
+        BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~300".into()]),
+        "the omitted callback slot must take the learned first-row identity"
     );
     let pin_contexts = |sibling: &str| {
         let Type::Record(depths) = &siblings[sibling] else {
@@ -9376,10 +9382,12 @@ fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
         pin_contexts("left"),
         [
             vec![
-                BTreeSet::new(),
+                BTreeSet::from([
+                    "selector:HEAD~200".into(),
+                    "selector:HEAD~300".into(),
+                ]),
                 BTreeSet::from([
                     "selector:HEAD~201".into(),
-                    "selector:HEAD~242".into(),
                     "selector:HEAD~301".into(),
                 ]),
             ],
@@ -9387,45 +9395,44 @@ fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
                 BTreeSet::from([
                     "selector:HEAD~120".into(),
                     "selector:HEAD~220".into(),
-                    "selector:HEAD~240".into(),
                     "selector:HEAD~320".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~121".into(),
                     "selector:HEAD~221".into(),
-                    "selector:HEAD~241".into(),
                     "selector:HEAD~321".into(),
                 ]),
             ],
         ],
-        "only the crossed left pin leaf returns to its omitted anchor; its adjacent lane and depth keep folding"
+        "learned fill: omitted row-0 depth-0 slots take the first-row identity (HEAD~200, HEAD~201); crossing row 2 (reuses HEAD~100) drops its left pins at both depths"
     );
     assert_eq!(
         pin_contexts("right"),
         [
             vec![
-                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~100".into(),
+                    "selector:HEAD~210".into(),
+                    "selector:HEAD~310".into(),
+                ]),
                 BTreeSet::from([
                     "selector:HEAD~101".into(),
                     "selector:HEAD~211".into(),
-                    "selector:HEAD~251".into(),
                     "selector:HEAD~311".into(),
                 ]),
             ],
             vec![
                 BTreeSet::from([
                     "selector:HEAD~230".into(),
-                    "selector:HEAD~260".into(),
                     "selector:HEAD~330".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~231".into(),
-                    "selector:HEAD~261".into(),
                     "selector:HEAD~331".into(),
                 ]),
             ],
         ],
-        "only the paired right pin leaf returns to its original identity while all adjacent pins keep labels"
+        "learned fill: omitted row-0 depth-1 slots take the first-row identity (HEAD~230, HEAD~231); crossing row 2 drops its right pins at both depths as well"
     );
 }
 
