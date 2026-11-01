@@ -2035,6 +2035,182 @@ fn orp1_row_store_ten_rows() {
     timed("index_churn", 10, || exercise_index_churn(&small));
 }
 
+#[path = "../../orna-cli-v1/tests/support/format3.rs"]
+mod format3;
+#[path = "../../orna-cli-v1/tests/support/media_commit.rs"]
+mod media_commit;
+
+/// Admits ten rows through a runtime request commit and publishes them with
+/// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
+/// the same sequence `orna publish` runs. The relation is seeded by the test
+/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
+/// the ten rows and the graph nodes that publication adds on top of that seed
+/// are written by the production writer.
+#[tokio::test]
+async fn orp1_production_writer_ten_rows() {
+    use orna_evaluator_v1::SysHostBindingRegistry;
+    use orna_runtime_v1::RuntimeState;
+    use orna_storage_v1::RuntimePublicationCoordinator;
+    use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
+
+    let media_fixtures = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../orna-cli-v1/tests/fixtures/media"
+    );
+    let (_repository_dir, repository, relation_id) = format3::empty_format3_repository();
+    let media = TempDir::new().expect("temporary media directory");
+    fs::copy(
+        Path::new(media_fixtures).join("tone.wav"),
+        media.path().join("tone.wav"),
+    )
+    .expect("copy media fixture");
+    let import_source = fs::read_to_string(Path::new(media_fixtures).join("import-song.orna"))
+        .expect("read media import fixture");
+    let root = format!("{:?}", media.path().to_string_lossy().as_ref());
+    let expression = import_source.trim_end().replace("__MEDIA_ROOT__", &root);
+
+    let (identity, initial_digest) = format3::cli_runtime_identity(&repository);
+    let state = RuntimeState::open(&repository, identity, initial_digest)
+        .await
+        .expect("open runtime state");
+    let writer = state
+        .acquire_lease(identity.repository_id)
+        .await
+        .expect("acquire runtime writer");
+    let capability = repository
+        .capture_capability(relation_id)
+        .expect("issue admitted capture capability");
+    let mut filesystem =
+        FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
+    filesystem
+        .allow_root(media.path())
+        .expect("allow media fixture root");
+    let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
+        .with_filesystem_provider(filesystem)
+        .with_repository_capture_capability(capability);
+
+    let head_before = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    for index in 0..10_u64 {
+        // Each request gets its own ordinal band so request, mutation and
+        // digest identities never collide across the ten rows. Ordinal 0 is
+        // excluded: an all-zero session id is an invalid runtime identity.
+        let ordinal = u8::try_from(index * 10 + 1).expect("ordinal fits a byte");
+        let key = format!("production-writer-{index:02}");
+        media_commit::commit_capture_pending(
+            &repository,
+            &state,
+            writer,
+            &mut bindings,
+            &expression,
+            &key,
+            ordinal,
+            true,
+            relation_id,
+        )
+        .await;
+    }
+
+    let checkpoint = state
+        .latest_checkpoint()
+        .await
+        .expect("read latest checkpoint")
+        .expect("admitted rows leave a checkpoint");
+    let freeze = state
+        .freeze([0x91; 16], &checkpoint)
+        .await
+        .expect("freeze admitted row prefix");
+    let frozen = state
+        .pending_table_mutations_through(&freeze)
+        .await
+        .expect("read frozen runtime range");
+    assert_eq!(
+        frozen.len(),
+        10,
+        "every admitted row is in the frozen range"
+    );
+    let head = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    let index = repository
+        .index_generation()
+        .expect("read repository index generation");
+    let mut coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index,
+        &freeze,
+        |_| Err(orna_storage_v1::Error::InvalidKey),
+        "orna: publish production writer rows",
+    )
+    .await
+    .expect("storage writer prepares production publication")
+    .expect("ten admitted rows are a visible change");
+    coordinator
+        .publish(&repository)
+        .expect("storage writer publishes production rows");
+    coordinator
+        .complete(&repository, &state, &freeze)
+        .await
+        .expect("complete production publication");
+
+    let head_after = repository
+        .head()
+        .expect("read published head")
+        .expect("publication leaves a head");
+    assert_ne!(
+        head_before.as_str(),
+        head_after.as_str(),
+        "publication advances HEAD"
+    );
+
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    assert_eq!(row_map.version().row_count(), Some(10));
+    let rows = format3::committed_store_rows(&repository, relation_id);
+    assert_eq!(
+        rows.len(),
+        10,
+        "ten committed rows are readable from the store"
+    );
+
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    let stats = graph
+        .object_stats(&scope)
+        .expect("count reachable store nodes");
+    let kind_count = |name: &str| -> u64 {
+        stats
+            .nodes()
+            .iter()
+            .filter(|(kind, _)| format!("{kind:?}") == name)
+            .map(|(_, count)| *count)
+            .sum()
+    };
+    let leaves = kind_count("OrderedLeaf");
+    let store_roots = kind_count("StoreRoot");
+    assert!(leaves >= 1, "the ordered tree has at least one leaf");
+    assert_eq!(store_roots, 1, "exactly one store root is reachable");
+    eprintln!(
+        "ORP-1 production_writer rows={} leaves={} store_roots={} blob_references={} head={}",
+        rows.len(),
+        leaves,
+        store_roots,
+        stats.blob_references(),
+        head_after.as_str(),
+    );
+}
+
 #[test]
 fn orp1_malformed_graphs_report_specific_diagnostics() {
     use orna_repository_v1::{FormatContextError, GraphError};
