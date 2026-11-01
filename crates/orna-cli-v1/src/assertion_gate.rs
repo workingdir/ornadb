@@ -1,8 +1,8 @@
 //! The CLI's production candidate assertion gate (ORNA-ASSERT-042,
-//! ORNA-ASSERT-045, ORNA-ASSERT-046, ORNA-ASSERT-048). `orna commit` and
-//! `orna publish` both refuse a candidate through this one gate before any ref,
-//! pin or journal names it, so the two commands cannot disagree about what an
-//! admitted assertion means.
+//! ORNA-ASSERT-045, ORNA-ASSERT-048). `orna commit` and `orna publish` both
+//! refuse a candidate through this one gate before any ref, pin or journal
+//! names it, so the two commands cannot disagree about what an admitted
+//! assertion means.
 
 use orna_repository_v1::{CandidateAssertionGate, CandidateAssertionRefusal, PrivateCommit};
 
@@ -116,10 +116,10 @@ fn head_table_rows(
 }
 
 /// The candidate tables whose evaluator rows differ from `HEAD`: the only
-/// tables an admitted assertion can depend on (ORNA-ASSERT-042), since they are
-/// candidate tables. A candidate table absent from `HEAD` is changed when it
-/// stages rows. When `HEAD` cannot be read, every candidate table counts as
-/// changed, so more checks run and none is skipped.
+/// tables a module assertion can depend on (ORNA-ASSERT-026). A candidate
+/// table absent from `HEAD` is changed when it stages rows. When `HEAD` cannot
+/// be read, every candidate table counts as changed, so more checks run and
+/// none is skipped.
 fn changed_tables(
     repository: &orna_repository_v1::Repository,
     rows: &orna_runtime_v1::RuntimeTableRows,
@@ -175,6 +175,7 @@ fn validate_candidate_assertions(
     let format = repository
         .open_private_candidate_format_context(candidate)
         .map_err(|_| unvalidated(&format!("{word} format context could not be opened")))?;
+    // The candidate's own rows, read from the private candidate rather than HEAD.
     let committed = orna_project_v1::private_candidate_tables(
         repository,
         candidate,
@@ -215,11 +216,11 @@ fn validate_candidate_assertions(
         })
 }
 
-/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-046,
-/// ORNA-ASSERT-028, ORNA-ASSERT-030, ORNA-ASSERT-048 to ORNA-ASSERT-050). The
-/// title names a false module assertion's owner and span, and carries the cause
-/// an unvalidated candidate could not be checked for, since attached details
-/// show only with `--debug`.
+/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-048 to
+/// ORNA-ASSERT-051). The title names a false module assertion's owner and span
+/// (ORNA-ASSERT-051), and carries the cause an unvalidated candidate could not
+/// be checked for (ORNA-ASSERT-049), since attached details show only with
+/// `--debug`.
 pub(crate) fn refusal_diagnostic(
     refusal: &CandidateAssertionRefusal,
     command: GatedCommand,
