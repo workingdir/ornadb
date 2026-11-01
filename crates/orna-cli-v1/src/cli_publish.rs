@@ -20,7 +20,8 @@
 
 use orna_runtime_v1::{RuntimeState, TableMutation};
 use orna_storage_v1::RuntimePublicationCoordinator;
-use orna_repository_v1::publication_crash_barrier;
+use orna_repository_v1::{CandidateAssertionGate, publication_crash_barrier};
+use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 
 use super::*;
 
@@ -472,6 +473,17 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 })?;
             return Ok::<_, Diagnostic>(Publication::NoVisibleChange(counts));
         };
+        // ORNA-ASSERT-045: the candidate's assertions run before any ref, pin or
+        // journal names it, so a refused publication leaves no ref, pin or
+        // journal behind and the frozen range stays pending.
+        let gate = AssertionGate {
+            command: GatedCommand::Publish,
+        };
+        if let Err(refusal) = gate.validate(&repository, coordinator.candidate()) {
+            let error =
+                orna_repository_v1::RepositoryError::CandidateAssertionRefused(refusal.clone());
+            return Err(refusal_diagnostic(&refusal, gate.command, &error));
+        }
         coordinator
             .publish_with_stage_hook(&repository, |stage| match stage {
                 orna_repository_v1::PublicationJournalStage::Prepared => {
