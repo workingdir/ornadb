@@ -9963,6 +9963,11 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     // slot. Later explicit labels (HEAD~102, HEAD~103) union in. The #7161 expectation
     // [Bottom, Bottom] omitted those labels.
     let rolled_back = parent_slots("omitted_first_pair_rolls_back_after_crossed_parent");
+    assert_eq!(
+        rolled_back.len(),
+        2,
+        "the rolled-back fold must keep both paired slots when its first parent omits both pins"
+    );
     for (slot, expected) in [
         (0, BTreeSet::from(["selector:HEAD~100".to_owned(), "selector:HEAD~102".to_owned()])),
         (1, BTreeSet::from(["selector:HEAD~101".to_owned(), "selector:HEAD~103".to_owned()])),
