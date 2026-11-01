@@ -2051,7 +2051,7 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
                 .file_name()
                 .into_string()
                 .map_err(|_| ProjectLoadError::UnsafePath)?;
-            if name == ".git" {
+            if orna_foundation_v1::is_git_metadata_component(name.as_bytes()) {
                 continue;
             }
             if !portable_component(&name) {
@@ -2374,7 +2374,9 @@ fn discover_worktree_rows(
         for entry in entries {
             let path = entry.path();
             if directory == root
-                && path.file_name().and_then(|name| name.to_str()) == Some(".git")
+                && path.file_name().is_some_and(|name| {
+                    orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes())
+                })
             {
                 continue;
             }
@@ -2776,6 +2778,36 @@ mod source_row_admission_tests {
             Arc::new(UnusedResolver),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn repository_path_validation_skips_git_metadata_in_every_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for name in [".GIT", "git~1", ".git. "] {
+            let dir = root.join(name);
+            std::fs::create_dir(&dir).unwrap();
+            // A decomposed `é` is non-portable, so a validated entry would be refused.
+            std::fs::write(dir.join("e\u{301}"), b"").unwrap();
+        }
+        assert!(crate::validate_repository_paths(root, crate::ProjectLimits::default()).is_ok());
+    }
+
+    #[test]
+    fn worktree_discovery_skips_git_metadata_in_every_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::create_dir(root.join(".GIT")).unwrap();
+        std::fs::write(root.join(".GIT").join("x.orna"), b"").unwrap();
+        let tables = std::collections::BTreeSet::from([".GIT".to_string()]);
+        let rows = crate::discover_worktree_rows(
+            root,
+            &tables,
+            &mut 0usize,
+            crate::ProjectLimits::default(),
+        )
+        .unwrap();
+        assert!(rows.is_empty());
     }
 
     #[test]
