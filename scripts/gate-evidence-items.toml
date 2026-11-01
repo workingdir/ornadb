@@ -209,7 +209,7 @@ select = [
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
-  "The large row is a 7.7 KB inline row with no overflow, and index maintenance rebuilds the whole table (ornadb-5il1.129).",
+  "The large row is a 7.7 KB inline row, and index maintenance rebuilds the whole table (ornadb-5il1.129). The overflow row (above a mirrored 8,192-byte inline bound) is measured on the write side only and is not read back by this harness.",
 ]
 
 [[item]]
