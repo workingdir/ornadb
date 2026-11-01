@@ -303,9 +303,10 @@ fn admission_error(
     }
 }
 
-/// The commit's table-assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-046,
-/// ORNA-ASSERT-048): the staged candidate's own rows must satisfy every
-/// admitted table assertion before any ref advances.
+/// The commit's assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-048): the staged
+/// candidate's own rows must satisfy every admitted table assertion and every
+/// module assertion the commit makes applicable (ORNA-ASSERT-026) before any ref
+/// advances.
 struct CommitAssertionGate;
 
 impl CandidateAssertionGate for CommitAssertionGate {
@@ -388,11 +389,12 @@ fn head_table_rows(
     Ok(rows)
 }
 
-/// The candidate tables whose evaluator rows differ from `HEAD`: the only
-/// tables an admitted assertion can depend on (ORNA-ASSERT-042), since they are
-/// candidate tables. A candidate table absent from `HEAD` is changed when it
-/// stages rows. When `HEAD` cannot be read, every candidate table counts as
-/// changed, so more checks run and none is skipped.
+/// The candidate tables whose evaluator rows differ from `HEAD`: the boundary's
+/// changed tables for ORNA-ASSERT-026, so a module assertion is evaluated only
+/// when one of its transitive dependency tables is in this set. A candidate
+/// table absent from `HEAD` is changed when it stages rows. When `HEAD` cannot
+/// be read, every candidate table counts as changed, so more checks run and none
+/// is skipped.
 fn changed_tables(
     repository: &orna_repository_v1::Repository,
     rows: &orna_runtime_v1::RuntimeTableRows,
@@ -486,11 +488,10 @@ fn validate_candidate_assertions(
         })
 }
 
-/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-046,
-/// ORNA-ASSERT-028, ORNA-ASSERT-030, ORNA-ASSERT-048 to ORNA-ASSERT-050). The
-/// title names a false module assertion's owner and span, and carries the cause
-/// an unvalidated candidate could not be checked for, since attached details
-/// show only with `--debug`.
+/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-048 to
+/// ORNA-ASSERT-051). The title names a false module assertion's owning module
+/// and span, and carries the cause an unvalidated candidate could not be checked
+/// for (ORNA-ASSERT-049), since attached details show only with `--debug`.
 fn candidate_assertion_refusal(
     refusal: &CandidateAssertionRefusal,
     error: &orna_repository_v1::RepositoryError,
@@ -562,8 +563,8 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             NOTHING_TO_COMMIT_TITLE,
             NOTHING_TO_COMMIT_HELP,
         ),
-        // ORNA-ASSERT-046, ORNA-ASSERT-028, ORNA-ASSERT-030, ORNA-ASSERT-048 to
-        // ORNA-ASSERT-050: the candidate's assertion gate refused it.
+        // ORNA-ASSERT-048 to ORNA-ASSERT-051: the candidate's assertion gate
+        // refused it.
         RepositoryError::CandidateAssertionRefused(refusal) => {
             return candidate_assertion_refusal(refusal, error);
         }
