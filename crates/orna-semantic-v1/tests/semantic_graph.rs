@@ -10790,23 +10790,32 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
     assert_eq!(
         nested_pin_contexts("left"),
         [
-            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~610".into(),
+                    "selector:HEAD~620".into(),
+                    "selector:HEAD~640".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~611".into(),
+                    "selector:HEAD~621".into(),
+                    "selector:HEAD~641".into(),
+                ]),
+            ],
             vec![
                 BTreeSet::from([
                     "selector:HEAD~612".into(),
                     "selector:HEAD~622".into(),
-                    "selector:HEAD~632".into(),
                     "selector:HEAD~642".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~613".into(),
                     "selector:HEAD~623".into(),
-                    "selector:HEAD~633".into(),
                     "selector:HEAD~643".into(),
                 ]),
             ],
         ],
-        "only the crossed first depth should roll back; the compatible nested depth keeps real labels"
+        "the left depths hold the learned first-row identities and the accepted row labels; the crossing row labels 632 and 633 are absent"
     );
     assert_eq!(
         nested_pin_contexts("right"),
@@ -10815,13 +10824,11 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
                 BTreeSet::from([
                     "selector:HEAD~710".into(),
                     "selector:HEAD~720".into(),
-                    "selector:HEAD~730".into(),
                     "selector:HEAD~740".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~711".into(),
                     "selector:HEAD~721".into(),
-                    "selector:HEAD~731".into(),
                     "selector:HEAD~741".into(),
                 ]),
             ],
@@ -10829,18 +10836,16 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
                 BTreeSet::from([
                     "selector:HEAD~712".into(),
                     "selector:HEAD~722".into(),
-                    "selector:HEAD~732".into(),
                     "selector:HEAD~742".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~713".into(),
                     "selector:HEAD~723".into(),
-                    "selector:HEAD~733".into(),
                     "selector:HEAD~743".into(),
                 ]),
             ],
         ],
-        "independent sibling pin depths should retain every real selector through the rejected parent"
+        "the right depths hold the accepted row selectors; the crossing row selectors 730 through 733 are absent"
     );
 }
 
