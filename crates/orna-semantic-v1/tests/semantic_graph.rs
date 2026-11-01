@@ -8339,20 +8339,64 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
         element.as_ref()
     };
 
-    let Type::Function { result, .. } = &module.symbols
-        ["rejects_nested_paired_boundary_depth_drift_after_selector_storm"]
-        .ty
-    else {
-        panic!("rejected storm must retain its computed result");
+    // Learned-fill ruling (ornadb-3iqo): `first` omits both depth-1 slots, so each takes
+    // the identity of the first accepted row that pins it (`middle`: HEAD~1121 on both
+    // sides). The paired depth-1 split first appears at `last` (HEAD~1131 vs HEAD~1132);
+    // that rollback restores only the crossed depth-1 pin paths to HEAD~1121, while
+    // depth-0 labels from every row keep accumulating. The previous expectation, a
+    // whole-fold rollback to `first`, assumed the omitted depth-1 slots stayed Bottom.
+    let rejected_value =
+        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm");
+    let Type::Record(rejected_fold) = rejected_value else {
+        panic!("rejected storm must keep its folded record: {rejected_value:?}");
     };
-    let Type::Record(fields) = result.as_ref() else {
-        panic!("rejected storm must return its source rows: {result:?}");
+    let Type::Record(rejected_group) = rejected_fold.get("group").expect("paired group") else {
+        panic!("rejected storm must keep the nested group: {rejected_fold:?}");
     };
-    assert_eq!(
-        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm"),
-        fields.get("first").expect("first source row"),
-        "a nested topology conflict must roll the fold back to the first row"
-    );
+    for (side, expected) in [
+        (
+            "left",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1101".to_owned(),
+                    "selector:HEAD~1102".into(),
+                    "selector:HEAD~1103".into(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
+            ],
+        ),
+        (
+            "right",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1111".to_owned(),
+                    "selector:HEAD~1112".into(),
+                    "selector:HEAD~1113".into(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
+            ],
+        ),
+    ] {
+        let Type::Record(boundary) = &rejected_group[side] else {
+            panic!("rejected {side} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &boundary["pins"] else {
+            panic!("rejected {side} selector depths must remain a tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts,
+            expected,
+            "rejected nested {side} selectors must keep labels and the learned depth-1 pair"
+        );
+    }
 
     let folded_value =
         folded_element("accepts_nested_paired_boundary_depths_after_selector_storm");
