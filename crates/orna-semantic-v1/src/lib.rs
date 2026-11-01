@@ -21567,9 +21567,14 @@ fn pinned_snapshot_reset_shape_matches(expected: &Type, selected: &Type) -> bool
 }
 
 /// A sparse checkpoint rebind may add or omit singleton selectors while
-/// preserving paired tuple identities. Compare tuple sibling lane paths and
-/// ignore selector counts; record-field sharing has a separate rollback rule
-/// and must still pass the exact reset topology check.
+/// preserving paired tuple identities. Compare the paired tuple sibling lane
+/// shapes carried by each selector. Exact resets require the same number of
+/// selectors per shape on both sides, so a selector that duplicates an existing
+/// shape (aliasing two lanes' omitted identities) is rejected. Selector names are
+/// not compared, because a concrete snapshot may differ between a local and its
+/// saved source. Omitted sources only require every shape to be present.
+/// Record-field sharing has a separate rollback rule and must still pass the
+/// exact reset topology check.
 fn snapshot_context_paired_tuple_identity_shapes_match(
     pin_maps: &[SnapshotContextMapPair],
     allow_omitted_source_lanes: bool,
@@ -21577,7 +21582,10 @@ fn snapshot_context_paired_tuple_identity_shapes_match(
     fn paired_shapes(
         pin_maps: &[SnapshotContextMapPair],
         use_expected: bool,
-    ) -> BTreeSet<BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>> {
+    ) -> BTreeMap<
+        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
+        usize,
+    > {
         let mut memberships = BTreeMap::<
             String,
             BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
@@ -21611,16 +21619,17 @@ fn snapshot_context_paired_tuple_identity_shapes_match(
                 }
             }
         }
-        memberships
-            .into_values()
-            .filter_map(|parent_memberships| {
-                let paired = parent_memberships
-                    .into_iter()
-                    .filter(|(_, lanes)| lanes.len() > 1)
-                    .collect::<BTreeSet<_>>();
-                (!paired.is_empty()).then_some(paired)
-            })
-            .collect()
+        let mut shapes = BTreeMap::new();
+        for parent_memberships in memberships.into_values() {
+            let paired = parent_memberships
+                .into_iter()
+                .filter(|(_, lanes)| lanes.len() > 1)
+                .collect::<BTreeSet<_>>();
+            if !paired.is_empty() {
+                *shapes.entry(paired).or_insert(0) += 1;
+            }
+        }
+        shapes
     }
 
     let expected = paired_shapes(pin_maps, true);
@@ -21628,7 +21637,7 @@ fn snapshot_context_paired_tuple_identity_shapes_match(
     if allow_omitted_source_lanes {
         // A fully omitted paired checkpoint field can be restored from its
         // sparse saved source after a dense fold, dropping only learned maps.
-        selected.is_subset(&expected)
+        selected.keys().all(|shape| expected.contains_key(shape))
     } else {
         !expected.is_empty() && expected == selected
     }
