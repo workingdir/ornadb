@@ -12373,8 +12373,14 @@ fn merge_checkpoint_field_map_inner(
     // Bottom contributes no value to a collection fold. Keep the concrete
     // sibling type when the other row omitted that slot; tuple promotion has
     // already checked that doing so cannot collapse distinct pin identities.
+    // An omitted pinned slot is the exception: no later row may supply its
+    // snapshot identity (ORNA-HIST-004, ORNA-SYS-012).
     if matches!(left, Type::Bottom) {
-        return Some(right.clone());
+        return if type_contains_pinned_snapshot_identity(right) {
+            Some(Type::Bottom)
+        } else {
+            Some(right.clone())
+        };
     }
     if matches!(right, Type::Bottom) {
         return Some(left.clone());
@@ -22324,13 +22330,11 @@ fn tuple_checkpoint_promotion_matches(left: &[Type], right: &[Type]) -> bool {
         && tuple_checkpoint_compaction_fold_preserves_pin_identity(left, right)
 }
 
-/// Extend a static fold anchor with the first concrete checkpoint subtree at
-/// each omitted path. When a tuple has an omitted slot, learn its paired pin
-/// topology from the first accepted row as a unit so later parents cannot
-/// rebind sharing between its slots. If paired record siblings also contain
-/// omissions, leave tuple promotion pathwise so the enclosing sibling rollback
-/// remains atomic. The reference does not specify sequential multi-parent tuple
-/// folds, so retain the first accepted topology as the conservative rule.
+/// Extend a static fold anchor with the first accepted row's pin topology. An
+/// omitted tuple slot has no identity to learn, and a later parent cannot
+/// supply one: the slot stays Bottom so a later row cannot rebind it (no
+/// implicit fill, ORNA-HIST-004 and ORNA-SYS-012). A conflicting later parent
+/// is rejected and the fold rolls back to the first accepted row.
 fn checkpoint_topology_anchor_with_first_pins(anchor: &Type, source: &Type) -> Type {
     if type_contains_paired_checkpoint_omissions(anchor) {
         // Promote every complete tuple lane from this parent in one structural
