@@ -2042,7 +2042,10 @@ mod media_commit;
 
 /// Admits ten rows through a runtime request commit and publishes them with
 /// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
-/// the same sequence `orna publish` runs. No test-side encoder builds the graph.
+/// the same sequence `orna publish` runs. The relation is seeded by the test
+/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
+/// the ten rows and the graph nodes that publication adds on top of that seed
+/// are written by the production writer.
 #[tokio::test]
 async fn orp1_production_writer_ten_rows() {
     use orna_evaluator_v1::SysHostBindingRegistry;
