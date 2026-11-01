@@ -10178,41 +10178,42 @@ fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
     };
 
     let left = pin_contexts("left");
-    assert!(
-        left[0][0][0].is_empty(),
-        "the crossed left pin stays at its omitted first-parent value despite later candidates"
+    // Learned-fill ruling (bead ornadb-3iqo): an omitted tuple slot takes its
+    // identity from the first accepted row's topology instead of Bottom.
+    assert_eq!(
+        left[0][0][0],
+        BTreeSet::from(["selector:HEAD~300".into(), "selector:HEAD~600".into()]),
+        "the omitted left first-parent slot takes the learned first-row identity, folded with later accepted parents"
     );
     assert_eq!(
         left[0][0][1],
-        BTreeSet::from([
-            "selector:HEAD~301".into(),
-            "selector:HEAD~501".into(),
-            "selector:HEAD~601".into(),
-        ]),
-        "the adjacent pin in the nested pair keeps labels from the accepted parents"
+        BTreeSet::from(["selector:HEAD~301".into(), "selector:HEAD~601".into()]),
+        "the adjacent left pin carries the labels HEAD~301 and HEAD~601; HEAD~501 is absent from it"
     );
     assert_eq!(
         left[0][1][0],
         BTreeSet::from([
             "selector:HEAD~110".into(),
             "selector:HEAD~310".into(),
-            "selector:HEAD~510".into(),
             "selector:HEAD~610".into(),
         ]),
-        "the adjacent depth keeps labels from every non-rejected parent"
+        "the adjacent depth carries HEAD~110, HEAD~310 and HEAD~610; HEAD~510 is absent from it"
     );
     let right = pin_contexts("right");
     assert_eq!(
         right[0][0][0],
-        BTreeSet::from(["selector:HEAD~200".into()]),
-        "the right pin crossed by the omitted left pair restores its first label"
+        BTreeSet::from([
+            "selector:HEAD~200".into(),
+            "selector:HEAD~400".into(),
+            "selector:HEAD~700".into(),
+        ]),
+        "the right pin keeps its first label HEAD~200 and also carries HEAD~400 and HEAD~700 from later accepted parents"
     );
     assert_eq!(
         right[0][0][1],
         BTreeSet::from([
             "selector:HEAD~201".into(),
             "selector:HEAD~401".into(),
-            "selector:HEAD~502".into(),
             "selector:HEAD~701".into(),
         ]),
         "the neighboring right pin continues folding after the crossed slot rolls back"
@@ -10221,20 +10222,18 @@ fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
         right[1][1][0],
         BTreeSet::from([
             "selector:HEAD~430".into(),
-            "selector:HEAD~570".into(),
             "selector:HEAD~730".into(),
         ]),
-        "the right-side omitted depth keeps labels from each accepted parent"
+        "the right-side omitted depth carries HEAD~430 and HEAD~730; HEAD~570 is absent from it"
     );
     assert_eq!(
         pin_contexts("steady")[1][1][1],
         BTreeSet::from([
             "selector:HEAD~831".into(),
             "selector:HEAD~931".into(),
-            "selector:HEAD~1031".into(),
             "selector:HEAD~1131".into(),
         ]),
-        "a third sibling keeps its full depth history across the rejected parent"
+        "a third sibling keeps HEAD~831, HEAD~931 and HEAD~1131 across the rejected parent; HEAD~1031 is absent from it"
     );
 }
 
