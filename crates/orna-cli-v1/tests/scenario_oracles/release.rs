@@ -45,7 +45,7 @@ const RUN_ROWS: &str = "rows written by `orna run` are refused at publication, s
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
 const CHECKOUT: &str =
-    "there is no `orna checkout`, `orna switch` or `orna reset`, so no checkout plan runs";
+    "`orna checkout` to a different commit is refused, so no CHECKOUT-3 plan runs";
 const STAGING: &str =
     "`orna add --row` cannot stage a published row: it reports that the logical row was not found";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
@@ -557,13 +557,13 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-CHECKOUT-001",
             "ornadb-5il1.141",
             CHECKOUT,
-            no_checkout,
+            different_commit_checkout_refused,
         ),
         Entry::gap(
             "FINAL-CHECKOUT-002",
             "ornadb-5il1.141",
             CHECKOUT,
-            no_checkout,
+            different_commit_checkout_refused,
         ),
         Entry::pass("FINAL-CHECKOUT-003", snapshot_mounts_are_pinned).with_fuse(),
         Entry::gap(
@@ -2210,8 +2210,26 @@ fn no_upgrade(db: &mut Db) -> Probe {
     unknown_command(db, &["upgrade", "--to-format", "3"])
 }
 
-fn no_checkout(db: &mut Db) -> Probe {
-    unknown_command(db, &["checkout", "HEAD"])
+/// The different-commit checkout is refused before any CHECKOUT-3 plan runs.
+/// The probe reproduces while that refusal holds; a checkout that succeeds
+/// makes the gap stale.
+fn different_commit_checkout_refused(db: &mut Db) -> Probe {
+    db.declare("pub table Note(id: Str) { text: Str, }\n")?;
+    db.repl_effect(r#"main.Note.insert({ id: "a", text: "one" })"#)?;
+    db.publish()?.ok()?;
+    db.orna(&["branch", "earlier"])?.ok()?;
+    db.repl_effect(r#"main.Note.insert({ id: "b", text: "two" })"#)?;
+    db.publish()?.ok()?;
+    let checkout = db.orna(&["checkout", "earlier"])?;
+    ensure!(
+        !checkout.succeeded() && checkout.output().contains("not available yet"),
+        "`orna checkout earlier` to a different commit is now accepted: {}",
+        checkout.diagnostic()
+    );
+    Ok(format!(
+        "orna checkout earlier to a different commit: {}",
+        checkout.diagnostic()
+    ))
 }
 
 fn storage_unobservable(db: &mut Db) -> Probe {
