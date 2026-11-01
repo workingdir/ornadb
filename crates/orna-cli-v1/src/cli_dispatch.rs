@@ -137,6 +137,9 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
             name,
             ref arguments,
         } => run_git_passthrough(&parsed.endpoint, name, arguments),
+        Command::BranchCreate { ref name } => {
+            cli_checkout::run_branch_create(&parsed.endpoint, name)
+        }
         Command::RestoreRow { ref table, ref key } => {
             cli_stage::unstage_row(&parsed.endpoint, table, key)
         }
