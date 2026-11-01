@@ -44,8 +44,7 @@ const NO_UPGRADE: &str = "there is no `orna upgrade`, so no format-1/2 history c
 const RUN_ROWS: &str = "rows written by `orna run` are refused at publication, so no product path builds a multi-row table";
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
-const CHECKOUT: &str =
-    "`orna checkout` to a different commit is refused, so no CHECKOUT-3 plan runs";
+const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
 const STAGING: &str =
     "`orna add --row` cannot stage a published row: it reports that the logical row was not found";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
@@ -2210,13 +2209,14 @@ fn no_upgrade(db: &mut Db) -> Probe {
     unknown_command(db, &["upgrade", "--to-format", "3"])
 }
 
-/// The different-commit checkout is refused as the blocker: CHECKOUT-3 has not
-/// run, so `orna checkout` answers "not available yet". The probe first proves
+/// The different-commit checkout is refused as the blocker: pending drafts are not
+/// carried forward (CHECKOUT-3 step 4), so `orna checkout` answers that it is
+/// refused while changes are pending. The probe first proves
 /// that a same-commit checkout keeps a draft and a worktree file (ORNA-BRANCH-002),
 /// then that the refused different-commit checkout leaves HEAD, the branch, the
 /// index, the worktree and the draft unchanged (ORNA-CHECKOUT-001). A checkout
-/// that succeeds changed state without the CHECKOUT-3 gate, which is a harness
-/// failure rather than a closed gap. A refusal for any other reason means the
+/// that succeeds while a draft is pending moved state past the refusal, which is a
+/// harness failure rather than a closed gap. A refusal for any other reason means the
 /// blocker no longer reproduces, which makes the gap stale.
 fn different_commit_checkout_refused(db: &mut Db) -> Probe {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
@@ -2249,12 +2249,12 @@ fn different_commit_checkout_refused(db: &mut Db) -> Probe {
     let checkout = db.orna(&["checkout", "earlier"])?;
     if checkout.succeeded() {
         return Err(Failure::Harness(format!(
-            "orna checkout earlier to a different commit succeeded without CHECKOUT-3: {}",
+            "orna checkout earlier to a different commit succeeded while a draft was pending: {}",
             checkout.diagnostic()
         )));
     }
     ensure!(
-        checkout.output().contains("not available yet"),
+        checkout.output().contains("checkout to a different commit is refused while"),
         "orna checkout earlier to a different commit was refused for another reason: {}",
         checkout.diagnostic()
     );

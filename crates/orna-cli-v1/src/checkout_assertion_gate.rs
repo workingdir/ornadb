@@ -13,10 +13,6 @@ use super::assertion_gate::validate_committed_target;
 /// The gate that `Repository::execute_nonconflicting_git_checkout` runs after it
 /// re-verifies the preflight and before any `git switch`. It validates the
 /// target commit that the preflight names.
-///
-/// The CLI refuses `orna checkout` in this build, so only tests construct the
-/// gate until the checkout verb is wired (ornadb-5il1.141).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct CheckoutGate;
 
 impl CheckoutAssertionGate for CheckoutGate {
