@@ -8587,14 +8587,8 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     else {
         panic!("rejected storm must retain its computed result");
     };
-    let Type::Record(rejected) = result.as_ref() else {
+    let Type::Record(_) = result.as_ref() else {
         panic!("rejected storm must return its source rows: {result:?}");
-    };
-    let Type::Record(first) = rejected.get("first").expect("first source row") else {
-        panic!("first source row must be a record");
-    };
-    let Type::Tuple(first_groups) = first.get("group").expect("first group tuple") else {
-        panic!("first group must remain a tuple");
     };
     let Type::Record(folded) = folded_element(
         "rejects_tuple_wrapped_paired_depth_drift_after_selector_storm",
@@ -8604,10 +8598,77 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     let Type::Tuple(folded_groups) = folded.get("group").expect("folded group tuple") else {
         panic!("folded group must remain a tuple");
     };
-    assert_eq!(
-        folded_groups, first_groups,
-        "a paired tuple-boundary fold must roll back atomically when its selector depth splits"
-    );
+    // Ruling (ornadb-3iqo): learned fill is intended. Accepted rows accumulate their pins per
+    // slot, so the first row is not the rollback target. In group 0 the last row's depth-1 pair
+    // (HEAD~1242 left, HEAD~1243 right) splits and rolls back to the depth-1 identity accumulated
+    // from the middle row (HEAD~1241 on both sides). The first row's failing depth-1 slots
+    // contribute no identity. Group 1 has no split and keeps its accumulated labels.
+    let expected: [(usize, &str, [&[&str]; 2]); 4] = [
+        (
+            0,
+            "left",
+            [
+                &["selector:HEAD~1201", "selector:HEAD~1202", "selector:HEAD~1203"],
+                &["selector:HEAD~1241"],
+            ],
+        ),
+        (
+            0,
+            "right",
+            [
+                &["selector:HEAD~1211", "selector:HEAD~1212", "selector:HEAD~1213"],
+                &["selector:HEAD~1241"],
+            ],
+        ),
+        (
+            1,
+            "left",
+            [
+                &["selector:HEAD~1221", "selector:HEAD~1222", "selector:HEAD~1223"],
+                &["selector:HEAD~1251", "selector:HEAD~1252"],
+            ],
+        ),
+        (
+            1,
+            "right",
+            [
+                &["selector:HEAD~1231", "selector:HEAD~1232", "selector:HEAD~1233"],
+                &["selector:HEAD~1251", "selector:HEAD~1252"],
+            ],
+        ),
+    ];
+    for (group_index, side_name, expected_slots) in expected {
+        let Type::Record(pair) = &folded_groups[group_index] else {
+            panic!("rejected tuple boundary {group_index} must remain a record");
+        };
+        let Type::Optional(side) = &pair[side_name] else {
+            panic!("rejected {side_name} boundary must remain optional");
+        };
+        let Type::Record(side_fields) = side.as_ref() else {
+            panic!("rejected {side_name} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &side_fields["pins"] else {
+            panic!("rejected {side_name} selector depths must remain a tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts,
+            expected_slots.map(|labels| {
+                labels
+                    .iter()
+                    .map(|label| (*label).to_owned())
+                    .collect::<BTreeSet<String>>()
+            }),
+            "rejected {side_name} of group {group_index} must keep the learned fill accumulated before the rejected drift"
+        );
+    }
 
     let Type::Record(stable) =
         folded_element("accepts_tuple_wrapped_paired_depths_after_selector_storm")
