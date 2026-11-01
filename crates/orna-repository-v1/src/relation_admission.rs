@@ -1367,7 +1367,7 @@ impl Repository {
 
     /// The identity inventory a private candidate commit's store carries. The
     /// commit gate reads it before publication, so table identities resolve
-    /// against exactly the serialized candidate (ORNA-ASSERT-046).
+    /// against exactly the serialized candidate.
     pub fn read_private_candidate_object_identities(
         &self,
         candidate: &PrivateCommit,

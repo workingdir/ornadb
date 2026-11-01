@@ -1,5 +1,5 @@
-//! The publish gate (ORNA-ASSERT-042, ORNA-ASSERT-045, ORNA-ASSERT-046,
-//! ORNA-ASSERT-048) through `orna publish`: the candidate built from the frozen
+//! The publish gate (ORNA-ASSERT-042, ORNA-ASSERT-045, ORNA-ASSERT-048) through
+//! `orna publish`: the candidate built from the frozen
 //! runtime range must satisfy every admitted table assertion before any ref,
 //! pin or journal names it. A refused publication leaves HEAD unchanged and the
 //! frozen range pending, so a retry after the fix publishes the same rows.

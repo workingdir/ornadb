@@ -402,7 +402,7 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         },
         "ORNA-A091-009" => DiagnosticDocumentation {
             code: "ORNA-A091-009",
-            title: "table assertion is false",
+            title: "table or cross-table assertion is false",
             explanation:
                 "A table or cross-table invariant does not hold for the deterministic rows being checked.",
             help: "inspect the reported witness and repair the affected table data",
