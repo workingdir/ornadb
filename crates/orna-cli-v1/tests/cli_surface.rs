@@ -228,7 +228,7 @@ fn checkout_to_a_different_commit_is_refused_and_changes_nothing() {
     let stderr = String::from_utf8_lossy(&cli.stderr);
     assert_eq!(cli.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("E2100"), "{stderr}");
-    assert!(stderr.contains("not available yet"), "{stderr}");
+    assert!(stderr.contains("checkout would overwrite uncommitted changes to a.txt"), "{stderr}");
 
     let current = git(repository.path(), &["branch", "--show-current"]);
     assert_eq!(
