@@ -9657,7 +9657,17 @@ fn paired_depth_omissions_restore_each_crossed_anchor() {
     let Type::Tuple(left_first_depth) = &left_depths[0] else {
         panic!("left first depth must remain paired");
     };
-    assert_eq!(left_first_depth[0], Type::Bottom);
+    // Learned-fill ruling (bead ornadb-3iqo): an omitted tuple slot takes its
+    // identity from the first accepted row's topology instead of Bottom. Row 0
+    // omits this left slot, so it carries the learned HEAD~200 identity with
+    // HEAD~300 folded in from row 3.
+    let mut learned_left = BTreeSet::new();
+    collect_snapshot_contexts(&left_first_depth[0], &mut learned_left);
+    assert_eq!(
+        learned_left,
+        BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~300".into()]),
+        "the omitted left slot must take the learned first-row identity"
+    );
     let Type::Record(right) = &siblings["right"] else {
         panic!("right sibling must remain a record");
     };
@@ -9667,52 +9677,58 @@ fn paired_depth_omissions_restore_each_crossed_anchor() {
     let Type::Tuple(right_second_depth) = &right_depths[1] else {
         panic!("right second depth must remain paired");
     };
-    assert_eq!(right_second_depth[0], Type::Bottom);
+    // Same ruling for the omitted row-0 right slot at the second depth: it takes
+    // the learned first-row identity (HEAD~230), with HEAD~330 folded in.
+    let mut learned_right = BTreeSet::new();
+    collect_snapshot_contexts(&right_second_depth[0], &mut learned_right);
+    assert_eq!(
+        learned_right,
+        BTreeSet::from(["selector:HEAD~230".into(), "selector:HEAD~330".into()]),
+        "the omitted right slot must take the learned first-row identity"
+    );
     assert_eq!(
         slots("left"),
         [
             vec![
-                BTreeSet::new(),
-                BTreeSet::from([
-                    "selector:HEAD~201".into(),
-                    "selector:HEAD~242".into(),
-                    "selector:HEAD~301".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~300".into()]),
+                BTreeSet::from(["selector:HEAD~201".into(), "selector:HEAD~301".into()]),
             ],
             vec![
-                BTreeSet::from(["selector:HEAD~120".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~120".into(),
+                    "selector:HEAD~220".into(),
+                    "selector:HEAD~320".into(),
+                ]),
                 BTreeSet::from([
                     "selector:HEAD~121".into(),
                     "selector:HEAD~221".into(),
-                    "selector:HEAD~241".into(),
                     "selector:HEAD~321".into(),
                 ]),
             ],
         ],
-        "the paired crossed identity restores the live left slot to its anchor label"
+        "row 2's left pins (HEAD~100, HEAD~240-242) are dropped; omitted left slots keep the learned first-row identity"
     );
     assert_eq!(
         slots("right"),
         [
             vec![
-                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~100".into(),
+                    "selector:HEAD~210".into(),
+                    "selector:HEAD~310".into(),
+                ]),
                 BTreeSet::from([
                     "selector:HEAD~101".into(),
                     "selector:HEAD~211".into(),
-                    "selector:HEAD~251".into(),
                     "selector:HEAD~311".into(),
                 ]),
             ],
             vec![
-                BTreeSet::new(),
-                BTreeSet::from([
-                    "selector:HEAD~231".into(),
-                    "selector:HEAD~261".into(),
-                    "selector:HEAD~331".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~230".into(), "selector:HEAD~330".into()]),
+                BTreeSet::from(["selector:HEAD~231".into(), "selector:HEAD~331".into()]),
             ],
         ],
-        "right adjacent depths continue accumulating their own labels"
+        "row 2's right pins (HEAD~120, HEAD~250-251, HEAD~261) are dropped; omitted right slots keep the learned first-row identity"
     );
 }
 
