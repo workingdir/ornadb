@@ -88,3 +88,53 @@ fn branch_runs_git_against_the_db_repository_not_the_current_directory() {
     assert_eq!(cli.stdout, native.stdout);
     assert_eq!(String::from_utf8_lossy(&cli.stdout).trim(), "cli-surface");
 }
+
+#[test]
+fn branch_name_creates_a_branch_at_head_and_makes_no_commit() {
+    let repository = tempdir().expect("repository");
+    git_succeeds(
+        repository.path(),
+        &["init", "--quiet", "--initial-branch=cli-surface"],
+    );
+    git_succeeds(
+        repository.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git_succeeds(repository.path(), &["config", "user.name", "kierandrewett"]);
+    git_succeeds(
+        repository.path(),
+        &["commit", "--quiet", "--allow-empty", "-m", "baseline"],
+    );
+    let db = repository.path().to_str().expect("utf-8 repository path");
+    let head_before = git(repository.path(), &["rev-parse", "HEAD"]);
+
+    let cli = orna(repository.path(), &["--db", db, "branch", "feature-x"]);
+    assert_eq!(
+        cli.status.code(),
+        Some(0),
+        "{:?}",
+        String::from_utf8_lossy(&cli.stderr)
+    );
+    assert!(cli.stdout.is_empty(), "branch creation prints nothing");
+
+    let created = git(repository.path(), &["rev-parse", "refs/heads/feature-x"]);
+    assert_eq!(created.stdout, head_before.stdout);
+    let head_after = git(repository.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(head_after.stdout, head_before.stdout);
+    let current = git(repository.path(), &["branch", "--show-current"]);
+    assert_eq!(
+        String::from_utf8_lossy(&current.stdout).trim(),
+        "cli-surface"
+    );
+
+    let again = orna(repository.path(), &["--db", db, "branch", "feature-x"]);
+    let stderr = String::from_utf8_lossy(&again.stderr);
+    assert_eq!(again.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("already exists"), "{stderr}");
+
+    let reserved = orna(repository.path(), &["--db", db, "branch", "HEAD"]);
+    let stderr = String::from_utf8_lossy(&reserved.stderr);
+    assert_eq!(reserved.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("E1002"), "{stderr}");
+}
