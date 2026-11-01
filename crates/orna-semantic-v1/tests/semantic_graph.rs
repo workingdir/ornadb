@@ -2265,7 +2265,7 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
 fn distinct_nominal_types_require_named_conversions() {
     let result = analyze(&[ModuleInput::new(
         "conversion.orna",
-        include_str!("fixtures/inline-semantic_graph/bd8b70b891a8.orna"),
+        include_str!("fixtures/inline-semantic_graph/ccec9bdc5a21.orna"),
     )]);
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
