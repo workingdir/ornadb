@@ -5329,6 +5329,8 @@ fn nested_bottom_cascade_preserves_tuple_pin_identity_by_capture_depth_wave() {
         depth: &str,
         attempted_selectors: &[&str],
     ) -> BTreeSet<String> {
+        let fixture_source =
+            include_str!("fixtures/historical-nested-tuple-bottom-cascade-depth-wave.orna");
         let mut binders = BTreeSet::new();
         for leaf in ["selected", "left", "middle", "right"] {
             let field = format!("{depth}_{leaf}");
@@ -5339,9 +5341,17 @@ fn nested_bottom_cascade_preserves_tuple_pin_identity_by_capture_depth_wave() {
                 ),
                 "{lane}.{field} must retain its own unresolved binder after an incomplete tuple wave: {selector}"
             );
-            assert!(
-                selector.ends_with(&format!(":parameter:{leaf}")),
-                "{lane}.{field} rebound to a sibling tuple binder: {selector}"
+            let binder_marker = format!(":parameter:{leaf}:formal-binder:<unknown>@");
+            let Some((_, span)) = selector.rsplit_once(binder_marker.as_str()) else {
+                panic!("{lane}.{field} rebound to a sibling tuple binder: {selector}");
+            };
+            let (start, end) = span.split_once("..").expect("formal binder span");
+            let start = start.parse::<usize>().expect("binder start");
+            let end = end.parse::<usize>().expect("binder end");
+            assert_eq!(
+                &fixture_source[start..end],
+                leaf,
+                "{lane}.{field} binder span must name its own `{leaf}` parameter: {selector}"
             );
             for attempted in attempted_selectors {
                 assert!(
