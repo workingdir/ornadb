@@ -78,6 +78,13 @@ reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label 
 [[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
+test = "paired_boundary_depth_topology_accumulates_through_selector_storms"
+bead = "ornadb-3iqo"
+reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored first-row assertion is not stale. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+
+[[failure]]
+package = "orna-semantic-v1"
+target = "test:semantic_graph"
 test = "paired_checkpoint_outputs_keep_lane_to_snapshot_mapping"
 bead = "ornadb-3iqo"
 reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
