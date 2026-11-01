@@ -5389,13 +5389,14 @@ mod graph_bridge_tests {
     }
 
     /// Captures `payload` as a protected OGB-2 closure and commits it as the Blob
-    /// row at key 7 of `relation_id`. Returns the identity, the descriptor OID and
-    /// the committed store root.
+    /// row at key 7 of `relation_id`. Returns the identity, the descriptor OID,
+    /// the committed store root, and the raw-content bytes digested by the
+    /// binary save (capture, protect and accept).
     fn commit_gear_chunked_blob_row(
         root: &Path,
         relation_id: [u8; 16],
         payload: &[u8],
-    ) -> (crate::blob_store::ContentIdentity, NativeOid, NativeOid) {
+    ) -> (crate::blob_store::ContentIdentity, NativeOid, NativeOid, u64) {
         let writing_context = context(root);
         let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
@@ -5406,6 +5407,7 @@ mod graph_bridge_tests {
             .expect("admit the repository-owned graph context");
         let write_scope = graph.open_read_scope().expect("owner write scope");
         let mut input = std::io::Cursor::new(payload.to_vec());
+        let rehashed_before = crate::blob_store::raw_content_bytes_digested();
         let candidate = graph
             .capture_blob_candidate(&mut input, payload.len() as u64, &write_scope)
             .expect("write a private OGB-2 candidate closure");
@@ -5415,6 +5417,7 @@ mod graph_bridge_tests {
         let binding = graph
             .accept_protected_blob_pin(pin)
             .expect("accept the durable pin as a canonical ORP Blob binding");
+        let rehashed = crate::blob_store::raw_content_bytes_digested() - rehashed_before;
         let identity = binding.content_identity();
         let descriptor_oid = binding.descriptor_oid().clone();
         let transfer = binding.transfer_record();
@@ -5461,7 +5464,7 @@ mod graph_bridge_tests {
         );
         let store_root = write_native_node(root, algorithm, &NodeData::StoreRoot { relation_map });
         commit_store_root(root, algorithm, &store_root);
-        (identity, descriptor_oid, store_root)
+        (identity, descriptor_oid, store_root, rehashed)
     }
 
     #[test]
@@ -5481,7 +5484,7 @@ mod graph_bridge_tests {
             chunk_spans.len() > 1,
             "fixture must contain multiple chunks"
         );
-        let (identity, descriptor_oid, store_root) =
+        let (identity, descriptor_oid, store_root, _rehashed) =
             commit_gear_chunked_blob_row(root, relation_id, &payload);
 
         let admitted_context = context(root);
@@ -5608,7 +5611,7 @@ mod graph_bridge_tests {
             "fixture must contain multiple chunks"
         );
         let chunk_boundary = chunk_spans[0].offset() + chunk_spans[0].length();
-        let (identity, descriptor_oid, _store_root) =
+        let (identity, descriptor_oid, _store_root, _rehashed) =
             commit_gear_chunked_blob_row(root, relation_id, &payload);
 
         let admitted_context = context(root);
@@ -5705,6 +5708,71 @@ mod graph_bridge_tests {
                 intersecting.len()
             );
         }
+    }
+
+    #[test]
+    fn binary_save_and_metadata_save_report_rehash_cost() {
+        let directory = repository();
+        let root = directory.path();
+        let relation_id = [0x76; 16];
+        let initial = context(root);
+        install_overflow_row_store(root, &initial, relation_id, None);
+
+        // ORNA-VFS-010: a binary save MAY stream the entire resulting bytes to
+        // establish its raw SHA-256. The digested bytes are measured and printed
+        // rather than assumed.
+        let payload = gear_chunked_payload();
+        let length = payload.len() as u64;
+        let (identity, _descriptor_oid, _store_root, binary_rehashed) =
+            commit_gear_chunked_blob_row(root, relation_id, &payload);
+        assert_eq!(identity.length(), length);
+        assert!(
+            binary_rehashed >= length,
+            "a binary save must digest at least the whole blob: {binary_rehashed} of {length} bytes"
+        );
+
+        // ORNA-VFS-010: a metadata-only save MUST not fetch or rehash sibling
+        // content. The insert touches only the row index; the Blob row at key 7
+        // is a sibling whose payload must stay unread and unhashed.
+        let admitted_context = context(root);
+        let admitted_snapshot = admitted_context
+            .load_row_map(relation_id)
+            .expect("admit the committed ORP row map");
+        let admitted_graph = admitted_context
+            .open_native_graph(&admitted_snapshot)
+            .expect("bind the metadata save to the committed graph");
+        let metadata_scope = admitted_graph.open_read_scope().unwrap();
+        let rehashed_before = crate::blob_store::raw_content_bytes_digested();
+        let maintenance = admitted_graph
+            .maintain_row_index(
+                &[RowIndexMutation::Insert {
+                    key: TypedKey::UInt(8),
+                    fields: inline_value(),
+                }],
+                &metadata_scope,
+            )
+            .expect("insert a metadata-only row");
+        let metadata_rehashed = crate::blob_store::raw_content_bytes_digested() - rehashed_before;
+        let metadata_fetched = metadata_scope.payload_bytes_read();
+        assert_ne!(
+            maintenance.primary_root(),
+            maintenance.previous_root(),
+            "the metadata save must rewrite the row index"
+        );
+        assert_eq!(
+            metadata_fetched, 0,
+            "a metadata-only save must fetch no sibling payload bytes"
+        );
+        assert_eq!(
+            metadata_rehashed, 0,
+            "a metadata-only save must rehash no sibling content"
+        );
+        eprintln!(
+            "Gate B: rehash binary-save digested bytes={binary_rehashed}; blob bytes={length}"
+        );
+        eprintln!(
+            "Gate B: rehash metadata-save digested bytes={metadata_rehashed}; payload bytes fetched={metadata_fetched}; blob bytes={length}"
+        );
     }
 
     #[test]
