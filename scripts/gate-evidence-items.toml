@@ -181,9 +181,10 @@ id = "C2"
 title = "Indexed point and range queries, missing keys, unindexed scan and concurrent writes in cold and warm partial clones"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_publication_race" },
 ]
 limitations = [
-  "The concurrent writes compute the row index on two threads; nothing commits and no ref CAS race occurs (ornadb-mmsa.13).",
+  "Concurrent publication is raced on a local repository only (orp1_production_publication_race). The cold and warm partial-clone concurrent writes (exercise_concurrent_writes) compute the row index on two threads and never publish; that driver runs only in the ignored one-million-row test (ornadb-mmsa.13, ornadb-px4m).",
 ]
 
 [[item]]

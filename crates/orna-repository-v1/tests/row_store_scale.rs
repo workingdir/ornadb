@@ -2040,17 +2040,25 @@ mod format3;
 #[path = "../../orna-cli-v1/tests/support/media_commit.rs"]
 mod media_commit;
 
-/// Admits ten rows through a runtime request commit and publishes them with
-/// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
-/// the same sequence `orna publish` runs. The relation is seeded by the test
-/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
-/// the ten rows and the graph nodes that publication adds on top of that seed
-/// are written by the production writer.
-#[tokio::test]
-async fn orp1_production_writer_ten_rows() {
+/// Production-path publication fixture: the repository, the media directory,
+/// and the runtime state after ten rows were admitted through a runtime
+/// request commit and frozen. The relation is seeded by the test fixture with
+/// an empty ORP-1 row root (`format3::empty_format3_repository`).
+struct AdmittedProductionRows {
+    _repository_dir: TempDir,
+    _media: TempDir,
+    repository: Repository,
+    relation_id: [u8; 16],
+    head_before: orna_repository_v1::GitCommitRef,
+    state: orna_runtime_v1::RuntimeState,
+    freeze: orna_runtime_v1::PublicationFreeze,
+}
+
+/// Admits ten rows through a runtime request commit and freezes the admitted
+/// prefix. Publication is left to the caller.
+async fn admit_ten_production_rows() -> AdmittedProductionRows {
     use orna_evaluator_v1::SysHostBindingRegistry;
     use orna_runtime_v1::RuntimeState;
-    use orna_storage_v1::RuntimePublicationCoordinator;
     use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 
     let media_fixtures = concat!(
@@ -2112,6 +2120,7 @@ async fn orp1_production_writer_ten_rows() {
         )
         .await;
     }
+    drop(bindings);
 
     let checkpoint = state
         .latest_checkpoint()
@@ -2131,6 +2140,37 @@ async fn orp1_production_writer_ten_rows() {
         10,
         "every admitted row is in the frozen range"
     );
+    AdmittedProductionRows {
+        _repository_dir,
+        _media: media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    }
+}
+
+/// Admits ten rows through a runtime request commit and publishes them with
+/// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
+/// the same sequence `orna publish` runs. The relation is seeded by the test
+/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
+/// the ten rows and the graph nodes that publication adds on top of that seed
+/// are written by the production writer.
+#[tokio::test]
+async fn orp1_production_writer_ten_rows() {
+    use orna_storage_v1::RuntimePublicationCoordinator;
+
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_ten_production_rows().await;
+
     let head = repository
         .head()
         .expect("read repository head")
@@ -2209,6 +2249,183 @@ async fn orp1_production_writer_ten_rows() {
         stats.blob_references(),
         head_after.as_str(),
     );
+}
+
+/// Asserts that the committed relation's native graph is whole: exactly one
+/// store root and at least one ordered leaf are reachable from HEAD. A
+/// partially published graph fails here.
+fn assert_whole_store_graph(repository: &Repository, relation_id: [u8; 16]) {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    let stats = graph
+        .object_stats(&scope)
+        .expect("count reachable store nodes");
+    let kind_count = |name: &str| -> u64 {
+        stats
+            .nodes()
+            .iter()
+            .filter(|(kind, _)| format!("{kind:?}") == name)
+            .map(|(_, count)| *count)
+            .sum()
+    };
+    assert!(
+        kind_count("OrderedLeaf") >= 1,
+        "the ordered tree has at least one leaf"
+    );
+    assert_eq!(
+        kind_count("StoreRoot"),
+        1,
+        "exactly one store root is reachable"
+    );
+}
+
+/// Two publishers stage the same frozen prefix against one expected head and
+/// index, then race `publish` on two threads. Exactly one compare-and-set
+/// wins; the other fails with `RefConflict` and changes nothing.
+#[tokio::test]
+async fn orp1_production_publication_race() {
+    use orna_storage_v1::{Error as StorageError, RuntimePublicationCoordinator};
+
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_ten_production_rows().await;
+    let head = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    let index = repository
+        .index_generation()
+        .expect("read repository index generation");
+    let left_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| Err(StorageError::InvalidKey),
+        "orna: publish race left",
+    )
+    .await
+    .expect("left publisher prepares")
+    .expect("ten admitted rows are a visible change");
+    let right_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index,
+        &freeze,
+        |_| Err(StorageError::InvalidKey),
+        "orna: publish race right",
+    )
+    .await
+    .expect("right publisher prepares")
+    .expect("ten admitted rows are a visible change");
+
+    // Each publisher runs on its own thread with its own repository handle and
+    // both start together, so their compare-and-set attempts overlap.
+    let barrier = std::sync::Barrier::new(2);
+    let (left, right) = std::thread::scope(|scope| {
+        let left_repository = repository.clone();
+        let right_repository = repository.clone();
+        let barrier = &barrier;
+        let left = scope.spawn(move || {
+            let mut coordinator = left_prepared;
+            barrier.wait();
+            let result = coordinator.publish(&left_repository);
+            (coordinator, result)
+        });
+        let right = scope.spawn(move || {
+            let mut coordinator = right_prepared;
+            barrier.wait();
+            let result = coordinator.publish(&right_repository);
+            (coordinator, result)
+        });
+        (
+            left.join().expect("left publisher thread"),
+            right.join().expect("right publisher thread"),
+        )
+    });
+    let (mut winner, winner_generation, loser, loser_error) = match (left, right) {
+        ((coordinator, Ok(generation)), (loser, Err(error)))
+        | ((loser, Err(error)), (coordinator, Ok(generation))) => {
+            (coordinator, generation, loser, error)
+        }
+        (left, right) => panic!(
+            "exactly one publisher wins the ref compare-and-set: left={:?} right={:?}",
+            left.1, right.1
+        ),
+    };
+    assert_eq!(
+        loser_error,
+        StorageError::RefConflict,
+        "the losing publisher fails its ref compare-and-set"
+    );
+
+    winner
+        .complete(&repository, &state, &freeze)
+        .await
+        .expect("winning publisher completes its publication");
+    let head_after = repository
+        .head()
+        .expect("read published head")
+        .expect("publication leaves a head");
+    assert_eq!(
+        head_after.as_str(),
+        winner.candidate().commit().as_str(),
+        "HEAD advances to the winning candidate"
+    );
+    assert_ne!(
+        head_after.as_str(),
+        head_before.as_str(),
+        "publication advances HEAD"
+    );
+    assert!(
+        !repository
+            .head_contains_commit(loser.candidate().commit())
+            .expect("check the losing candidate against HEAD"),
+        "the losing candidate commit never reaches HEAD"
+    );
+    assert_eq!(
+        repository
+            .index_generation()
+            .expect("read repository index generation"),
+        winner_generation,
+        "only the winning publisher advances the index"
+    );
+
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    assert_eq!(
+        row_map.version().row_count(),
+        Some(10),
+        "the losing publisher adds no rows"
+    );
+    let rows = format3::committed_store_rows(&repository, relation_id);
+    assert_eq!(
+        rows.len(),
+        10,
+        "the winner's ten rows are readable from the store"
+    );
+
+    assert_whole_store_graph(&repository, relation_id);
 }
 
 #[test]
