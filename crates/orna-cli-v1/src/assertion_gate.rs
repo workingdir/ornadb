@@ -69,6 +69,13 @@ fn admitted_tables_of(
 
 /// The evaluator rows of every admitted table at `HEAD`, read under `HEAD`'s
 /// own schemas and identities. An unborn branch has no rows.
+///
+/// Interim cost (bead ornadb-t5tz): every gated commit or publish in a project
+/// that declares assertions runs this read, which encodes every admitted table
+/// at `HEAD` and is bounded by `ApplicationAuthority::committed_read_limits`.
+/// Past a limit, or when `HEAD` cannot be read, `changed_tables` treats every
+/// candidate table as changed. A cheaper change signal is not adopted yet; the
+/// bead names the proof it requires first.
 fn head_table_rows(
     repository: &orna_repository_v1::Repository,
 ) -> Result<orna_runtime_v1::RuntimeTableRows, &'static str> {
