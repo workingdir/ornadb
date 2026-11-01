@@ -2088,8 +2088,9 @@ async fn orp1_production_writer_ten_rows() {
         .expect("format-3 fixture has a head");
     for index in 0..10_u64 {
         // Each request gets its own ordinal band so request, mutation and
-        // digest identities never collide across the ten rows.
-        let ordinal = u8::try_from(index * 10).expect("ordinal fits a byte");
+        // digest identities never collide across the ten rows. Ordinal 0 is
+        // excluded: an all-zero session id is an invalid runtime identity.
+        let ordinal = u8::try_from(index * 10 + 1).expect("ordinal fits a byte");
         let key = format!("production-writer-{index:02}");
         media_commit::commit_capture_pending(
             &repository,
