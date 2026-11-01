@@ -113,13 +113,6 @@ reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label 
 [[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
-test = "paired_nested_omission_reset_replay_restores_lane_pin_maps"
-bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question under ORNA-SYS-012/ORNA-BLOB-008: the engine accepts a reset that aliases the paired lanes' omitted identities; the restored rejection expectation is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:semantic_graph"
 test = "paired_pin_identities_survive_omissions_at_outer_and_middle_depths"
 bead = "ornadb-3iqo"
 reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
