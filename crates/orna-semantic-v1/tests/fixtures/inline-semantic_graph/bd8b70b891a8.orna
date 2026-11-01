@@ -1,1 +1,0 @@
-pub fn bad(value: A): C = value;
