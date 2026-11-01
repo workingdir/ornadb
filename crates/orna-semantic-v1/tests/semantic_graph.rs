@@ -9317,60 +9317,61 @@ fn nested_extension_omissions_preserve_sibling_depth_identities() {
             })
             .collect::<Vec<_>>()
     };
+    // Learned-fill ruling (ornadb-3iqo): parent 2 reuses HEAD~100 on its left depth 0, the crossed
+    // pin pair that the single DIAG_TYPE diagnostic rejects as a whole parent. Its HEAD~100,
+    // HEAD~242, HEAD~240 and HEAD~241 pins therefore reach no sibling. Parent 0's left depth 0 pair,
+    // written as fail(failure) in the fixture, is omitted and learns its identity from the first
+    // accepted parent (HEAD~200, HEAD~201). Accepted parent 3 contributes HEAD~300/HEAD~301 and
+    // HEAD~320/HEAD~321. These expectations replace the stale #7161 test-only generation.
     assert_eq!(
         pin_contexts("left"),
         [
             vec![
-                BTreeSet::new(),
-                BTreeSet::from([
-                    "selector:HEAD~201".into(),
-                    "selector:HEAD~242".into(),
-                    "selector:HEAD~301".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~300".into()]),
+                BTreeSet::from(["selector:HEAD~201".into(), "selector:HEAD~301".into()]),
             ],
             vec![
                 BTreeSet::from([
                     "selector:HEAD~120".into(),
                     "selector:HEAD~220".into(),
-                    "selector:HEAD~240".into(),
                     "selector:HEAD~320".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~121".into(),
                     "selector:HEAD~221".into(),
-                    "selector:HEAD~241".into(),
                     "selector:HEAD~321".into(),
                 ]),
             ],
         ],
-        "the crossed left extension returns to its omitted depth while other identities keep folding"
+        "the crossed left extension learns its identity from the first accepted row"
     );
+    // Learned-fill ruling (ornadb-3iqo): rejected parent 2 contributes none of its right labels
+    // (HEAD~250, HEAD~251, HEAD~260, HEAD~261). Parent 0's right depth 1 pair is fail(failure) in
+    // the fixture, so it is omitted and learns its identity from the first accepted parent
+    // (HEAD~230, HEAD~231), adding no label beyond those. Every accepted parent keeps its slot 0
+    // and slot 1 labels together, so no pair is dropped (HEAD~210/HEAD~211 and HEAD~310/HEAD~311
+    // included). The stale {HEAD~100}-only slot 0 came from the test-only #7161 generation.
     assert_eq!(
         pin_contexts("right"),
         [
             vec![
-                BTreeSet::from(["selector:HEAD~100".into()]),
+                BTreeSet::from([
+                    "selector:HEAD~100".into(),
+                    "selector:HEAD~210".into(),
+                    "selector:HEAD~310".into(),
+                ]),
                 BTreeSet::from([
                     "selector:HEAD~101".into(),
                     "selector:HEAD~211".into(),
-                    "selector:HEAD~251".into(),
                     "selector:HEAD~311".into(),
                 ]),
             ],
             vec![
-                BTreeSet::from([
-                    "selector:HEAD~230".into(),
-                    "selector:HEAD~260".into(),
-                    "selector:HEAD~330".into(),
-                ]),
-                BTreeSet::from([
-                    "selector:HEAD~231".into(),
-                    "selector:HEAD~261".into(),
-                    "selector:HEAD~331".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~230".into(), "selector:HEAD~330".into()]),
+                BTreeSet::from(["selector:HEAD~231".into(), "selector:HEAD~331".into()]),
             ],
         ],
-        "the paired right extension returns to its original identity without dropping adjacent pins"
+        "the paired right extension keeps each accepted parent's pins together",
     );
 }
 
