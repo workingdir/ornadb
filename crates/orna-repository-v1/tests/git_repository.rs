@@ -10,7 +10,7 @@ use std::{
 use fs2::FileExt;
 use orna_foundation_v1::{GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CheckoutExecutionError, CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
+    CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
     LegacyAnnotationCandidate, ManagedFileChange, ManagedPath, MigrationAnnotationDefaults,
     MigrationContinuityRecord, MountError, MountView, NativeObjectId, OrnaInternalRef,
@@ -24,6 +24,36 @@ use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+/// Accepts every checkout target: these repository-level tests stage no assertion.
+struct AcceptCheckout;
+
+impl orna_repository_v1::CheckoutAssertionGate for AcceptCheckout {
+    fn validate(
+        &self, _: &orna_repository_v1::Repository, _: &orna_repository_v1::CheckoutPreflight,
+    ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal> {
+        Ok(())
+    }
+}
+
+/// Runs `check` over the locked checkout preflight, standing in for the
+/// production checkout gate (ORNA-ASSERT-044).
+struct CheckoutGate<'a>(
+    &'a dyn Fn(
+        &orna_repository_v1::Repository,
+        &orna_repository_v1::CheckoutPreflight,
+    ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal>,
+);
+
+impl orna_repository_v1::CheckoutAssertionGate for CheckoutGate<'_> {
+    fn validate(
+        &self,
+        repository: &orna_repository_v1::Repository,
+        plan: &orna_repository_v1::CheckoutPreflight,
+    ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal> {
+        (self.0)(repository, plan)
+    }
+}
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -739,7 +769,13 @@ fn force_checkout_keeps_user_directories_named_like_git_metadata() {
     );
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     repo.execute_validated_force_checkout(&discard).unwrap();
@@ -1458,7 +1494,7 @@ fn divergent_checkout_rejects_format3_target_without_a_store_root() {
     let plan = repo.plan_checkout("format3-target", runtime).unwrap();
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan),
+        repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout),
         Err(orna_repository_v1::RepositoryError::CheckoutTargetInvalid)
     ));
     assert_eq!(repo.cwd_generation(runtime).unwrap(), before);
@@ -1473,7 +1509,7 @@ fn divergent_checkout_accepts_a_format3_target_with_source_and_store_roots() {
     let runtime = RuntimeGeneration::new(92);
     let plan = repo.plan_checkout("format3-target", runtime).unwrap();
 
-    repo.execute_nonconflicting_git_checkout(&plan).unwrap();
+    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout).unwrap();
 
     assert_eq!(repo.head().unwrap().as_ref(), Some(plan.target().commit()));
     assert_eq!(
@@ -1504,16 +1540,13 @@ fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
         .unwrap();
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout_with_validation(&plan, |repository, observed| {
-            assert_eq!(
-                repository.head().unwrap(),
-                observed.expected_head().cloned()
-            );
+        repo.execute_nonconflicting_git_checkout(&plan, &CheckoutGate(&|repository, observed| {
+            assert_eq!(repository.head().unwrap(), observed.expected_head().cloned());
             assert_eq!(observed.target().branch_name(), Some("experiment"));
-            Err::<(), _>("candidate schema assertion rejected")
-        }),
-        Err(CheckoutExecutionError::Validation(
-            "candidate schema assertion rejected"
+            Err(orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None))
+        })),
+        Err(orna_repository_v1::RepositoryError::CandidateAssertionRefused(
+            orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
         ))
     ));
     assert_eq!(
@@ -1551,13 +1584,11 @@ fn divergent_checkout_rechecks_git_state_after_candidate_validation() {
     let before = git_state(&repo, root.path());
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout_with_validation(&plan, |_, _| {
+        repo.execute_nonconflicting_git_checkout(&plan, &CheckoutGate(&|_, _| {
             fs::write(root.path().join("main.orna"), "changed during validation\n").unwrap();
-            Ok::<(), ()>(())
-        }),
-        Err(CheckoutExecutionError::Repository(
-            orna_repository_v1::RepositoryError::CheckoutPlanStale
-        ))
+            Ok(())
+        })),
+        Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
     ));
     assert_eq!(git_state(&repo, root.path()).0, before.0);
     assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
@@ -1594,7 +1625,7 @@ fn divergent_checkout_refuses_to_overwrite_an_untracked_target_path() {
         &[ManagedPath::new("new.orna").unwrap()]
     );
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan),
+        repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout),
         Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
     ));
     assert_eq!(
@@ -1633,7 +1664,7 @@ fn divergent_checkout_refuses_to_overwrite_an_ignored_target_path() {
         &[ManagedPath::new("new.orna").unwrap()]
     );
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan),
+        repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout),
         Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
     ));
     assert_eq!(
@@ -1714,7 +1745,13 @@ fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
     let before = repo.cwd_generation(RuntimeGeneration::new(28)).unwrap();
 
     let _validated = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     assert_eq!(
         repo.cwd_generation(RuntimeGeneration::new(28)).unwrap(),
@@ -1722,7 +1759,7 @@ fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
     );
 
     assert!(matches!(
-        repo.validate_checkout_discard_set(&plan, true, Some(&token), &[]),
+        repo.validate_checkout_discard_set(&plan, true, Some(&token), &[], &AcceptCheckout),
         Err(orna_repository_v1::RepositoryError::CheckoutDiscardSetMismatch)
     ));
     assert!(matches!(
@@ -1731,6 +1768,7 @@ fn checkout_discard_set_requires_the_canonical_force_witness_and_exact_paths() {
             false,
             Some(&token),
             plan.git().discardable_paths(),
+            &AcceptCheckout,
         ),
         Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
     ));
@@ -1790,7 +1828,8 @@ fn checkout_discard_set_rejects_a_force_plan_after_target_branch_drift() {
             &plan,
             true,
             Some(&token),
-            plan.git().discardable_paths()
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
         ),
         Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
     ));
@@ -1817,7 +1856,13 @@ fn admitted_force_discard_is_fenced_against_later_target_drift() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
 
     let target = git(root.path(), &["rev-parse", "experiment"]);
@@ -1865,7 +1910,13 @@ fn pre_execution_force_checkout_recovery_retains_drifted_intent_without_mutation
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     assert!(repo.has_pending_pre_execution_checkout().unwrap());
@@ -1911,6 +1962,7 @@ fn pending_force_checkout_recovery_fences_other_git_visible_checkout_executors()
             true,
             Some(&force_token),
             force_plan.git().discardable_paths(),
+            &AcceptCheckout,
         )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
@@ -1948,7 +2000,13 @@ fn restarted_force_discard_recovery_requires_the_recorded_canonical_witness() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
 
@@ -1977,6 +2035,7 @@ fn restarted_force_discard_recovery_requires_the_recorded_canonical_witness() {
             true,
             Some(&stale.force_token()),
             stale.git().discardable_paths(),
+            &AcceptCheckout,
         )
         .unwrap();
     let before_stale = git_state(&restarted, root.path());
@@ -2026,7 +2085,13 @@ fn force_checkout_discards_only_the_consented_paths_and_carries_unrelated_state(
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     repo.execute_validated_force_checkout(&discard).unwrap();
@@ -2069,7 +2134,13 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
 
@@ -2138,7 +2209,13 @@ fn interrupted_force_checkout_after_discard_journal_recovers_detached_target() {
     ));
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
 
@@ -2211,7 +2288,13 @@ fn interrupted_force_checkout_after_git_switch_recovers_selected_target() {
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
 
@@ -2264,7 +2347,13 @@ fn malformed_discarded_checkout_journal_attachment_fails_before_recovery_mutatio
         .unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
 
@@ -2314,22 +2403,19 @@ fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
     let before = repo.cwd_generation(RuntimeGeneration::new(32)).unwrap();
 
     assert!(matches!(
-        repo.validate_checkout_discard_set_with_validation(
+        repo.validate_checkout_discard_set(
             &plan,
             true,
             Some(&token),
             plan.git().discardable_paths(),
-            |repository, observed| {
-                assert_eq!(
-                    repository.head().unwrap(),
-                    observed.expected_head().cloned()
-                );
+            &CheckoutGate(&|repository, observed| {
+                assert_eq!(repository.head().unwrap(), observed.expected_head().cloned());
                 assert_eq!(observed.target().branch_name(), Some("experiment"));
-                Err::<(), _>("candidate schema assertion rejected")
-            },
+                Err(orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None))
+            }),
         ),
-        Err(orna_repository_v1::CheckoutExecutionError::Validation(
-            "candidate schema assertion rejected"
+        Err(orna_repository_v1::RepositoryError::CandidateAssertionRefused(
+            orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
         ))
     ));
     assert_eq!(
@@ -3913,7 +3999,13 @@ fn cross_protocol_recovery_journals_are_mutually_exclusive() {
     let plan = repo.plan_checkout("experiment", runtime).unwrap();
     let token = plan.force_token();
     let discard = repo
-        .validate_checkout_discard_set(&plan, true, Some(&token), plan.git().discardable_paths())
+        .validate_checkout_discard_set(
+            &plan,
+            true,
+            Some(&token),
+            plan.git().discardable_paths(),
+            &AcceptCheckout,
+        )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
     let checkout_path = repo.runtime_paths().root().join("checkout-journal.bin");
