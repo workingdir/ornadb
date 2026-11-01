@@ -9928,14 +9928,17 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
         )],
         &historical_nested_callable_catalogue(),
     );
+    // Learned fill (bead ornadb-3iqo ruling): an omitted extension slot takes its
+    // snapshot identity from the first accepted row's topology, so the omitted
+    // extension pairs are filled rather than diagnosed at the fold boundaries.
     assert_eq!(
         result
             .diagnostics
             .iter()
             .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
             .count(),
-        2,
-        "the nested extension omissions are diagnosed at both fold boundaries: {:?}",
+        0,
+        "the nested extension omissions are filled from the first accepted row and not diagnosed at either fold boundary: {:?}",
         result.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>()
     );
     let module = result
@@ -9974,8 +9977,31 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
     };
     assert_eq!(
         depth_contexts(&depths[0]),
-        [BTreeSet::new(), BTreeSet::new()],
-        "the first batch's omitted extension pair remains omitted across nested folds"
+        [
+            BTreeSet::from([
+                "selector:HEAD~100".into(),
+                "selector:HEAD~120".into(),
+                "selector:HEAD~140".into(),
+                "selector:HEAD~200".into(),
+                "selector:HEAD~220".into(),
+                "selector:HEAD~240".into(),
+                "selector:HEAD~400".into(),
+                "selector:HEAD~420".into(),
+                "selector:HEAD~440".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~101".into(),
+                "selector:HEAD~121".into(),
+                "selector:HEAD~141".into(),
+                "selector:HEAD~201".into(),
+                "selector:HEAD~221".into(),
+                "selector:HEAD~241".into(),
+                "selector:HEAD~401".into(),
+                "selector:HEAD~421".into(),
+                "selector:HEAD~441".into(),
+            ]),
+        ],
+        "observed depth-0 identities after nested folds (bead ornadb-3iqo learned fill)"
     );
     assert_eq!(
         depth_contexts(&depths[1]),
@@ -9984,14 +10010,32 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
                 "selector:HEAD~90".into(),
                 "selector:HEAD~92".into(),
                 "selector:HEAD~94".into(),
+                "selector:HEAD~110".into(),
+                "selector:HEAD~130".into(),
+                "selector:HEAD~150".into(),
+                "selector:HEAD~210".into(),
+                "selector:HEAD~230".into(),
+                "selector:HEAD~250".into(),
+                "selector:HEAD~410".into(),
+                "selector:HEAD~430".into(),
+                "selector:HEAD~450".into(),
             ]),
             BTreeSet::from([
                 "selector:HEAD~91".into(),
                 "selector:HEAD~93".into(),
                 "selector:HEAD~95".into(),
+                "selector:HEAD~111".into(),
+                "selector:HEAD~131".into(),
+                "selector:HEAD~151".into(),
+                "selector:HEAD~211".into(),
+                "selector:HEAD~231".into(),
+                "selector:HEAD~251".into(),
+                "selector:HEAD~411".into(),
+                "selector:HEAD~431".into(),
+                "selector:HEAD~451".into(),
             ]),
         ],
-        "the independently pinned depth retains its first-batch extension identities"
+        "the independently pinned depth carries the first batch's extension identities and every later accepted row's identities"
     );
 }
 
