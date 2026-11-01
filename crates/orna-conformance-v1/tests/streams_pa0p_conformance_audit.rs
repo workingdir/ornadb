@@ -361,6 +361,7 @@ async fn finite_item_calling_helper_function_commits_a_row_per_item() {
             .await
             .expect("read delivered row")
             .unwrap_or_else(|| panic!("item {value} must commit a row"));
+        let row = Value::decode(&row).expect("decode delivered row");
         assert_eq!(row_field(&row, "value"), &Raw::Int((value + 1).into()));
     }
     let key = list_checkpoint_key("main", "fixture:streams-s9-helper-item", &[1, 2]);
