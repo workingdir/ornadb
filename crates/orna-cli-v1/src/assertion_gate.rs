@@ -1,9 +1,9 @@
-//! The CLI's production assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-044,
-//! ORNA-ASSERT-045, ORNA-ASSERT-046, ORNA-ASSERT-048). `orna commit` and
-//! `orna publish` refuse a candidate through this one gate before any ref,
-//! pin or journal names it. A checkout target is checked by the same validator
-//! through `validate_committed_target`, so no command disagrees about what an
-//! admitted assertion means.
+//! The CLI's production candidate assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-044,
+//! ORNA-ASSERT-045, ORNA-ASSERT-048). `orna commit` and `orna publish` both
+//! refuse a candidate through this one gate before any ref, pin or journal
+//! names it. A checkout target is checked by the same validator through
+//! `validate_committed_target`, so no command disagrees about what an admitted
+//! assertion means.
 
 use orna_repository_v1::{CandidateAssertionGate, CandidateAssertionRefusal, PrivateCommit};
 
@@ -73,6 +73,13 @@ fn admitted_tables_of(
 
 /// The evaluator rows of every admitted table at `HEAD`, read under `HEAD`'s
 /// own schemas and identities. An unborn branch has no rows.
+///
+/// Interim cost (bead ornadb-t5tz): every gated commit or publish in a project
+/// that declares assertions runs this read, which encodes every admitted table
+/// at `HEAD` and is bounded by `ApplicationAuthority::committed_read_limits`.
+/// Past a limit, or when `HEAD` cannot be read, `changed_tables` treats every
+/// candidate table as changed. A cheaper change signal is not adopted yet; the
+/// bead names the proof it requires first.
 fn head_table_rows(
     repository: &orna_repository_v1::Repository,
 ) -> Result<orna_runtime_v1::RuntimeTableRows, &'static str> {
@@ -148,9 +155,9 @@ fn committed_admitted_rows(
     }))
 }
 
-/// The candidate tables whose evaluator rows differ from `HEAD`: the only
-/// tables an admitted assertion can depend on (ORNA-ASSERT-042), since they are
-/// candidate tables. A candidate table absent from `HEAD` is changed when it
+/// The candidate tables whose evaluator rows differ from `HEAD`. A module
+/// assertion is evaluated when its dependency set intersects this set
+/// (ORNA-ASSERT-026). A candidate table absent from `HEAD` is changed when it
 /// stages rows. When `HEAD` cannot be read, every candidate table counts as
 /// changed, so more checks run and none is skipped.
 fn changed_tables(
@@ -208,6 +215,7 @@ fn validate_candidate_assertions(
     let format = repository
         .open_private_candidate_format_context(candidate)
         .map_err(|_| unvalidated(&format!("{word} format context could not be opened")))?;
+    // The candidate's own rows, read from the private candidate rather than HEAD.
     let committed = orna_project_v1::private_candidate_tables(
         repository,
         candidate,
@@ -298,11 +306,11 @@ pub(crate) fn validate_committed_target(
     )
 }
 
-/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-046,
-/// ORNA-ASSERT-028, ORNA-ASSERT-030, ORNA-ASSERT-048 to ORNA-ASSERT-050). The
-/// title names a false module assertion's owner and span, and carries the cause
-/// an unvalidated candidate could not be checked for, since attached details
-/// show only with `--debug`.
+/// The refusal of a candidate by its assertion gate (ORNA-ASSERT-048 to
+/// ORNA-ASSERT-051). The title names a false module assertion's owner and span
+/// (ORNA-ASSERT-051), and carries the cause an unvalidated candidate could not
+/// be checked for (ORNA-ASSERT-049), since attached details show only with
+/// `--debug`.
 pub(crate) fn refusal_diagnostic(
     refusal: &CandidateAssertionRefusal,
     command: GatedCommand,
