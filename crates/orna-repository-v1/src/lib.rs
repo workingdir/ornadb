@@ -289,6 +289,32 @@ impl CandidateAssertionGate for AcceptAllAssertions {
     }
 }
 
+/// Accepts every checkout target. Used only by the repository's checkout-path
+/// unit tests, which stage no assertion.
+#[cfg(test)]
+pub(crate) struct AcceptAllCheckoutAssertions;
+
+#[cfg(test)]
+impl CheckoutAssertionGate for AcceptAllCheckoutAssertions {
+    fn validate(
+        &self, _: &Repository, _: &CheckoutPreflight,
+    ) -> Result<(), CandidateAssertionRefusal> {
+        Ok(())
+    }
+}
+
+/// Refuses a checkout target whose logical state would become current while it
+/// violates an admitted assertion (ORNA-ASSERT-044). The repository crate cannot
+/// evaluate table or module assertions itself, so both checkout executors ask
+/// this gate over the immutable preflight while the coordination lock is held.
+/// Production gates accept without evaluating a target that changes no logical
+/// state; a refusal names the same codes as the commit path.
+pub trait CheckoutAssertionGate {
+    fn validate(
+        &self, repository: &Repository, plan: &CheckoutPreflight,
+    ) -> Result<(), CandidateAssertionRefusal>;
+}
+
 /// Opaque, repository-local review of one exact staged index generation.
 /// Construction is restricted to this crate so callers cannot forge a review.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2063,14 +2089,6 @@ impl CheckoutRecoveryJournal {
         journal.validate_generation_transition()?;
         Ok(journal)
     }
-}
-
-/// The failure boundary for a checkout that validates its logical candidate
-/// while the repository mutation lock is held.
-#[derive(Debug)]
-pub enum CheckoutExecutionError<E> {
-    Repository(RepositoryError),
-    Validation(E),
 }
 
 impl CheckoutPreflight {
@@ -6196,62 +6214,33 @@ impl Repository {
     /// locked preflight found no conflicting local paths.
     ///
     /// This is intentionally narrower than a complete Orna checkout: callers
-    /// must validate the target's logical state and coordinate runtime
-    /// activation before invoking this repository phase.  It never accepts a
-    /// force witness or discard set; a conflict fails before Git is asked to
+    /// must coordinate runtime activation before invoking this repository
+    /// phase. The gate decides whether the target's logical state may become
+    /// current (ORNA-ASSERT-044). It runs under the mutation lock after the
+    /// target snapshot is admitted and before Git moves; a refusal leaves
+    /// `HEAD`, the index, and the worktree untouched. The phase never accepts
+    /// a force witness or discard set; a conflict fails before Git is asked to
     /// change the CWD.
     pub fn execute_nonconflicting_git_checkout(
         &self,
         plan: &CheckoutPreflight,
+        gate: &dyn CheckoutAssertionGate,
     ) -> Result<(), RepositoryError> {
-        self.execute_nonconflicting_git_checkout_with_validation(plan, |_repository, _plan| {
-            Ok::<(), std::convert::Infallible>(())
-        })
-        .map_err(|error| match error {
-            CheckoutExecutionError::Repository(error) => error,
-            CheckoutExecutionError::Validation(never) => match never {},
-        })
-    }
-
-    /// Executes the safe Git carry-forward phase only after `validate` has
-    /// accepted the isolated logical candidate under the same mutation lock.
-    ///
-    /// The validator may inspect the target commit and its logical state using
-    /// the repository and immutable preflight. A rejected candidate leaves
-    /// `HEAD`, the index, and the worktree untouched. This does not authorize
-    /// conflicting or forced checkout; journaled destructive recovery remains
-    /// a separate higher-level boundary.
-    pub fn execute_nonconflicting_git_checkout_with_validation<E, F>(
-        &self,
-        plan: &CheckoutPreflight,
-        validate: F,
-    ) -> Result<(), CheckoutExecutionError<E>>
-    where
-        F: FnOnce(&Repository, &CheckoutPreflight) -> Result<(), E>,
-    {
-        let _lock = self
-            .acquire_coordination_lock()
-            .map_err(CheckoutExecutionError::Repository)?;
-        self.require_no_pending_publication_recovery_locked()
-            .map_err(CheckoutExecutionError::Repository)?;
-        self.require_no_pending_checkout_recovery_locked()
-            .map_err(CheckoutExecutionError::Repository)?;
-        self.verify_checkout_preflight_locked(plan)
-            .map_err(CheckoutExecutionError::Repository)?;
+        let _lock = self.acquire_coordination_lock()?;
+        self.require_no_pending_publication_recovery_locked()?;
+        self.require_no_pending_checkout_recovery_locked()?;
+        self.verify_checkout_preflight_locked(plan)?;
         if plan.expected_head.as_ref() == Some(plan.target.commit())
             || !plan.git.conflicting_paths().is_empty()
         {
-            return Err(CheckoutExecutionError::Repository(
-                RepositoryError::CheckoutExecutionUnsafe,
-            ));
+            return Err(RepositoryError::CheckoutExecutionUnsafe);
         }
 
-        self.validate_checkout_target_context(plan.target.commit())
-            .map_err(CheckoutExecutionError::Repository)?;
+        self.validate_checkout_target_context(plan.target.commit())?;
 
-        validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
-        self.verify_checkout_preflight_locked(plan)
-            .map_err(CheckoutExecutionError::Repository)?;
+        gate.validate(self, plan)
+            .map_err(RepositoryError::CandidateAssertionRefused)?;
+        self.verify_checkout_preflight_locked(plan)?;
 
         let mut command = self.command();
         match plan.target() {
@@ -6264,18 +6253,9 @@ impl Repository {
                     .arg(commit.as_str());
             }
         }
-        self.run(command)
-            .map(|_| ())
-            .map_err(CheckoutExecutionError::Repository)?;
-        if self
-            .head()
-            .map_err(CheckoutExecutionError::Repository)?
-            .as_ref()
-            != Some(plan.target.commit())
-        {
-            return Err(CheckoutExecutionError::Repository(
-                RepositoryError::GitOperationFailed,
-            ));
+        self.run(command)?;
+        if self.head()?.as_ref() != Some(plan.target.commit()) {
+            return Err(RepositoryError::GitOperationFailed);
         }
         Ok(())
     }
@@ -6401,55 +6381,25 @@ impl Repository {
     ///
     /// This is deliberately only an admission boundary: it holds the same
     /// coordination lock as checkout execution, revalidates the complete
-    /// preflight, and requires the canonical force witness, but does not alter
-    /// the ref, index, worktree, or runtime state. A future journaled executor
-    /// must consume this validated set rather than infer a replacement set.
+    /// preflight, asks the gate to accept the target's logical state
+    /// (ORNA-ASSERT-044), and requires the canonical force witness. It never
+    /// changes the ref, index, worktree, or runtime state, and a rejected
+    /// logical candidate cannot be converted into a force-authorized plan. A
+    /// future journaled executor must consume this exact validated discard set
+    /// rather than infer a replacement set.
     pub fn validate_checkout_discard_set(
         &self,
         plan: &CheckoutPreflight,
         force: bool,
         token: Option<&CheckoutPlanToken>,
         discard_paths: &[ManagedPath],
+        gate: &dyn CheckoutAssertionGate,
     ) -> Result<ValidatedCheckoutDiscard, RepositoryError> {
-        self.validate_checkout_discard_set_with_validation(
-            plan,
-            force,
-            token,
-            discard_paths,
-            |_repository, _plan| Ok::<(), std::convert::Infallible>(()),
-        )
-        .map_err(|error| match error {
-            CheckoutExecutionError::Repository(error) => error,
-            CheckoutExecutionError::Validation(never) => match never {},
-        })
-    }
-
-    /// Admits a force discard set only after `validate` accepts the isolated
-    /// logical candidate while the checkout mutation lock is held.
-    ///
-    /// This remains an admission boundary: it never changes the ref, index,
-    /// worktree, or runtime state. A rejected logical candidate cannot be
-    /// converted into a force-authorized plan, and a future journaled executor
-    /// must still consume this exact validated discard set.
-    pub fn validate_checkout_discard_set_with_validation<E, F>(
-        &self,
-        plan: &CheckoutPreflight,
-        force: bool,
-        token: Option<&CheckoutPlanToken>,
-        discard_paths: &[ManagedPath],
-        validate: F,
-    ) -> Result<ValidatedCheckoutDiscard, CheckoutExecutionError<E>>
-    where
-        F: FnOnce(&Repository, &CheckoutPreflight) -> Result<(), E>,
-    {
-        let _lock = self
-            .acquire_coordination_lock()
-            .map_err(CheckoutExecutionError::Repository)?;
-        self.verify_checkout_preflight_locked(plan)
-            .map_err(CheckoutExecutionError::Repository)?;
-        validate(self, plan).map_err(CheckoutExecutionError::Validation)?;
-        plan.authorize_force(force, token)
-            .map_err(CheckoutExecutionError::Repository)?;
+        let _lock = self.acquire_coordination_lock()?;
+        self.verify_checkout_preflight_locked(plan)?;
+        gate.validate(self, plan)
+            .map_err(RepositoryError::CandidateAssertionRefused)?;
+        plan.authorize_force(force, token)?;
         if discard_paths == plan.git.discardable_paths() {
             Ok(ValidatedCheckoutDiscard {
                 preflight: plan.clone(),
@@ -6457,9 +6407,7 @@ impl Repository {
                 discard_paths: discard_paths.to_vec(),
             })
         } else {
-            Err(CheckoutExecutionError::Repository(
-                RepositoryError::CheckoutDiscardSetMismatch,
-            ))
+            Err(RepositoryError::CheckoutDiscardSetMismatch)
         }
     }
 
@@ -10786,7 +10734,7 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 
 #[cfg(test)]
 mod tests {
-    use crate::AcceptAllAssertions;
+    use crate::{AcceptAllAssertions, AcceptAllCheckoutAssertions};
     use std::{collections::BTreeMap, fs, path::Path, process::Command};
 
     #[cfg(target_os = "linux")]
@@ -12453,6 +12401,7 @@ mod tests {
                 true,
                 Some(&token),
                 plan.git().discardable_paths(),
+                &AcceptAllCheckoutAssertions,
             )
             .unwrap();
 
