@@ -5462,32 +5462,50 @@ impl Filesystem for WorkspaceFilesystem {
                     let reference = reference.clone();
                     let save = Arc::clone(&candidate.save);
                     let field = candidate.field.clone();
-                    let initial = if flags.0 & libc::O_TRUNC != 0 {
-                        Ok(Vec::new())
-                    } else {
-                        read_blob_bytes(&graph, &reference)
-                    };
-                    if matches!(&initial, Ok(bytes) if bytes.len() > DRAFT_FILE_BOUND_BYTES) {
+                    let length = reference.content_identity().length();
+                    let seed_len = if flags.0 & libc::O_TRUNC != 0 { 0 } else { length };
+                    if seed_len > DRAFT_FILE_BOUND_BYTES as u64 {
                         reply.error(Errno::EDQUOT);
                         return;
                     }
-                    let seeded = initial.and_then(|initial| {
+                    // The admitted Blob is copied into the scratch one bounded range at a time,
+                    // so its whole content is never read into memory.
+                    let seeded = (|| {
                         let target = save.temporary_target(Some(&field))?;
                         let scratch = Arc::new(
                             save.writer
                                 .runtime
                                 .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                         );
-                        if !initial.is_empty() {
-                            save.writer
-                                .runtime
-                                .block_on(scratch.write_at(0, &initial))
-                                .map_err(|error| {
-                                    format!("Blob candidate could not be seeded: {error:?}")
-                                })?;
+                        if seed_len > 0 {
+                            let scope = graph.open_read_scope().map_err(|error| {
+                                format!("Blob read scope could not be opened: {error:?}")
+                            })?;
+                            let mut offset = 0_u64;
+                            while offset < seed_len {
+                                let end = offset
+                                    .saturating_add(CANDIDATE_CHUNK_BYTES as u64)
+                                    .min(seed_len);
+                                let range = graph
+                                    .read_blob_range(&reference, offset..end, &scope)
+                                    .map_err(|error| {
+                                        format!("Blob content could not be read: {error:?}")
+                                    })?;
+                                let chunk = range.bytes();
+                                if chunk.len() as u64 != end - offset {
+                                    return Err("Blob content ended before its recorded length".to_owned());
+                                }
+                                save.writer
+                                    .runtime
+                                    .block_on(scratch.write_at(offset, chunk))
+                                    .map_err(|error| {
+                                        format!("Blob candidate could not be seeded: {error:?}")
+                                    })?;
+                                offset = end;
+                            }
                         }
-                        Ok((target, scratch))
-                    });
+                        Ok::<_, String>((target, scratch))
+                    })();
                     match seeded {
                         Ok((target, scratch)) => {
                             (save, target, Some(scratch), Some(field))
@@ -5505,15 +5523,13 @@ impl Filesystem for WorkspaceFilesystem {
                 }) if write_mode => {
                     let save = Arc::clone(&candidate.save);
                     let field = candidate.field.clone();
-                    let initial = if flags.0 & libc::O_TRUNC != 0 {
-                        Vec::new()
-                    } else {
-                        bytes.to_vec()
-                    };
-                    if initial.len() > DRAFT_FILE_BOUND_BYTES {
+                    let seed_len = if flags.0 & libc::O_TRUNC != 0 { 0 } else { bytes.len() };
+                    if seed_len > DRAFT_FILE_BOUND_BYTES as u64 {
                         reply.error(Errno::EDQUOT);
                         return;
                     }
+                    // The accepted text is copied into the scratch one bounded chunk at a time,
+                    // so the whole candidate is never materialised in memory.
                     let seeded = (|| {
                         let target = save.temporary_target(Some(&field))?;
                         let scratch = Arc::new(
@@ -5521,13 +5537,24 @@ impl Filesystem for WorkspaceFilesystem {
                                 .runtime
                                 .block_on(target.begin_temporary_replacement(DRAFT_FILE_BOUND_BYTES)),
                         );
-                        if !initial.is_empty() {
+                        let mut offset = 0_u64;
+                        while offset < seed_len {
+                            let wanted = usize::try_from(seed_len - offset)
+                                .unwrap_or(usize::MAX)
+                                .min(CANDIDATE_CHUNK_BYTES);
+                            let chunk = bytes
+                                .read_range(offset, wanted)
+                                .map_err(|error| format!("Text candidate could not be read: {error}"))?;
+                            if chunk.is_empty() {
+                                return Err("Text candidate ended before its recorded length".to_owned());
+                            }
                             save.writer
                                 .runtime
-                                .block_on(scratch.write_at(0, &initial))
+                                .block_on(scratch.write_at(offset, &chunk))
                                 .map_err(|error| {
                                     format!("Text candidate could not be seeded: {error:?}")
                                 })?;
+                            offset += chunk.len() as u64;
                         }
                         Ok::<_, String>((target, scratch))
                     })();
@@ -6396,15 +6423,10 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
                 NodeKind::Text { bytes, .. } => {
-                    let start = match usize::try_from(offset) {
-                        Ok(start) if start < bytes.len() => start,
-                        _ => {
-                            reply.data(&[]);
-                            return;
-                        }
-                    };
-                    let end = start.saturating_add(size as usize).min(bytes.len());
-                    reply.data(&bytes[start..end]);
+                    match bytes.read_range(offset, size as usize) {
+                        Ok(data) => reply.data(&data),
+                        Err(_) => reply.error(Errno::EIO),
+                    }
                     return;
                 }
                 NodeKind::Blob { graph, reference, .. } => Some((
@@ -7004,7 +7026,7 @@ impl FsBuilder {
                 (FileType::RegularFile, candidate.len(), 0o444, 1)
             }
             NodeKind::Text { bytes, .. } => {
-                (FileType::RegularFile, bytes.len() as u64, 0o444, 1)
+                (FileType::RegularFile, bytes.len(), 0o444, 1)
             }
             NodeKind::Document { bytes, .. } => {
                 (FileType::RegularFile, bytes.len() as u64, 0o644, 1)
@@ -7883,12 +7905,12 @@ impl FsBuilder {
                 None => None,
             };
             if file.is_text() {
-                let bytes = candidate_field
-                    .replacement_bytes
-                    .as_ref()
-                    .ok_or_else(|| "projected text file has no captured text".to_owned())?
-                    .to_arc()
-                    .map_err(|error| format!("projected text file could not be read: {error}"))?;
+                let bytes = Arc::clone(
+                    candidate_field
+                        .replacement_bytes
+                        .as_ref()
+                        .ok_or_else(|| "projected text file has no captured text".to_owned())?,
+                );
                 files.push((file.name().to_owned(), NodeKind::Text { bytes, candidate }));
                 continue;
             }
@@ -8515,17 +8537,6 @@ impl FsBuilder {
             ),
             _ => return Err("replaced mount entry is not a blob".into()),
         };
-        // Text nodes keep contiguous bytes; a Blob keeps the streamed candidate. A failed
-        // copy is reported before the directory is touched.
-        let text_bytes = if text {
-            Some(
-                bytes
-                    .to_arc()
-                    .map_err(|error| format!("replacement text could not be read: {error}"))?,
-            )
-        } else {
-            None
-        };
         let generation = self.next_inode;
         let next_inode = generation
             .checked_add(1)
@@ -8552,9 +8563,10 @@ impl FsBuilder {
             generation,
             FsNode {
                 parent,
-                kind: match text_bytes {
-                    Some(bytes) => NodeKind::Text { bytes, candidate },
-                    None => NodeKind::BlobBytes(bytes),
+                kind: if text {
+                    NodeKind::Text { bytes, candidate }
+                } else {
+                    NodeKind::BlobBytes(bytes)
                 },
             },
         );
@@ -8626,7 +8638,7 @@ enum NodeKind {
     /// A large Str projected as a sibling text file. Its bytes are captured in the row; a
     /// writable file carries the row save context and its field (profiles/vfs-1.md).
     Text {
-        bytes: Arc<[u8]>,
+        bytes: Arc<CandidateSnapshot>,
         candidate: Option<BlobCandidate>,
     },
     /// A nested record, tuple, list or map value's directory, listed one level at a time.
