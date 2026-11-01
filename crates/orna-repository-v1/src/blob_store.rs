@@ -5,7 +5,7 @@
 //! when metadata is inspected, and they do not provide a second object store
 //! or a legacy loose/compact/Parquet writer.
 
-use std::{fmt, io::Read};
+use std::{cell::Cell, fmt, io::Read};
 
 use sha2::{Digest, Sha256};
 
@@ -336,12 +336,27 @@ impl GearChunker {
     }
 }
 
+thread_local! {
+    /// Raw-content bytes digested on this thread by [`ContentDigest::update`].
+    /// The schema identity digest is excluded: it hashes schema text, not payload.
+    static RAW_CONTENT_BYTES_DIGESTED: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Raw-content bytes this thread has digested so far: the rehash cost that
+/// ORNA-VFS-010 requires to be measured. Callers measure a delta around the
+/// operation they observe.
+#[cfg(test)]
+pub(crate) fn raw_content_bytes_digested() -> u64 {
+    RAW_CONTENT_BYTES_DIGESTED.with(Cell::get)
+}
+
 /// Streaming raw-content digest state.  The state never includes annotations
 /// or native Git object headers; a domain-separated digest starts from its
 /// domain prefix and still counts only the content in its length.
 pub struct ContentDigest {
     hasher: Sha256,
     length: u64,
+    counted: bool,
 }
 
 impl Default for ContentDigest {
@@ -355,6 +370,7 @@ impl ContentDigest {
         Self {
             hasher: Sha256::new(),
             length: 0,
+            counted: true,
         }
     }
 
@@ -365,7 +381,11 @@ impl ContentDigest {
         let mut hasher = Sha256::new();
         hasher.update(domain.as_bytes());
         hasher.update([0]);
-        Self { hasher, length: 0 }
+        Self {
+            hasher,
+            length: 0,
+            counted: false,
+        }
     }
 
     pub fn update(&mut self, bytes: &[u8]) -> Result<(), BlobStoreError> {
@@ -378,6 +398,11 @@ impl ContentDigest {
         }
         self.hasher.update(bytes);
         self.length = length;
+        if self.counted {
+            RAW_CONTENT_BYTES_DIGESTED.with(|digested| {
+                digested.set(digested.get().saturating_add(bytes.len() as u64));
+            });
+        }
         Ok(())
     }
 
