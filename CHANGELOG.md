@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- CWD observation reads each dirty or untracked file once per settled stamp (ornadb-5il1.156; product change). Commit,
+  verify and publish observations reuse a regular file's digest section while its stamp is unchanged and its mtime and
+  ctime are at least two seconds before the read (racy-clean). A file written within that window is read again on every
+  observation, so a same-size rewrite is still detected; this is a documented limit, not a single-read guarantee for a
+  file edited seconds before commit. Git-ignored files stay out of the CWD observation (unchanged). The worktree content
+  digest format is now `ORNA-WORKTREE-CONTENT-V2`, so digests computed before this change differ from new ones.
+  Tests: `crates/orna-repository-v1/src/lib.rs` (`settled_dirty_file_is_read_once_across_cwd_observations`).
 - Literal list streams evaluate each item's row expression under the bound item parameter (ORNA-A12-01), so helper calls
   and arithmetic in the item expression produce the row instead of only literal items. An item whose evaluation fails
   fails the stream with ORNA-LIST-STREAM-ITEM, naming the owning source (ORNA-ASSERT-051); the failed item is not
