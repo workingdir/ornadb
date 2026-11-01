@@ -115,6 +115,11 @@ pub(super) enum Command {
         name: &'static str,
         arguments: Vec<String>,
     },
+    /// `branch NAME`: create a branch at HEAD with no commit, leaving the index
+    /// and worktree unchanged (ORNA-BRANCH-001).
+    BranchCreate {
+        name: String,
+    },
     /// `restore --staged --row TABLE KEY`: restore one logical row's index entry to HEAD.
     RestoreRow {
         table: String,
@@ -681,10 +686,20 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Command::Diff(arguments)
         }
         Some("log") => Command::Log(words.by_ref().map(str::to_owned).collect()),
-        Some("branch") => Command::GitPassthrough {
-            name: "branch",
-            arguments: words.by_ref().map(str::to_owned).collect(),
-        },
+        Some("branch") => {
+            let arguments: Vec<String> = words.by_ref().map(str::to_owned).collect();
+            let create = match arguments.as_slice() {
+                [name] if !name.starts_with('-') => Some(name.clone()),
+                _ => None,
+            };
+            match create {
+                Some(name) => Command::BranchCreate { name },
+                None => Command::GitPassthrough {
+                    name: "branch",
+                    arguments,
+                },
+            }
+        }
         Some("tag") => Command::GitPassthrough {
             name: "tag",
             arguments: words.by_ref().map(str::to_owned).collect(),
