@@ -3,6 +3,7 @@
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
 
+mod assertion_gate;
 mod cli_args;
 mod cli_dispatch;
 mod cli_help;
