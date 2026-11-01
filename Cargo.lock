@@ -1587,6 +1587,7 @@ name = "orna-project-v1"
 version = "1.0.0"
 dependencies = [
  "num-bigint 0.4.8",
+ "orna-foundation-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
  "orna-semantic-v1",
