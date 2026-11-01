@@ -9144,7 +9144,7 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
 }
 
 #[test]
-fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
+fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
     let source =
         include_str!("fixtures/historical-nested-sibling-omission-depth-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -9436,7 +9436,7 @@ fn nested_extension_omissions_preserve_sibling_depth_identities() {
 }
 
 #[test]
-fn paired_depth_omissions_restore_each_crossed_anchor() {
+fn paired_depth_omissions_drop_the_crossing_row_at_every_depth() {
     let source = include_str!("fixtures/historical-paired-depth-omission-reconciliation.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -10008,7 +10008,7 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
 }
 
 #[test]
-fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
+fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
     let source = include_str!(
         "fixtures/historical-nested-paired-reconciliation-omission-wave.orna"
     );
@@ -10628,7 +10628,7 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
 }
 
 #[test]
-fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
+fn omitted_nested_fold_drops_the_crossing_row_and_keeps_accepted_labels() {
     let source = include_str!("fixtures/historical-omission-scoped-rollback.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -10763,7 +10763,7 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
 }
 
 #[test]
-fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
+fn nested_container_omission_drops_the_crossing_row_as_a_whole_element() {
     let source = include_str!("fixtures/historical-nested-container-rollback.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
