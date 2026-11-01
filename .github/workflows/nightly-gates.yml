@@ -206,6 +206,22 @@ jobs:
           --out "$RUNNER_TEMP/gate-evidence" --timeout-minutes 120
           -- cargo clippy --locked --workspace --all-targets -- -D warnings
 
+      - name: Check the fixed-row batching product claim
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/gate_evidence.py run --check fixed-row-batching
+          --record claims-fixed-row-batching --title "product claim: fixed-row batching"
+          --out "$RUNNER_TEMP/gate-evidence"
+          -- python3 scripts/check_product_claims.py fixed-row-batching
+
+      - name: Check the git prune --expire product claim
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/gate_evidence.py run --check prune-expire
+          --record claims-prune-expire --title "product claim: git prune --expire"
+          --out "$RUNNER_TEMP/gate-evidence"
+          -- python3 scripts/check_product_claims.py prune-expire
+
       - name: Upload the evidence records and logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
