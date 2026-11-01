@@ -257,10 +257,9 @@ pub struct PrivateCommit {
 /// Refuses a private candidate commit before anything publishes it. The
 /// repository crate cannot evaluate table or module assertions itself, so the
 /// publication path asks this gate over the serialized candidate before its
-/// journal or any ref names it (ORNA-ASSERT-042, ORNA-ASSERT-045,
-/// ORNA-ASSERT-046). Production commit paths pass a gate that evaluates the
-/// admitted assertions; only the test-only `AcceptAllAssertions` accepts without
-/// evaluating them.
+/// journal or any ref names it (ORNA-ASSERT-042, ORNA-ASSERT-045). Production
+/// commit paths pass a gate that evaluates the admitted assertions; only the
+/// test-only `AcceptAllAssertions` accepts without evaluating them.
 pub trait CandidateAssertionGate {
     fn validate(
         &self, repository: &Repository, candidate: &PrivateCommit,
@@ -273,7 +272,8 @@ pub enum CandidateAssertionRefusal {
     /// A table or module assertion evaluated false over the serialized candidate.
     /// Carries the module assertion's site; a table assertion carries none.
     AssertionFalse(Option<String>),
-    /// Validation could not complete, so the candidate is refused whole.
+    /// Validation could not complete, so the candidate is refused whole. The
+    /// string is the cause, which the E2300 title carries (ORNA-ASSERT-049).
     Unvalidated(String),
 }
 
