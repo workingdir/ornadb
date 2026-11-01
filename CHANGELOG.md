@@ -12,6 +12,12 @@ been published.
   `max` prefers `+0.0`, and neither fails with ORNA-EVAL-VALUE any more. Tests: `crates/orna-evaluator-v1/tests/float_ieee.rs`.
   Open: scalar `std.math.clamp` still rejects a NaN operand with ORNA-EVAL-VALUE; the spec does not name clamp's NaN
   behaviour (ORNA-FLOAT-007 covers `min` and `max` only).
+- Nonfinite Float text decodes (ornadb-5il1.188; product change). `Float.nan`, `Float.infinity` and `-Float.infinity`
+  (29-formats.md:125) decode to the IEEE-754 values they name, and every nonfinite Float re-encodes to one of those
+  spellings (ORNA-CODEC-003). Decode admits Float data only as literals and these spellings, so any other Float path,
+  such as `Float.pi`, is refused with ORNA-EVAL-VALUE (ORNA-FORMAT-004, non-executable). Tests:
+  `crates/orna-evaluator-v1/tests/float_ieee.rs`. Open: decode does not yet check the `as:` type against the decoded
+  value (ORNA-FORMAT-004 type-directed decoding).
 - Project admission uses the production catalogue (ornadb-5il1.384, partial; product change, not test-only).
   `orna check`, `orna run`, commit and serve admission, the VFS source-write check and the LSP project loader resolve
   `LoadedProject::production_catalogue`: the authoritative core, extended by the pinned standard profile and its verified
