@@ -1183,6 +1183,7 @@ caaf709cd39eb7612a9bdb2f6fa50ef67325ee57fe79526ecb7c93ba22e720e7  crates/orna-co
 b2b8b1c5b470579c2707f45a3ad127d0fb7022027b775d5fd4a7ff9f8f7a2d12  crates/orna-conformance-v1/tests/fixtures/streams-pa0p-layout-variant.orna
 70a830b02fac7b03164207cee17607fba5763586d81650b9ffb19d9697a7faae  crates/orna-conformance-v1/tests/fixtures/streams-pa0p-multiple-roots.orna
 bc7a7c9b49964341b316beaf5f1c34cfc5908de06af115c573f3b037a17605f4  crates/orna-conformance-v1/tests/fixtures/streams-pa0p-renamed-consumer.orna
+d769bf55650a118585ad2071cc89d1d61d97cd897de42673a4ce3f76d63522bb  crates/orna-conformance-v1/tests/fixtures/streams-s10-assert-item.orna
 fd355cf1fb98f0fdc7c727abfafd080f829a3cbca698b55755d5caaf11a70a73  crates/orna-conformance-v1/tests/fixtures/streams-s9-helper-item.orna
 88bd9994773ab0c0f8301c09d0e60bab753d6e1a5722f0ff031ed790177cc01e  crates/orna-conformance-v1/tests/fixtures/streams-s9-refused-item.orna
 fb9c56354c6866dc18d7c471a2c09f013422faf667121d0c2e1601a8b24781b9  crates/orna-conformance-v1/tests/fixtures/streams-yfxkj-predicate-nested-pairs-checkpoint-fold-mismatch.orna
