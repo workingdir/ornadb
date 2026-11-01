@@ -10743,21 +10743,34 @@ fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
     let Type::Record(left_fields) = left_element.as_ref() else {
         panic!("left list element must preserve its nested record");
     };
+    // Learned-fill ruling (ornadb-3iqo): an omitted depth-0 slot takes its identity from the
+    // first accepted row's topology, not the Bottom anchor. Row 3 is the rejected crossing
+    // (slots 0/1 swapped); it contributes no labels to this element, so its depth-1 labels
+    // 832/833 are absent and only the accepted rows' labels remain.
     assert_eq!(
         collect_depths(&left_fields["pins"]),
         [
-            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~810".into(),
+                    "selector:HEAD~820".into(),
+                    "selector:HEAD~840".into(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~811".into(),
+                    "selector:HEAD~821".into(),
+                    "selector:HEAD~841".into(),
+                ]),
+            ],
             vec![
                 BTreeSet::from([
                     "selector:HEAD~812".into(),
                     "selector:HEAD~822".into(),
-                    "selector:HEAD~832".into(),
                     "selector:HEAD~842".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~813".into(),
                     "selector:HEAD~823".into(),
-                    "selector:HEAD~833".into(),
                     "selector:HEAD~843".into(),
                 ]),
             ],
@@ -10767,6 +10780,9 @@ fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
     let Type::Record(right_fields) = &siblings["right"] else {
         panic!("right sibling must preserve its computed record");
     };
+    // Learned-fill ruling (ornadb-3iqo), right sibling: crossing row 3 is rejected as a whole,
+    // so its right labels 930-933 are absent just as its left depth-1 labels 832/833 are.
+    // Only accepted rows 1, 2 and 4 (0-based) contribute labels to this sibling.
     assert_eq!(
         collect_depths(&right_fields["pins"]),
         [
@@ -10774,13 +10790,11 @@ fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
                 BTreeSet::from([
                     "selector:HEAD~910".into(),
                     "selector:HEAD~920".into(),
-                    "selector:HEAD~930".into(),
                     "selector:HEAD~940".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~911".into(),
                     "selector:HEAD~921".into(),
-                    "selector:HEAD~931".into(),
                     "selector:HEAD~941".into(),
                 ]),
             ],
@@ -10788,18 +10802,16 @@ fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
                 BTreeSet::from([
                     "selector:HEAD~912".into(),
                     "selector:HEAD~922".into(),
-                    "selector:HEAD~932".into(),
                     "selector:HEAD~942".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~913".into(),
                     "selector:HEAD~923".into(),
-                    "selector:HEAD~933".into(),
                     "selector:HEAD~943".into(),
                 ]),
             ],
         ],
-        "rollback under a list wrapper must not erase its independent sibling labels"
+        "learned-fill rollback: the rejected parent row contributes no labels to either sibling"
     );
 }
 
