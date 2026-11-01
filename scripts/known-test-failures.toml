@@ -260,13 +260,6 @@ reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label 
 [[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
-test = "qualified_kwh_units_share_the_closed_cross_database_identity"
-bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: bisect first bad a7fcbc2c6 (5il1.250 diag codes); adjudication pending. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:semantic_graph"
 test = "sequential_three_way_tuple_folds_anchor_late_rebound_widths"
 bead = "ornadb-3iqo"
 reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
