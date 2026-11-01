@@ -140,7 +140,8 @@ limitations = [
 gate = "B"
 id = "B4"
 title = "Seek and range reads verify bytes and report whole-object overfetch"
-limitations = ["No test reports overfetch; no overfetch metric exists."]
+select = [{ record = "workspace-rest", package = "orna-repository-v1", target = "lib", test = "range_reads_report_whole_chunk_overfetch_against_requested_bytes" }]
+counters = ["^Gate B: range "]
 
 [[item]]
 gate = "B"
