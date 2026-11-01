@@ -6,7 +6,7 @@
 //! only the supplied worktree-relative paths.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt, fs,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
     path::{Component, Path, PathBuf},
@@ -1693,6 +1693,25 @@ struct WorktreeScan {
     stamps: Vec<ManagedStamp>,
 }
 
+/// The digest of one regular file's bytes, valid while its stamp is unchanged.
+#[derive(Clone, Debug)]
+struct CachedFileDigest {
+    stamp: ManagedFileStamp,
+    digest: [u8; 32],
+}
+
+/// How long before a read a file's mtime and ctime must lie for its stamp to
+/// prove its bytes unchanged. Filesystems store timestamps coarsely, so a write
+/// in the same tick as an earlier read can leave the stamp equal.
+const CONTENT_RACY_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+#[cfg(test)]
+thread_local! {
+    /// Regular files whose bytes a worktree observation read on this thread.
+    static CONTENT_READS: std::cell::RefCell<Vec<PathBuf>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 impl WorktreeState {
     pub fn as_porcelain_v2_z(&self) -> &[u8] {
         &self.0
@@ -2513,6 +2532,9 @@ pub struct Repository {
     runtime: RuntimePaths,
     objects: std::sync::Arc<object_reader::ObjectReader>,
     coordination_lock_wait: std::time::Duration,
+    /// Regular-file digest sections from the last worktree observation. Derived
+    /// and disposable: a section is reused only while its file stamp is unchanged.
+    section_cache: std::sync::Arc<std::sync::Mutex<HashMap<Vec<u8>, CachedFileDigest>>>,
 }
 
 /// Binds a candidate tree entry at its exact index position.
@@ -2595,6 +2617,7 @@ impl Repository {
             worktree,
             runtime: RuntimePaths { root: runtime },
             coordination_lock_wait: COORDINATION_LOCK_WAIT,
+            section_cache: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -5949,8 +5972,18 @@ impl Repository {
         for path in extra_paths {
             paths.insert(path.as_path().as_os_str().as_encoded_bytes().to_vec());
         }
+        // Regular-file sections come from the previous scan when their stamp is
+        // unchanged and settled (see `stamp_settled_before`). The cache is
+        // replaced by this scan's sections, so it never outlives one observation
+        // of each path.
+        let previous = self
+            .section_cache
+            .lock()
+            .map(|mut cache| std::mem::take(&mut *cache))
+            .unwrap_or_default();
+        let mut next = HashMap::new();
         let mut digest = Sha256::new();
-        digest.update(b"ORNA-WORKTREE-CONTENT\0");
+        digest.update(b"ORNA-WORKTREE-CONTENT-V2\0");
         let mut stamps = Vec::with_capacity(paths.len());
         for encoded_path in paths {
             let path =
@@ -5961,6 +5994,7 @@ impl Repository {
             let encoded_path = path.as_path().as_os_str().as_encoded_bytes();
             digest.update((encoded_path.len() as u64).to_be_bytes());
             digest.update(encoded_path);
+            let key = encoded_path.to_vec();
             let target = self.worktree.join(path.as_path());
             let metadata = match fs::symlink_metadata(&target) {
                 Ok(metadata) => Some(metadata),
@@ -5983,13 +6017,70 @@ impl Repository {
                 Some(metadata) if metadata.is_file() => {
                     digest.update([2]);
                     digest.update([Self::worktree_executable_marker(&metadata)]);
-                    Self::digest_file_contents(&target, &mut digest)?;
+                    let file_stamp = Self::managed_file_stamp(&metadata);
+                    let (section, entry) = match previous.get(&key) {
+                        Some(cached) if cached.stamp == file_stamp => {
+                            (cached.digest, Some(cached.clone()))
+                        }
+                        _ => {
+                            let read_started = std::time::SystemTime::now();
+                            let section = Self::file_section_digest(&target)?;
+                            let settled = Self::stamp_settled_before(&file_stamp, read_started);
+                            let entry = settled.then(|| CachedFileDigest {
+                                stamp: file_stamp,
+                                digest: section,
+                            });
+                            (section, entry)
+                        }
+                    };
+                    if let Some(entry) = entry {
+                        next.insert(key, entry);
+                    }
+                    digest.update(section);
                 }
                 Some(_) => digest.update([3]),
                 None => digest.update([0]),
             }
         }
+        if let Ok(mut cache) = self.section_cache.lock() {
+            *cache = next;
+        }
         Ok((digest.finalize().into(), stamps))
+    }
+
+    /// Hashes one regular file's length and bytes as a standalone section, so
+    /// the section can be cached against the file's stamp.
+    fn file_section_digest(target: &Path) -> Result<[u8; 32], RepositoryError> {
+        #[cfg(test)]
+        CONTENT_READS.with(|reads| reads.borrow_mut().push(target.to_path_buf()));
+        let mut section = Sha256::new();
+        Self::digest_file_contents(target, &mut section)?;
+        Ok(section.finalize().into())
+    }
+
+    /// Reports whether a file's stamp is settled before `read_started`: its mtime
+    /// and ctime both precede it by the racy window. Only then can a later write
+    /// leave the stamp unchanged, so only settled sections may be reused. A file
+    /// written within the window is always read again.
+    fn stamp_settled_before(stamp: &ManagedFileStamp, read_started: std::time::SystemTime) -> bool {
+        let Some(limit) = read_started.checked_sub(CONTENT_RACY_WINDOW) else {
+            return false;
+        };
+        let modified_settled = stamp.modified.is_some_and(|modified| modified <= limit);
+        #[cfg(unix)]
+        let changed_settled = {
+            let (_, _, ctime, ctime_nsec, _) = stamp.change;
+            u64::try_from(ctime)
+                .ok()
+                .zip(u32::try_from(ctime_nsec).ok())
+                .and_then(|(secs, nanos)| {
+                    std::time::UNIX_EPOCH.checked_add(std::time::Duration::new(secs, nanos))
+                })
+                .is_some_and(|changed| changed <= limit)
+        };
+        #[cfg(not(unix))]
+        let changed_settled = true;
+        modified_settled && changed_settled
     }
 
     /// Streams a regular file's length and bytes into `digest` through a fixed
@@ -10792,6 +10883,7 @@ fn decode_object_id(value: &str) -> Result<Vec<u8>, RepositoryError> {
 mod tests {
     use crate::AcceptAllAssertions;
     use std::{collections::BTreeMap, fs, path::Path, process::Command};
+    use super::{CONTENT_RACY_WINDOW, CONTENT_READS};
 
     #[cfg(target_os = "linux")]
     use std::{env, os::unix::ffi::OsStringExt, path::PathBuf};
@@ -11341,6 +11433,81 @@ mod tests {
             before != after,
             "a dirty managed file must change the CWD observation"
         );
+    }
+
+    /// Takes the dirty-file reads this thread recorded, clearing the record.
+    fn content_reads_take() -> Vec<PathBuf> {
+        CONTENT_READS.with(|reads| std::mem::take(&mut *reads.borrow_mut()))
+    }
+
+    /// A settled dirty file is read once across the CWD observations of one
+    /// operation: the first observation reads it, the rest reuse its section.
+    #[test]
+    fn settled_dirty_file_is_read_once_across_cwd_observations() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("main.orna"), "module main;\n// settled\n").unwrap();
+        std::thread::sleep(CONTENT_RACY_WINDOW + std::time::Duration::from_millis(200));
+        let repository = Repository::discover(root.path()).unwrap();
+        content_reads_take();
+        let first = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        repository.verify_cwd(&first).unwrap();
+        repository.worktree_state().unwrap();
+        let reads = content_reads_take();
+        assert_eq!(reads.len(), 1, "a settled dirty file must be read once: {reads:?}");
+        assert!(reads[0].ends_with("main.orna"));
+    }
+
+    /// Git-ignored bytes never enter the CWD observation, so no read names them.
+    #[test]
+    fn cwd_observation_reads_no_git_ignored_file() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("big/app.log"), b"ignored").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        content_reads_take();
+        repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        repository.worktree_state().unwrap();
+        let reads = content_reads_take();
+        assert!(
+            reads.iter().all(|path| !path.ends_with("app.log")),
+            "git-ignored bytes must not be read: {reads:?}"
+        );
+    }
+
+    /// A file written within the racy window is not settled, so its bytes are
+    /// read again and a same-size rewrite still changes the observation.
+    #[test]
+    fn cwd_generation_detects_same_size_rewrite_within_racy_window() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("main.orna"), "module main;\n// aaaa\n").unwrap();
+        let repository = Repository::discover(root.path()).unwrap();
+        content_reads_take();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert_eq!(content_reads_take().len(), 1);
+        fs::write(root.path().join("main.orna"), "module main;\n// bbbb\n").unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert_eq!(
+            content_reads_take().len(),
+            1,
+            "an unsettled dirty file must be read again"
+        );
+        assert!(
+            before != after,
+            "a same-size rewrite must change the CWD observation"
+        );
+    }
+
+    /// Deleting a settled dirty file changes the observation; its cached
+    /// section is never reused for a path that no longer exists.
+    #[test]
+    fn settled_dirty_file_deletion_changes_cwd_observation() {
+        let root = repository_with_ignored_big_directory();
+        fs::write(root.path().join("main.orna"), "module main;\n// keep\n").unwrap();
+        std::thread::sleep(CONTENT_RACY_WINDOW + std::time::Duration::from_millis(200));
+        let repository = Repository::discover(root.path()).unwrap();
+        let before = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        fs::remove_file(root.path().join("main.orna")).unwrap();
+        let after = repository.cwd_generation(RuntimeGeneration::new(0)).unwrap();
+        assert!(before != after, "a deleted dirty file must change the CWD observation");
     }
 
     #[cfg(target_os = "linux")]
