@@ -9241,15 +9241,25 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
             .collect::<Vec<_>>()
     };
 
+    // Ruling (ornadb-3iqo): learned fill is intended. An omitted or failed first-row slot takes
+    // the first accepted row's topology, so the first accepted row's labels stay on both siblings.
+    // Observed: the crossed row's labels (HEAD~1240 and HEAD~1241, shared by left and right) are
+    // absent from both siblings, while the accepted rows before and after it keep theirs.
     assert_eq!(
         pin_contexts("left"),
-        [BTreeSet::new(), BTreeSet::new()],
-        "the left path participating in a new cross-sibling identity must roll back to the omitted anchor"
+        [
+            BTreeSet::from(["selector:HEAD~1210".into(), "selector:HEAD~1260".into()]),
+            BTreeSet::from(["selector:HEAD~1211".into(), "selector:HEAD~1261".into()]),
+        ],
+        "the left path participating in a new cross-sibling identity must keep the accepted rows' labels on both sides of the crossed row"
     );
     assert_eq!(
         pin_contexts("right"),
-        [BTreeSet::new(), BTreeSet::new()],
-        "the right path participating in a new cross-sibling identity must roll back to the omitted anchor"
+        [
+            BTreeSet::from(["selector:HEAD~1220".into(), "selector:HEAD~1270".into()]),
+            BTreeSet::from(["selector:HEAD~1221".into(), "selector:HEAD~1271".into()]),
+        ],
+        "the right path participating in a new cross-sibling identity must keep the accepted rows' labels on both sides of the crossed row"
     );
     assert_eq!(
         pin_contexts("steady"),
