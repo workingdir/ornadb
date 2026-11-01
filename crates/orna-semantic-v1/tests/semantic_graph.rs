@@ -10397,27 +10397,39 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
         "nested_omission_storm_rolls_back_after_crossing",
         "left",
     );
+    // Learned fill (ornadb-3iqo ruling): an omitted tuple slot takes its snapshot identity
+    // from accepted rows; the crossing row is rejected as a whole, so its labels are absent.
     assert_eq!(
         rolled_back,
         [
-            vec![BTreeSet::new(), BTreeSet::new()],
+            vec![
+                BTreeSet::from([
+                    "selector:HEAD~200".to_owned(),
+                    "selector:HEAD~202".to_owned(),
+                    "selector:HEAD~220".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~201".to_owned(),
+                    "selector:HEAD~203".to_owned(),
+                    "selector:HEAD~221".to_owned(),
+                ]),
+            ],
             vec![
                 BTreeSet::from([
                     "selector:HEAD~210".to_owned(),
                     "selector:HEAD~212".to_owned(),
-                    "selector:HEAD~214".to_owned(),
                     "selector:HEAD~222".to_owned(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~211".to_owned(),
                     "selector:HEAD~213".to_owned(),
-                    "selector:HEAD~215".to_owned(),
                     "selector:HEAD~223".to_owned(),
                 ]),
             ],
         ],
-        "a rejected nested crossing rolls back only its pair while sibling depths keep their labels"
+        "a rejected crossing row drops its own labels; omitted slots take their learned fill"
     );
+    // Ruling (ornadb-3iqo): the rejected crossing row (fixture row 3) drops its right labels too.
     assert_eq!(
         nested_pins(
             "nested_omission_storm_rolls_back_after_crossing",
@@ -10429,14 +10441,12 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
                     "selector:HEAD~100".into(),
                     "selector:HEAD~110".into(),
                     "selector:HEAD~120".into(),
-                    "selector:HEAD~130".into(),
                     "selector:HEAD~140".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~101".into(),
                     "selector:HEAD~111".into(),
                     "selector:HEAD~121".into(),
-                    "selector:HEAD~131".into(),
                     "selector:HEAD~141".into(),
                 ]),
             ],
@@ -10445,19 +10455,17 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
                     "selector:HEAD~102".into(),
                     "selector:HEAD~112".into(),
                     "selector:HEAD~122".into(),
-                    "selector:HEAD~132".into(),
                     "selector:HEAD~142".into(),
                 ]),
                 BTreeSet::from([
                     "selector:HEAD~103".into(),
                     "selector:HEAD~113".into(),
                     "selector:HEAD~123".into(),
-                    "selector:HEAD~133".into(),
                     "selector:HEAD~143".into(),
                 ]),
             ],
         ],
-        "a failed depth scope must not discard concrete labels from its sibling"
+        "a rejected crossing row drops its labels on both sides; accepted rows keep theirs"
     );
 
     assert_eq!(
