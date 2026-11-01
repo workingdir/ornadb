@@ -216,9 +216,7 @@ fn assert_free_project_with_non_scalar_key_still_commits() {
 /// ORNA-ASSERT-026 and ORNA-ASSERT-051: a module assertion whose dependency table
 /// `Book` the commit changes is evaluated over the candidate rows. A false one
 /// refuses the commit at its source span, not as a table assertion. The owner is
-/// not pinned here: the root module renders as `main`, but this test asserts only
-/// the span. A named non-root owner is not covered, because `orna publish` refuses
-/// run-recorded rows of a non-root module table, so no such row can be published.
+/// not pinned here, because this test asserts only the span.
 #[test]
 fn false_module_assertion_refuses_the_commit_with_its_span() {
     let directory = tempfile::tempdir().expect("temporary directory");
