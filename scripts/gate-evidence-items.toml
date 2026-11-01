@@ -210,7 +210,7 @@ gate = "C"
 id = "C5"
 title = "Malformed overlapping ranges, broken counts, giant fanout and wrong schema domains fail"
 select = [
-  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_malformed_graphs_rejected" },
+  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_malformed_graphs_report_specific_diagnostics" },
 ]
 
 [[item]]
