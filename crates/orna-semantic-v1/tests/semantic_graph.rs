@@ -14753,17 +14753,17 @@ fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
         )],
         &historical_nested_callable_catalogue(),
     );
-    // Learned fill (bead ornadb-3iqo ruling) decides that an omitted slot takes the
-    // learned first-row topology; the engine accepts this reset chain with no
-    // diagnostic for this fixture shape.
     assert_eq!(
         result
             .diagnostics
             .iter()
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>(),
-        Vec::<(&str, &str)>::new(),
-        "the paired nested reset replay is accepted with no diagnostics for this fixture shape"
+        vec![(
+            "ORNA-S021-TYPE",
+            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+        )],
+        "a reset that aliases the paired lanes' omitted identities must be rejected specifically"
     );
     let module = result
         .modules
