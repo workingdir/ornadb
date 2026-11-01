@@ -5083,11 +5083,10 @@ impl StreamHandler for ListTableHandler {
             Ok(value) => value,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
         };
-        let row =
-            match substitute_list_item(&self.bridge.insert_row, &self.bridge.parameter, &value) {
-                Some(row) => row,
-                None => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
-            };
+        let row = match evaluate_list_item_row(&self.bridge, &value, self.limits) {
+            Ok(row) => row,
+            Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
+        };
         let key = match table_key(&row, &self.bridge.key_fields) {
             Ok(key) => key,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
@@ -5908,41 +5907,24 @@ fn literal_string(text: &str) -> Option<String> {
     (!body.contains('\\')).then(|| body.into())
 }
 
-fn substitute_list_item(expr: &Expr, parameter: &str, item: &Value) -> Option<Value> {
-    match expr {
-        Expr::Name { text, .. } if text == parameter => Some(item.clone()),
-        Expr::Field { base, name, .. } => match base.as_ref() {
-            Expr::Name { text, .. } if text == parameter => record_field(item, name),
-            _ => None,
-        },
-        Expr::Record { fields, .. } => {
-            let mut fields = fields
-                .iter()
-                .map(|field| {
-                    Some((
-                        field.name.clone(),
-                        substitute_list_item(&field.value, parameter, item)?
-                            .raw()
-                            .clone(),
-                    ))
-                })
-                .collect::<Option<Vec<_>>>()?;
-            fields.sort_by_cached_key(|(name, _)| {
-                Value::new(OvbRaw::Text(name.clone()))
-                    .expect("text field key is a valid value")
-                    .encode()
-                    .expect("text field key encodes canonically")
-            });
-            Value::new(OvbRaw::Map(
-                fields
-                    .into_iter()
-                    .map(|(name, value)| (OvbRaw::Text(name), value))
-                    .collect(),
-            ))
-            .ok()
-        }
-        _ => literal_value(expr),
-    }
+/// Evaluates the admitted `table.insert` row expression for one stream item
+/// (ORNA-A12-01). The item parameter is bound to the decoded item value and the
+/// row expression is evaluated with the admitted assertion functions, so helper
+/// calls and arithmetic in the item expression produce the row.
+fn evaluate_list_item_row(
+    bridge: &ListStreamBridge,
+    item: &Value,
+    limits: EvaluatorLimits,
+) -> Result<Value, EvaluationError> {
+    let environment = Environment::from([(bridge.parameter.clone(), item.clone())]);
+    let mut budget = StepBudget::new(limits.max_steps);
+    evaluate_with_functions_and_budget(
+        &bridge.insert_row,
+        &environment,
+        &bridge.assertion_functions,
+        limits,
+        &mut budget,
+    )
 }
 
 impl Default for TransactionalEvaluator {
@@ -13968,7 +13950,7 @@ mod list_stream_tests {
                     && matches!(value, OvbRaw::Tag(60000, _))
             })
         ));
-        let row = substitute_list_item(&bridge.insert_row, &bridge.parameter, &sample)
+        let row = evaluate_list_item_row(&bridge, &sample, Limits::default())
             .expect("Reading row projection");
         assert_eq!(
             table_key(&row, &bridge.key_fields).expect("composite Reading key"),
