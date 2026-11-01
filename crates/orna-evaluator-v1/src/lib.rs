@@ -5801,11 +5801,9 @@ impl Context<'_, '_> {
                     .replace('_', "")
                     .parse::<f64>()
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                if value.is_finite() {
-                    Ok(Value::Float(value.to_bits()))
-                } else {
-                    Err(error("ORNA-EVAL-VALUE"))
-                }
+                // ORNA-LIT-002: conversion is correctly rounded to nearest, so an
+                // out-of-range numeral yields a signed infinity rather than an error.
+                Ok(Value::Float(value.to_bits()))
             }
             LiteralKind::Date => {
                 let value = text.to_owned();
@@ -11476,12 +11474,15 @@ impl Context<'_, '_> {
             }
             ("__decode", [Value::String(input)]) => {
                 self.string(input.clone())?;
-                let parsed = parse_expression(input);
-                if !parsed.is_ok() || !is_orna_data_expression(&parsed.value) {
+                let mut parsed = parse_expression(input);
+                let mut bindings = BTreeMap::new();
+                if !parsed.is_ok()
+                    || !admit_orna_data_expression(&mut parsed.value, &mut bindings)
+                {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
                 let mut scope = Scope(
-                    BTreeMap::new(),
+                    bindings,
                     BTreeSet::new(),
                     BTreeSet::new(),
                     NominalDefinitions::new(),
@@ -14056,22 +14057,53 @@ fn is_identifier(value: &str) -> bool {
         && chars.all(|scalar| scalar == '_' || scalar.is_alphanumeric())
 }
 
-fn is_orna_data_expression(expression: &Expr) -> bool {
+/// The canonical nonfinite Float spellings (29-formats.md:125) and the scope binding carrying each.
+/// The NUL prefix cannot occur in a source identifier, so the binding never collides with user names.
+fn nonfinite_float_constant(expression: &Expr) -> Option<(&'static str, f64)> {
+    let Expr::Field { base, name, .. } = expression else {
+        return None;
+    };
+    if !matches!(base.as_ref(), Expr::Name { text, .. } if text == "Float") {
+        return None;
+    }
+    match name.as_str() {
+        "nan" => Some(("\0Float.nan", f64::NAN)),
+        "infinity" => Some(("\0Float.infinity", f64::INFINITY)),
+        _ => None,
+    }
+}
+
+/// ORNA-FORMAT-004: admits only the data subset of canonical Orna text. A canonical nonfinite
+/// Float spelling is rewritten to a binding holding its IEEE-754 value, so no `Float` path is
+/// evaluated. Returns false for any construct that is not data.
+fn admit_orna_data_expression(
+    expression: &mut Expr,
+    bindings: &mut BTreeMap<String, Value>,
+) -> bool {
+    if let Some((binding, value)) = nonfinite_float_constant(expression) {
+        let span = expression.span();
+        bindings.insert(binding.to_owned(), float_value(value));
+        *expression = Expr::Name {
+            text: binding.to_owned(),
+            span,
+        };
+        return true;
+    }
     match expression {
         Expr::Literal { .. } => true,
         Expr::Name { .. } => false,
-        Expr::Group { inner, .. } => is_orna_data_expression(inner),
+        Expr::Group { inner, .. } => admit_orna_data_expression(inner, bindings),
         Expr::Unary { op, rhs, .. } => {
-            matches!(op.as_str(), "+" | "-") && is_orna_data_expression(rhs)
+            matches!(op.as_str(), "+" | "-") && admit_orna_data_expression(rhs, bindings)
         }
-        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => {
-            elements.iter().all(is_orna_data_expression)
-        }
+        Expr::List { elements, .. } | Expr::Tuple { elements, .. } => elements
+            .iter_mut()
+            .all(|element| admit_orna_data_expression(element, bindings)),
         Expr::Record { fields, .. } => fields
-            .iter()
-            .all(|field| is_orna_data_expression(&field.value)),
+            .iter_mut()
+            .all(|field| admit_orna_data_expression(&mut field.value, bindings)),
         Expr::Field { base, .. } => matches!(
-            base.as_ref(),
+            &**base,
             Expr::Literal {
                 kind: LiteralKind::Decimal | LiteralKind::Integer,
                 ..
@@ -14079,13 +14111,13 @@ fn is_orna_data_expression(expression: &Expr) -> bool {
         ),
         Expr::Call {
             callee, arguments, ..
-        } if matches!(callee.as_ref(), Expr::Name { text, .. } if text == "Some")
+        } if matches!(&**callee, Expr::Name { text, .. } if text == "Some")
             && arguments.len() == 1
             && arguments.iter().all(|argument| argument.name.is_none()) =>
         {
             arguments
-                .iter()
-                .all(|argument| is_orna_data_expression(&argument.value))
+                .iter_mut()
+                .all(|argument| admit_orna_data_expression(&mut argument.value, bindings))
         }
         _ => false,
     }
@@ -16513,6 +16545,13 @@ fn compare_group_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering,
     }
 }
 fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationError> {
+    if let (Value::Float(a), Value::Float(b)) = (left, right) {
+        // ORNA-FLOAT-007: canonical NaN if either input is NaN; `min` prefers -0.0
+        // and `max` prefers +0.0 among zeros, otherwise numeric order decides.
+        let values = [*a, *b];
+        let bits = if min { float_min(&values) } else { float_max(&values) };
+        return bits.map(Value::Float).ok_or_else(|| error("ORNA-EVAL-VALUE"));
+    }
     let ordering = compare_values(left, right)?;
     if (ordering.is_le()) == min {
         Ok(left.clone())
