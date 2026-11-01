@@ -30,6 +30,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  mount exit codes: 0 attached, released or reported; 1 snapshot, mountpoint or record unavailable",
     "  diff [GIT_DIFF_ARGS...]",
     "  log [GIT_LOG_ARGS...]",
+    "  branch [NAME]                 list local branches, or create NAME at HEAD with no commit",
     "  annotate FILE --type MEDIA_TYPE --output FILE [--suffix HINT]  write an annotated Blob file",
     "  annotate exit status: 0 annotated Blob file written; 1 file or annotation failure; 2 invalid arguments or format size limit",
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",

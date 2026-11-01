@@ -14,7 +14,7 @@ fn error(title: &'static str, detail: impl Into<String>) -> Diagnostic {
     )
 }
 
-fn repository(endpoint: &Endpoint) -> Result<Repository, Diagnostic> {
+pub(super) fn repository(endpoint: &Endpoint) -> Result<Repository, Diagnostic> {
     let root = local_project_path(endpoint)?;
     Repository::discover(root)
         .map_err(|e| error("Git worktree could not be discovered", format!("{e:?}")))
