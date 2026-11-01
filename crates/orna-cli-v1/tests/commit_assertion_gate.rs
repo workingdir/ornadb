@@ -162,6 +162,10 @@ fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
         text.contains("could not be validated against its assertions"),
         "{text}"
     );
+    assert!(
+        text.contains("an assertion could not be evaluated over the staged rows"),
+        "{text}"
+    );
     assert_eq!(head(&root), before, "{text}");
 }
 
