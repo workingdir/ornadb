@@ -35,7 +35,7 @@ fn git_succeeds(repository: &std::path::Path, arguments: &[&str]) {
 fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens() {
     let directory = tempdir().expect("temporary directory");
     for command in [
-        "checkout", "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune",
+        "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune",
         "upgrade", "restore",
     ] {
         let output = orna(directory.path(), &[command]);
@@ -47,6 +47,15 @@ fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens(
             "{command}: {stderr}"
         );
     }
+}
+
+#[test]
+fn checkout_without_a_target_is_a_usage_error_before_any_repository_opens() {
+    let directory = tempdir().expect("temporary directory");
+    let output = orna(directory.path(), &["checkout"]);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "{stderr}");
+    assert!(stderr.contains("E1001"), "{stderr}");
 }
 
 #[test]
