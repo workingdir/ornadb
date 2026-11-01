@@ -1272,6 +1272,7 @@ struct IndexChurnMetrics {
     allocations: (u64, u64),
     source_page_transfer: (usize, usize),
     new_tree_objects: usize,
+    new_blob_bytes: usize,
     media_transfer: (usize, usize),
 }
 
@@ -1332,6 +1333,7 @@ fn measure_index_churn(
     let source_page_transfer =
         index_data_delta(&fixture.index_data_blobs, &before_objects, &after_objects);
     let new_tree_objects = tree_object_delta(&before_objects, &after_objects);
+    let new_blob_bytes = blob_bytes_delta(&before_objects, &after_objects);
     let media_transfer =
         media_payload_delta(&fixture.media_payload_oids, &before_objects, &after_objects);
     assert_eq!(
@@ -1349,13 +1351,14 @@ fn measure_index_churn(
         allocations,
         source_page_transfer,
         new_tree_objects,
+        new_blob_bytes,
         media_transfer,
     }
 }
 
 fn report_index_churn(rows: u64, operation: &str, metrics: IndexChurnMetrics) {
     eprintln!(
-        "ORP-1 index_churn rows={} operation={} elapsed_ms={} index_created={} index_reused={} payload_objects_reused={} payload_bytes_read={} source_page_blobs={} source_page_bytes={} new_tree_objects={} media_blobs={} media_bytes={} allocs={} alloc_bytes={}",
+        "ORP-1 index_churn rows={} operation={} elapsed_ms={} index_created={} index_reused={} payload_objects_reused={} payload_bytes_read={} source_page_blobs={} source_page_bytes={} new_tree_objects={} new_blob_bytes={} media_blobs={} media_bytes={} allocs={} alloc_bytes={}",
         rows,
         operation,
         millis(metrics.elapsed),
@@ -1366,12 +1369,17 @@ fn report_index_churn(rows: u64, operation: &str, metrics: IndexChurnMetrics) {
         metrics.source_page_transfer.0,
         metrics.source_page_transfer.1,
         metrics.new_tree_objects,
+        metrics.new_blob_bytes,
         metrics.media_transfer.0,
         metrics.media_transfer.1,
         metrics.allocations.0,
         metrics.allocations.1,
     );
 }
+
+/// Mirrors `row_store::ROW_INLINE_LIMIT`, which is crate-private: a row whose
+/// encoding exceeds it is lowered to overflow (`fits_inline`, overflow.rs).
+const ROW_INLINE_LIMIT: usize = 8_192;
 
 fn exercise_index_churn(fixture: &Fixture) {
     let (_clone_holder, clone_path, _) = clone_partial(fixture.root.path());
@@ -1450,6 +1458,45 @@ fn exercise_index_churn(fixture: &Fixture) {
             true,
         ),
     );
+    // Above the inline bound the row is lowered to overflow. Digit text varies
+    // per byte, so the overflow chunks cannot dedupe into existing objects.
+    let mut overflow_row = Vec::with_capacity(ROW_INLINE_LIMIT + 1_024);
+    cbor_array(&mut overflow_row, 3);
+    cbor_uint(&mut overflow_row, bucket_for(fixture.row_count + 31));
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let overflow_text: String = (0..9_000)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(b'0' + ((state >> 33) % 10) as u8)
+        })
+        .collect();
+    cbor_text(&mut overflow_row, &overflow_text);
+    overflow_row.extend_from_slice(
+        fixture
+            .media_annotation
+            .as_deref()
+            .expect("valid fixture has a media annotation"),
+    );
+    let overflow_len = overflow_row.len();
+    assert!(overflow_len > ROW_INLINE_LIMIT);
+    let overflow_key = encode_uint(fixture.row_count + 31);
+    let overflow_row = RowIndexMutation::insert_canonical(&overflow_key, &overflow_row)
+        .expect("construct overflowing row with shared media reference");
+    let overflow_churn = measure_index_churn(
+        fixture,
+        &clone_path,
+        "insert overflow row",
+        overflow_row,
+        fixture.row_count + 1,
+        true,
+    );
+    assert!(
+        overflow_churn.new_blob_bytes >= overflow_len,
+        "the overflowed row's bytes are written as new blobs"
+    );
+    report_index_churn(fixture.row_count, "overflow_row", overflow_churn);
     let after_churn = object_inventory(&clone_path);
     assert!(
         fixture
@@ -1921,6 +1968,17 @@ fn tree_object_delta(before: &ObjectInventory, after: &ObjectInventory) -> usize
             object.kind == ObjectKind::Tree && !before.objects.contains_key(oid)
         })
         .count()
+}
+
+fn blob_bytes_delta(before: &ObjectInventory, after: &ObjectInventory) -> usize {
+    after
+        .objects
+        .iter()
+        .filter(|(oid, object)| {
+            object.kind == ObjectKind::Blob && !before.objects.contains_key(*oid)
+        })
+        .map(|(_, object)| object.size)
+        .sum()
 }
 
 fn assert_rejected(
