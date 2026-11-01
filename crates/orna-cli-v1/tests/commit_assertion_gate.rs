@@ -2,7 +2,7 @@
 //! ORNA-ASSERT-048, ORNA-ASSERT-051) through `orna commit`: the staged
 //! candidate's own rows must satisfy every admitted table assertion, and every
 //! module assertion whose dependency table the commit changes, before any ref
-//! advances. A refused module assertion is reported at its module and source span.
+//! advances. A refused module assertion is reported at its source span.
 //!
 //! Rows reach the candidate only once they are published, so each test admits
 //! its rows under a project that declares no assertion, publishes them, and
@@ -50,17 +50,13 @@ const ENUM_KEYED_BESIDE_BOOK_LIBRARY: &str = "pub enum Level {\n    low,\n    hi
 pub table Task(level: Level) {\n    title: Str,\n}\n\n\
 pub table Book(id: Int) {\n    title: Str,\n}\n";
 
-/// `Book` and `Loan` for a module assertion over both tables.
-const BOOK_LOAN_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
-pub table Loan(id: Int) {\n    book_id: Int,\n    copies: Int,\n}\n";
-
-/// `Book` gains a constant `edition` default, so the published `Dune` row reads
-/// as edition 7. The module assertion needs a Book whose edition equals each
-/// Loan's copies; the Loan with one copy finds none, so the assertion is false.
-const BOOK_EDITION_LOAN_MODULE_LIBRARY: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    edition: Int = 7,\n}\n\n\
-pub table Loan(id: Int) {\n    book_id: Int,\n    copies: Int,\n}\n\n\
-assert every(Loan, loan => exists(Book, book => book.edition == loan.copies));\n";
+/// `Book` gains an `edition` default of 7, so the published `Dune` row reads as
+/// edition 7. The module assertion relates `Loan` to `Book` (a one-table
+/// invariant is rejected outside its table), and finds no edition 1 in `Book`.
+const BOOK_EDITION_MODULE_ASSERTED: &str = "pub table Book(id: Int) {\n    title: Str,\n    edition: Int = 7,\n}\n\n\
+pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
+pub table Shelf(id: Int) {\n    label: Str,\n}\n\n\
+assert every(Loan, loan => exists(Book, book => book.edition == 1));\n";
 
 /// `Book`, `Loan` and an empty `Shelf` for a module assertion over `Loan` and `Shelf`.
 const BOOK_LOAN_SHELF_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
@@ -218,36 +214,38 @@ fn assert_free_project_with_non_scalar_key_still_commits() {
 }
 
 /// ORNA-ASSERT-026 and ORNA-ASSERT-051: a module assertion whose dependency table
-/// the commit changes is evaluated over the candidate rows, and a false one
-/// refuses the commit at its module and source span rather than as a table
-/// assertion.
+/// `Book` the commit changes is evaluated over the candidate rows. A false one
+/// refuses the commit at its source span, not as a table assertion. The owner is
+/// not pinned here: the root module renders as `main`, but this test asserts only
+/// the span. A named non-root owner is not covered, because `orna publish` refuses
+/// run-recorded rows of a non-root module table, so no such row can be published.
 #[test]
-fn false_module_assertion_refuses_the_commit_with_its_owner_and_span() {
+fn false_module_assertion_refuses_the_commit_with_its_span() {
     let directory = tempfile::tempdir().expect("temporary directory");
-    let root = initialized_database(&directory, BOOK_LOAN_LIBRARY);
-    commit_source(&root, "book and loan tables");
+    let root = initialized_database(&directory, BOOK_LOAN_SHELF_LIBRARY);
+    commit_source(&root, "book, loan and shelf tables");
     assert_success(
         &orna_repl(
             &root,
             "main.Book.insert({ id: 1, title: \"Dune\" })\n\
-             main.Loan.insert({ id: 1, book_id: 1, copies: 1 })",
+             main.Loan.insert({ id: 1, book_id: 1 })",
         ),
-        "admit the rows before the module assertion exists",
+        "admit the rows",
     );
     publish(&root, "Dune");
     let before = head(&root);
 
-    // The `edition` default reads the published Dune row as edition 7, so Book is
-    // in the changed set and the module assertion applies. No Book has edition 1.
+    // `Book` changes, because its `edition` default reads the published `Dune`
+    // row as 7, so the module assertion over `Book` applies and is false.
     let refused = stage_and_commit(
         &root,
-        BOOK_EDITION_LOAN_MODULE_LIBRARY,
+        BOOK_EDITION_MODULE_ASSERTED,
         "assert across the changed table",
     );
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
     assert!(text.contains("ORNA-A091-009"), "{text}");
-    assert!(text.contains("assertion at"), "{text}");
+    assert!(text.contains("assertion at source"), "{text}");
     assert!(!text.contains("table assertion is false"), "{text}");
     assert_eq!(head(&root), before, "{text}");
 }
