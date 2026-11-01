@@ -156,7 +156,8 @@ limitations = [
 gate = "B"
 id = "B6"
 title = "Binary edit rehash cost is measured rather than hidden"
-limitations = ["No test measures rehash cost."]
+select = [{ record = "workspace-rest", package = "orna-repository-v1", target = "lib", test = "binary_save_and_metadata_save_report_rehash_cost" }]
+counters = ["^Gate B: rehash "]
 
 # Gate C: indexed rows at scale.
 
