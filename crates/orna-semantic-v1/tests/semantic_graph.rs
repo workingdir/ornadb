@@ -10150,9 +10150,16 @@ fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
         contexts
     };
 
+    // Learned-fill ruling (ornadb-3iqo): row 1 crosses HEAD~200 into the right row 0 pin,
+    // so its left depth 0 slot 0 label rolls back to the first accepted identity HEAD~100.
+    // Row 2 then explicitly supplies HEAD~600 at that slot, which unions in exactly as
+    // HEAD~601 does at slot 1. The #7161 expectation {HEAD~100} omitted that later label.
     assert_eq!(
         pin_contexts("left", 0, 0),
-        BTreeSet::from(["selector:HEAD~100".into()]),
+        BTreeSet::from([
+            "selector:HEAD~100".into(),
+            "selector:HEAD~600".into(),
+        ]),
         "the crossed left pin restores its first-parent identity"
     );
     assert_eq!(
@@ -10164,9 +10171,16 @@ fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
         ]),
         "the left neighbor keeps labels from unaffected parents"
     );
+    // Learned-fill ruling (ornadb-3iqo): row 1 omits the right depth 0 pair, so that slot
+    // takes HEAD~200 from the first accepted row. Row 2 then explicitly supplies HEAD~700
+    // at the same slot, which unions in exactly as HEAD~701 does at slot 1. The #7161
+    // expectation {HEAD~200} omitted that later label.
     assert_eq!(
         pin_contexts("right", 0, 0),
-        BTreeSet::from(["selector:HEAD~200".into()]),
+        BTreeSet::from([
+            "selector:HEAD~200".into(),
+            "selector:HEAD~700".into(),
+        ]),
         "the omitted right pin shares the rollback boundary with the crossing"
     );
     assert_eq!(
