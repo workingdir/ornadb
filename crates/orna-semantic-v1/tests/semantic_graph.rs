@@ -15020,16 +15020,16 @@ fn historical_callables_are_read_effect_only() {
 // Specified: ORNA-UNIT-008; qualified unit suffixes resolve to the same imported unit identity.
 #[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
-    let result = analyze(&[ModuleInput::new(
+    let result = analyze_corpus(&[ModuleInput::new(
         "units.orna",
         include_str!("fixtures/inline-semantic_graph/4d774ab8f9ad.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
-    let incompatible = analyze(&[ModuleInput::new(
+    let incompatible = analyze_corpus(&[ModuleInput::new(
         "units.orna",
-        include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
+        include_str!("fixtures/inline-semantic_graph/823fe4ed8a5a.orna"),
     )]);
     assert!(has(&incompatible, DIAG_INCOMPATIBLE_DIMENSIONS));
 }
