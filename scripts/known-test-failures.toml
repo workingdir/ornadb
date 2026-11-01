@@ -80,7 +80,7 @@ package = "orna-semantic-v1"
 target = "test:semantic_graph"
 test = "paired_boundary_depth_topology_accumulates_through_selector_storms"
 bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored first-row assertion is not stale. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored first-row assertion is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
 
 [[failure]]
 package = "orna-semantic-v1"
@@ -101,7 +101,7 @@ package = "orna-semantic-v1"
 target = "test:semantic_graph"
 test = "nested_paired_boundary_depths_stay_stable_through_selector_storms"
 bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored first-row whole-record assertion is not stale. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored first-row whole-record assertion is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
 
 [[failure]]
 package = "orna-semantic-v1"
@@ -115,7 +115,7 @@ package = "orna-semantic-v1"
 target = "test:semantic_graph"
 test = "paired_nested_omission_reset_replay_restores_lane_pin_maps"
 bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question under ORNA-SYS-012/ORNA-BLOB-008: the engine accepts a reset that aliases the paired lanes' omitted identities; the restored rejection expectation is not stale. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+reason = "Listed in scripts/semantic-known-red.txt: product question under ORNA-SYS-012/ORNA-BLOB-008: the engine accepts a reset that aliases the paired lanes' omitted identities; the restored rejection expectation is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
 
 [[failure]]
 package = "orna-semantic-v1"
@@ -143,11 +143,11 @@ package = "orna-semantic-v1"
 target = "test:semantic_graph"
 test = "sparse_paired_rebind_chains_preserve_identity_across_omitted_rows"
 bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question: a rejected split's rollback target (accumulated tuple vs empty tuple) is outside the learned-fill ruling (clause b); restored originally-omitted-tuple assertion is not stale. Fails on this branch with the restored assertion; the pull-request path skips it via the ledger. Fix owner tracked by the bead."
+reason = "Listed in scripts/semantic-known-red.txt: product question: a rejected split's rollback target (accumulated tuple vs empty tuple) is outside the learned-fill ruling (clause b); restored originally-omitted-tuple assertion is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
 
 [[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
 test = "tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms"
 bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored whole-fold assertion is not stale. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
+reason = "Listed in scripts/semantic-known-red.txt: product question: rollback target after a conflicting later row is outside the learned-fill ruling (clause a); restored whole-fold assertion is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
