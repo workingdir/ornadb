@@ -44,8 +44,7 @@ const NO_UPGRADE: &str = "there is no `orna upgrade`, so no format-1/2 history c
 const RUN_ROWS: &str = "rows written by `orna run` are refused at publication, so no product path builds a multi-row table";
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
-const CHECKOUT: &str =
-    "there is no `orna checkout`, `orna switch` or `orna reset`, so no checkout plan runs";
+const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
 const STAGING: &str =
     "`orna add --row` cannot stage a published row: it reports that the logical row was not found";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
@@ -557,13 +556,13 @@ pub fn entries() -> Vec<Entry> {
             "FINAL-CHECKOUT-001",
             "ornadb-5il1.141",
             CHECKOUT,
-            no_checkout,
+            different_commit_checkout_refused,
         ),
         Entry::gap(
             "FINAL-CHECKOUT-002",
             "ornadb-5il1.141",
             CHECKOUT,
-            no_checkout,
+            different_commit_checkout_refused,
         ),
         Entry::pass("FINAL-CHECKOUT-003", snapshot_mounts_are_pinned).with_fuse(),
         Entry::gap(
@@ -2210,8 +2209,79 @@ fn no_upgrade(db: &mut Db) -> Probe {
     unknown_command(db, &["upgrade", "--to-format", "3"])
 }
 
-fn no_checkout(db: &mut Db) -> Probe {
-    unknown_command(db, &["checkout", "HEAD"])
+/// The different-commit checkout is refused as the blocker: pending drafts are not
+/// carried forward (CHECKOUT-3 step 4), so `orna checkout` answers that it is
+/// refused while changes are pending. The probe first proves
+/// that a same-commit checkout keeps a draft and a worktree file (ORNA-BRANCH-002),
+/// then that the refused different-commit checkout leaves HEAD, the branch, the
+/// index, the worktree and the draft unchanged (ORNA-CHECKOUT-001). A checkout
+/// that succeeds while a draft is pending moved state past the refusal, which is a
+/// harness failure rather than a closed gap. A refusal for any other reason means the
+/// blocker no longer reproduces, which makes the gap stale.
+fn different_commit_checkout_refused(db: &mut Db) -> Probe {
+    db.declare("pub table Note(id: Str) { text: Str, }\n")?;
+    db.repl_effect(r#"main.Note.insert({ id: "a", text: "one" })"#)?;
+    db.publish()?.ok()?;
+    db.orna(&["branch", "earlier"])?.ok()?;
+    db.repl_effect(r#"main.Note.insert({ id: "b", text: "two" })"#)?;
+    db.publish()?.ok()?;
+    db.orna(&["branch", "mirror"])?.ok()?;
+    db.repl_effect(r#"main.Note.insert({ id: "c", text: "draft" })"#)?;
+    db.write("scratch.txt", "draft\n")?;
+    let drafts = db.runtime_mutations()?;
+    harness_ensure!(
+        drafts > 0,
+        "the unpublished draft is not counted as a runtime mutation"
+    );
+
+    db.orna(&["checkout", "mirror"])?.ok()?;
+    harness_ensure!(
+        checked_out_branch(db)? == "mirror",
+        "the same-commit checkout did not select mirror"
+    );
+    harness_ensure!(
+        db.runtime_mutations()? == drafts && db.read("scratch.txt")? == b"draft\n",
+        "the same-commit checkout did not keep the draft and scratch.txt"
+    );
+
+    let head = db.git_text(&["rev-parse", "HEAD"])?;
+    let status = db.git_text(&["status", "--porcelain=v1"])?;
+    let checkout = db.orna(&["checkout", "earlier"])?;
+    if checkout.succeeded() {
+        return Err(Failure::Harness(format!(
+            "orna checkout earlier to a different commit succeeded while a draft was pending: {}",
+            checkout.diagnostic()
+        )));
+    }
+    ensure!(
+        checkout.output().contains("checkout to a different commit is refused while"),
+        "orna checkout earlier to a different commit was refused for another reason: {}",
+        checkout.diagnostic()
+    );
+    harness_ensure!(
+        checked_out_branch(db)? == "mirror" && db.git_text(&["rev-parse", "HEAD"])? == head,
+        "the refused checkout moved HEAD or the branch"
+    );
+    harness_ensure!(
+        db.git_text(&["status", "--porcelain=v1"])? == status,
+        "the refused checkout changed the index or the worktree"
+    );
+    harness_ensure!(
+        db.runtime_mutations()? == drafts && db.read("scratch.txt")? == b"draft\n",
+        "the refused checkout changed the draft or scratch.txt"
+    );
+    Ok(format!(
+        "orna checkout earlier to a different commit: {}; the same-commit checkout \
+         kept {drafts} draft(s)",
+        checkout.diagnostic()
+    ))
+}
+
+fn checked_out_branch(db: &mut Db) -> Result<String, Failure> {
+    Ok(db
+        .git_text(&["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned())
 }
 
 fn storage_unobservable(db: &mut Db) -> Probe {

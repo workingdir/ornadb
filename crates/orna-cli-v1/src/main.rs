@@ -15,6 +15,7 @@ mod cli_export;
 mod cli_import;
 mod cli_mount;
 mod cli_stage;
+mod cli_checkout;
 #[cfg(target_os = "linux")]
 mod fuse_mount;
 mod cli_annotate;
