@@ -1952,9 +1952,9 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
     )]);
     assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
-    let temperature = analyze(&[ModuleInput::new(
+    let temperature = analyze_corpus(&[ModuleInput::new(
         "temperature.orna",
-        include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna")),
     )]);
     assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
