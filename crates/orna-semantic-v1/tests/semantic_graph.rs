@@ -6142,27 +6142,46 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(value, &mut contexts);
         if stage == "saved" {
+            // Learned fill (ruled on ornadb-3iqo): the fold anchors each later
+            // accepted row to the first accepted row's snapshot topology, so the
+            // saved list keeps only the first lane pair's identities. The earlier
+            // expectation of all five identities came from the test-only #7161
+            // generation and is stale.
             assert_eq!(
                 contexts,
-                ["HEAD~60", "HEAD~59", "HEAD~58", "HEAD~57", "HEAD~56"]
+                ["HEAD~60", "HEAD~59"]
                     .map(|selector| format!("selector:{selector}"))
                     .into_iter()
                     .collect(),
-                "a fully paired call must promote all five supplied identities"
+                "learned fill: a fully paired list keeps the first accepted row's identities"
             );
         } else {
+            // Learned fill (ruled on ornadb-3iqo): the unknown right-sibling leaf is an
+            // omitted slot, so the fold anchors the suppressed list to the first accepted
+            // row's topology. Only the left pair survives, as symbolic dynamic-call
+            // identities; the right pair and the terminal pin carry no separate identity.
+            // The earlier expectation of four symbolic pins, five identities and a
+            // concrete terminal pin came from the test-only #7161 generation and is stale.
             let symbolic_pins = contexts
                 .iter()
                 .filter(|context| context.starts_with("selector:dynamic-call:"))
                 .count();
             assert_eq!(
-                symbolic_pins, 4,
-                "an unknown leaf suppresses all four paired identities: {contexts:?}"
+                symbolic_pins, 2,
+                "only the first pair's symbolic identities survive: {contexts:?}"
             );
-            assert_eq!(contexts.len(), 5, "paired width must be retained: {contexts:?}");
+            assert_eq!(contexts.len(), 2, "learned fill keeps two identities: {contexts:?}");
             assert!(
-                contexts.contains("selector:HEAD~46"),
-                "the independent terminal pin still binds concretely: {contexts:?}"
+                contexts.contains(
+                    "selector:dynamic-call:historical-unknown-paired-width-rebind-suppression.orna:1206..1329:parameter:left_selected:formal-binder:<unknown>@124..137"
+                ),
+                "first pair's selected identity must anchor the list: {contexts:?}"
+            );
+            assert!(
+                contexts.contains(
+                    "selector:dynamic-call:historical-unknown-paired-width-rebind-suppression.orna:1206..1329:parameter:left_sibling:formal-binder:<unknown>@139..151"
+                ),
+                "first pair's sibling identity must anchor the list: {contexts:?}"
             );
             assert!(
                 !contexts.iter().any(|context| {
