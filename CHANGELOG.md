@@ -5,6 +5,7 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Known limits for row maps and Git maintenance (no product behaviour change). Fixed-row batching is not content-stable: ORP row pages close at content-defined boundary anchors, with a maximum entry count as a backstop (`boundary_anchor` in `crates/orna-repository-v1/src/orp.rs`). Concurrent uncoordinated `git prune --expire now` is unsupported and is not advertised as safe (ORNA-CAP-006); this build exposes no `prune` command.
 - CWD observation reads each dirty or untracked file once per settled stamp (ornadb-5il1.156; product change). Commit,
   verify and publish observations reuse a regular file's digest section while its stamp is unchanged and its mtime and
   ctime are at least two seconds before the read (racy-clean). A file written within that window is read again on every

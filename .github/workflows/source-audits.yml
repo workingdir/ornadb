@@ -84,6 +84,9 @@ jobs:
       - name: Prove independent extractor behavior
         run: python3 -m unittest scripts.test_orna_extract
 
+      - name: Prove product claim checker behavior
+        run: python3 -m unittest scripts.test_check_product_claims
+
       - name: Check standard library pin and Rust mirror
         run: python3 scripts/check_standard_library_pin.py --check
 

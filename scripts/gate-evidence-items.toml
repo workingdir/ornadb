@@ -30,6 +30,8 @@ expected = [
   "gate-d-crash-matrix",
   "lint-fmt",
   "lint-clippy",
+  "claims-fixed-row-batching",
+  "claims-prune-expire",
 ]
 
 # Gate A: format and existing behaviour.
@@ -219,7 +221,7 @@ select = [
 gate = "C"
 id = "C6"
 title = "Do not claim fixed-row batching is content-stable"
-limitations = ["A documentation obligation with no executable check."]
+select = [{ record = "claims-fixed-row-batching", package = "workspace", target = "check:fixed-row-batching" }]
 
 # Gate D: durability and publication.
 
@@ -262,7 +264,7 @@ limitations = ["No Orna-coordinated maintenance operation exists; the tests run 
 gate = "D"
 id = "D4"
 title = "No production claim of arbitrary concurrent uncoordinated git prune --expire now"
-limitations = ["A documentation obligation with no executable check."]
+select = [{ record = "claims-prune-expire", package = "workspace", target = "check:prune-expire" }]
 
 [[item]]
 gate = "D"
@@ -391,8 +393,9 @@ select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_truncate_sparse", test = "quota_rejected_write_is_not_retained_across_unmount_restart" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "fsynced_temporary_scratch_survives_mount_restart" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_editor_compat", test = "unlinked_fsynced_temporary_scratch_is_gone_after_mount_restart" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "unmount_and_remount_recover_after_sigkill" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:vfs_mount_sessions", test = "sigterm_retains_unresolved_drafts_instead_of_discarding_them" },
 ]
-limitations = ["No SIGKILL durability test covers acknowledged content, and a signal-triggered unmount loses drafts (ornadb-5il1.50)."]
 
 # Gate F: history, migration and complete copies.
 
