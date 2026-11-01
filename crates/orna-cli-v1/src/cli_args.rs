@@ -115,6 +115,16 @@ pub(super) enum Command {
         name: &'static str,
         arguments: Vec<String>,
     },
+    /// `branch NAME`: create a branch at HEAD with no commit, leaving the index
+    /// and worktree unchanged (ORNA-BRANCH-001).
+    BranchCreate {
+        name: String,
+    },
+    /// `checkout NAME`: select a branch or commit whose snapshot is HEAD
+    /// (ORNA-BRANCH-002); other targets are refused until the CHECKOUT-3 plan lands.
+    Checkout {
+        name: String,
+    },
     /// `restore --staged --row TABLE KEY`: restore one logical row's index entry to HEAD.
     RestoreRow {
         table: String,
@@ -250,10 +260,6 @@ fn parse_legend_args(args: &[&str]) -> Result<(LegendFormat, Option<usize>), Dia
 /// refused command never mutates anything.
 fn refused_command(name: &str) -> Diagnostic {
     let (title, help) = match name {
-        "checkout" => (
-            "`checkout` is not available in this build",
-            "use `branch` to list branches; switching the Orna workspace is not available in this build",
-        ),
         "switch" => (
             "`switch` is not available in this build",
             "use `branch` to list branches; switching the Orna workspace is not available in this build",
@@ -681,10 +687,42 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Command::Diff(arguments)
         }
         Some("log") => Command::Log(words.by_ref().map(str::to_owned).collect()),
-        Some("branch") => Command::GitPassthrough {
-            name: "branch",
-            arguments: words.by_ref().map(str::to_owned).collect(),
-        },
+        Some("branch") => {
+            let arguments: Vec<String> = words.by_ref().map(str::to_owned).collect();
+            let create = match arguments.as_slice() {
+                [name] if !name.starts_with('-') => Some(name.clone()),
+                _ => None,
+            };
+            match create {
+                Some(name) => Command::BranchCreate { name },
+                None => Command::GitPassthrough {
+                    name: "branch",
+                    arguments,
+                },
+            }
+        }
+        Some("checkout") => {
+            let arguments: Vec<&str> = words.by_ref().collect();
+            match arguments.as_slice() {
+                [name] if !name.starts_with('-') => Command::Checkout {
+                    name: (*name).to_owned(),
+                },
+                [] => {
+                    return Err(Diagnostic::usage(
+                        "E1001",
+                        "`checkout` needs a branch or commit name",
+                        "supply the branch or commit to select, such as `orna checkout main`",
+                    ));
+                }
+                _ => {
+                    return Err(Diagnostic::usage(
+                        "E1002",
+                        "`checkout` takes exactly one branch or commit name",
+                        "use `orna checkout NAME`; options are not available in this build",
+                    ));
+                }
+            }
+        }
         Some("tag") => Command::GitPassthrough {
             name: "tag",
             arguments: words.by_ref().map(str::to_owned).collect(),
@@ -759,7 +797,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
             None => Command::Run(Invocation::ProjectMain),
         },
-        Some(name @ ("checkout" | "switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune" | "upgrade")) => {
+        Some(name @ ("switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune" | "upgrade")) => {
             return Err(refused_command(name));
         }
         Some(_) => {
