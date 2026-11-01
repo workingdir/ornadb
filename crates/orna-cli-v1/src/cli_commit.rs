@@ -457,6 +457,8 @@ fn validate_candidate_assertions(
         orna_application_v1::ApplicationAuthority::committed_read_limits(),
     )
     .map_err(|_| unvalidated("staged committed rows could not be read"))?;
+    // `private_candidate_tables` returns one entry per schema or fails, so the
+    // lookup below cannot miss. A miss would refuse the commit, not skip a table.
     let mut rows = orna_runtime_v1::RuntimeTableRows::new();
     for (name, schema) in &schemas {
         let table = committed
