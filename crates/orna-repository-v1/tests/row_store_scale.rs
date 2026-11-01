@@ -2053,7 +2053,10 @@ async fn orp1_production_writer_ten_rows() {
     use orna_storage_v1::RuntimePublicationCoordinator;
     use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 
-    let media_fixtures = concat!(env!("CARGO_MANIFEST_DIR"), "/../orna-cli-v1/tests/fixtures/media");
+    let media_fixtures = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../orna-cli-v1/tests/fixtures/media"
+    );
     let (_repository_dir, repository, relation_id) = format3::empty_format3_repository();
     let media = TempDir::new().expect("temporary media directory");
     fs::copy(
@@ -2061,10 +2064,8 @@ async fn orp1_production_writer_ten_rows() {
         media.path().join("tone.wav"),
     )
     .expect("copy media fixture");
-    let import_source = fs::read_to_string(
-        Path::new(media_fixtures).join("import-song.orna"),
-    )
-    .expect("read media import fixture");
+    let import_source = fs::read_to_string(Path::new(media_fixtures).join("import-song.orna"))
+        .expect("read media import fixture");
     let root = format!("{:?}", media.path().to_string_lossy().as_ref());
     let expression = import_source.trim_end().replace("__MEDIA_ROOT__", &root);
 
@@ -2079,8 +2080,11 @@ async fn orp1_production_writer_ten_rows() {
     let capability = repository
         .capture_capability(relation_id)
         .expect("issue admitted capture capability");
-    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
-    filesystem.allow_root(media.path()).expect("allow media fixture root");
+    let mut filesystem =
+        FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
+    filesystem
+        .allow_root(media.path())
+        .expect("allow media fixture root");
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
@@ -2122,7 +2126,11 @@ async fn orp1_production_writer_ten_rows() {
         .pending_table_mutations_through(&freeze)
         .await
         .expect("read frozen runtime range");
-    assert_eq!(frozen.len(), 10, "every admitted row is in the frozen range");
+    assert_eq!(
+        frozen.len(),
+        10,
+        "every admitted row is in the frozen range"
+    );
     let head = repository
         .head()
         .expect("read repository head")
@@ -2168,13 +2176,19 @@ async fn orp1_production_writer_ten_rows() {
         .expect("load the relation row map");
     assert_eq!(row_map.version().row_count(), Some(10));
     let rows = format3::committed_store_rows(&repository, relation_id);
-    assert_eq!(rows.len(), 10, "ten committed rows are readable from the store");
+    assert_eq!(
+        rows.len(),
+        10,
+        "ten committed rows are readable from the store"
+    );
 
     let graph = format
         .open_native_graph(&row_map)
         .expect("open the native graph");
     let scope = graph.open_read_scope().expect("open a read scope");
-    let stats = graph.object_stats(&scope).expect("count reachable store nodes");
+    let stats = graph
+        .object_stats(&scope)
+        .expect("count reachable store nodes");
     let kind_count = |name: &str| -> u64 {
         stats
             .nodes()
@@ -2196,7 +2210,6 @@ async fn orp1_production_writer_ten_rows() {
         head_after.as_str(),
     );
 }
-
 
 #[test]
 fn orp1_malformed_graphs_report_specific_diagnostics() {
