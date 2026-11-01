@@ -5,6 +5,17 @@ use orna_repository_v1::{IndexGeneration, Repository, RuntimeGeneration, Worktre
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
 
+/// Accepts every checkout target: these tests stage no assertion.
+struct AcceptCheckout;
+
+impl orna_repository_v1::CheckoutAssertionGate for AcceptCheckout {
+    fn validate(
+        &self, _: &orna_repository_v1::Repository, _: &orna_repository_v1::CheckoutPreflight,
+    ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal> {
+        Ok(())
+    }
+}
+
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
         .current_dir(directory)
@@ -127,7 +138,7 @@ fn divergent_checkout_carries_nonconflicting_git_state() {
         .unwrap();
     assert!(plan.git().conflicting_paths().is_empty());
 
-    repo.execute_nonconflicting_git_checkout(&plan).unwrap();
+    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout).unwrap();
 
     assert_eq!(git(root.path(), &["branch", "--show-current"]), "experiment");
     assert_eq!(
@@ -164,7 +175,7 @@ fn divergent_checkout_refuses_conflicting_git_state_without_mutating_cwd() {
     let plan = repo.plan_checkout("experiment", runtime).unwrap();
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan),
+        repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout),
         Err(orna_repository_v1::RepositoryError::CheckoutExecutionUnsafe)
     ));
     assert_eq!(repo.cwd_generation(runtime).unwrap(), before);
@@ -200,6 +211,7 @@ fn checkout_recovery_preserves_an_external_branch_advance() {
             true,
             Some(&token),
             plan.git().discardable_paths(),
+            &AcceptCheckout,
         )
         .unwrap();
     repo.persist_validated_checkout_discard(&discard).unwrap();
