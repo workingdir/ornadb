@@ -66,7 +66,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     ops::Bound,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -4397,6 +4397,9 @@ struct ListTableHandler {
     /// The refusal for the item that failed evaluation, reported by the caller
     /// in place of the generic delivery diagnostic.
     refusal: Option<Diagnostic>,
+    /// The site of the assertion that refused the current item, written by the
+    /// item's validator and read when the item fails (ORNA-ASSERT-051).
+    assertion_refusal: Arc<Mutex<Option<String>>>,
 }
 
 struct CandidateRelationEffectHandler<'a> {
@@ -4936,7 +4939,7 @@ impl TableActivationCandidateValidator for TransactionalTableCandidateValidator 
                 )
                 .map_err(|_| table_evaluation_diagnostic())?;
                 if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                    self.refused_module_assertion = Some(module_assertion_site(&assertion));
+                    self.refused_module_assertion = Some(assertion_site(&assertion));
                     return Err(table_assertion_diagnostic());
                 }
             }
@@ -4952,10 +4955,17 @@ struct ListTableCandidateValidator {
     functions: Functions,
     limits: EvaluatorLimits,
     tables: Vec<String>,
+    /// Shared with the handler that built this validator; holds the site of the
+    /// assertion that refused the item (ORNA-ASSERT-051).
+    assertion_refusal: Arc<Mutex<Option<String>>>,
 }
 
 impl ListTableCandidateValidator {
-    fn new(bridge: &ListStreamBridge, limits: EvaluatorLimits) -> Result<Self, String> {
+    fn new(
+        bridge: &ListStreamBridge,
+        limits: EvaluatorLimits,
+        assertion_refusal: Arc<Mutex<Option<String>>>,
+    ) -> Result<Self, String> {
         let module_assertions =
             applicable_module_assertions(&bridge.table, &bridge.module_assertions)?;
         let mut tables = BTreeSet::from([bridge.table.clone()]);
@@ -4969,7 +4979,112 @@ impl ListTableCandidateValidator {
             functions: bridge.assertion_functions.clone(),
             limits,
             tables: tables.into_iter().collect(),
+            assertion_refusal,
         })
+    }
+
+    fn clear_refusal(&self) {
+        *self
+            .assertion_refusal
+            .lock()
+            .expect("assertion refusal slot is not poisoned") = None;
+    }
+
+    /// Records the assertion that refused the item and returns its diagnostic
+    /// unchanged, so the failure can name the owner and span (ORNA-ASSERT-051).
+    fn refuse(
+        &self,
+        assertion: &AdmittedAssertion,
+        diagnostic: SafeDiagnostic,
+    ) -> SafeDiagnostic {
+        *self
+            .assertion_refusal
+            .lock()
+            .expect("assertion refusal slot is not poisoned") = Some(assertion_site(assertion));
+        diagnostic
+    }
+
+    fn check_table_assertion(
+        &self,
+        assertion: &AdmittedAssertion,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        budget: &mut StepBudget,
+    ) -> Result<(), SafeDiagnostic> {
+        if table_assertion_function(&assertion.expression, &self.functions).is_some() {
+            let mut effects = CandidateRelationEffectHandler { rows };
+            let value = evaluate_function_assertion(
+                &self.table,
+                &assertion.expression,
+                &self.functions,
+                self.limits,
+                budget,
+                &mut effects,
+            )
+            .map_err(|_| table_evaluation_diagnostic())?;
+            if !matches!(value.raw(), OvbRaw::Bool(true)) {
+                return Err(table_assertion_diagnostic());
+            }
+            return Ok(());
+        }
+        let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
+            .map_err(|_| table_evaluation_diagnostic())?;
+        let mut projections = BTreeSet::new();
+        let mut candidate_rows = 0usize;
+        for (_, encoded) in rows
+            .get(&self.table)
+            .ok_or_else(table_evaluation_diagnostic)?
+        {
+            debit_host_step(budget).map_err(|_| table_evaluation_diagnostic())?;
+            candidate_rows = candidate_rows
+                .checked_add(1)
+                .ok_or_else(table_evaluation_diagnostic)?;
+            self.limits
+                .check_items(candidate_rows)
+                .map_err(|_| table_evaluation_diagnostic())?;
+            let row = Value::decode(encoded).map_err(|_| table_row_decode_diagnostic())?;
+            let environment = Environment::from([(binding.to_owned(), row)]);
+            let value = evaluate_with_functions_and_budget(
+                predicate,
+                &environment,
+                &self.functions,
+                self.limits,
+                budget,
+            )
+            .map_err(|_| table_evaluation_diagnostic())?;
+            match kind {
+                TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
+                TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
+                TableAssertionKind::AllUnique => {
+                    let projection = value.encode().map_err(|_| table_evaluation_diagnostic())?;
+                    if !projections.insert(projection) {
+                        return Err(table_assertion_diagnostic());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn check_module_assertion(
+        &self,
+        assertion: &AdmittedAssertion,
+        rows: &orna_runtime_v1::RuntimeTableRows,
+        budget: &mut StepBudget,
+    ) -> Result<(), SafeDiagnostic> {
+        let value = evaluate_module_assertion_rows(
+            rows,
+            &assertion.expression,
+            &Environment::new(),
+            &self.functions,
+            self.limits,
+            budget,
+            0,
+        )
+        .map_err(|_| table_evaluation_diagnostic())?;
+        if !matches!(value.raw(), OvbRaw::Bool(true)) {
+            return Err(table_assertion_diagnostic());
+        }
+        Ok(())
     }
 }
 
@@ -4988,61 +5103,11 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
         rows: &orna_runtime_v1::RuntimeTableRows,
         changed_tables: &BTreeSet<String>,
     ) -> Result<(), SafeDiagnostic> {
+        self.clear_refusal();
         let mut budget = StepBudget::new(self.limits.max_steps);
         for assertion in &self.assertions {
-            if table_assertion_function(&assertion.expression, &self.functions).is_some() {
-                let mut effects = CandidateRelationEffectHandler { rows };
-                let value = evaluate_function_assertion(
-                    &self.table,
-                    &assertion.expression,
-                    &self.functions,
-                    self.limits,
-                    &mut budget,
-                    &mut effects,
-                )
-                .map_err(|_| table_evaluation_diagnostic())?;
-                if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                    return Err(table_assertion_diagnostic());
-                }
-                continue;
-            }
-            let (kind, binding, predicate) = table_assertion_predicate(&assertion.expression)
-                .map_err(|_| table_evaluation_diagnostic())?;
-            let mut projections = BTreeSet::new();
-            let mut candidate_rows = 0usize;
-            for (_, encoded) in rows
-                .get(&self.table)
-                .ok_or_else(table_evaluation_diagnostic)?
-            {
-                debit_host_step(&mut budget).map_err(|_| table_evaluation_diagnostic())?;
-                candidate_rows = candidate_rows
-                    .checked_add(1)
-                    .ok_or_else(table_evaluation_diagnostic)?;
-                self.limits
-                    .check_items(candidate_rows)
-                    .map_err(|_| table_evaluation_diagnostic())?;
-                let row = Value::decode(encoded).map_err(|_| table_row_decode_diagnostic())?;
-                let environment = Environment::from([(binding.to_owned(), row)]);
-                let value = evaluate_with_functions_and_budget(
-                    predicate,
-                    &environment,
-                    &self.functions,
-                    self.limits,
-                    &mut budget,
-                )
-                .map_err(|_| table_evaluation_diagnostic())?;
-                match kind {
-                    TableAssertionKind::Every if matches!(value.raw(), OvbRaw::Bool(true)) => {}
-                    TableAssertionKind::Every => return Err(table_assertion_diagnostic()),
-                    TableAssertionKind::AllUnique => {
-                        let projection =
-                            value.encode().map_err(|_| table_evaluation_diagnostic())?;
-                        if !projections.insert(projection) {
-                            return Err(table_assertion_diagnostic());
-                        }
-                    }
-                }
-            }
+            self.check_table_assertion(assertion, rows, &mut budget)
+                .map_err(|diagnostic| self.refuse(assertion, diagnostic))?;
         }
         for assertion in self
             .module_assertions
@@ -5051,19 +5116,8 @@ impl StreamTableCandidateValidator for ListTableCandidateValidator {
                 assertion_dependencies_apply(&assertion.dependencies, changed_tables)
             })
         {
-            let value = evaluate_module_assertion_rows(
-                rows,
-                &assertion.expression,
-                &Environment::new(),
-                &self.functions,
-                self.limits,
-                &mut budget,
-                0,
-            )
-            .map_err(|_| table_evaluation_diagnostic())?;
-            if !matches!(value.raw(), OvbRaw::Bool(true)) {
-                return Err(table_assertion_diagnostic());
-            }
+            self.check_module_assertion(assertion, rows, &mut budget)
+                .map_err(|diagnostic| self.refuse(assertion, diagnostic))?;
         }
         Ok(())
     }
@@ -5077,6 +5131,7 @@ impl ListTableHandler {
             next_mutation: 0,
             digest: [9; 32],
             refusal: None,
+            assertion_refusal: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -5122,7 +5177,11 @@ impl StreamHandler for ListTableHandler {
         // Constructing the validator is part of handler execution. If it
         // fails after the mutation was staged, preserve that staged batch only
         // in the failure result so the runtime can discard it atomically.
-        let validator = match ListTableCandidateValidator::new(&self.bridge, self.limits) {
+        let validator = match ListTableCandidateValidator::new(
+            &self.bridge,
+            self.limits,
+            Arc::clone(&self.assertion_refusal),
+        ) {
             Ok(validator) => Box::new(validator),
             Err(_) => {
                 return StreamHandlerResult::FailAfterTable(
@@ -5160,12 +5219,18 @@ fn table_assertion_diagnostic() -> SafeDiagnostic {
     }
 }
 
-/// Names a module assertion that a commit refused: its owner module and the
-/// source span of its declaration (ORNA-A091-009).
-fn module_assertion_site(assertion: &AdmittedAssertion) -> String {
+/// Names an assertion that refused a commit or a stream item: its owner kind and
+/// name, and the source span of its declaration (ORNA-A091-009, ORNA-ASSERT-051).
+fn assertion_site(assertion: &AdmittedAssertion) -> String {
+    let kind = match assertion.owner_kind {
+        AssertionOwnerKind::Executable => "executable",
+        AssertionOwnerKind::RefinedType => "refined type",
+        AssertionOwnerKind::Table => "table",
+        AssertionOwnerKind::Module => "module",
+    };
     let span = &assertion.declaration_span;
     format!(
-        "module {} assertion at {}{}..{}",
+        "{kind} {} assertion at {}{}..{}",
         assertion.owner_name,
         span.file.as_deref().unwrap_or("source"),
         span.start,
@@ -5217,12 +5282,60 @@ fn stream_delivery_failure_diagnostic(failure: &FailureRecord) -> Diagnostic {
 }
 
 /// A recorded item refusal names the owning source (ORNA-ASSERT-051) and takes
-/// precedence over the generic delivery diagnostic.
-fn stream_failure_diagnostic(handler: &mut ListTableHandler, failure: &FailureRecord) -> Diagnostic {
-    handler
-        .refusal
-        .take()
-        .unwrap_or_else(|| stream_delivery_failure_diagnostic(failure))
+/// precedence over the generic delivery diagnostic. An assertion refusal is
+/// named by its owner kind and name, source span, item position and source
+/// identity; the code stays ORNA-LIST-STREAM-DELIVERY.
+fn stream_failure_diagnostic(
+    handler: &mut ListTableHandler,
+    failure: &FailureRecord,
+) -> Diagnostic {
+    if let Some(refusal) = handler.refusal.take() {
+        return refusal;
+    }
+    let site = handler
+        .assertion_refusal
+        .lock()
+        .expect("assertion refusal slot is not poisoned")
+        .take();
+    match site {
+        Some(site) if is_assertion_refusal_code(failure.diagnostic.code) => {
+            stream_assertion_refusal_diagnostic(&site, &handler.bridge.source_identity, failure)
+        }
+        _ => stream_delivery_failure_diagnostic(failure),
+    }
+}
+
+/// True for the codes an assertion produces when it refuses or cannot be
+/// evaluated. A decode failure of a stored row is not an assertion refusal and
+/// keeps the generic diagnostic.
+fn is_assertion_refusal_code(code: DiagnosticCode) -> bool {
+    matches!(
+        code,
+        DiagnosticCode::TableAssertionFalse | DiagnosticCode::ExecutionRejected
+    )
+}
+
+fn stream_assertion_refusal_diagnostic(
+    site: &str,
+    source_identity: &str,
+    failure: &FailureRecord,
+) -> Diagnostic {
+    let message = SafeText::new(format!(
+        "literal list stream item at position {} was refused by {site} (source {source_identity})",
+        failure.identity.0.position.token.as_str(),
+    ))
+    .unwrap_or_else(|_| {
+        SafeText::new("literal list stream item was refused").expect("static message")
+    });
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM-DELIVERY").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("literal list stream delivery was retained after activation rollback")
+            .expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .with_cause(stream_failure_cause(failure.diagnostic.code))
+    .redacted_with_message(message)
 }
 
 /// The runtime's typed failure code, carried as a non-catalogue label for the
