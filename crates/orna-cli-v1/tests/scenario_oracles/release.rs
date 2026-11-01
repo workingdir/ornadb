@@ -2210,9 +2210,14 @@ fn no_upgrade(db: &mut Db) -> Probe {
     unknown_command(db, &["upgrade", "--to-format", "3"])
 }
 
-/// The different-commit checkout is refused before any CHECKOUT-3 plan runs.
-/// The probe reproduces while that refusal holds; a checkout that succeeds
-/// makes the gap stale.
+/// The different-commit checkout is refused as the blocker: CHECKOUT-3 has not
+/// run, so `orna checkout` answers "not available yet". The probe first proves
+/// that a same-commit checkout keeps a draft and a worktree file (ORNA-BRANCH-002),
+/// then that the refused different-commit checkout leaves HEAD, the branch, the
+/// index, the worktree and the draft unchanged (ORNA-CHECKOUT-001). A checkout
+/// that succeeds changed state without the CHECKOUT-3 gate, which is a harness
+/// failure rather than a closed gap. A refusal for any other reason means the
+/// blocker no longer reproduces, which makes the gap stale.
 fn different_commit_checkout_refused(db: &mut Db) -> Probe {
     db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     db.repl_effect(r#"main.Note.insert({ id: "a", text: "one" })"#)?;
@@ -2220,16 +2225,63 @@ fn different_commit_checkout_refused(db: &mut Db) -> Probe {
     db.orna(&["branch", "earlier"])?.ok()?;
     db.repl_effect(r#"main.Note.insert({ id: "b", text: "two" })"#)?;
     db.publish()?.ok()?;
+    db.orna(&["branch", "mirror"])?.ok()?;
+    db.repl_effect(r#"main.Note.insert({ id: "c", text: "draft" })"#)?;
+    db.write("scratch.txt", "draft\n")?;
+    let drafts = db.runtime_mutations()?;
+    harness_ensure!(
+        drafts > 0,
+        "the unpublished draft is not counted as a runtime mutation"
+    );
+
+    db.orna(&["checkout", "mirror"])?.ok()?;
+    harness_ensure!(
+        checked_out_branch(db)? == "mirror",
+        "the same-commit checkout did not select mirror"
+    );
+    harness_ensure!(
+        db.runtime_mutations()? == drafts && db.read("scratch.txt")? == b"draft\n",
+        "the same-commit checkout did not keep the draft and scratch.txt"
+    );
+
+    let head = db.git_text(&["rev-parse", "HEAD"])?;
+    let status = db.git_text(&["status", "--porcelain=v1"])?;
     let checkout = db.orna(&["checkout", "earlier"])?;
+    if checkout.succeeded() {
+        return Err(Failure::Harness(format!(
+            "orna checkout earlier to a different commit succeeded without CHECKOUT-3: {}",
+            checkout.diagnostic()
+        )));
+    }
     ensure!(
-        !checkout.succeeded() && checkout.output().contains("not available yet"),
-        "`orna checkout earlier` to a different commit is now accepted: {}",
+        checkout.output().contains("not available yet"),
+        "orna checkout earlier to a different commit was refused for another reason: {}",
         checkout.diagnostic()
     );
+    harness_ensure!(
+        checked_out_branch(db)? == "mirror" && db.git_text(&["rev-parse", "HEAD"])? == head,
+        "the refused checkout moved HEAD or the branch"
+    );
+    harness_ensure!(
+        db.git_text(&["status", "--porcelain=v1"])? == status,
+        "the refused checkout changed the index or the worktree"
+    );
+    harness_ensure!(
+        db.runtime_mutations()? == drafts && db.read("scratch.txt")? == b"draft\n",
+        "the refused checkout changed the draft or scratch.txt"
+    );
     Ok(format!(
-        "orna checkout earlier to a different commit: {}",
+        "orna checkout earlier to a different commit: {}; the same-commit checkout \
+         kept {drafts} draft(s)",
         checkout.diagnostic()
     ))
+}
+
+fn checked_out_branch(db: &mut Db) -> Result<String, Failure> {
+    Ok(db
+        .git_text(&["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_owned())
 }
 
 fn storage_unobservable(db: &mut Db) -> Probe {
