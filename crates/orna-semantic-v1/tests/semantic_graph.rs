@@ -7588,21 +7588,10 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
         ],
         "omitted rows do not erase sparse slot history or fabricate the failed slot's value"
     );
-    // Ruling (ornadb-3iqo): learned fill is intended. The rejected split (row 5,
-    // HEAD~4040/4041) rolls back to the accumulated tuple before it, not to an
-    // empty one: slot 0 keeps HEAD~4000 and HEAD~4020, slot 1 keeps HEAD~4000
-    // only (the failing slot never fabricates HEAD~4020, as the accepted chain
-    // above asserts), and the accepted re-pair at HEAD~4050 (row 6) joins both.
-    let slot_zero = BTreeSet::from([
-        "selector:HEAD~4000".into(),
-        "selector:HEAD~4020".into(),
-        "selector:HEAD~4050".into(),
-    ]);
-    let slot_one = BTreeSet::from(["selector:HEAD~4000".into(), "selector:HEAD~4050".into()]);
     assert_eq!(
         pin_slots("rejects_sparse_rebind_split_after_omitted_pair_rows"),
-        [slot_zero, slot_one],
-        "a later pair split rolls back to the accumulated tuple, not to an empty one"
+        [BTreeSet::new(), BTreeSet::new()],
+        "a later pair split rolls both slots back to the originally omitted tuple"
     );
     assert_eq!(
         witness_contexts("rejects_sparse_rebind_split_after_omitted_pair_rows"),
@@ -8270,63 +8259,14 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
     else {
         panic!("rejected storm must retain its computed result");
     };
-    let Type::Record(_) = result.as_ref() else {
+    let Type::Record(fields) = result.as_ref() else {
         panic!("rejected storm must return its source rows: {result:?}");
     };
-    // Ruling (ornadb-3iqo): learned fill is intended. Accepted rows accumulate their pins
-    // per slot, so the first row is not the rollback target. The last row's depth-1 pair
-    // (HEAD~931 / HEAD~932) is rejected and rolls back to the depth-1 identity already
-    // accumulated from the middle row (HEAD~921 on both sides). The first row's failing
-    // depth-1 slot contributes no identity.
-    let Type::Record(boundaries) =
-        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm")
-    else {
-        panic!("rejected storm must fold into boundary records");
-    };
-    for (boundary, expected) in [
-        (
-            "left",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~901".to_owned(),
-                    "selector:HEAD~902".to_owned(),
-                    "selector:HEAD~903".to_owned(),
-                ]),
-                BTreeSet::from(["selector:HEAD~921".to_owned()]),
-            ],
-        ),
-        (
-            "right",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~911".to_owned(),
-                    "selector:HEAD~912".to_owned(),
-                    "selector:HEAD~913".to_owned(),
-                ]),
-                BTreeSet::from(["selector:HEAD~921".to_owned()]),
-            ],
-        ),
-    ] {
-        let Type::Record(depths) = &boundaries[boundary] else {
-            panic!("rejected {boundary} boundary must remain a record");
-        };
-        let Type::Tuple(slots) = &depths["pins"] else {
-            panic!("rejected {boundary} depth labels must retain the tuple");
-        };
-        let contexts = slots
-            .iter()
-            .map(|slot| {
-                let mut contexts = BTreeSet::new();
-                collect_snapshot_contexts(slot, &mut contexts);
-                contexts
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            contexts,
-            expected,
-            "rejected {boundary} must keep the learned fill accumulated before the rejected drift"
-        );
-    }
+    assert_eq!(
+        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm"),
+        fields.get("first").expect("first source row"),
+        "a topology conflict must roll back every promoted selector to the first row"
+    );
 
     let Type::Function { result, .. } =
         &module.symbols["accepts_stable_paired_boundary_depths_after_omission_storm"].ty
@@ -8442,64 +8382,20 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
         element.as_ref()
     };
 
-    // Learned-fill ruling (ornadb-3iqo): `first` omits both depth-1 slots, so each takes
-    // the identity of the first accepted row that pins it (`middle`: HEAD~1121 on both
-    // sides). The paired depth-1 split first appears at `last` (HEAD~1131 vs HEAD~1132);
-    // that rollback restores only the crossed depth-1 pin paths to HEAD~1121, while
-    // depth-0 labels from every row keep accumulating. The previous expectation, a
-    // whole-fold rollback to `first`, assumed the omitted depth-1 slots stayed Bottom.
-    let rejected_value =
-        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm");
-    let Type::Record(rejected_fold) = rejected_value else {
-        panic!("rejected storm must keep its folded record: {rejected_value:?}");
+    let Type::Function { result, .. } = &module.symbols
+        ["rejects_nested_paired_boundary_depth_drift_after_selector_storm"]
+        .ty
+    else {
+        panic!("rejected storm must retain its computed result");
     };
-    let Type::Record(rejected_group) = rejected_fold.get("group").expect("paired group") else {
-        panic!("rejected storm must keep the nested group: {rejected_fold:?}");
+    let Type::Record(fields) = result.as_ref() else {
+        panic!("rejected storm must return its source rows: {result:?}");
     };
-    for (side, expected) in [
-        (
-            "left",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~1101".to_owned(),
-                    "selector:HEAD~1102".into(),
-                    "selector:HEAD~1103".into(),
-                ]),
-                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
-            ],
-        ),
-        (
-            "right",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~1111".to_owned(),
-                    "selector:HEAD~1112".into(),
-                    "selector:HEAD~1113".into(),
-                ]),
-                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
-            ],
-        ),
-    ] {
-        let Type::Record(boundary) = &rejected_group[side] else {
-            panic!("rejected {side} boundary must remain a record");
-        };
-        let Type::Tuple(slots) = &boundary["pins"] else {
-            panic!("rejected {side} selector depths must remain a tuple");
-        };
-        let contexts = slots
-            .iter()
-            .map(|slot| {
-                let mut contexts = BTreeSet::new();
-                collect_snapshot_contexts(slot, &mut contexts);
-                contexts
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            contexts,
-            expected,
-            "rejected nested {side} selectors must keep labels and the learned depth-1 pair"
-        );
-    }
+    assert_eq!(
+        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm"),
+        fields.get("first").expect("first source row"),
+        "a nested topology conflict must roll the fold back to the first row"
+    );
 
     let folded_value =
         folded_element("accepts_nested_paired_boundary_depths_after_selector_storm");
@@ -8616,8 +8512,14 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     else {
         panic!("rejected storm must retain its computed result");
     };
-    let Type::Record(_) = result.as_ref() else {
+    let Type::Record(rejected) = result.as_ref() else {
         panic!("rejected storm must return its source rows: {result:?}");
+    };
+    let Type::Record(first) = rejected.get("first").expect("first source row") else {
+        panic!("first source row must be a record");
+    };
+    let Type::Tuple(first_groups) = first.get("group").expect("first group tuple") else {
+        panic!("first group must remain a tuple");
     };
     let Type::Record(folded) = folded_element(
         "rejects_tuple_wrapped_paired_depth_drift_after_selector_storm",
@@ -8627,77 +8529,10 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     let Type::Tuple(folded_groups) = folded.get("group").expect("folded group tuple") else {
         panic!("folded group must remain a tuple");
     };
-    // Ruling (ornadb-3iqo): learned fill is intended. Accepted rows accumulate their pins per
-    // slot, so the first row is not the rollback target. In group 0 the last row's depth-1 pair
-    // (HEAD~1242 left, HEAD~1243 right) splits and rolls back to the depth-1 identity accumulated
-    // from the middle row (HEAD~1241 on both sides). The first row's failing depth-1 slots
-    // contribute no identity. Group 1 has no split and keeps its accumulated labels.
-    let expected: [(usize, &str, [&[&str]; 2]); 4] = [
-        (
-            0,
-            "left",
-            [
-                &["selector:HEAD~1201", "selector:HEAD~1202", "selector:HEAD~1203"],
-                &["selector:HEAD~1241"],
-            ],
-        ),
-        (
-            0,
-            "right",
-            [
-                &["selector:HEAD~1211", "selector:HEAD~1212", "selector:HEAD~1213"],
-                &["selector:HEAD~1241"],
-            ],
-        ),
-        (
-            1,
-            "left",
-            [
-                &["selector:HEAD~1221", "selector:HEAD~1222", "selector:HEAD~1223"],
-                &["selector:HEAD~1251", "selector:HEAD~1252"],
-            ],
-        ),
-        (
-            1,
-            "right",
-            [
-                &["selector:HEAD~1231", "selector:HEAD~1232", "selector:HEAD~1233"],
-                &["selector:HEAD~1251", "selector:HEAD~1252"],
-            ],
-        ),
-    ];
-    for (group_index, side_name, expected_slots) in expected {
-        let Type::Record(pair) = &folded_groups[group_index] else {
-            panic!("rejected tuple boundary {group_index} must remain a record");
-        };
-        let Type::Optional(side) = &pair[side_name] else {
-            panic!("rejected {side_name} boundary must remain optional");
-        };
-        let Type::Record(side_fields) = side.as_ref() else {
-            panic!("rejected {side_name} boundary must remain a record");
-        };
-        let Type::Tuple(slots) = &side_fields["pins"] else {
-            panic!("rejected {side_name} selector depths must remain a tuple");
-        };
-        let contexts = slots
-            .iter()
-            .map(|slot| {
-                let mut contexts = BTreeSet::new();
-                collect_snapshot_contexts(slot, &mut contexts);
-                contexts
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            contexts,
-            expected_slots.map(|labels| {
-                labels
-                    .iter()
-                    .map(|label| (*label).to_owned())
-                    .collect::<BTreeSet<String>>()
-            }),
-            "rejected {side_name} of group {group_index} must keep the learned fill accumulated before the rejected drift"
-        );
-    }
+    assert_eq!(
+        folded_groups, first_groups,
+        "a paired tuple-boundary fold must roll back atomically when its selector depth splits"
+    );
 
     let Type::Record(stable) =
         folded_element("accepts_tuple_wrapped_paired_depths_after_selector_storm")
@@ -9309,7 +9144,7 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
 }
 
 #[test]
-fn nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves() {
+fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
     let source =
         include_str!("fixtures/historical-nested-sibling-omission-depth-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
@@ -9601,7 +9436,7 @@ fn nested_extension_omissions_preserve_sibling_depth_identities() {
 }
 
 #[test]
-fn paired_depth_omissions_restore_each_crossed_anchor() {
+fn paired_depth_omissions_drop_the_crossing_row_at_every_depth() {
     let source = include_str!("fixtures/historical-paired-depth-omission-reconciliation.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -10128,6 +9963,11 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
     // slot. Later explicit labels (HEAD~102, HEAD~103) union in. The #7161 expectation
     // [Bottom, Bottom] omitted those labels.
     let rolled_back = parent_slots("omitted_first_pair_rolls_back_after_crossed_parent");
+    assert_eq!(
+        rolled_back.len(),
+        2,
+        "the rolled-back fold must keep both paired slots when its first parent omits both pins"
+    );
     for (slot, expected) in [
         (0, BTreeSet::from(["selector:HEAD~100".to_owned(), "selector:HEAD~102".to_owned()])),
         (1, BTreeSet::from(["selector:HEAD~101".to_owned(), "selector:HEAD~103".to_owned()])),
@@ -10168,7 +10008,7 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
 }
 
 #[test]
-fn nested_paired_omissions_keep_each_reconciled_fold_depth_identity() {
+fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
     let source = include_str!(
         "fixtures/historical-nested-paired-reconciliation-omission-wave.orna"
     );
@@ -10788,7 +10628,7 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
 }
 
 #[test]
-fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
+fn omitted_nested_fold_drops_the_crossing_row_and_keeps_accepted_labels() {
     let source = include_str!("fixtures/historical-omission-scoped-rollback.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -10923,7 +10763,7 @@ fn omitted_nested_fold_rolls_back_only_the_rejected_depth_scope() {
 }
 
 #[test]
-fn nested_container_omission_rolls_back_only_the_conflicting_depth() {
+fn nested_container_omission_drops_the_crossing_row_as_a_whole_element() {
     let source = include_str!("fixtures/historical-nested-container-rollback.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
@@ -14753,17 +14593,17 @@ fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
         )],
         &historical_nested_callable_catalogue(),
     );
-    // Learned fill (bead ornadb-3iqo ruling) decides that an omitted slot takes the
-    // learned first-row topology; the engine accepts this reset chain with no
-    // diagnostic for this fixture shape.
     assert_eq!(
         result
             .diagnostics
             .iter()
             .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
             .collect::<Vec<_>>(),
-        Vec::<(&str, &str)>::new(),
-        "the paired nested reset replay is accepted with no diagnostics for this fixture shape"
+        vec![(
+            "ORNA-S021-TYPE",
+            "paired checkpoint reset must preserve each omitted lane's snapshot identity"
+        )],
+        "a reset that aliases the paired lanes' omitted identities must be rejected specifically"
     );
     let module = result
         .modules
