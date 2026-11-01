@@ -275,3 +275,47 @@ fn checkout_in_a_plain_git_repository_switches_at_the_same_commit() {
         "checkout must not initialise Orna state in a plain Git repository"
     );
 }
+
+#[test]
+fn checkout_to_a_different_commit_without_an_admitted_target_changes_nothing() {
+    let repository = tempdir().expect("repository");
+    git_succeeds(
+        repository.path(),
+        &["init", "--quiet", "--initial-branch=cli-surface"],
+    );
+    git_succeeds(
+        repository.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git_succeeds(repository.path(), &["config", "user.name", "kierandrewett"]);
+    std::fs::write(repository.path().join("a.txt"), "one\n").expect("a.txt");
+    git_succeeds(repository.path(), &["add", "a.txt"]);
+    git_succeeds(repository.path(), &["commit", "--quiet", "-m", "baseline"]);
+    git_succeeds(repository.path(), &["branch", "older"]);
+    std::fs::write(repository.path().join("a.txt"), "two\n").expect("a.txt");
+    git_succeeds(repository.path(), &["commit", "--quiet", "-am", "second"]);
+    let db = repository.path().to_str().expect("utf-8 repository path");
+    let head_before = git(repository.path(), &["rev-parse", "HEAD"]);
+
+    let cli = orna(repository.path(), &["--db", db, "checkout", "older"]);
+    let stderr = String::from_utf8_lossy(&cli.stderr);
+    assert_eq!(cli.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("E2100"), "{stderr}");
+    assert!(stderr.contains("could not be admitted"), "{stderr}");
+
+    let current = git(repository.path(), &["branch", "--show-current"]);
+    assert_eq!(
+        String::from_utf8_lossy(&current.stdout).trim(),
+        "cli-surface"
+    );
+    let head_after = git(repository.path(), &["rev-parse", "HEAD"]);
+    assert_eq!(head_after.stdout, head_before.stdout);
+    let status = git(repository.path(), &["status", "--porcelain=v1"]);
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    let worktree = std::fs::read_to_string(repository.path().join("a.txt")).expect("a.txt");
+    assert_eq!(worktree, "two\n");
+}
