@@ -6641,9 +6641,16 @@ fn sequential_three_way_tuple_folds_anchor_late_rebound_widths() {
     );
     let mut rejected_slot_contexts = BTreeSet::new();
     collect_snapshot_contexts(rejected_tracked, &mut rejected_slot_contexts);
-    assert!(
-        rejected_slot_contexts.is_empty(),
-        "a late map-width rebind must roll back to the first row's omitted tuple slot, got {rejected_slot_contexts:?}"
+    // Learned fill (ornadb-3iqo ruling): the omitted first-row tracked slot takes the identity of
+    // the first accepted row that carries a concrete tracked topology (row 2: HEAD~60..63); the
+    // late width rebind (HEAD~64/65) is rejected and leaves no labels.
+    assert_eq!(
+        rejected_slot_contexts,
+        BTreeSet::from([
+            "selector:HEAD~60".to_owned(), "selector:HEAD~61".to_owned(),
+            "selector:HEAD~62".to_owned(), "selector:HEAD~63".to_owned(),
+        ]),
+        "a late map-width rebind must roll back to the learned fill of the first row's omitted tuple slot"
     );
 }
 
