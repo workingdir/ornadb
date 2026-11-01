@@ -191,9 +191,13 @@ gate = "C"
 id = "C3"
 title = "Report root and tree traffic, payload traffic, latency, allocations and indices"
 select = [
+  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
 ]
 counters = ["^ORP-1 "]
+limitations = [
+  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture (orp1_row_store_ten_rows); orp1_production_writer_ten_rows reports only row, leaf, store-root, blob-reference and head counts. Counters on production-written graphs, and at one million rows, are not measured here (ornadb-5il1.6).",
+]
 
 [[item]]
 gate = "C"
