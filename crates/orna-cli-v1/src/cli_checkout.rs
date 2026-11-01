@@ -75,11 +75,19 @@ pub(super) fn run_checkout(endpoint: &Endpoint, name: &str) -> Result<(), Diagno
 
 /// Captures the CWD generation that the checkout plan must match. The runtime
 /// state is read, not changed; a plan captured under another generation is
-/// refused as stale.
+/// refused as stale. A plain Git repository has no runtime identity, so it has
+/// no runtime state to protect: its generation is zero and the checkout is
+/// planned from Git state alone (ORNA-CLI-001, ORNA-BRANCH-002).
 fn runtime_generation(
     repo: &orna_repository_v1::Repository,
 ) -> Result<orna_repository_v1::RuntimeGeneration, Diagnostic> {
-    let (identity, initial_digest) = super::runtime_identity(repo)?;
+    let (identity, initial_digest) = match super::runtime_identity(repo) {
+        Ok(identity) => identity,
+        Err(_) if is_plain_git_repository(repo) => {
+            return Ok(orna_repository_v1::RuntimeGeneration::new(0));
+        }
+        Err(error) => return Err(error),
+    };
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -94,9 +102,20 @@ fn runtime_generation(
     let capture = runtime
         .block_on(state.capture())
         .map_err(|_| checkout_runtime_unavailable())?;
-    let generation = u64::try_from(capture.generation())
-        .map_err(|_| checkout_runtime_unavailable())?;
+    let generation =
+        u64::try_from(capture.generation()).map_err(|_| checkout_runtime_unavailable())?;
     Ok(orna_repository_v1::RuntimeGeneration::new(generation))
+}
+
+/// True for a repository with a known, writable HEAD format and no database
+/// metadata. Any other failure to derive the runtime identity keeps E2200.
+fn is_plain_git_repository(repo: &orna_repository_v1::Repository) -> bool {
+    repo.require_known_head_format().is_ok()
+        && repo.require_writable_head_format().is_ok()
+        && matches!(
+            orna_repository_v1::inspect_metadata_for_runtime(repo),
+            Ok(None)
+        )
 }
 
 fn checkout_runtime_unavailable() -> Diagnostic {
