@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Float literals and scalar `min`/`max` follow IEEE-754 (ornadb-5il1.188; product change). An `f`-suffixed numeral is
+  correctly rounded to nearest (ORNA-LIT-002, ORNA-NUM-003), so `1.0e400f` evaluates to a signed infinity and an
+  underflowing numeral to a signed zero, where it previously failed with ORNA-EVAL-VALUE. Scalar `std.math.min` and
+  `std.math.max` over two Floats follow ORNA-FLOAT-007: a NaN operand yields the canonical NaN, `min` prefers `-0.0` and
+  `max` prefers `+0.0`, and neither fails with ORNA-EVAL-VALUE any more. Tests: `crates/orna-evaluator-v1/tests/float_ieee.rs`.
+  Open: scalar `std.math.clamp` still rejects a NaN operand with ORNA-EVAL-VALUE; the spec does not name clamp's NaN
+  behaviour (ORNA-FLOAT-007 covers `min` and `max` only).
 - Project admission uses the production catalogue (ornadb-5il1.384, partial; product change, not test-only).
   `orna check`, `orna run`, commit and serve admission, the VFS source-write check and the LSP project loader resolve
   `LoadedProject::production_catalogue`: the authoritative core, extended by the pinned standard profile and its verified
