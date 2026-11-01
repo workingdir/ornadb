@@ -396,9 +396,9 @@ pub fn format3_repository_for_table(
     media_source: &str,
     table_name: &str,
 ) -> (TempDir, Repository, [u8; 16]) {
-    let (directory, repository, relation_id, _, _) =
-        format3_repository_parts(media_source, table_name, &[]);
-    (directory, repository, relation_id)
+    let (directory, repository, relations, _) =
+        format3_repository_parts(media_source, &[table_name], &[]);
+    (directory, repository, relations[0].relation_id)
 }
 /// Creates an empty format-3 table and returns a context pinned to that
 /// exact committed snapshot. Rows enter the store through admission, never as
@@ -418,19 +418,44 @@ pub fn format3_repository_with_context_and_modules(
     table_name: &str,
     extra_modules: &[(&str, &str)],
 ) -> (TempDir, Repository, [u8; 16], Format3Context) {
-    let (directory, repository, relation_id, schema_root, store_root) =
-        format3_repository_parts(media_source, table_name, extra_modules);
+    let (directory, repository, relations, store_root) =
+        format3_repository_parts(media_source, &[table_name], extra_modules);
+    let relation = relations.into_iter().next().unwrap();
     let commit = repository.head().unwrap().unwrap();
     let context =
-        persisted_format3_context(&repository, commit.as_str(), &schema_root, &store_root);
-    (directory, repository, relation_id, context)
+        persisted_format3_context(&repository, commit.as_str(), &relation.schema_oid, &store_root);
+    (directory, repository, relation.relation_id, context)
 }
 
+/// Creates a format-3 repository whose `main.orna` declares every name in
+/// `table_names`, with one committed relation per table and no rows.
+/// `extra_modules` are committed beside `main.orna` as in
+/// [`format3_repository_with_context_and_modules`].
+pub fn format3_repository_with_tables(
+    media_source: &str,
+    table_names: &[&str],
+    extra_modules: &[(&str, &str)],
+) -> (TempDir, Repository) {
+    let (directory, repository, _, _) =
+        format3_repository_parts(media_source, table_names, extra_modules);
+    (directory, repository)
+}
+
+/// One relation the fixture commits: its table object identity and the object
+/// ID of its schema node.
+struct FixtureRelation {
+    relation_id: [u8; 16],
+    schema_oid: String,
+}
+
+/// Commits a format-3 repository whose `main.orna` declares each name in
+/// `declaration_names`, with one relation per declared table and no rows.
+/// Returns the relations in declaration order and the store root's object ID.
 fn format3_repository_parts(
     media_source: &str,
-    declaration_name: &str,
+    declaration_names: &[&str],
     extra_modules: &[(&str, &str)],
-) -> (TempDir, Repository, [u8; 16], String, String) {
+) -> (TempDir, Repository, Vec<FixtureRelation>, String) {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     git(root, &["init", "--quiet"]);
@@ -447,18 +472,6 @@ fn format3_repository_parts(
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();
-    let table = identities
-        .source_table_schema(
-            &modules,
-            &analysis,
-            Some(database_id),
-            "",
-            "main.orna",
-            declaration_name,
-        )
-        .unwrap();
-    let relation_id = *table.table_object_id();
-    let schema_source = table.descriptor().encode().unwrap();
     std::fs::create_dir_all(root.join(".orna/store")).unwrap();
     std::fs::write(root.join(".orna/database.orna"), &database).unwrap();
     std::fs::write(root.join(".orna/object-identities.cbor"), &manifest_bytes).unwrap();
@@ -478,62 +491,87 @@ fn format3_repository_parts(
     // The byte index names its chunk by the chunk's SHA-256; the kind-6 node
     // and the rows domain carry the format-3 schema identity: SHA-256 of
     // `orna.schema.v3`, NUL and the descriptor bytes.
-    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
-    let schema_digest: [u8; 32] = Sha256::new()
-        .chain_update(b"orna.schema.v3\0")
-        .chain_update(&schema_source)
-        .finalize()
-        .into();
-    let chunk_oid = git_object(root, "blob", &schema_source);
-    let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
-    append_cbor_head(&mut byte_index, 0, schema_source.len());
-    byte_index.push(0x81);
-    byte_index.push(0x83);
-    append_cbor_head(&mut byte_index, 0, schema_source.len());
-    append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
-    append_cbor_bytes(&mut byte_index, &chunk_digest);
-    let byte_index_oid = native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+    let mut relations = Vec::new();
+    let mut relation_entries = Vec::new();
+    let mut relation_children: Vec<(String, &str)> = Vec::new();
+    for &declaration_name in declaration_names {
+        let table = identities
+            .source_table_schema(
+                &modules,
+                &analysis,
+                Some(database_id),
+                "",
+                "main.orna",
+                declaration_name,
+            )
+            .unwrap();
+        let relation_id = *table.table_object_id();
+        let schema_source = table.descriptor().encode().unwrap();
+        let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+        let schema_digest: [u8; 32] = Sha256::new()
+            .chain_update(b"orna.schema.v3\0")
+            .chain_update(&schema_source)
+            .finalize()
+            .into();
+        let chunk_oid = git_object(root, "blob", &schema_source);
+        let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+        append_cbor_head(&mut byte_index, 0, schema_source.len());
+        byte_index.push(0x81);
+        byte_index.push(0x83);
+        append_cbor_head(&mut byte_index, 0, schema_source.len());
+        append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
+        append_cbor_bytes(&mut byte_index, &chunk_digest);
+        let byte_index_oid =
+            native_fixture_node(root, &byte_index, &[(chunk_oid.as_str(), "blob")]);
 
-    let mut schema = vec![0x85, 0x01, 0x06];
-    append_cbor_head(&mut schema, 0, schema_source.len());
-    append_cbor_bytes(&mut schema, &schema_digest);
-    append_cbor_bytes(&mut schema, &git_oid_bytes(&byte_index_oid));
-    let schema_oid = native_fixture_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
+        let mut schema = vec![0x85, 0x01, 0x06];
+        append_cbor_head(&mut schema, 0, schema_source.len());
+        append_cbor_bytes(&mut schema, &schema_digest);
+        append_cbor_bytes(&mut schema, &git_oid_bytes(&byte_index_oid));
+        let schema_oid = native_fixture_node(root, &schema, &[(byte_index_oid.as_str(), "tree")]);
 
-    let mut row_domain = vec![0x83, 0x64];
-    row_domain.extend_from_slice(b"rows");
-    append_cbor_bytes(&mut row_domain, &relation_id);
-    append_cbor_bytes(&mut row_domain, &schema_digest);
-    let mut empty_rows = vec![0x84, 0x01, 0x01];
-    empty_rows.extend_from_slice(&row_domain);
-    empty_rows.push(0x80);
-    let row_root_oid = native_fixture_node(root, &empty_rows, &[]);
+        let mut row_domain = vec![0x83, 0x64];
+        row_domain.extend_from_slice(b"rows");
+        append_cbor_bytes(&mut row_domain, &relation_id);
+        append_cbor_bytes(&mut row_domain, &schema_digest);
+        let mut empty_rows = vec![0x84, 0x01, 0x01];
+        empty_rows.extend_from_slice(&row_domain);
+        empty_rows.push(0x80);
+        let row_root_oid = native_fixture_node(root, &empty_rows, &[]);
 
+        let key = TypedKey::Bytes(relation_id.to_vec())
+            .canonical_bytes()
+            .expect("the relation ID has a canonical typed key");
+        let mut value = vec![0x84];
+        append_cbor_bytes(&mut value, &git_oid_bytes(&schema_oid));
+        append_cbor_bytes(&mut value, &git_oid_bytes(&row_root_oid));
+        value.push(0xf6);
+        value.push(0x00);
+        relation_entries.push((key, value));
+        relation_children.push((schema_oid.clone(), "tree"));
+        relation_children.push((row_root_oid, "tree"));
+        relations.push(FixtureRelation {
+            relation_id,
+            schema_oid,
+        });
+    }
+    relation_entries.sort_by(|left, right| left.0.cmp(&right.0));
     let mut relation_domain = vec![0x82, 0x69];
     relation_domain.extend_from_slice(b"relations");
     append_cbor_bytes(&mut relation_domain, &database_id);
     let mut relation_map = vec![0x84, 0x01, 0x01];
     relation_map.extend_from_slice(&relation_domain);
-    relation_map.push(0x81);
-    relation_map.push(0x82);
-    relation_map.extend_from_slice(
-        &TypedKey::Bytes(relation_id.to_vec())
-            .canonical_bytes()
-            .expect("the relation ID has a canonical typed key"),
-    );
-    relation_map.push(0x84);
-    append_cbor_bytes(&mut relation_map, &git_oid_bytes(&schema_oid));
-    append_cbor_bytes(&mut relation_map, &git_oid_bytes(&row_root_oid));
-    relation_map.push(0xf6);
-    relation_map.push(0x00);
-    let relation_map_oid = native_fixture_node(
-        root,
-        &relation_map,
-        &[
-            (schema_oid.as_str(), "tree"),
-            (row_root_oid.as_str(), "tree"),
-        ],
-    );
+    append_cbor_head(&mut relation_map, 4, relation_entries.len());
+    for (key, value) in &relation_entries {
+        relation_map.push(0x82);
+        relation_map.extend_from_slice(key);
+        relation_map.extend_from_slice(value);
+    }
+    let relation_children: Vec<(&str, &str)> = relation_children
+        .iter()
+        .map(|(oid, kind)| (oid.as_str(), *kind))
+        .collect();
+    let relation_map_oid = native_fixture_node(root, &relation_map, &relation_children);
 
     let mut store_root = vec![0x83, 0x01, 0x00];
     append_cbor_bytes(&mut store_root, &git_oid_bytes(&relation_map_oid));
@@ -585,13 +623,7 @@ fn format3_repository_parts(
     git(root, &["reset", "--quiet", "--hard", &commit]);
 
     let repository = Repository::discover(root).unwrap();
-    (
-        directory,
-        repository,
-        relation_id,
-        schema_oid,
-        store_root_oid,
-    )
+    (directory, repository, relations, store_root_oid)
 }
 
 struct UnreadableFixtureResolver;
