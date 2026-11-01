@@ -7249,16 +7249,35 @@ impl Repository {
     }
 
     /// Creates `name` at the selected commit using Git's nonexistence CAS.
-    /// It makes no commit and does not modify the index or worktree.
+    /// It makes no commit and does not modify the index or worktree. An
+    /// existing branch is never moved: it is refused with `BranchExists`, and a
+    /// HEAD that moved during the create is refused with `StaleHead`.
     pub fn create_branch_at_head(&self, name: &str) -> Result<GitCommitRef, RepositoryError> {
-        if !valid_branch_name(name) {
+        if !valid_branch_name(name) || name == "HEAD" || name == "@" {
             return Err(RepositoryError::InvalidBranchName);
         }
         let _lock = self.acquire_coordination_lock()?;
         let head = self.head()?.ok_or(RepositoryError::UnbornHead)?;
         let reference = format!("refs/heads/{name}");
-        self.update_ref_transaction(&head, &reference)?;
-        Ok(head)
+        if self.ref_exists(&reference)? {
+            return Err(RepositoryError::BranchExists);
+        }
+        match self.update_ref_transaction(&head, &reference) {
+            Ok(()) => Ok(head),
+            Err(RepositoryError::StaleHead) => {
+                // One failed `update-ref` transaction covers both a HEAD that
+                // moved and a ref that appeared concurrently; the state now
+                // present says which one it was.
+                if self.head()?.as_ref() != Some(&head) {
+                    Err(RepositoryError::StaleHead)
+                } else if self.ref_exists(&reference)? {
+                    Err(RepositoryError::BranchExists)
+                } else {
+                    Err(RepositoryError::GitOperationFailed)
+                }
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Lists ordinary configured remote names. Internal refs are not published
@@ -10518,6 +10537,8 @@ pub enum RepositoryError {
     SnapshotNotReachable,
     InvalidSelector,
     InvalidBranchName,
+    /// A branch of this name already exists; branch creation never moves one.
+    BranchExists,
     InvalidCommitMessage,
     /// No author or committer identity is configured for a reviewed commit,
     /// and Git is not allowed to guess one.
@@ -10586,6 +10607,7 @@ impl fmt::Display for RepositoryError {
             }
             Self::InvalidSelector => f.write_str("invalid Git snapshot selector"),
             Self::InvalidBranchName => f.write_str("invalid Git branch name"),
+            Self::BranchExists => f.write_str("a Git branch with this name already exists"),
             Self::InvalidCommitMessage => f.write_str("invalid Git commit message"),
             Self::MissingGitIdentity => {
                 f.write_str("no Git author or committer identity is configured")
