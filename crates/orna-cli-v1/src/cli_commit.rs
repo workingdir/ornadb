@@ -343,8 +343,7 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             NOTHING_TO_COMMIT_TITLE,
             NOTHING_TO_COMMIT_HELP,
         ),
-        // ORNA-ASSERT-046, ORNA-ASSERT-028, ORNA-ASSERT-030, ORNA-ASSERT-048 to
-        // ORNA-ASSERT-050: the candidate's assertion gate refused it.
+        // ORNA-ASSERT-048 to ORNA-ASSERT-051: the candidate's assertion gate refused it.
         RepositoryError::CandidateAssertionRefused(refusal) => {
             return refusal_diagnostic(refusal, GatedCommand::Commit, error);
         }
