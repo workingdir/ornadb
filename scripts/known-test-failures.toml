@@ -92,13 +92,6 @@ reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label 
 [[failure]]
 package = "orna-semantic-v1"
 target = "test:semantic_graph"
-test = "nested_omission_checkpoint_storms_preserve_depth_labels_transactionally"
-bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
-
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:semantic_graph"
 test = "nested_sibling_omission_storm_rolls_back_only_the_crossed_depth_leaves"
 bead = "ornadb-3iqo"
 reason = "Listed in scripts/semantic-known-red.txt: paired-omission depth-label topology (#7478 vs #7161); spec-silent. Fails on main; the pull-request path already skips it. Fix owner tracked by the bead."
