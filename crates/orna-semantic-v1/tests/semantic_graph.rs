@@ -9786,11 +9786,23 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
         slots
     };
 
-    assert_eq!(
-        parent_slots("omitted_first_pair_rolls_back_after_crossed_parent"),
-        &[Type::Bottom, Type::Bottom],
-        "a failed fold whose first parent omitted both pins must not promote labels from later rows"
-    );
+    // Learned-fill ruling (ornadb-3iqo): the first parent omits both pins, so each omitted slot
+    // takes its identity from the first accepted row (HEAD~100 in slot 0, HEAD~101 in slot 1).
+    // The crossed second parent rolls back, so its HEAD~101 and HEAD~100 labels reach neither
+    // slot. Later explicit labels (HEAD~102, HEAD~103) union in. The #7161 expectation
+    // [Bottom, Bottom] omitted those labels.
+    let rolled_back = parent_slots("omitted_first_pair_rolls_back_after_crossed_parent");
+    for (slot, expected) in [
+        (0, BTreeSet::from(["selector:HEAD~100".to_owned(), "selector:HEAD~102".to_owned()])),
+        (1, BTreeSet::from(["selector:HEAD~101".to_owned(), "selector:HEAD~103".to_owned()])),
+    ] {
+        let mut contexts = BTreeSet::new();
+        collect_snapshot_contexts(&rolled_back[slot], &mut contexts);
+        assert_eq!(
+            contexts, expected,
+            "an omitted first pair must take the first accepted row identity in slot {slot}"
+        );
+    }
     let valid_slots = parent_slots("valid_paired_omissions_keep_all_parent_depth_labels");
     for (slot, expected) in [
         (
