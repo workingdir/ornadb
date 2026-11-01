@@ -1790,7 +1790,10 @@ mod git_metadata_tests {
         copy_working_tree(source.path(), destination.path()).unwrap();
         assert!(destination.path().join("tracked.txt").is_file());
         for name in SPELLINGS {
-            assert!(!destination.path().join(name).exists(), "{name:?} must not be copied");
+            assert!(
+                !destination.path().join(name).exists(),
+                "{name:?} must not be copied"
+            );
         }
     }
 
