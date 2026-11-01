@@ -12294,7 +12294,15 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
         )],
         &historical_nested_callable_catalogue(),
     );
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
     let module = result
         .modules
         .values()
@@ -12512,7 +12520,15 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
         )],
         &historical_nested_callable_catalogue(),
     );
-    assert!(result.is_ok(), "{:?}", result.diagnostics);
+    assert!(
+        result.is_ok(),
+        "{:?}",
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
     let module = result
         .modules
         .values()
@@ -14871,7 +14887,15 @@ fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses(
     };
 
     let first = analyze_fixture("paired-reproduction.orna", paired);
-    assert!(first.is_ok(), "{:?}", first.diagnostics);
+    assert!(
+        first.is_ok(),
+        "{:?}",
+        first
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
     let first_checkpoint_type = checkpoint_type(&first);
 
     let mixed_result = analyze_fixture("paired-reproduction-mixed.orna", mixed);
@@ -16680,7 +16704,15 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         "scalar-distinct.orna",
         include_str!("fixtures/inline-semantic_graph/b3b9826e3d10.orna"),
     )]);
-    assert!(has(&scalar, DIAG_UNSUPPORTED), "{:?}", scalar.diagnostics);
+    assert!(
+        has(&scalar, DIAG_UNSUPPORTED),
+        "{:?}",
+        scalar
+            .diagnostics
+            .iter()
+            .map(|diagnostic| (diagnostic.code(), diagnostic.message()))
+            .collect::<Vec<_>>()
+    );
 
     let float_list = analyze(&[ModuleInput::new(
         "float-list-distinct.orna",
