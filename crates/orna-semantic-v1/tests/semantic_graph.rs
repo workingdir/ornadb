@@ -8602,20 +8602,70 @@ fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
         element.as_ref()
     };
 
-    let Type::Function { result, .. } = &module.symbols
-        ["rejects_multi_level_paired_depth_drift_after_selector_storm"]
-        .ty
+    // Learned-fill ruling (ornadb-3iqo): the first row omits the shared depth, so that slot
+    // takes the first accepted identity, HEAD~1421 from the middle row, on both boundaries.
+    // Stable labels union in on each boundary. The last row splits the shared depth (HEAD~1431
+    // west, HEAD~1432 east); the diagnostic asserted above rejects that split, so neither label
+    // reaches the shared slot. The whole-record rollback to the first row came from the
+    // #7161 test-only generation and is superseded by the ruling.
+    let Type::Record(rejected_folded) =
+        folded_element("rejects_multi_level_paired_depth_drift_after_selector_storm")
     else {
-        panic!("rejected storm must retain its computed result");
+        panic!("rejected storm fold element must remain a record");
     };
-    let Type::Record(rejected) = result.as_ref() else {
-        panic!("rejected storm must return its source rows: {result:?}");
+    let Type::Record(rejected_cluster) =
+        rejected_folded.get("cluster").expect("rejected folded cluster")
+    else {
+        panic!("rejected storm cluster must remain a record");
     };
-    assert_eq!(
-        folded_element("rejects_multi_level_paired_depth_drift_after_selector_storm"),
-        rejected.get("first").expect("first source row"),
-        "a multi-level paired-boundary conflict must roll back to the first row"
-    );
+    for (branch, side, stable_depth, shared_depth) in [
+        (
+            "west",
+            "left",
+            ["selector:HEAD~1401", "selector:HEAD~1402", "selector:HEAD~1403"],
+            ["selector:HEAD~1421"],
+        ),
+        (
+            "east",
+            "right",
+            ["selector:HEAD~1411", "selector:HEAD~1412", "selector:HEAD~1413"],
+            ["selector:HEAD~1421"],
+        ),
+    ] {
+        let Type::Record(branch_fields) = &rejected_cluster[branch] else {
+            panic!("rejected {branch} boundary must remain a record");
+        };
+        let Type::Record(side_fields) = &branch_fields[side] else {
+            panic!("rejected {branch}.{side} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &side_fields["pins"] else {
+            panic!("rejected {branch}.{side} depths must remain a tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts[0],
+            stable_depth
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>(),
+            "rejected {branch}.{side} must fold stable labels at depth zero"
+        );
+        assert_eq!(
+            contexts[1],
+            shared_depth
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>(),
+            "rejected {branch}.{side} must keep the learned shared depth at depth one"
+        );
+    }
 
     let Type::Record(folded) =
         folded_element("accepts_multi_level_paired_depths_after_selector_storm")
