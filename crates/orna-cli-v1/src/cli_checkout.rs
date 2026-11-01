@@ -1,4 +1,4 @@
-//! Branch creation and checkout verbs (ORNA-BRANCH-001 to ORNA-BRANCH-003).
+//! Branch creation and same-commit checkout verbs (ORNA-BRANCH-001, ORNA-BRANCH-002).
 
 use super::cli_stage::repository;
 use super::{Diagnostic, Endpoint};
@@ -46,6 +46,93 @@ fn branch_create_diagnostic(name: &str, error: &RepositoryError) -> Diagnostic {
             "E2100",
             "branch could not be created",
             "check the repository state, then retry; no branch was created",
+            format!("{other:?}"),
+        ),
+    }
+}
+
+/// `orna checkout NAME`: selects a branch or commit whose snapshot equals HEAD
+/// (ORNA-BRANCH-002). Git keeps the index, worktree and CWD across an attachment
+/// change between attachments of one commit, so pending and staged source state
+/// is preserved. A different-commit target needs the CHECKOUT-3 plan and is
+/// refused here before anything changes.
+pub(super) fn run_checkout(endpoint: &Endpoint, name: &str) -> Result<(), Diagnostic> {
+    let repo = repository(endpoint)?;
+    let generation = runtime_generation(&repo)?;
+    let plan = repo
+        .plan_checkout(name, generation)
+        .map_err(|error| checkout_diagnostic(&error))?;
+    if plan.expected_head() != Some(plan.target().commit()) {
+        return Err(Diagnostic::target(
+            "E2100",
+            "checkout to a different commit is not available yet",
+            "the target commit differs from HEAD, so nothing changed; `orna checkout NAME` selects a branch or commit at the current HEAD",
+        ));
+    }
+    repo.execute_same_commit_checkout(&plan)
+        .map_err(|error| checkout_diagnostic(&error))
+}
+
+/// Captures the CWD generation that the checkout plan must match. The runtime
+/// state is read, not changed; a plan captured under another generation is
+/// refused as stale.
+fn runtime_generation(
+    repo: &orna_repository_v1::Repository,
+) -> Result<orna_repository_v1::RuntimeGeneration, Diagnostic> {
+    let (identity, initial_digest) = super::runtime_identity(repo)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|_| checkout_runtime_unavailable())?;
+    let state = runtime
+        .block_on(orna_runtime_v1::RuntimeState::open(
+            repo,
+            identity,
+            initial_digest,
+        ))
+        .map_err(|_| checkout_runtime_unavailable())?;
+    let capture = runtime
+        .block_on(state.capture())
+        .map_err(|_| checkout_runtime_unavailable())?;
+    let generation = u64::try_from(capture.generation())
+        .map_err(|_| checkout_runtime_unavailable())?;
+    Ok(orna_repository_v1::RuntimeGeneration::new(generation))
+}
+
+fn checkout_runtime_unavailable() -> Diagnostic {
+    Diagnostic::target(
+        "E2200",
+        "local runtime state needed by checkout could not be read",
+        "retry after checking local runtime state; no change was made",
+    )
+}
+
+fn checkout_diagnostic(error: &RepositoryError) -> Diagnostic {
+    match error {
+        RepositoryError::InvalidSelector => Diagnostic::usage(
+            "E1002",
+            "checkout target is not a branch or commit",
+            "name an existing branch or commit, such as `orna checkout main`; no change was made",
+        ),
+        RepositoryError::RepositoryBusy => Diagnostic::target(
+            "E2100",
+            "repository coordination lock is busy",
+            "wait for the active repository operation to finish, then retry; no change was made",
+        ),
+        RepositoryError::CheckoutPlanStale | RepositoryError::StaleCwd => Diagnostic::target(
+            "E2100",
+            "the checkout plan went stale before it ran",
+            "retry `orna checkout NAME`; no change was made",
+        ),
+        RepositoryError::CheckoutExecutionUnsafe => Diagnostic::target(
+            "E2100",
+            "checkout refused: the target is not the current commit",
+            "no change was made; checkout to a different commit is not available yet",
+        ),
+        other => Diagnostic::target_with_detail(
+            "E2100",
+            "checkout could not be completed",
+            "check the repository state, then retry; no change was made",
             format!("{other:?}"),
         ),
     }
