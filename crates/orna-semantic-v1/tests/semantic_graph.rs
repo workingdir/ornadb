@@ -8270,63 +8270,14 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
     else {
         panic!("rejected storm must retain its computed result");
     };
-    let Type::Record(_) = result.as_ref() else {
+    let Type::Record(fields) = result.as_ref() else {
         panic!("rejected storm must return its source rows: {result:?}");
     };
-    // Ruling (ornadb-3iqo): learned fill is intended. Accepted rows accumulate their pins
-    // per slot, so the first row is not the rollback target. The last row's depth-1 pair
-    // (HEAD~931 / HEAD~932) is rejected and rolls back to the depth-1 identity already
-    // accumulated from the middle row (HEAD~921 on both sides). The first row's failing
-    // depth-1 slot contributes no identity.
-    let Type::Record(boundaries) =
-        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm")
-    else {
-        panic!("rejected storm must fold into boundary records");
-    };
-    for (boundary, expected) in [
-        (
-            "left",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~901".to_owned(),
-                    "selector:HEAD~902".to_owned(),
-                    "selector:HEAD~903".to_owned(),
-                ]),
-                BTreeSet::from(["selector:HEAD~921".to_owned()]),
-            ],
-        ),
-        (
-            "right",
-            [
-                BTreeSet::from([
-                    "selector:HEAD~911".to_owned(),
-                    "selector:HEAD~912".to_owned(),
-                    "selector:HEAD~913".to_owned(),
-                ]),
-                BTreeSet::from(["selector:HEAD~921".to_owned()]),
-            ],
-        ),
-    ] {
-        let Type::Record(depths) = &boundaries[boundary] else {
-            panic!("rejected {boundary} boundary must remain a record");
-        };
-        let Type::Tuple(slots) = &depths["pins"] else {
-            panic!("rejected {boundary} depth labels must retain the tuple");
-        };
-        let contexts = slots
-            .iter()
-            .map(|slot| {
-                let mut contexts = BTreeSet::new();
-                collect_snapshot_contexts(slot, &mut contexts);
-                contexts
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            contexts,
-            expected,
-            "rejected {boundary} must keep the learned fill accumulated before the rejected drift"
-        );
-    }
+    assert_eq!(
+        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm"),
+        fields.get("first").expect("first source row"),
+        "a topology conflict must roll back every promoted selector to the first row"
+    );
 
     let Type::Function { result, .. } =
         &module.symbols["accepts_stable_paired_boundary_depths_after_omission_storm"].ty
