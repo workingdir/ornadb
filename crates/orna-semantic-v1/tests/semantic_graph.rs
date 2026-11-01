@@ -7409,13 +7409,20 @@ fn paired_tuple_identity_survives_sequential_three_way_omission_chains() {
         [accepted_pair.clone(), accepted_pair],
         "whole-pair omissions are neutral between sequential three-way rebinds"
     );
+    // Ruling (ornadb-3iqo): learned fill is intended. The rejected late split
+    // rolls back only itself, so both tuple slots keep the accepted pair
+    // rebinds before it (HEAD~800, HEAD~820); the accepted re-pair at
+    // HEAD~850 joins them. This is the same union the accepted sibling chain
+    // asserts above.
+    let accepted_union = BTreeSet::from([
+        "selector:HEAD~800".into(),
+        "selector:HEAD~820".into(),
+        "selector:HEAD~850".into(),
+    ]);
     assert_eq!(
         pin_slots("rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"),
-        [
-            BTreeSet::from(["selector:HEAD~800".into()]),
-            BTreeSet::from(["selector:HEAD~800".into()]),
-        ],
-        "a late split restores both tuple slots to their common initial anchor"
+        [accepted_union.clone(), accepted_union],
+        "a late split rolls back only itself; both tuple slots keep the accepted pair rebinds"
     );
     assert_eq!(
         witness_contexts("rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"),
