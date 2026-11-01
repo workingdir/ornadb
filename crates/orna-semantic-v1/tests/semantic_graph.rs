@@ -17975,33 +17975,33 @@ fn contextual_empty_instant_ranges_are_rejected() {
 // Specified: ORNA-UNIT-007; affine absolute aggregates admit mean and extrema operations according to their algebra.
 #[test]
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
-    let valid = analyze(&[ModuleInput::new(
+    let valid = analyze_corpus(&[ModuleInput::new(
         "average.orna",
-        include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna")),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
-    let extrema = analyze(&[
+    let extrema = analyze_corpus(&[
         ModuleInput::new(
             "maximum.orna",
-            include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna"),
+            with_fixture_units(include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna")),
         ),
         ModuleInput::new(
             "minimum.orna",
-            include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna"),
+            with_fixture_units(include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna")),
         ),
     ]);
     assert!(extrema.is_ok(), "{:?}", extrema.diagnostics);
 
-    let shadowed = analyze(&[ModuleInput::new(
+    let shadowed = analyze_corpus(&[ModuleInput::new(
         "shadowed-max.orna",
-        include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna")),
     )]);
     assert!(has(&shadowed, DIAG_TYPE));
 
-    let invalid = analyze(&[ModuleInput::new(
+    let invalid = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
     )]);
     assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
