@@ -17203,6 +17203,41 @@ fn infer_named_pipeline_stage(
     local: &BTreeMap<String, Symbol>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Inferred {
+    if let Expr::Name { text, .. } = callee
+        && root_collection_intrinsic_is_unshadowed(text, scope, local)
+        && !matches!(
+            input.ty,
+            Type::Relation(_)
+                | Type::Stream(_)
+                | Type::List(_)
+                | Type::Range(_)
+                | Type::Applied { .. }
+        )
+    {
+        // ORNA-PIPE-004 admits a stage only when its first parameter accepts the
+        // piped value. The closed collection intrinsics take a collection kind
+        // (09-standard-library), so a scalar or structural input is rejected by
+        // this clause rather than by resolving the intrinsic name. Applied
+        // constructors keep their own resolution. A failed input is not piped
+        // into the stage (ORNA-PIPE-007), so it adds no diagnostic of its own.
+        let mut effects = input.effects;
+        for argument in arguments {
+            if !matches!(argument.value, Expr::Lambda { .. }) {
+                let value = infer(&argument.value, scope, local, diagnostics);
+                effects.join(&value.effects);
+            }
+        }
+        if !matches!(input.ty, Type::Error) {
+            diagnostics.push(diag(
+                DIAG_UNSUPPORTED,
+                format!("pipeline stage {text} requires a collection input"),
+            ));
+        }
+        return Inferred {
+            ty: Type::Error,
+            effects,
+        };
+    }
     if qualified_path(callee).is_none() {
         diagnostics.push(diag(
             DIAG_UNSUPPORTED,
