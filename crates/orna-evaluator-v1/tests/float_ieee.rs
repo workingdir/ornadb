@@ -95,3 +95,24 @@ fn nan_is_unordered_against_itself_and_infinities_order() {
     assert!(bool_result("(1.0f / 0.0f) == (2.0f / 0.0f)"));
     assert!(bool_result("(-1.0f / 0.0f) < (1.0f / 0.0f)"));
 }
+
+// Specified: ORNA-LIT-002; a Float numeral is correctly rounded to nearest, so an out-of-range
+// numeral is a signed infinity and an underflowing numeral is a signed zero.
+#[test]
+fn out_of_range_float_literals_round_to_signed_infinity_or_zero() {
+    assert_eq!(float_bits("1.0e400f"), f64::INFINITY.to_bits());
+    assert_eq!(float_bits("-1.0e400f"), f64::NEG_INFINITY.to_bits());
+    assert_eq!(float_bits("1.0e-400f"), 0.0f64.to_bits());
+}
+
+// Specified: ORNA-FLOAT-007; min prefers -0.0 and max prefers +0.0 among zeros, and any NaN
+// operand yields the canonical NaN instead of an evaluation error.
+#[test]
+fn scalar_min_and_max_follow_float_extrema_rules() {
+    assert_eq!(float_bits("std.math.min(0.0f, -0.0f)"), (-0.0f64).to_bits());
+    assert_eq!(float_bits("std.math.min(-0.0f, 0.0f)"), (-0.0f64).to_bits());
+    assert_eq!(float_bits("std.math.max(-0.0f, 0.0f)"), 0.0f64.to_bits());
+    assert_eq!(float_bits("std.math.max(0.0f, -0.0f)"), 0.0f64.to_bits());
+    assert_eq!(float_bits("std.math.min(0.0f / 0.0f, 1.0f)"), CANONICAL_NAN_BITS);
+    assert_eq!(float_bits("std.math.max(1.0f, 0.0f / 0.0f)"), CANONICAL_NAN_BITS);
+}

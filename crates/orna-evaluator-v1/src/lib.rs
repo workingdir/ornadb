@@ -5801,11 +5801,9 @@ impl Context<'_, '_> {
                     .replace('_', "")
                     .parse::<f64>()
                     .map_err(|_| error("ORNA-EVAL-VALUE"))?;
-                if value.is_finite() {
-                    Ok(Value::Float(value.to_bits()))
-                } else {
-                    Err(error("ORNA-EVAL-VALUE"))
-                }
+                // ORNA-LIT-002: conversion is correctly rounded to nearest, so an
+                // out-of-range numeral yields a signed infinity rather than an error.
+                Ok(Value::Float(value.to_bits()))
             }
             LiteralKind::Date => {
                 let value = text.to_owned();
@@ -16513,6 +16511,13 @@ fn compare_group_keys(left: &Value, right: &Value) -> Result<std::cmp::Ordering,
     }
 }
 fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationError> {
+    if let (Value::Float(a), Value::Float(b)) = (left, right) {
+        // ORNA-FLOAT-007: canonical NaN if either input is NaN; `min` prefers -0.0
+        // and `max` prefers +0.0 among zeros, otherwise numeric order decides.
+        let values = [*a, *b];
+        let bits = if min { float_min(&values) } else { float_max(&values) };
+        return bits.map(Value::Float).ok_or_else(|| error("ORNA-EVAL-VALUE"));
+    }
     let ordering = compare_values(left, right)?;
     if (ordering.is_le()) == min {
         Ok(left.clone())
