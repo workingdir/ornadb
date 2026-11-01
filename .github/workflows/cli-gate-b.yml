@@ -64,7 +64,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
 
+      # The payload fixture is 10 GiB and the run needs about 21 GiB of scratch.
+      # The stock runner image carries toolchains this job never uses, and a
+      # runner with less free space fails the fixture write with ENOSPC instead
+      # of exercising the gate (run 41255797165 on f3b53fa73).
+      - name: Free runner disk space
+        run: |
+          set -euo pipefail
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/share/boost \
+            /usr/local/share/chipper \
+            /usr/share/swift
+          sudo apt-get -y clean
+          df -h /
+
       - name: Gate B large network payload
         env:
           ORNA_REQUIRE_FUSE: "1"
-        run: cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact
+          # Keep the 10 GiB fixture and the store inside the runner workspace,
+          # whose size is checked above, instead of a small /tmp tmpfs.
+          TMPDIR: ${{ runner.workspace }}/gate-b-tmp
+        run: |
+          set -euo pipefail
+          mkdir -p "$TMPDIR"
+          df -h "$TMPDIR"
+          cargo test --locked -p orna-cli-v1 --test media_import_query gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata -- --nocapture --exact
