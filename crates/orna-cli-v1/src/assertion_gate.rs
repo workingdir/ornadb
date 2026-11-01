@@ -1,7 +1,8 @@
-//! The CLI's production candidate assertion gate (ORNA-ASSERT-042,
+//! The CLI's production assertion gate (ORNA-ASSERT-042, ORNA-ASSERT-044,
 //! ORNA-ASSERT-045, ORNA-ASSERT-046, ORNA-ASSERT-048). `orna commit` and
-//! `orna publish` both refuse a candidate through this one gate before any ref,
-//! pin or journal names it, so the two commands cannot disagree about what an
+//! `orna publish` refuse a candidate through this one gate before any ref,
+//! pin or journal names it. A checkout target is checked by the same validator
+//! through `validate_committed_target`, so no command disagrees about what an
 //! admitted assertion means.
 
 use orna_repository_v1::{CandidateAssertionGate, CandidateAssertionRefusal, PrivateCommit};
@@ -32,15 +33,18 @@ impl CandidateAssertionGate for AssertionGate {
 pub(crate) enum GatedCommand {
     Commit,
     Publish,
+    Checkout,
 }
 
 impl GatedCommand {
     /// The word that names the candidate's rows in a diagnostic: a commit
-    /// refuses staged rows, a publication refuses pending rows.
+    /// refuses staged rows, a publication refuses pending rows, and a checkout
+    /// refuses the rows of its target commit.
     fn candidate_word(self) -> &'static str {
         match self {
             Self::Commit => "staged",
             Self::Publish => "pending",
+            Self::Checkout => "target",
         }
     }
 }
@@ -81,38 +85,67 @@ fn head_table_rows(
     let project = orna_project_v1::ProjectLoader::default()
         .load_committed_snapshot(repository, &head)
         .map_err(|_| "HEAD project could not be loaded")?;
-    let (table_names, schemas) = admitted_tables_of(&project)?;
+    Ok(match committed_admitted_rows(repository, &head, &project)? {
+        Some(committed) => committed.rows,
+        None => orna_runtime_v1::RuntimeTableRows::new(),
+    })
+}
+
+/// One committed commit's admitted tables, read under that commit's own
+/// project, object identities and schemas.
+struct CommittedRows {
+    manifest: orna_project_v1::ObjectIdentityManifest,
+    table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId>,
+    rows: orna_runtime_v1::RuntimeTableRows,
+}
+
+/// Reads the admitted tables of `commit` as evaluator rows under the commit's
+/// own schemas and identities (ORNA-ASSERT-048: one logical state). `Ok(None)`
+/// when `project` admits no table; any unreadable part fails with its cause.
+fn committed_admitted_rows(
+    repository: &orna_repository_v1::Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+    project: &orna_project_v1::LoadedProject,
+) -> Result<Option<CommittedRows>, &'static str> {
+    let (table_names, schemas) = admitted_tables_of(project)?;
     if table_names.is_empty() {
-        return Ok(orna_runtime_v1::RuntimeTableRows::new());
+        return Ok(None);
     }
-    let table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId> =
-        committed_table_identities(repository, &head, table_names)
-            .map_err(|_| "HEAD table identities are unavailable")?
-            .iter()
-            .map(|table| (table.table().to_owned(), table.object_id()))
-            .collect();
+    let manifest =
+        orna_project_v1::ObjectIdentityManifest::read_committed_if_present(repository, commit)
+            .ok()
+            .flatten()
+            .ok_or("commit carries no object identity inventory")?;
+    let identities = table_identities_from_manifest(&manifest, table_names)
+        .map_err(|_| "table identities are unavailable")?;
+    let table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId> = identities
+        .iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect();
     let format = repository
-        .open_pinned_format_context(head.as_str())
-        .map_err(|_| "HEAD format context could not be opened")?;
+        .open_pinned_format_context(commit.as_str())
+        .map_err(|_| "format context could not be opened")?;
     let mut committed = orna_project_v1::committed_tables(
         repository,
         &format,
-        &head,
+        commit,
         &schemas,
         &table_object_ids,
         orna_application_v1::ApplicationAuthority::committed_read_limits(),
     )
-    .map_err(|_| "HEAD committed rows could not be read")?;
+    .map_err(|_| "committed rows could not be read")?;
     let mut rows = orna_runtime_v1::RuntimeTableRows::new();
     for (name, schema) in &schemas {
-        let table = committed
-            .remove(name)
-            .ok_or("HEAD table rows are missing")?;
+        let table = committed.remove(name).ok_or("table rows are missing")?;
         let encoded = orna_project_v1::evaluator_rows(&table, schema)
-            .map_err(|_| "HEAD table rows could not be encoded")?;
+            .map_err(|_| "table rows could not be encoded")?;
         rows.insert(name.clone(), encoded);
     }
-    Ok(rows)
+    Ok(Some(CommittedRows {
+        manifest,
+        table_object_ids,
+        rows,
+    }))
 }
 
 /// The candidate tables whose evaluator rows differ from `HEAD`: the only
@@ -194,15 +227,30 @@ fn validate_candidate_assertions(
         rows.insert(name.clone(), encoded);
     }
     let changed = changed_tables(repository, &rows);
+    validate_changed_rows(&project, &manifest, table_object_ids, &rows, &changed, word)
+}
+
+/// Runs the production validator over the changed tables of `rows`. A false
+/// table or module assertion refuses with the owning module's span
+/// (ORNA-ASSERT-051); any other failure refuses the candidate as unvalidated,
+/// so it is never committed unchecked.
+fn validate_changed_rows(
+    project: &orna_project_v1::LoadedProject,
+    manifest: &orna_project_v1::ObjectIdentityManifest,
+    table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId>,
+    rows: &orna_runtime_v1::RuntimeTableRows,
+    changed: &BTreeSet<String>,
+    word: &str,
+) -> Result<(), CandidateAssertionRefusal> {
     let mut validator = orna_conformance_v1::transactional_loaded_project_commit_validator(
-        &project,
-        &manifest,
+        project,
+        manifest,
         std::sync::Arc::new(table_object_ids),
         orna_evaluator_v1::Limits::default(),
     )
     .map_err(|outcome| unvalidated(&stage_outcome_cause(&outcome)))?;
     validator
-        .validate_changed(&rows, &changed)
+        .validate_changed(rows, changed)
         .map_err(|diagnostic| {
             if orna_conformance_v1::is_table_assertion_false(diagnostic) {
                 CandidateAssertionRefusal::AssertionFalse(validator.failed_module_assertion())
@@ -213,6 +261,41 @@ fn validate_candidate_assertions(
                 ))
             }
         })
+}
+
+/// Validates the committed `target` that a checkout would make current
+/// (ORNA-ASSERT-044). A target that changes no admitted table's rows against
+/// `HEAD` changes no logical state, so it is accepted without evaluation.
+/// Otherwise its own rows must satisfy every admitted assertion, as a
+/// candidate's rows must before commit.
+pub(crate) fn validate_committed_target(
+    repository: &orna_repository_v1::Repository,
+    target: &orna_repository_v1::GitCommitRef,
+) -> Result<(), CandidateAssertionRefusal> {
+    let word = GatedCommand::Checkout.candidate_word();
+    let project = orna_project_v1::ProjectLoader::default()
+        .load_committed_snapshot(repository, target)
+        .map_err(|_| unvalidated(&format!("{word} project could not be loaded")))?;
+    if !orna_conformance_v1::project_declares_assertions(&project) {
+        return Ok(());
+    }
+    let Some(committed) = committed_admitted_rows(repository, target, &project)
+        .map_err(|cause| unvalidated(&format!("{word} {cause}")))?
+    else {
+        return Ok(());
+    };
+    let changed = changed_tables(repository, &committed.rows);
+    if changed.is_empty() {
+        return Ok(());
+    }
+    validate_changed_rows(
+        &project,
+        &committed.manifest,
+        committed.table_object_ids,
+        &committed.rows,
+        &changed,
+        word,
+    )
 }
 
 /// The refusal of a candidate by its assertion gate (ORNA-ASSERT-046,
@@ -235,6 +318,7 @@ pub(crate) fn refusal_diagnostic(
             let help = match command {
                 GatedCommand::Commit => "change the staged rows or source so every assertion holds, stage them, then retry `orna commit -m MESSAGE`; no commit was created",
                 GatedCommand::Publish => "change the pending rows or source so every assertion holds, then retry `orna publish`; nothing was published",
+                GatedCommand::Checkout => "change the target commit's source or rows so every assertion holds, then retry the checkout; HEAD and the working tree were not changed",
             };
             ("ORNA-A091-009", title, help)
         }
@@ -242,6 +326,7 @@ pub(crate) fn refusal_diagnostic(
             let help = match command {
                 GatedCommand::Commit => "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created",
                 GatedCommand::Publish => "fix the pending source or store, then retry `orna publish`; nothing was published",
+                GatedCommand::Checkout => "fix the target commit's source or store, then retry the checkout; HEAD and the working tree were not changed",
             };
             (
                 "E2300",
