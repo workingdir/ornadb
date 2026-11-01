@@ -1952,9 +1952,9 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
     )]);
     assert!(has(&key, DIAG_PRIMARY_KEY_FLOAT));
 
-    let temperature = analyze(&[ModuleInput::new(
+    let temperature = analyze_corpus(&[ModuleInput::new(
         "temperature.orna",
-        include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna")),
     )]);
     assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
@@ -2265,7 +2265,7 @@ fn legacy_system_admin_methods_are_rejected_with_published_messages() {
 fn distinct_nominal_types_require_named_conversions() {
     let result = analyze(&[ModuleInput::new(
         "conversion.orna",
-        include_str!("fixtures/inline-semantic_graph/bd8b70b891a8.orna"),
+        include_str!("fixtures/inline-semantic_graph/ccec9bdc5a21.orna"),
     )]);
     assert!(result.diagnostics.iter().any(|diagnostic| {
         diagnostic.message()
@@ -15020,16 +15020,16 @@ fn historical_callables_are_read_effect_only() {
 // Specified: ORNA-UNIT-008; qualified unit suffixes resolve to the same imported unit identity.
 #[test]
 fn qualified_kwh_units_share_the_closed_cross_database_identity() {
-    let result = analyze(&[ModuleInput::new(
+    let result = analyze_corpus(&[ModuleInput::new(
         "units.orna",
         include_str!("fixtures/inline-semantic_graph/4d774ab8f9ad.orna"),
     )]);
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
-    let incompatible = analyze(&[ModuleInput::new(
+    let incompatible = analyze_corpus(&[ModuleInput::new(
         "units.orna",
-        include_str!("fixtures/inline-semantic_graph/fa031c0cc369.orna"),
+        include_str!("fixtures/inline-semantic_graph/823fe4ed8a5a.orna"),
     )]);
     assert!(has(&incompatible, DIAG_INCOMPATIBLE_DIMENSIONS));
 }
@@ -17975,33 +17975,33 @@ fn contextual_empty_instant_ranges_are_rejected() {
 // Specified: ORNA-UNIT-007; affine absolute aggregates admit mean and extrema operations according to their algebra.
 #[test]
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
-    let valid = analyze(&[ModuleInput::new(
+    let valid = analyze_corpus(&[ModuleInput::new(
         "average.orna",
-        include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna")),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
-    let extrema = analyze(&[
+    let extrema = analyze_corpus(&[
         ModuleInput::new(
             "maximum.orna",
-            include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna"),
+            with_fixture_units(include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna")),
         ),
         ModuleInput::new(
             "minimum.orna",
-            include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna"),
+            with_fixture_units(include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna")),
         ),
     ]);
     assert!(extrema.is_ok(), "{:?}", extrema.diagnostics);
 
-    let shadowed = analyze(&[ModuleInput::new(
+    let shadowed = analyze_corpus(&[ModuleInput::new(
         "shadowed-max.orna",
-        include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna")),
     )]);
     assert!(has(&shadowed, DIAG_TYPE));
 
-    let invalid = analyze(&[ModuleInput::new(
+    let invalid = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna"),
+        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
     )]);
     assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
