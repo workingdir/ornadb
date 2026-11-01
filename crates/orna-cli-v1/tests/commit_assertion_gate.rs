@@ -218,10 +218,11 @@ fn assert_free_project_with_non_scalar_key_still_commits() {
 }
 
 /// ORNA-ASSERT-026 and ORNA-ASSERT-051: a module assertion whose dependency table
-/// the commit changes is evaluated over the candidate rows, and its refusal is
-/// reported at its module and source span rather than as a table assertion.
+/// the commit changes is evaluated over the candidate rows, and a false one
+/// refuses the commit at its module and source span rather than as a table
+/// assertion.
 #[test]
-fn module_assertion_over_changed_table_refuses_the_commit_with_its_span() {
+fn false_module_assertion_refuses_the_commit_with_its_owner_and_span() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(&directory, BOOK_LOAN_LIBRARY);
     commit_source(&root, "book and loan tables");
@@ -269,13 +270,13 @@ fn module_assertion_over_unchanged_tables_is_skipped_by_the_commit() {
     publish(&root, "Dune");
     let before = head(&root);
 
-    // Only Book changes. Without the changed-table scoping the assertion would be
-    // evaluated and refuse, because Shelf is empty and no shelf matches the Loan.
+    // Book changes outside the module assertion's dependency set {Loan, Shelf}, so
+    // the commit does not evaluate it, and it commits although Shelf is empty.
     let committed = stage_and_commit(
         &root,
         BOOK_EDITION_LOAN_SHELF_MODULE_LIBRARY,
-        "change only the book table",
+        "change a table outside the module assertion",
     );
-    assert_success(&committed, "commit that changes only Book");
+    assert_success(&committed, "commit outside the module assertion's dependencies");
     assert_ne!(head(&root), before);
 }
