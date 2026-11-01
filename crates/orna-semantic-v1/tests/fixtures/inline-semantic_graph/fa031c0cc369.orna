@@ -1,1 +1,0 @@
-pub fn incompatible(a: Float<std.units.si.kWh>, b: Float<work.units.hour>) = a + b;

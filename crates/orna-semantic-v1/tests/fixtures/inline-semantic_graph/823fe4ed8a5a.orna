@@ -1,0 +1,2 @@
+use fixture.units.*;
+pub fn incompatible(a: Float<std.units.si.kWh>, b: Float<MiB>) = a + b;

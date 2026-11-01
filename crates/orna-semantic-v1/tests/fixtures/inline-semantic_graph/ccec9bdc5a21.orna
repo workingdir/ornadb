@@ -1,0 +1,16 @@
+pub type A {
+    value: Str,
+}
+pub type B {
+    value: Str,
+    impl From<A> {
+        fn from(value) = B { value: value.value };
+    }
+}
+pub type C {
+    value: Str,
+    impl From<B> {
+        fn from(value) = C { value: value.value };
+    }
+}
+pub fn bad(value: A): C = value; // requires A -> B -> C From chain
