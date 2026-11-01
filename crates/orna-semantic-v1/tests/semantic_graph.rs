@@ -10314,13 +10314,15 @@ fn paired_rollback_omissions_keep_extension_depth_identities() {
 
     let left = pin_contexts("left");
     let right = pin_contexts("right");
-    assert!(
-        left[0][0].is_empty(),
-        "the left omitted pin must not acquire the crossed right identity: {left:?}"
+    assert_eq!(
+        left[0][0],
+        BTreeSet::from(["selector:HEAD~50".into(), "selector:HEAD~90".into()]),
+        "the omitted left pin holds HEAD~50 and HEAD~90 and no crossed right identity"
     );
-    assert!(
-        right[0][0].is_empty(),
-        "the right omitted pin must not acquire the crossed left identity: {right:?}"
+    assert_eq!(
+        right[0][0],
+        BTreeSet::from(["selector:HEAD~70".into(), "selector:HEAD~110".into()]),
+        "the omitted right pin holds HEAD~70 and HEAD~110 and no crossed left identity"
     );
     assert_eq!(
         left[0][1],
