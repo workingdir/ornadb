@@ -115,11 +115,11 @@ fn head_table_rows(
     Ok(rows)
 }
 
-/// The candidate tables whose evaluator rows differ from `HEAD`: the only
-/// tables a module assertion can depend on (ORNA-ASSERT-026). A candidate
-/// table absent from `HEAD` is changed when it stages rows. When `HEAD` cannot
-/// be read, every candidate table counts as changed, so more checks run and
-/// none is skipped.
+/// The candidate tables whose evaluator rows differ from `HEAD`. A module
+/// assertion is evaluated when its dependency set intersects this set
+/// (ORNA-ASSERT-026). A candidate table absent from `HEAD` is changed when it
+/// stages rows. When `HEAD` cannot be read, every candidate table counts as
+/// changed, so more checks run and none is skipped.
 fn changed_tables(
     repository: &orna_repository_v1::Repository,
     rows: &orna_runtime_v1::RuntimeTableRows,
