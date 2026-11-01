@@ -443,6 +443,11 @@ been published.
   journals, and in compact manifests. The system worktree listing skips a
   Git-metadata-named entry (`.git:x`, `a\.git`, `.git.`) instead of reporting it
   as a user path.
+- Project path validation, worktree discovery, the VFS reserved-name check and the legacy migration clear, copy and hash
+  paths treat every Git-metadata spelling (`.GIT`, `git~1`, `.git. `) as Git metadata through
+  `orna_foundation_v1::is_git_metadata_component`, not only the exact `.git`. A directory with such a name no longer fails
+  project loading as a non-portable path, no longer produces worktree rows, is reserved in the VFS, and is no longer
+  copied, cleared or counted by a legacy migration. The exact nested `.git` remains hashed as repository state.
 - `scripts/orna_extract.py` is an independent extractor. It reads a format-3
   repository's Git objects at a commit through `git cat-file --batch`, without
   the engine's readers, and writes the modules, the schema, the rows and each
