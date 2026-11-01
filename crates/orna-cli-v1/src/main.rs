@@ -4,6 +4,7 @@
 )]
 
 mod assertion_gate;
+mod checkout_assertion_gate;
 mod cli_args;
 mod cli_dispatch;
 mod cli_help;
