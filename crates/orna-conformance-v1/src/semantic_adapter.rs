@@ -3724,7 +3724,7 @@ impl DurableTransactionalEvaluator {
                     request,
                     fingerprint,
                     writer,
-                    StageOutcome::Failed(stream_delivery_failure_diagnostic(&failure)),
+                    StageOutcome::Failed(stream_failure_diagnostic(&mut handler, &failure)),
                 )
                 .await
             }
@@ -4340,7 +4340,7 @@ impl DurableTransactionalEvaluator {
         {
             Ok(StreamRunOutcome::Exhausted { .. }) => Ok(StageOutcome::Passed),
             Ok(StreamRunOutcome::Failed { failure, .. }) => Ok(StageOutcome::Failed(
-                stream_delivery_failure_diagnostic(&failure),
+                stream_failure_diagnostic(&mut handler, &failure),
             )),
             Ok(_) => Ok(StageOutcome::Skipped {
                 reason: "literal list stream did not exhaust".into(),
@@ -4394,6 +4394,9 @@ struct ListTableHandler {
     limits: EvaluatorLimits,
     next_mutation: u64,
     digest: [u8; 32],
+    /// The refusal for the item that failed evaluation, reported by the caller
+    /// in place of the generic delivery diagnostic.
+    refusal: Option<Diagnostic>,
 }
 
 struct CandidateRelationEffectHandler<'a> {
@@ -5073,6 +5076,7 @@ impl ListTableHandler {
             limits,
             next_mutation: 0,
             digest: [9; 32],
+            refusal: None,
         }
     }
 }
@@ -5083,11 +5087,13 @@ impl StreamHandler for ListTableHandler {
             Ok(value) => value,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
         };
-        let row =
-            match substitute_list_item(&self.bridge.insert_row, &self.bridge.parameter, &value) {
-                Some(row) => row,
-                None => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
-            };
+        let row = match evaluate_list_item_row(&self.bridge, &value, self.limits) {
+            Ok(row) => row,
+            Err(error) => {
+                self.refusal = Some(item_evaluation_refusal(&self.bridge, &error));
+                return StreamHandlerResult::Fail(stream_handler_diagnostic());
+            }
+        };
         let key = match table_key(&row, &self.bridge.key_fields) {
             Ok(key) => key,
             Err(_) => return StreamHandlerResult::Fail(stream_handler_diagnostic()),
@@ -5208,6 +5214,15 @@ fn stream_delivery_failure_diagnostic(failure: &FailureRecord) -> Diagnostic {
     .expect("valid diagnostic")
     .with_cause(stream_failure_cause(failure.diagnostic.code))
     .redacted()
+}
+
+/// A recorded item refusal names the owning source (ORNA-ASSERT-051) and takes
+/// precedence over the generic delivery diagnostic.
+fn stream_failure_diagnostic(handler: &mut ListTableHandler, failure: &FailureRecord) -> Diagnostic {
+    handler
+        .refusal
+        .take()
+        .unwrap_or_else(|| stream_delivery_failure_diagnostic(failure))
 }
 
 /// The runtime's typed failure code, carried as a non-catalogue label for the
@@ -5908,41 +5923,44 @@ fn literal_string(text: &str) -> Option<String> {
     (!body.contains('\\')).then(|| body.into())
 }
 
-fn substitute_list_item(expr: &Expr, parameter: &str, item: &Value) -> Option<Value> {
-    match expr {
-        Expr::Name { text, .. } if text == parameter => Some(item.clone()),
-        Expr::Field { base, name, .. } => match base.as_ref() {
-            Expr::Name { text, .. } if text == parameter => record_field(item, name),
-            _ => None,
-        },
-        Expr::Record { fields, .. } => {
-            let mut fields = fields
-                .iter()
-                .map(|field| {
-                    Some((
-                        field.name.clone(),
-                        substitute_list_item(&field.value, parameter, item)?
-                            .raw()
-                            .clone(),
-                    ))
-                })
-                .collect::<Option<Vec<_>>>()?;
-            fields.sort_by_cached_key(|(name, _)| {
-                Value::new(OvbRaw::Text(name.clone()))
-                    .expect("text field key is a valid value")
-                    .encode()
-                    .expect("text field key encodes canonically")
-            });
-            Value::new(OvbRaw::Map(
-                fields
-                    .into_iter()
-                    .map(|(name, value)| (OvbRaw::Text(name), value))
-                    .collect(),
-            ))
-            .ok()
-        }
-        _ => literal_value(expr),
-    }
+/// Evaluates the admitted `table.insert` row expression for one stream item
+/// (ORNA-A12-01). The item parameter is bound to the decoded item value and the
+/// row expression is evaluated with the admitted assertion functions, so helper
+/// calls and arithmetic in the item expression produce the row.
+fn evaluate_list_item_row(
+    bridge: &ListStreamBridge,
+    item: &Value,
+    limits: EvaluatorLimits,
+) -> Result<Value, EvaluationError> {
+    let environment = Environment::from([(bridge.parameter.clone(), item.clone())]);
+    let mut budget = StepBudget::new(limits.max_steps);
+    evaluate_with_functions_and_budget(
+        &bridge.insert_row,
+        &environment,
+        &bridge.assertion_functions,
+        limits,
+        &mut budget,
+    )
+}
+
+/// Refusal for one stream item whose admitted row expression fails to
+/// evaluate. The evaluation failure is kept as a cause (ORNA-ASSERT-049) and
+/// the root message names the owning source (ORNA-ASSERT-051). The item value
+/// is not presented.
+fn item_evaluation_refusal(bridge: &ListStreamBridge, error: &EvaluationError) -> Diagnostic {
+    let message = SafeText::new(format!(
+        "literal list stream item was refused by owner {}",
+        bridge.source_identity
+    ))
+    .unwrap_or_else(|_| SafeText::new("literal list stream item was refused").expect("static message"));
+    Diagnostic::new(
+        SafeText::new("ORNA-LIST-STREAM-ITEM").expect("static code"),
+        DiagnosticSeverity::Error,
+        SafeText::new("literal list stream item was refused").expect("static message"),
+    )
+    .expect("valid diagnostic")
+    .with_cause(error.diagnostic().clone())
+    .redacted_with_message(message)
 }
 
 impl Default for TransactionalEvaluator {
@@ -13738,7 +13756,7 @@ mod list_stream_tests {
         Catalogue,
         DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
         StageOutcome, admit_project_list_stream, admit_transaction_project,
-        stream_handler_diagnostic, substitute_list_item, table_key,
+        evaluate_list_item_row, stream_handler_diagnostic, table_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
@@ -13968,7 +13986,7 @@ mod list_stream_tests {
                     && matches!(value, OvbRaw::Tag(60000, _))
             })
         ));
-        let row = substitute_list_item(&bridge.insert_row, &bridge.parameter, &sample)
+        let row = evaluate_list_item_row(&bridge, &sample, Limits::default())
             .expect("Reading row projection");
         assert_eq!(
             table_key(&row, &bridge.key_fields).expect("composite Reading key"),

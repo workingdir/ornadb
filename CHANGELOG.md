@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Literal list streams evaluate each item's row expression under the bound item parameter (ORNA-A12-01), so helper calls
+  and arithmetic in the item expression produce the row instead of only literal items. An item whose evaluation fails
+  fails the stream with ORNA-LIST-STREAM-ITEM, naming the owning source (ORNA-ASSERT-051); the failed item is not
+  committed and the checkpoint does not advance past it (ORNA-ASSERT-047). Items committed before the refusal keep their
+  own checkpointed rows. Partial: whole-batch rollback is not implemented.
 - Float literals and scalar `min`/`max` follow IEEE-754 (ornadb-5il1.188; product change). An `f`-suffixed numeral is
   correctly rounded to nearest (ORNA-LIT-002, ORNA-NUM-003), so `1.0e400f` evaluates to a signed infinity and an
   underflowing numeral to a signed zero, where it previously failed with ORNA-EVAL-VALUE. Scalar `std.math.min` and

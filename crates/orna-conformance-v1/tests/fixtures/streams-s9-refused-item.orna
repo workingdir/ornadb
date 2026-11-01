@@ -1,0 +1,8 @@
+pub table Reading(id: Int) { value: Int, }
+fn ratio(value) = 10 / (value - 2);
+pub fn main() {
+    Stream.from_list([1, 2], source_identity: "fixture:streams-s9-refused-item")
+        | for_each(value => {
+            Reading.insert({ id: value, value: ratio(value) });
+        });
+}

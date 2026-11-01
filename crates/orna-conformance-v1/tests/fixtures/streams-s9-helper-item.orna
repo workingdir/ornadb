@@ -1,0 +1,8 @@
+pub table Reading(id: Int) { value: Int, }
+fn bump(value) = value + 1;
+pub fn main() {
+    Stream.from_list([1, 2], source_identity: "fixture:streams-s9-helper-item")
+        | for_each(value => {
+            Reading.insert({ id: value, value: bump(value) });
+        });
+}
