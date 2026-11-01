@@ -1040,7 +1040,7 @@ fn clear_checkout(root: &Path) -> Result<(), RepositoryError> {
     let entries = fs::read_dir(root).map_err(|_| RepositoryError::LocalStateUnavailable)?;
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
-        if entry.file_name() == ".git" {
+        if orna_foundation_v1::is_git_metadata_component(entry.file_name().as_encoded_bytes()) {
             continue;
         }
         let path = entry.path();
@@ -1221,7 +1221,7 @@ fn copy_working_tree(source_root: &Path, destination_root: &Path) -> Result<(), 
     for entry in entries {
         let entry = entry.map_err(|_| RepositoryError::LocalStateUnavailable)?;
         let name = entry.file_name();
-        if name == ".git" {
+        if orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes()) {
             continue;
         }
         copy_entry(&entry.path(), &destination_root.join(&name))?;
@@ -1467,6 +1467,9 @@ fn hash_working_tree(
                     .ok_or(RepositoryError::LocalStateUnavailable)?;
                 hash_nested_git_state(&directory, hash)?;
             }
+            continue;
+        }
+        if orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes()) {
             continue;
         }
         let child = relative.join(name);
@@ -1744,5 +1747,74 @@ mod tests {
         std::fs::create_dir(&destination).unwrap();
         git(&destination, &["init", "-q"]);
         assert!(super::copy_index_blobs(&plain, &destination).is_err());
+    }
+}
+
+#[cfg(test)]
+mod git_metadata_tests {
+    use super::*;
+
+    const SPELLINGS: [&str; 4] = [".git", ".GIT", "git~1", ".git. "];
+
+    fn digest_and_entries(root: &Path) -> ([u8; 32], usize) {
+        let mut hash = Sha256::new();
+        let mut entries = 0;
+        hash_working_tree(root, Path::new(""), &mut hash, &mut entries).unwrap();
+        (hash.finalize().into(), entries)
+    }
+
+    #[test]
+    fn clear_checkout_retains_git_metadata_in_every_spelling() {
+        let temp = tempfile::tempdir().unwrap();
+        for name in SPELLINGS {
+            std::fs::create_dir(temp.path().join(name)).unwrap();
+        }
+        std::fs::write(temp.path().join("tracked.txt"), b"checkout").unwrap();
+        clear_checkout(temp.path()).unwrap();
+        for name in SPELLINGS {
+            assert!(temp.path().join(name).is_dir(), "{name:?} must be retained");
+        }
+        assert!(!temp.path().join("tracked.txt").exists());
+    }
+
+    #[test]
+    fn working_tree_copy_never_copies_git_metadata_in_any_spelling() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        for name in SPELLINGS {
+            let dir = source.path().join(name);
+            std::fs::create_dir(&dir).unwrap();
+            std::fs::write(dir.join("config"), b"metadata").unwrap();
+        }
+        std::fs::write(source.path().join("tracked.txt"), b"payload").unwrap();
+        copy_working_tree(source.path(), destination.path()).unwrap();
+        assert!(destination.path().join("tracked.txt").is_file());
+        for name in SPELLINGS {
+            assert!(
+                !destination.path().join(name).exists(),
+                "{name:?} must not be copied"
+            );
+        }
+    }
+
+    #[test]
+    fn working_tree_hash_skips_nested_git_metadata_in_every_spelling() {
+        // The exact `.git` spelling is hashed as nested repository state, so only
+        // the spellings Git does not treat as metadata are exercised here.
+        for name in [".GIT", "git~1", ".git. "] {
+            let root = tempfile::tempdir().unwrap();
+            std::fs::write(root.path().join("tracked.txt"), b"payload").unwrap();
+            let deps = root.path().join("deps");
+            std::fs::create_dir(&deps).unwrap();
+            std::fs::write(deps.join("lib.txt"), b"lib").unwrap();
+            let metadata = deps.join(name);
+            std::fs::create_dir(&metadata).unwrap();
+            std::fs::write(metadata.join("junk"), b"first").unwrap();
+            let (before, entries) = digest_and_entries(root.path());
+            assert_eq!(entries, 3, "{name:?} must not be counted");
+            std::fs::write(metadata.join("junk"), b"second").unwrap();
+            let (after, _) = digest_and_entries(root.path());
+            assert_eq!(before, after, "{name:?} content must not be hashed");
+        }
     }
 }
