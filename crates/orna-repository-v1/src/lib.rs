@@ -260,10 +260,10 @@ pub struct PrivateCommit {
 /// asks this gate over the serialized candidate before accepting it
 /// (ORNA-ASSERT-042). The publish entry points (`publish_candidate`,
 /// `publish_candidate_with_stage_hook`, `publish_legacy_format_migration`) take
-/// no gate and do not evaluate assertions, though ORNA-ASSERT-045 requires
-/// assertions to run before graph publication. `CommitAssertionGate` in
-/// `orna-cli-v1` is the only production implementation; the test-only
-/// `AcceptAllAssertions` accepts without evaluating them.
+/// no gate: the CLI runs its gate before calling them, so an assertion is
+/// evaluated before graph publication (ORNA-ASSERT-045). The production
+/// implementation is `AssertionGate` in `orna-cli-v1`'s `assertion_gate`
+/// module; the test-only `AcceptAllAssertions` accepts without evaluating them.
 pub trait CandidateAssertionGate {
     fn validate(
         &self, repository: &Repository, candidate: &PrivateCommit,
