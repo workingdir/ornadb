@@ -76,6 +76,7 @@ const MULTIPLE_ROOTS: &str = include_str!("fixtures/streams-pa0p-multiple-roots.
 const FUNCTION_CALLBACK: &str = include_str!("fixtures/streams-pa0p-function-callback.orna");
 const HELPER_ITEM_STREAM: &str = include_str!("fixtures/streams-s9-helper-item.orna");
 const REFUSED_ITEM_STREAM: &str = include_str!("fixtures/streams-s9-refused-item.orna");
+const ASSERT_REFUSED_ITEM_STREAM: &str = include_str!("fixtures/streams-s10-assert-item.orna");
 const PREDICATE_NESTED_PAIRS: &str =
     include_str!("fixtures/streams-jyy6a-predicate-nested-pairs.orna");
 const PREDICATE_NESTED_PAIRS_DUPLICATE: &str =
@@ -429,6 +430,71 @@ async fn refused_stream_item_names_its_owner_and_does_not_advance_checkpoint() {
     assert_eq!(
         checkpoint.version, 1,
         "the checkpoint must not advance past the refused item"
+    );
+}
+
+#[tokio::test]
+async fn refused_table_assertion_item_names_its_owner_span_and_position() {
+    let (_directory, repository) = repository(ASSERT_REFUSED_ITEM_STREAM);
+    let identity = identity();
+    let source = source_unit_with(ASSERT_REFUSED_ITEM_STREAM, "streams-s10-assert-item");
+    let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
+    assert_eq!(evaluator.admit_list_stream_source(&source), StageOutcome::Passed);
+    let outcome = evaluator
+        .execute_list_stream_source(&repository, identity, [0x56; 16], [0x57; 32], &source)
+        .await
+        .expect("explicit finite dispatch with an assertion-refused item");
+    let StageOutcome::Failed(diagnostic) = outcome else {
+        panic!("an assertion-refused item must fail the stream, got {outcome:?}");
+    };
+    assert_eq!(diagnostic.code(), "ORNA-LIST-STREAM-DELIVERY");
+    let message = diagnostic.message();
+    assert!(
+        message.contains("table Reading assertion at"),
+        "the diagnostic must name the owning table and assertion span: {message}"
+    );
+    assert!(
+        message.contains("fixture:streams-s10-assert-item"),
+        "the diagnostic must name the source identity: {message}"
+    );
+    assert!(
+        message.contains("position 1"),
+        "the diagnostic must name the refused item's position: {message}"
+    );
+    let state = RuntimeState::open(&repository, identity, [0x57; 32])
+        .await
+        .expect("reopen runtime state");
+    let key = Value::int(1.into()).encode().expect("encoded table key");
+    assert!(
+        state
+            .committed_table_row("Reading", &key)
+            .await
+            .expect("read first item row")
+            .is_some(),
+        "the item before the refusal keeps its own checkpointed row"
+    );
+    let key = Value::int(2.into()).encode().expect("encoded table key");
+    assert!(
+        state
+            .committed_table_row("Reading", &key)
+            .await
+            .expect("read refused item row")
+            .is_none(),
+        "the refused item must not publish a row"
+    );
+    let key = list_checkpoint_key("main", "fixture:streams-s10-assert-item", &[1, 2]);
+    let checkpoint = state
+        .stream_checkpoint(&key)
+        .await
+        .expect("checkpoint after the refusal");
+    assert_eq!(
+        checkpoint.version, 1,
+        "the checkpoint must not advance past the refused item"
+    );
+    assert_eq!(
+        checkpoint.committed.expect("committed position").token.as_str(),
+        "1",
+        "the checkpoint stays at the refused item's position"
     );
 }
 
