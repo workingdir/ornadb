@@ -13756,7 +13756,7 @@ mod list_stream_tests {
         Catalogue,
         DurableTransactionalEvaluator, PROJECT_STREAM_ROOT_ADMISSION_REASON, SourceUnit,
         StageOutcome, admit_project_list_stream, admit_transaction_project,
-        stream_handler_diagnostic, substitute_list_item, table_key,
+        evaluate_list_item_row, stream_handler_diagnostic, table_key,
     };
     use crate::{ProjectEnvironment, ProjectExpectations, ProjectUnit};
     use orna_evaluator_v1::Limits;
