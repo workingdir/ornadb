@@ -4,6 +4,13 @@
 //! or expose a native plug-in loader; portable extension loading remains a
 //! separate WIT/Component Model slice.
 
+// Every fallible function here returns `ProviderDiagnostic`, the registry's
+// shared public failure type. Its size is the declared failure vocabulary: role,
+// expected and provided offers, and the detail needed to report a host mismatch.
+// Boxing it would push a Box onto every caller of a type the crate hands out by
+// value, to save an allocation on a path that ends in an error.
+#![allow(clippy::result_large_err)]
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;

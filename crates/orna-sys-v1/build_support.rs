@@ -773,14 +773,14 @@ impl Collector {
         }
         if let Some(attribute) = annotations.first() {
             match parse_function_attributes(attribute, attrs) {
-                Ok((metadata, role, type_graph, schema, failures)) => {
-                    self.load_registry_json(type_graph, "type_graph");
-                    self.load_registry_json(schema, "schema");
+                Ok(parsed) => {
+                    self.load_registry_json(parsed.type_graph, "type_graph");
+                    self.load_registry_json(parsed.schema, "schema");
                     self.functions.push(Function {
                         method: method.ident.to_string(),
-                        metadata,
-                        role,
-                        failures,
+                        metadata: parsed.metadata,
+                        role: parsed.role,
+                        failures: parsed.failures,
                     });
                 }
                 Err(error) => self.errors.push(format!("{}: {error}", method.ident)),
@@ -899,10 +899,21 @@ pub fn is_ornasys(attribute: &syn::Attribute) -> bool {
         .is_some_and(|segment| segment.ident == "ornasys")
 }
 
+/// One `#[ornasys]` function annotation after parsing, before it becomes a
+/// `Function`. The optional fields are the registry sections the annotation may
+/// add to; they stay separate here so the caller can load each section by name.
+struct ParsedFunctionAttributes {
+    metadata: Value,
+    role: Option<String>,
+    type_graph: Option<String>,
+    schema: Option<String>,
+    failures: Vec<String>,
+}
+
 fn parse_function_attributes(
     attribute: &syn::Attribute,
     attrs: &[syn::Attribute],
-) -> Result<(Value, Option<String>, Option<String>, Option<String>, Vec<String>), String> {
+) -> Result<ParsedFunctionAttributes, String> {
     let mut fields = Map::new();
     let mut role = None;
     let mut type_graph = None;
@@ -975,7 +986,13 @@ fn parse_function_attributes(
     if let Some(role) = &role {
         parse_role_version(role)?;
     }
-    Ok((metadata, role, type_graph, schema, failures))
+    Ok(ParsedFunctionAttributes {
+        metadata,
+        role,
+        type_graph,
+        schema,
+        failures,
+    })
 }
 
 fn parse_failure_list(value: &str) -> Result<Vec<String>, String> {
@@ -1518,6 +1535,10 @@ fn is_qualified_sys_failure_code(code: &str) -> bool {
         })
 }
 
+/// The six name lists mirror the column groups of the inventory table being
+/// validated, so they stay positional and read as headers above the call site's
+/// literal lists.
+#[allow(clippy::too_many_arguments)]
 fn validate_named_rows(
     value: &Value,
     inventory: &str,
@@ -1845,12 +1866,12 @@ fn validate_cross_inventory_names(api: &Value) -> Result<(), String> {
                 "removed system API name `{removed}` is still publicly declared"
             ));
         }
-        if let Some(replacement) = descriptor["replacement"].as_str() {
-            if !api_paths.contains(replacement) {
-                return Err(format!(
-                    "removed system API name `{removed}` has unresolved replacement `{replacement}`"
-                ));
-            }
+        if let Some(replacement) = descriptor["replacement"].as_str()
+            && !api_paths.contains(replacement)
+        {
+            return Err(format!(
+                "removed system API name `{removed}` has unresolved replacement `{replacement}`"
+            ));
         }
     }
     Ok(())

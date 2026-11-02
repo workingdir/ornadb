@@ -59,6 +59,8 @@ fn spill(
     }
 }
 
+/// Each planner fixture helper assembles one plan shape from its parts.
+#[allow(clippy::too_many_arguments)]
 fn plan(
     first_budget: u64,
     second_budget: u64,

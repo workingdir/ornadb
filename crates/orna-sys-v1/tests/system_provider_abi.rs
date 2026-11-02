@@ -6030,7 +6030,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
         effects: role_contract.effects.clone(),
     };
 
-    let selected_registry = ProviderRoleRegistry::from_baked_abi(&table)
+    let selected_registry = ProviderRoleRegistry::from_baked_abi(table)
         .expect("required metadata role resolves its baked provider");
     let selected_offer = selected_registry
         .resolve(role_name)
@@ -6149,7 +6149,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
         };
         let selected_result = selected_registry
             .dispatch_to_provider(
-                &table,
+                table,
                 operation_name,
                 &selected_provider,
                 &expected_arguments,
@@ -6225,17 +6225,17 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
         };
         let wrong_result = if selected_route {
             selected_registry.dispatch_to_provider(
-                &table,
+                table,
                 operation_name,
                 &wrong_result_provider,
-                &[first_input.clone()],
+                std::slice::from_ref(&first_input),
                 |_| Ok(()),
             )
         } else {
             table.dispatch_to_provider(
                 operation_name,
                 &wrong_result_provider,
-                &[first_input.clone()],
+                std::slice::from_ref(&first_input),
                 |_| Ok(()),
             )
         };
@@ -6265,7 +6265,7 @@ fn provider_metadata_edges_preserve_generic_schema_and_dispatch_contracts() {
         };
         let arity_result = if selected_route {
             selected_registry.dispatch_to_provider(
-                &table,
+                table,
                 operation_name,
                 &arity_provider,
                 &[],

@@ -176,6 +176,8 @@ fn generation(value: u64, position: Option<&[u8]>) -> QueryCheckpointGenerationD
     }
 }
 
+/// Each planner fixture helper assembles one plan shape from its parts.
+#[allow(clippy::too_many_arguments)]
 fn occurrence(
     checkpoint: &str,
     restore: u64,
