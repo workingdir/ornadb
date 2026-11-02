@@ -222,6 +222,14 @@ jobs:
           --out "$RUNNER_TEMP/gate-evidence"
           -- python3 scripts/check_product_claims.py prune-expire
 
+      - name: Check the shipped crate carries no retired row writer
+        if: ${{ !cancelled() }}
+        run: >-
+          python3 scripts/gate_evidence.py run --check retired-row-writers
+          --record claims-retired-row-writers --title "product claim: no retired row writer in the shipped crate"
+          --out "$RUNNER_TEMP/gate-evidence" --timeout-minutes 40
+          -- bash scripts/check_retired_row_writers.sh
+
       - name: Upload the evidence records and logs
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
