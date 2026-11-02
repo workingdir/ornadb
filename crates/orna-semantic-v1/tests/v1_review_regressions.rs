@@ -842,7 +842,7 @@ fn table_display_and_present_writes_require_type_diagnostics() {
     ] {
         let source = render_source_fixture(
             include_str!("fixtures/inline-v1_review_regressions/8b311ae59082.orna"),
-            &[("protocol", &protocol), ("member", &member)],
+            &[("protocol", protocol), ("member", member)],
         );
         expect_diagnostics(&analyze_main(&source), &[DIAG_DISPLAY_READ_ONLY]);
     }
@@ -862,13 +862,13 @@ fn presentation_direct_return_terminates_write_scan() {
     ] {
         let accepted = render_source_fixture(
             include_str!("fixtures/inline-v1_review_regressions/eca9c0c90cf4.orna"),
-            &[("protocol", &protocol), ("member", &member)],
+            &[("protocol", protocol), ("member", member)],
         );
         expect_accepted(&analyze_main(&accepted));
 
         let rejected = render_source_fixture(
             include_str!("fixtures/inline-v1_review_regressions/dd5e785cd9c3.orna"),
-            &[("protocol", &protocol), ("member", &member)],
+            &[("protocol", protocol), ("member", member)],
         );
         expect_diagnostics(&analyze_main(&rejected), &[DIAG_DISPLAY_READ_ONLY]);
     }
@@ -956,7 +956,7 @@ fn presentation_effect_summaries_propagate_through_helpers() {
     ] {
         let source = render_source_fixture(
             include_str!("fixtures/inline-v1_review_regressions/8e46d6a91cc3.orna"),
-            &[("protocol", &protocol), ("member", &member)],
+            &[("protocol", protocol), ("member", member)],
         );
         expect_accepted(&analyze_main(&source));
     }
@@ -1137,7 +1137,7 @@ fn generic_protocol_overlap_rejection_is_independent_of_source_order() {
     ] {
         let result = analyze_main(&render_source_fixture(
             include_str!("fixtures/inline-v1_review_regressions/9ee5c163a769.orna"),
-            &[("implementations", &implementations)],
+            &[("implementations", implementations)],
         ));
         expect_diagnostics(&result, &[DIAG_TYPE]);
         assert!(result.diagnostics.iter().any(|diagnostic| {

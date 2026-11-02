@@ -156,13 +156,13 @@ fn verify_root<S: OgbObjects>(
     if total > OGB_MAX_LENGTH {
         return Err(OgbError::Malformed("meta total range"));
     }
-    if let Some((_, max_len)) = payload.as_ref() {
-        if total > *max_len {
-            return Err(OgbError::Limit {
-                total,
-                limit: *max_len,
-            });
-        }
+    if let Some((_, max_len)) = payload.as_ref()
+        && total > *max_len
+    {
+        return Err(OgbError::Limit {
+            total,
+            limit: *max_len,
+        });
     }
     let Item::Bytes(data_oid) = data_oid else {
         return Err(OgbError::Malformed("meta data oid"));
@@ -197,6 +197,8 @@ fn verify_root<S: OgbObjects>(
     })
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 /// Recursively verifies one data node. Chunk bytes are fed to `hasher` in order,
 /// and appended to `payload` when the caller asked for the content.
 fn verify_node<S: OgbObjects>(
@@ -721,12 +723,11 @@ pub(crate) mod tests {
         Sha256::digest(data).into()
     }
 
+    /// One index child entry: its stop position, object id and optional digest.
+    type IndexChild = (u64, Vec<u8>, Option<[u8; 32]>);
+
     /// Encodes `[1, height, total, [[stop, oid, digest|null], ...]]`.
-    fn index_bytes(
-        height: u64,
-        total: u64,
-        children: &[(u64, Vec<u8>, Option<[u8; 32]>)],
-    ) -> Vec<u8> {
+    fn index_bytes(height: u64, total: u64, children: &[IndexChild]) -> Vec<u8> {
         let mut out = vec![0x84, 0x01];
         cbor_head(0, height, &mut out);
         cbor_head(0, total, &mut out);

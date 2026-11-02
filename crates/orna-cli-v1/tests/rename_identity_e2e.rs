@@ -1,4 +1,4 @@
-//! `orna mv` keeps a table's ObjectId in a database the product created
+//! `orna mv` keeps a table's `ObjectId` in a database the product created
 //! (ORNA-OBJECT-003, ORNA-EVOL-001, ORNA-META-001; Gate A "identities
 //! survive rename"): `orna init`, `orna commit`, `orna publish` a row,
 //! `orna mv Music Archive`, review the source with Git, `orna commit`. The

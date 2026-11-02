@@ -113,6 +113,9 @@ pub fn serialize_host_registry(registry: &SystemHostOperationRegistry) -> Result
     serde_json::to_string_pretty(&canonical_value).map_err(|error| error.to_string())
 }
 
+/// Used by the host and system registry parity test targets, which include this
+/// module; the build-script copy of the module has no such caller.
+#[allow(dead_code)]
 pub fn generate_host_registry(source_root: &Path) -> Result<String, String> {
     let registry = generate_typed_host_registry(source_root)?;
     serialize_host_registry(&registry)

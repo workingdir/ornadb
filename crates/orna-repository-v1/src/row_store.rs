@@ -456,6 +456,8 @@ pub struct RowMapSnapshot {
 }
 
 impl RowMapSnapshot {
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     pub(crate) fn issue(
         version: RowMapVersion,
         authority: [u8; 32],
@@ -534,7 +536,7 @@ impl RowMapSnapshot {
                 range
                     .upper_exclusive
                     .as_ref()
-                    .map_or(true, |upper| entry.key < *upper)
+                    .is_none_or(|upper| entry.key < *upper)
             })
             .take(range.limit)
             .map(|entry| AdmittedRow::from_entry(&self.version, entry))
@@ -1144,6 +1146,8 @@ impl RowValue {
         }
     }
 
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     /// The complete canonical ORP-1 page body for an ordered set of entries:
     /// the CBOR array of `[key, value]` pairs a reader decodes into one leaf.
     /// Entry order is the order supplied, which the caller owns.

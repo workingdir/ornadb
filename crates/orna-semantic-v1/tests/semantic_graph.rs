@@ -322,7 +322,7 @@ fn calendar_buckets_require_typed_zones_and_do_not_conflate_elapsed_durations() 
     ] {
         let source = render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/7294729a7490.orna"),
-            &[("body", &body)],
+            &[("body", body)],
         );
         let result = analyze_with_catalogue(
             &[ModuleInput::new("buckets.orna", source)],
@@ -578,7 +578,7 @@ fn table_mutations_validate_patch_fields_and_ordered_keys_across_imports() {
         ] {
             let body = render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/01ea7c81fd2b.orna"),
-                &[("prefix", &prefix), ("operation", &operation)],
+                &[("prefix", prefix), ("operation", operation)],
             );
             let inputs = if imported {
                 vec![
@@ -698,18 +698,18 @@ fn declared_table_admission_retains_required_default_and_computed_metadata_acros
                         render_source_fixture(
                             include_str!("fixtures/inline-semantic_graph/a3ba8311f81e.orna"),
                             &[
-                                ("row", &row),
-                                ("receiver", &receiver),
-                                ("operation", &operation),
+                                ("row", row),
+                                ("receiver", receiver),
+                                ("operation", operation),
                             ],
                         )
                     } else {
                         render_source_fixture(
                             include_str!("fixtures/inline-semantic_graph/3f4b72b593e6.orna"),
                             &[
-                                ("receiver", &receiver),
-                                ("operation", &operation),
-                                ("row", &row),
+                                ("receiver", receiver),
+                                ("operation", operation),
+                                ("row", row),
                             ],
                         )
                     };
@@ -731,7 +731,7 @@ fn declared_table_admission_retains_required_default_and_computed_metadata_acros
                             "main.orna",
                             render_source_fixture(
                                 include_str!("fixtures/inline-semantic_graph/252c5ea7ddea.orna"),
-                                &[("declaration", &declaration), ("body", &body)],
+                                &[("declaration", declaration), ("body", &body)],
                             ),
                         )]
                     };
@@ -830,7 +830,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
                 "rows.orna",
                 render_source_fixture(
                     include_str!("fixtures/inline-semantic_graph/808e0cc9149d.orna"),
-                    &[("operation", &operation), ("value", &value)],
+                    &[("operation", operation), ("value", value)],
                 ),
             )]);
             if let Some(expected) = expected {
@@ -869,7 +869,7 @@ fn table_insert_and_upsert_validate_provided_fields() {
             "rows.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/22e14ae5d0e2.orna"),
-                &[("value", &value)],
+                &[("value", value)],
             ),
         )]);
         assert!(has(&result, code), "{:?}", result.diagnostics);
@@ -884,7 +884,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
         "decimal-upsert.orna",
         render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/b9c1b567cc20.orna"),
-            &[("declaration", &declaration)],
+            &[("declaration", declaration)],
         ),
     )]);
     assert!(
@@ -897,7 +897,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
         "decimal-insert.orna",
         render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/26ac9a852d79.orna"),
-            &[("declaration", &declaration)],
+            &[("declaration", declaration)],
         ),
     )]);
     assert!(
@@ -914,7 +914,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
         "decimal-missing-key.orna",
         render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/c3066bc5ad9a.orna"),
-            &[("declaration", &declaration)],
+            &[("declaration", declaration)],
         ),
     )]);
     assert!(
@@ -929,7 +929,7 @@ fn decimal_primary_key_upsert_admits_partial_rows_but_insert_requires_completene
         "decimal-invalid-field.orna",
         render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/d538eed4759d.orna"),
-            &[("declaration", &declaration)],
+            &[("declaration", declaration)],
         ),
     )]);
     assert!(
@@ -993,7 +993,7 @@ fn relation_comparisons_require_an_explicit_comparison_operation() {
             "relations.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/1a494648dbd3.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(result.diagnostics.iter().any(|diagnostic| {
@@ -1019,7 +1019,7 @@ fn ordered_comparisons_reject_mismatched_and_unsupported_evaluator_values() {
             "ordered-comparison.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/d4d71edde22b.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(
@@ -1041,7 +1041,7 @@ fn failure_skip_requires_a_typed_version_precondition() {
     ] {
         let source = render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/9638bea36fee.orna"),
-            &[("arguments", &arguments)],
+            &[("arguments", arguments)],
         );
         let result = analyze(&[ModuleInput::new("skip.orna", source)]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
@@ -1065,7 +1065,7 @@ fn failure_replay_requires_a_typed_version_precondition() {
     ] {
         let source = render_source_fixture(
             include_str!("fixtures/inline-semantic_graph/67c676dcea5a.orna"),
-            &[("arguments", &arguments)],
+            &[("arguments", arguments)],
         );
         let result = analyze(&[ModuleInput::new("replay.orna", source)]);
         assert!(has(&result, DIAG_TYPE), "{:?}", result.diagnostics);
@@ -1819,7 +1819,7 @@ fn imported_generic_calls_reject_invalid_explicit_type_arguments() {
                 "consumer.orna",
                 render_source_fixture(
                     include_str!("fixtures/inline-semantic_graph/1ba59ac17631.orna"),
-                    &[("body", &body)],
+                    &[("body", body)],
                 ),
             ),
         ]);
@@ -2056,7 +2056,7 @@ fn frozen_nominal_nested_impl_uses_authoritative_fixture_surface() {
     assert!(!has(&invalid_source, DIAG_UNRESOLVED));
     let nonexact_source = render_source_fixture(
         include_str!("fixtures/inline-semantic_graph/787d3b77e398.orna"),
-        &[("source", &source)],
+        &[("source", source)],
     );
     let nonexact = analyze_with_catalogue(
         &[ModuleInput::new(
@@ -2538,7 +2538,7 @@ fn relation_windows_admit_the_standard_size_and_step_contract() {
             "invalid-window.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/8f6114f1e1fb.orna"),
-                &[("body", &body)],
+                &[("body", body)],
             ),
         )]);
         assert!(
@@ -7804,7 +7804,6 @@ fn paired_sparse_omission_replay_recovers_learned_lane_identities() {
                 expected
                     .iter()
                     .map(|selector| format!("selector:{selector}"))
-                    .into_iter()
                     .collect(),
                 "{lane} must recover its concrete selector history through sparse rows"
             );
@@ -15142,17 +15141,16 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
     };
     assert_canonical_snapshot_context_maps(result.as_ref());
 
-    let cases: [
-        (
-            &str,
-            &str,
-            &str,
-            &[&str],
-            Option<&[&str]>,
-            Option<&[&str]>,
-        );
-        18
-    ] = [
+    type PairedDepthCase = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        Option<&'static [&'static str]>,
+        Option<&'static [&'static str]>,
+    );
+
+    let cases: [PairedDepthCase; 18] = [
         ("left", "root", "saved", &["950", "948"], None, None),
         (
             "left",
@@ -15894,7 +15892,7 @@ fn declared_defaults_are_checked_and_shared_by_direct_and_piped_calls() {
             "defaults.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/3ba4b5f57e5a.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
@@ -16757,7 +16755,7 @@ fn replay_status_default_does_not_waive_the_version_precondition() {
             "replay-default.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/8522f29bf6a0.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
@@ -16792,7 +16790,7 @@ fn callable_list_defaults_require_every_member_to_supply_a_default() {
             "callable-defaults.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/28b3f043e08d.orna"),
-                &[("second", &second)],
+                &[("second", second)],
             ),
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -16825,7 +16823,7 @@ fn default_expression_effects_remain_visible_on_the_callable() {
             "effectful-default.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/fe8f91f175b2.orna"),
-                &[("annotation", &annotation)],
+                &[("annotation", annotation)],
             ),
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -16886,11 +16884,11 @@ fn direct_and_piped_calls_share_argument_validation() {
         for expression in [
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/6c9762998de2.orna"),
-                &[("arguments", &arguments)],
+                &[("arguments", arguments)],
             ),
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/3a5ee8f3394a.orna"),
-                &[("arguments", &arguments)],
+                &[("arguments", arguments)],
             ),
         ] {
             let result = analyze(&[ModuleInput::new(
@@ -16928,7 +16926,7 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
             "logical-operators.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/857baac217a5.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
@@ -16944,7 +16942,7 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
             "logical-operators.orna",
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/857baac217a5.orna"),
-                &[("expression", &expression)],
+                &[("expression", expression)],
             ),
         )]);
         assert!(
@@ -18094,7 +18092,7 @@ fn root_relation_aggregates_respect_shadowed_bindings() {
             format!("shadowed-{operation}.orna"),
             render_source_fixture(
                 include_str!("fixtures/inline-semantic_graph/11875dc9243f.orna"),
-                &[("operation", &operation), ("terminal", &terminal)],
+                &[("operation", operation), ("terminal", terminal)],
             ),
         )]);
         assert!(

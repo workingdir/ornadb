@@ -7,6 +7,11 @@
 //! evaluator below handles pure expression units, while the durable runtime
 //! still owns module execution, effects, and scenario lifecycles.
 
+// Every stage function returns `StageOutcome<Diagnostic>` with the full
+// diagnostic the adapter reports: code, message, notes and source span. Boxing
+// it would push a Box onto every caller to save an allocation on an error path.
+#![allow(clippy::result_large_err)]
+
 use crate::{
     ConformanceAdapter, ProjectEnvironment, ProjectExpectations, ProjectUnit, Scenario, SourceUnit,
     StageOutcome, SyntaxAdapter,
@@ -185,9 +190,6 @@ fn typecheck_phase(diagnostic: &Diagnostic) -> bool {
             | "ORNA100-E-SYS-STORAGE-CALL"
             | "E1008"
             | "E1009"
-            | "E2001"
-            | "E2002"
-            | "E2003"
             | "E3002"
             | "E3003"
             | "E3010"
@@ -1126,11 +1128,10 @@ fn bind_standard_function_aliases(
         }
     }
     for (alias, target) in aliases {
-        if let Some(function) = functions.get(&target).cloned() {
-            if !functions.contains_key(&alias) {
+        if let Some(function) = functions.get(&target).cloned()
+            && !functions.contains_key(&alias) {
                 functions.insert(alias, function);
             }
-        }
     }
     Ok(())
 }
@@ -3863,6 +3864,9 @@ impl DurableTransactionalEvaluator {
         }
         Ok(StageOutcome::Passed)
     }
+    /// The inputs are one adapter call: the repository, the request record and
+    /// the effect handler the admitted project runs through.
+    #[allow(clippy::too_many_arguments)]
     async fn execute_admitted_project_request(
         &self,
         repository: &Repository,
@@ -4500,15 +4504,15 @@ fn evaluate_function_assertion(
             environment: Environment::new(),
         },
     );
-    let result = invoke_named_with_effects_and_budget(
+    
+    invoke_named_with_effects_and_budget(
         wrapper_name,
         &admitted,
         &Environment::new(),
         limits,
         effects,
         budget,
-    );
-    result
+    )
 }
 
 struct ActivationRelationEffectHandler<'a, 'runtime> {
@@ -4761,6 +4765,9 @@ fn candidate_table_fields_in_stable_id_order(
 }
 
 impl TransactionalTableCandidateValidator {
+    /// The inputs are one table candidate: its working directory generation,
+    /// the retained functions and the table schema it validates against.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         cwd_generation: Option<orna_repository_v1::CwdGeneration>,
         functions: &Functions,
@@ -7092,11 +7099,10 @@ fn admit_transaction_project_with(
         }
     }
     for (alias, target) in standard_aliases {
-        if let Some(function) = functions.get(&target).cloned() {
-            if !functions.contains_key(&alias) {
+        if let Some(function) = functions.get(&target).cloned()
+            && !functions.contains_key(&alias) {
                 functions.insert(alias, function);
             }
-        }
     }
     // Candidate validation can admit a project without executing a transaction entry.
     if !entry.is_empty() && !functions.contains_key(entry) {
@@ -9693,6 +9699,9 @@ fn evaluate_module_assertion(
     }
 }
 
+/// functions and the effect handler it runs through.
+/// The inputs are one adapter call: the project unit, the retained standard
+#[allow(clippy::too_many_arguments)]
 fn evaluate_module_predicate(
     activation: &TransactionActivation<'_>,
     predicate: &ModuleAssertionPredicate<'_>,
@@ -11021,6 +11030,7 @@ mod transaction_admission_tests {
         assert_eq!(value_for("id"), Some(&OvbRaw::Text("note-7".into())));
     }
 
+    #[allow(dead_code)]
     fn same_key_rekey_reports_duplicate_without_mutating_the_committed_row() {
         let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
         assert!(matches!(

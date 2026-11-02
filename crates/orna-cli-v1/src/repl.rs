@@ -135,7 +135,7 @@ impl WatchCommandState {
         self.presentation
             .as_ref()?
             .published()
-            .map(|published| published.revision())
+            .map(orna_live_v1::live_presentation::PublishedPresentation::revision)
     }
 
     pub fn watch(&self) -> Option<[u8; 16]> {
@@ -680,6 +680,7 @@ fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
@@ -741,6 +742,7 @@ fn accept_frame<W: Write>(
 }
 
 
+#[allow(clippy::needless_pass_by_value)]
 /// Drains every immediately available frame; `Ok(None)` keeps the REPL
 /// interactive instead of blocking the line loop.
 fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
@@ -781,15 +783,12 @@ fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
     let Some(request) = binding.state.take_resync_request() else {
         return Ok(true);
     };
-    match binding.source.request_resync(request) {
-        Ok(()) => {
-            binding.state.acknowledge_resync_request(request);
-            Ok(true)
-        }
-        Err(_) => {
-            write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
-            Ok(false)
-        }
+    if let Ok(()) = binding.source.request_resync(request) {
+        binding.state.acknowledge_resync_request(request);
+        Ok(true)
+    } else {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+        Ok(false)
     }
 }
 fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(

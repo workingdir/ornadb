@@ -5,9 +5,14 @@ use std::{
 
 #[path = "src/abi_version.rs"]
 mod abi_version;
+// These modules are compiled into the build script and, by path, into the
+// parity test targets. Each inclusion sees only part of their uses, so the
+// allow sits on each inclusion rather than inside the files.
 #[path = "src/host_registry_model.rs"]
+#[allow(dead_code)]
 mod host_registry_model;
 
+#[allow(dead_code)]
 mod build_host;
 mod build_provider;
 mod build_support;

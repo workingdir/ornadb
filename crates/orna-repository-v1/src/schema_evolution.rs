@@ -194,13 +194,12 @@ impl EvolutionPlan {
 
         let mut changes = SchemaChanges::default();
         for field in &new_fields {
-            if let Some(old_field) = old_fields.iter().find(|old| old.id == field.id) {
-                if old_field.name != field.name {
+            if let Some(old_field) = old_fields.iter().find(|old| old.id == field.id)
+                && old_field.name != field.name {
                     changes
                         .renamed
                         .push((old_field.name.to_owned(), field.name.to_owned()));
                 }
-            }
         }
         let old_stored = old_fields
             .iter()

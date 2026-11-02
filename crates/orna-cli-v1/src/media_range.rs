@@ -160,9 +160,8 @@ pub fn media_reply<E>(
     let plan = plan_media_response(method, range, length);
     let span = match resolve_range(range, length) {
         RangeOutcome::Full if length > 0 => Some((0, length - 1)),
-        RangeOutcome::Full => None,
+        RangeOutcome::Full | RangeOutcome::Unsatisfiable => None,
         RangeOutcome::Partial { start, end } => Some((start, end)),
-        RangeOutcome::Unsatisfiable => None,
     };
     let body = match span {
         Some((start, end)) if plan.send_body => {
@@ -313,10 +312,11 @@ mod tests {
 
     #[test]
     fn empty_representation_reads_nothing() {
-        let reply = media_reply(MediaMethod::Get, None, 0, |_, _| {
-            Ok::<Vec<u8>, ()>(panic!("empty representation must not read"))
-        })
-        .expect("empty plan");
+        let reply =
+            media_reply(MediaMethod::Get, None, 0, |_, _| -> Result<Vec<u8>, ()> {
+                unreachable!("empty representation must not read")
+            })
+            .expect("empty plan");
         assert_eq!(reply.plan.status, 200);
         assert!(reply.body.is_empty());
     }

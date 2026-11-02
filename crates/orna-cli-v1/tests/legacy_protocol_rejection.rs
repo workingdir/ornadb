@@ -67,7 +67,7 @@ fn value_layer_ovb1_export_refuses_annotated_blob_with_invalid_profile() {
         "OVB-1 export must refuse an annotated Blob with InvalidProfile"
     );
     assert_eq!(
-        ValueError::InvalidProfile.code().map(|code| code.as_str()),
+        ValueError::InvalidProfile.code().map(orna_value_v1::ErrorCode::as_str),
         Some(CODE),
         "the export refusal must carry the declared sys code"
     );

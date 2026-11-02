@@ -98,10 +98,10 @@ fn query() -> QueryPlanDescription {
     }
 }
 
-fn routes_for_stage<'a>(
-    explained: &'a orna_sys_v1::ExplainedPlan,
+fn routes_for_stage(
+    explained: &orna_sys_v1::ExplainedPlan,
     stage: u64,
-) -> &'a [orna_sys_v1::PlanByteCapHandoffRoute] {
+) -> &[orna_sys_v1::PlanByteCapHandoffRoute] {
     let filter = explained
         .nodes()
         .iter()

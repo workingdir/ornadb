@@ -5,6 +5,20 @@
 //! database. Executors check the requirement through product commands; gap
 //! probes reproduce the first blocker on that path.
 
+// The scenario oracles are linear transcripts: each file replays one release
+// scenario step by step, indexes fixture lengths it just bounded, and builds
+// diagnostic strings for comparison. Those properties are the fixture, so the
+// lints that describe them are allowed here and nowhere else.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::decimal_bitwise_operands,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::format_collect
+)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
@@ -824,14 +838,14 @@ pub fn entries() -> Vec<Entry> {
 
 // Shared fixtures.
 
-const MEDIA_SOURCE: &str = r#"pub table media(id: Str) {
+const MEDIA_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
     content: Blob,
 }
 
 pub fn add(id: Str, title: Str, content: Blob) =
     media.insert({ id: id, title: title, content: content });
-"#;
+";
 
 /// Bytes that occur nowhere else in a store.
 fn distinctive_payload(length: usize) -> Vec<u8> {
@@ -1487,26 +1501,23 @@ fn check_native_graph(entries: &[StoreEntry]) -> Check {
             "node {node} has entries {names:?}"
         );
         for kid in kids {
-            match kid.name() {
-                "data" => ensure!(
-                    kid.kind == "blob" && kid.size.is_some_and(|size| size <= 64 * 1024),
-                    "node {node} data is not a bounded blob"
-                ),
-                _ => {
-                    ensure!(kid.kind == "tree", "node {node} refs is not a tree");
-                    for edge in children
-                        .get(kid.path.as_str())
-                        .map(Vec::as_slice)
-                        .unwrap_or_default()
-                    {
-                        ensure!(
-                            edge.name() == edge.oid
-                                && matches!(edge.kind.as_str(), "tree" | "blob"),
-                            "edge {} is not named by its {} object ID",
-                            edge.path,
-                            edge.kind
-                        );
-                    }
+            if kid.name() == "data" { ensure!(
+                kid.kind == "blob" && kid.size.is_some_and(|size| size <= 64 * 1024),
+                "node {node} data is not a bounded blob"
+            ); } else {
+                ensure!(kid.kind == "tree", "node {node} refs is not a tree");
+                for edge in children
+                    .get(kid.path.as_str())
+                    .map(Vec::as_slice)
+                    .unwrap_or_default()
+                {
+                    ensure!(
+                        edge.name() == edge.oid
+                            && matches!(edge.kind.as_str(), "tree" | "blob"),
+                        "edge {} is not named by its {} object ID",
+                        edge.path,
+                        edge.kind
+                    );
                 }
             }
         }
@@ -2366,13 +2377,13 @@ fn forbidden_blob_synonyms_are_accepted(db: &mut Db) -> Probe {
 
 fn nested_blobs_are_refused(db: &mut Db) -> Probe {
     db.declare(
-        r#"pub table album(id: Str) {
+        r"pub table album(id: Str) {
     cover: Blob?,
     tracks: [Blob],
 }
 
 pub fn add(id: Str, track: Blob) = album.insert({ id: id, cover: null, tracks: [track] });
-"#,
+",
     )?;
     db.write("track.bin", b"track bytes")?;
     let root = db.root_text()?;

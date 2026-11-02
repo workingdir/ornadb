@@ -35,10 +35,8 @@ use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{Raw, Value};
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 #[path = "support/editor_mount.rs"]
@@ -491,9 +489,7 @@ async fn stale_save_status_json_flags_the_fields_source() {
         assert_success(&json, "orna mount status --json");
         let json = String::from_utf8_lossy(&json.stdout).into_owned();
         let after = json
-            .split_once("\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"")
-            .map(|(_, rest)| rest.to_owned())
-            .unwrap_or_else(|| panic!("the JSON status lists the london draft code: {json}"));
+            .split_once("\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"").map_or_else(|| panic!("the JSON status lists the london draft code: {json}"), |(_, rest)| rest.to_owned());
         after.split('"').next().unwrap_or_default().to_owned()
     };
     assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is in the JSON");

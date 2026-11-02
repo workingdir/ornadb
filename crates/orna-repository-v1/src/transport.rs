@@ -1733,8 +1733,11 @@ mod tests {
         thread,
     };
 
-    static PUSH_LOCK_GATE: Mutex<Option<(PathBuf, Arc<(Barrier, Barrier)>)>> =
-        Mutex::new(None);
+    /// The worktree under test and the two barriers that hold a push between
+    /// journal validation and its lock.
+    type PushGate = (PathBuf, Arc<(Barrier, Barrier)>);
+
+    static PUSH_LOCK_GATE: Mutex<Option<PushGate>> = Mutex::new(None);
 
     pub(super) fn pause_push_after_journal_validation(worktree: &Path) {
         let gate = PUSH_LOCK_GATE
@@ -1977,7 +1980,7 @@ mod tests {
     /// supervisor kills it.
     fn crashed_fetch_child_body(root: &Path) {
         let repository =
-            Repository::discover(&root.join("local")).expect("discover crash repository");
+            Repository::discover(root.join("local")).expect("discover crash repository");
         let request =
             FetchRequest::new("origin", [RequestedRef::branch("main").unwrap()], []).unwrap();
         let _ = repository.fetch(&request);

@@ -393,9 +393,9 @@ fn authoritative_parse_invalid_fixture_corpus_fails() {
     for name in files {
         let source = reference(&format!("examples/invalid/{name}.orna"));
         let diagnostics = if name == "row-declaration" {
-            parse_row(&source).diagnostics
+            parse_row(source).diagnostics
         } else {
-            parse_module(&source).diagnostics
+            parse_module(source).diagnostics
         };
         assert!(!diagnostics.is_empty(), "{name} unexpectedly parsed");
     }
@@ -444,9 +444,9 @@ fn authoritative_parse_invalid_primary_codes_match_manifest() {
     for (name, expected) in cases {
         let source = reference(&format!("examples/invalid/{name}.orna"));
         let diagnostics = if name == "row-declaration" {
-            parse_row(&source).diagnostics
+            parse_row(source).diagnostics
         } else {
-            parse_module(&source).diagnostics
+            parse_module(source).diagnostics
         };
         let actual = diagnostics.first().map(|d| d.code).unwrap_or("<none>");
         if actual != expected {

@@ -178,6 +178,7 @@ fn mv_renames_a_committed_table_and_preserves_table_and_child_field_ids() {
 fn mv_renames_a_table_in_a_nested_module() {
     const MAIN: &str = "use warehouse;\n";
     const WAREHOUSE: &str = "pub table Media(id: Str) { size: Int, }\n";
+    const RENAMED_WAREHOUSE: &str = "pub table Archive(id: Str) { size: Int, }\n";
     let (_directory, root, initial) =
         committed_project_with(&[("main.orna", MAIN), ("warehouse.orna", WAREHOUSE)]);
     assert!(initial.id(ObjectKind::Table, "warehouse.Media").is_some());
@@ -185,7 +186,6 @@ fn mv_renames_a_table_in_a_nested_module() {
     let output = run_cli(&root, &["mv", "warehouse.Media", "Archive"]);
     assert_cli_success(&output, "orna mv");
 
-    const RENAMED_WAREHOUSE: &str = "pub table Archive(id: Str) { size: Int, }\n";
     assert_eq!(
         fs::read_to_string(root.join("warehouse.orna")).unwrap(),
         RENAMED_WAREHOUSE

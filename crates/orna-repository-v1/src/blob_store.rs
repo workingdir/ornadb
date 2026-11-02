@@ -5,6 +5,12 @@
 //! when metadata is inspected, and they do not provide a second object store
 //! or a legacy loose/compact/Parquet writer.
 
+// The format-3 Blob descriptor and byte-index types below describe the store
+// surface the writer path has not reached yet: the module exposes them, and the
+// publication code still uses the older representation. The allow is scoped to
+// this module so a new dead item elsewhere is still reported.
+#![allow(dead_code)]
+
 use std::{cell::Cell, fmt, io::Read};
 
 use sha2::{Digest, Sha256};

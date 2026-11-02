@@ -34,13 +34,15 @@ fn run_history(directory: &Path, arguments: &[&str]) -> Output {
 
 /// The 32-digit hex relation id the `orna history` CLI takes.
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    let mut output = String::with_capacity(32);
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
     for byte in relation_id {
-        output.push_str(&format!("{byte:02x}"));
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    output
+    out
 }
 
+#[allow(clippy::too_many_lines)]
 /// ORNA-EVOL-004: compare the logical row's Blob annotation transition across
 /// pinned endpoints, without treating their distinct Git/storage layout IDs
 /// as row changes and without reading either snapshot's payloads.

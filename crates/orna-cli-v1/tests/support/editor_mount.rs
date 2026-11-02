@@ -173,16 +173,16 @@ pub fn write_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
 }
 
 pub struct EditorMount {
-    pub _mounted: MountedProcess,
+    pub mounted: MountedProcess,
     /// A live writer other than the mount, holding the worktree's runtime owner
     /// lock and writer lease for the fixture's lifetime.
-    pub _foreign_writer: Option<RuntimeState>,
+    pub foreign_writer: Option<RuntimeState>,
     pub repository: Repository,
     pub relation_id: [u8; 16],
     pub row_directory: PathBuf,
     pub data_path: PathBuf,
-    pub _mount_parent: TempDir,
-    pub _repository_directory: TempDir,
+    pub mount_parent: TempDir,
+    pub repository_directory: TempDir,
 }
 
 /// Starts `mount --cwd` and waits until the Linux mount table lists `mountpoint`.
@@ -372,7 +372,7 @@ pub async fn repository_with_source_row(
 /// worktree's runtime owner lock and takes the writer lease for
 /// `FOREIGN_OWNER`, so a mount started afterwards is only a secondary
 /// participant (ORNA-TURSO-005).
-pub async fn live_foreign_writer(repository: &Repository) -> RuntimeState {
+pub async fn liveforeign_writer(repository: &Repository) -> RuntimeState {
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(repository);
     let state = RuntimeState::open(repository, runtime_identity, initial_digest)
         .await
@@ -556,7 +556,7 @@ pub async fn start_editor_mount_with_source(
     let (repository_directory, repository, relation_id) =
         repository_with_source_row(source, "london", 0x90, initial).await;
     let foreign_writer = if foreign_owner {
-        Some(live_foreign_writer(&repository).await)
+        Some(liveforeign_writer(&repository).await)
     } else {
         None
     };
@@ -568,14 +568,14 @@ pub async fn start_editor_mount_with_source(
     let row_directory = mountpoint.join("Music/london");
     let data_path = row_directory.join("data.orna");
     EditorMount {
-        _mounted: mounted,
-        _foreign_writer: foreign_writer,
+        mounted,
+        foreign_writer,
         repository,
         relation_id,
         row_directory,
         data_path,
-        _mount_parent: mount_parent,
-        _repository_directory: repository_directory,
+        mount_parent,
+        repository_directory,
     }
 }
 
@@ -610,7 +610,7 @@ pub fn assert_errno(result: std::io::Result<()>, expected: &[i32], context: &str
 /// Draft guard value the mount publishes on its root: `1` while any draft is
 /// unresolved, `0` when none is.
 pub fn draft_guard(fixture: &EditorMount) -> u8 {
-    let root = fixture._mount_parent.path().join("library");
+    let root = fixture.mount_parent.path().join("library");
     let mut value = [0_u8; 1];
     let length = rustix::fs::getxattr(root.as_path(), "user.orna.unresolved-drafts", &mut value)
         .expect("read the mount draft guard");
@@ -628,9 +628,7 @@ pub async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &st
         if value == expected {
             return;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("{context}: guard is {value}, expected {expected} after 5s");
-        }
+        assert!(tokio::time::Instant::now() < deadline, "{context}: guard is {value}, expected {expected} after 5s");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

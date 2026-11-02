@@ -26,11 +26,9 @@ use std::{
 
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
 
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
@@ -98,7 +96,7 @@ fn owner_routed_edit(fixture: &EditorMount, title: &str) {
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args(["edit", "Music/london/data.orna"])
         .env("EDITOR", &editor)
         .output()
@@ -126,7 +124,7 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
     }
     let mut fixture = start_editor_mount(false).await;
     let original = fresh_view(&fixture);
-    let mountpoint = fixture._mount_parent.path().join("library");
+    let mountpoint = fixture.mount_parent.path().join("library");
 
     let mut draft = open_rw(&fixture);
     draft.set_len(0).unwrap();
@@ -160,20 +158,20 @@ async fn unsynced_draft_is_invisible_to_second_open_and_after_child_exec_and_sig
     // Kill with the writer's descriptor still open. Once the daemon is gone the
     // connection is aborted, so closing the descriptor afterwards cannot flush
     // the draft into acceptance.
-    signal(fixture._mounted.pid(), "KILL");
+    signal(fixture.mounted.pid(), "KILL");
     fixture
-        ._mounted
+        .mounted
         .wait_for_exit(Duration::from_secs(10))
         .expect("SIGKILL stops the mount");
-    fixture._mounted.release_mountpoint();
+    fixture.mounted.release_mountpoint();
     drop(draft);
     drop(second);
 
-    fixture._mounted = wait_for_mount(start_mount_process(
-        fixture._repository_directory.path(),
+    fixture.mounted = wait_for_mount(start_mount_process(
+        fixture.repository_directory.path(),
         &mountpoint,
     ));
-    fixture._mounted.await_path(&fixture.data_path);
+    fixture.mounted.await_path(&fixture.data_path);
     assert_eq!(
         fresh_view(&fixture),
         original,
@@ -405,7 +403,7 @@ fn write_editor_script(path: &std::path::Path, body: &str) {
 /// refused (E2000, the stale-edit cause), the draft is retained, and the other
 /// writer's row stays in place.
 /// The `E2000` assertion relies on `ESTALE` on the wire: `EAGAIN` surfaces as EOPNOTSUPP on
-/// this kernel (ornadb-eufo.1.1; tests/vfs_setxattr_errno_kernel_limit.rs).
+/// this kernel (ornadb-eufo.1.1; `tests/vfs_setxattr_errno_kernel_limit.rs`).
 #[tokio::test]
 async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     if !require_fuse_or_skip() {
@@ -422,7 +420,7 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
             "#!/bin/sh\nEDITOR='{other}' '{bin}' --db '{db}' edit Music/london/data.orna || exit 1\nprintf '%s\\n' '{mine}' > \"$1\"\n",
             other = other_editor.display(),
             bin = env!("CARGO_BIN_EXE_orna"),
-            db = fixture._repository_directory.path().display(),
+            db = fixture.repository_directory.path().display(),
             mine = music_row("Mine").trim_end(),
         ),
     )
@@ -432,7 +430,7 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--debug")
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args(["edit", "Music/london/data.orna"])
         .env("EDITOR", &outer_editor)
         .output()
@@ -455,9 +453,7 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     let retained = diagnostics
         .split("draft retained at ")
         .nth(1)
-        .and_then(|rest| rest.split(['\n', ',', '"']).next())
-        .map(|path| PathBuf::from(path.trim()))
-        .unwrap_or_else(|| panic!("the E2000 refusal names the retained draft path: {diagnostics}"));
+        .and_then(|rest| rest.split(['\n', ',', '"']).next()).map_or_else(|| panic!("the E2000 refusal names the retained draft path: {diagnostics}"), |path| PathBuf::from(path.trim()));
     let draft = std::fs::read_to_string(&retained)
         .unwrap_or_else(|error| panic!("retained draft at {}: {error}", retained.display()));
     assert!(
@@ -468,7 +464,7 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
 
 /// ORNA-VFS-022 and 41-vfs.md:39-40 (EDIT-1 "other opens see accepted state"):
 /// a row written through the owner while the mount is live, with the kernel
-/// caching disabled by direct_io on editable opens, is visible to every new open.
+/// caching disabled by `direct_io` on editable opens, is visible to every new open.
 /// A read handle opened before that write keeps its generation, which is the
 /// pinned-generation rule, not a stale cache. The fresh `stat` size after this
 /// write is asserted by `stat_after_owner_write_reports_fresh_size`.
@@ -699,7 +695,7 @@ async fn reader_opened_before_owner_write_survives_temp_rename_over_row() {
 /// read or owner write before the rename, keeps the bytes and size it pinned when a temp file
 /// renames over the row. A new open shows the admitted replacement (profiles/vfs-1.md:126-133).
 /// No read happens before the rename, so the kernel page cache cannot serve the old bytes. The
-/// sleep lets the attributes cached at open expire (fs/fuse/dir.c compares i_time with jiffies
+/// sleep lets the attributes cached at open expire (fs/fuse/dir.c compares `i_time` with jiffies
 /// strictly), so `fstat` reaches the server, which must report the pinned node.
 #[tokio::test]
 async fn reader_opened_on_live_row_survives_temp_rename_over_row() {
@@ -820,8 +816,8 @@ async fn temp_rename_shrinking_large_str_row_removes_text_sibling() {
 
 /// ornadb-5il1.470.4: a path `stat` taken right after each owner-routed write reports the
 /// accepted size, even though a `stat` just before the write cached the dentry and attributes.
-/// ENTRY_TTL is zero, so the kernel revalidates on use (fs/fuse/dir.c: fuse_time_to_jiffies
-/// returns 0 for a zero timeout and fuse_dentry_revalidate compares that against jiffies).
+/// `ENTRY_TTL` is zero, so the kernel revalidates on use (fs/fuse/dir.c: `fuse_time_to_jiffies`
+/// returns 0 for a zero timeout and `fuse_dentry_revalidate` compares that against jiffies).
 /// The row grows every round, so a stale size would differ from the accepted size.
 #[tokio::test]
 async fn path_stat_after_owner_write_reports_accepted_size_in_loop() {
@@ -893,7 +889,7 @@ async fn orna_edit_started_after_owner_write_starts_from_fresh_row() {
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args(["edit", "Music/london/data.orna"])
         .env("EDITOR", &editor)
         .output()
@@ -1019,7 +1015,7 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
             "#!/bin/sh\nEDITOR='{other}' '{bin}' --db '{db}' edit Music/london/data.orna || exit 1\nprintf '%s\\n' '{mine}' > \"$1\"\n",
             other = other_editor.display(),
             bin = env!("CARGO_BIN_EXE_orna"),
-            db = fixture._repository_directory.path().display(),
+            db = fixture.repository_directory.path().display(),
             mine = music_row("Strong edit").trim_end(),
         ),
     )
@@ -1027,7 +1023,7 @@ async fn blind_replacement_after_late_temp_overwrites_owner_change_while_orna_ed
     std::fs::set_permissions(&outer_editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args(["edit", "Music/london/data.orna"])
         .env("EDITOR", &outer_editor)
         .output()
@@ -1084,7 +1080,7 @@ async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
     let before = fresh_view(&fixture);
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args([
             "repl",
             "main.Music.insert({ id: \"paris\", title: \"Repl\", artist: \"Kieran\" })",
@@ -1127,10 +1123,10 @@ async fn repl_write_is_refused_while_live_mount_holds_writer_lease() {
 
     // Control: dropping only the mount releases the writer lease and keeps the
     // repository directory, so the same command must now succeed.
-    drop(fixture._mounted);
+    drop(fixture.mounted);
     let released = Command::new(env!("CARGO_BIN_EXE_orna"))
         .arg("--db")
-        .arg(fixture._repository_directory.path())
+        .arg(fixture.repository_directory.path())
         .args([
             "repl",
             "main.Music.insert({ id: \"paris\", title: \"Repl\", artist: \"Kieran\" })",

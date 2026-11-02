@@ -53,30 +53,30 @@ const UNREPORTED_ROLLBACK_TEST: &str =
 enum Scenario {
     /// An external effect was recorded, then the process dies inside the open
     /// writer transaction at the table-write seam.
-    ExternalEffectAtKill,
+    ExternalEffectAtWriteSeam,
     /// A controlled transaction was rolled back in-process, then the process
     /// dies after the rollback was recorded.
-    ControlledRollbackThenKill,
+    ControlledRollbackThenDeath,
     /// An activation declared possible external effects, its table write was
     /// rolled back in-process, then the process dies. The rollback is observed
     /// but cannot be proven controlled, so recovery must stay uncertain.
-    UnreportedRollbackThenKill,
+    UnreportedRollbackThenDeath,
 }
 
 impl Scenario {
     const fn tag(self) -> &'static str {
         match self {
-            Self::ExternalEffectAtKill => "external-effect-at-kill",
-            Self::ControlledRollbackThenKill => "controlled-rollback-then-kill",
-            Self::UnreportedRollbackThenKill => "unreported-rollback-then-kill",
+            Self::ExternalEffectAtWriteSeam => "external-effect-at-kill",
+            Self::ControlledRollbackThenDeath => "controlled-rollback-then-kill",
+            Self::UnreportedRollbackThenDeath => "unreported-rollback-then-kill",
         }
     }
 
     fn parse(value: &str) -> Option<Self> {
         match value {
-            "external-effect-at-kill" => Some(Self::ExternalEffectAtKill),
-            "controlled-rollback-then-kill" => Some(Self::ControlledRollbackThenKill),
-            "unreported-rollback-then-kill" => Some(Self::UnreportedRollbackThenKill),
+            "external-effect-at-kill" => Some(Self::ExternalEffectAtWriteSeam),
+            "controlled-rollback-then-kill" => Some(Self::ControlledRollbackThenDeath),
+            "unreported-rollback-then-kill" => Some(Self::UnreportedRollbackThenDeath),
             _ => None,
         }
     }
@@ -366,13 +366,13 @@ fn run_crashing_child(
 
 #[test]
 fn external_effect_at_the_kill_recovers_as_uncertain_never_rollback() {
-    if child_scenario() == Some(Scenario::ExternalEffectAtKill) {
+    if child_scenario() == Some(Scenario::ExternalEffectAtWriteSeam) {
         external_effect_child(&child_repository());
     }
 
     let (directory, repository) = repository();
     let status = run_crashing_child(
-        Scenario::ExternalEffectAtKill,
+        Scenario::ExternalEffectAtWriteSeam,
         directory.path(),
         EXTERNAL_EFFECT_TEST,
     );
@@ -473,13 +473,13 @@ fn external_effect_at_the_kill_recovers_as_uncertain_never_rollback() {
 
 #[test]
 fn controlled_rollback_before_the_kill_is_the_only_proven_rollback() {
-    if child_scenario() == Some(Scenario::ControlledRollbackThenKill) {
+    if child_scenario() == Some(Scenario::ControlledRollbackThenDeath) {
         controlled_rollback_child(&child_repository());
     }
 
     let (directory, repository) = repository();
     let status = run_crashing_child(
-        Scenario::ControlledRollbackThenKill,
+        Scenario::ControlledRollbackThenDeath,
         directory.path(),
         CONTROLLED_ROLLBACK_TEST,
     );
@@ -553,13 +553,13 @@ fn controlled_rollback_before_the_kill_is_the_only_proven_rollback() {
 
 #[test]
 fn explicit_external_possible_rollback_before_the_kill_is_never_proven() {
-    if child_scenario() == Some(Scenario::UnreportedRollbackThenKill) {
+    if child_scenario() == Some(Scenario::UnreportedRollbackThenDeath) {
         unreported_rollback_child(&child_repository());
     }
 
     let (directory, repository) = repository();
     let status = run_crashing_child(
-        Scenario::UnreportedRollbackThenKill,
+        Scenario::UnreportedRollbackThenDeath,
         directory.path(),
         UNREPORTED_ROLLBACK_TEST,
     );

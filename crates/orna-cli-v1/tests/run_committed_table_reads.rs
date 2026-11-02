@@ -358,7 +358,7 @@ fn invoke_reads_committed_rows_while_runtime_owner_lock_is_held() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("orna CLI process");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_mins(2);
     loop {
         if child.try_wait().expect("poll orna").is_some() {
             break;

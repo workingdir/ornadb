@@ -1120,12 +1120,12 @@ impl<'a> CompactBaseFold<'a> {
             .rows
             .get(&key)
             .is_some_and(|row| row.value.is_some());
-        let role_matches_lineage = match (role, value, was_visible) {
+        let role_matches_lineage = matches!(
+            (role, value, was_visible),
             (CompactSegmentRole::Data, Some(_), false)
-            | (CompactSegmentRole::Replacement, Some(_), true)
-            | (CompactSegmentRole::Deletion, None, true) => true,
-            _ => false,
-        };
+                | (CompactSegmentRole::Replacement, Some(_), true)
+                | (CompactSegmentRole::Deletion, None, true)
+        );
         if !role_matches_lineage {
             return Err(CompactBaseProjectionError::InvalidWriterRole);
         }
@@ -1664,18 +1664,15 @@ impl CompactOvbProfile {
 }
 
 /// An immutable, canonical exact key identity.
-#[derive(Clone, Debug, Hash)]
+///
+/// Equality and hashing are byte equality of the canonical encoding. The
+/// derived impls say exactly that, so the previous hand-written `PartialEq`
+/// added nothing; `Ord` stays manual because it compares decoded primary keys
+/// first and falls back to the encoding.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub struct CompactKeyIdentity {
     encoded: Vec<u8>,
 }
-
-impl PartialEq for CompactKeyIdentity {
-    fn eq(&self, other: &Self) -> bool {
-        self.encoded == other.encoded
-    }
-}
-
-impl Eq for CompactKeyIdentity {}
 
 impl PartialOrd for CompactKeyIdentity {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {

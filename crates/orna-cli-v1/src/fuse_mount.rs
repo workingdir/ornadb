@@ -57,7 +57,18 @@ mod source_write;
 /// the compact publication file bound (ORNA-PUB-001). It is not a VFS spec
 /// bound. A write or truncate that grows a file past it is quota-rejected
 /// (EDQUOT) and never admitted; shrinking an existing larger baseline is allowed.
+#[allow(clippy::cast_possible_truncation)]
 const DRAFT_FILE_BOUND_BYTES: usize = COMPACT_FILE_BOUND_BYTES as usize;
+
+/// Lowercase hex of an identity, as the mount's diagnostics spell it.
+fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
 
 /// Bound on unbound editor scratch files one mount may create (41-vfs.md Temporary-save
 /// replacement). Unbound scratch is recovery state, so an editor cannot grow it without limit.
@@ -82,6 +93,7 @@ const SCAN_PENDING: &str = "the committed schema history of this table is still 
 
 /// Errno for a rejected draft operation (profiles/vfs-1 errno table): EDQUOT
 /// for the per-file or aggregate draft quota, EIO for backing I/O failures.
+#[allow(clippy::trivially_copy_pass_by_ref)]
 fn draft_errno(result: &Result<(), EditDraftError>) -> Errno {
     match result {
         Err(EditDraftError::FileTooLarge | EditDraftError::QuotaExceeded) => Errno::EDQUOT,
@@ -106,7 +118,7 @@ fn candidate_document_bytes(bytes: &CandidateSnapshot) -> std::io::Result<Vec<u8
 /// Errno for a mutation refused on the live writable mount. Every such refusal
 /// is a denied or unsupported operation, so it is EPERM (41-vfs.md:103-105;
 /// profiles/vfs-1.md:139). EROFS is reserved for the kernel read-only snapshot
-/// mount (spawn_read_only), which never reaches these handlers.
+/// mount (`spawn_read_only`), which never reaches these handlers.
 fn refused_mutation_errno() -> Errno {
     Errno::EPERM
 }
@@ -609,7 +621,7 @@ const VFS_RETAINED_DRAFT_LIMIT: usize = 256;
 const VFS_EDITOR_DRAFT_DIRECTORY: &str = "editor-drafts";
 
 /// Creates the explicit editor draft for `edit` (ORNA-VFS-024 recovery). The
-/// file is created exclusively (O_EXCL) at mode 0600 under an unpredictable
+/// file is created exclusively (`O_EXCL`) at mode 0600 under an unpredictable
 /// name, inside a 0700 directory of the runtime recovery store. It is kept on
 /// disk so a failed edit can be retained and reported by path.
 fn create_editor_draft(runtime_root: &Path) -> Result<(File, PathBuf), String> {
@@ -778,6 +790,7 @@ impl CandidateSource {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
 /// Reads up to `length` bytes at `offset` of the candidate that results from
 /// cutting or zero-extending a base of `base_len` bytes to `size`. `read_base`
 /// reads the base's bytes; growth is zero-filled. Copies only the requested window.
@@ -803,6 +816,7 @@ fn truncated_window(
     Ok(out)
 }
 
+#[allow(clippy::cast_possible_truncation)]
 /// Reads up to `length` bytes at `offset` from in-memory candidate bytes.
 fn stashed_range(bytes: &[u8], offset: u64, length: usize) -> Vec<u8> {
     let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
@@ -944,6 +958,7 @@ impl VfsRetainedDraftStore {
         Ok(())
     }
 
+#[allow(clippy::too_many_lines)]
     /// Retains `bytes` as a candidate for the projected `path`. Retaining the
     /// same candidate for the same path again keeps its first record and ID.
     /// Holds one chunk at a time: `read_chunk(offset, length)` supplies the
@@ -1283,25 +1298,22 @@ fn advance_historical_scan(
     scan: Option<Box<HistoricalScan>>,
     deadline: Instant,
 ) -> Result<HistoricalStep, String> {
-    let mut scan = match scan {
-        Some(scan) => *scan,
-        None => {
-            let history = repository
-                .committed_history(HISTORY_LIMIT + 1)
-                .map_err(|error| format!("committed history could not be read: {error:?}"))?;
-            if history.len() > HISTORY_LIMIT {
-                return Err(format!(
-                    "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
-                ));
-            }
-            ScanProgress::new(
-                history
-                    .iter()
-                    .rev()
-                    .map(|entry| entry.commit().clone())
-                    .collect(),
-            )
+    let mut scan = if let Some(scan) = scan { *scan } else {
+        let history = repository
+            .committed_history(HISTORY_LIMIT + 1)
+            .map_err(|error| format!("committed history could not be read: {error:?}"))?;
+        if history.len() > HISTORY_LIMIT {
+            return Err(format!(
+                "the table's committed history is longer than the {HISTORY_LIMIT}-commit scan bound"
+            ));
         }
+        ScanProgress::new(
+            history
+                .iter()
+                .rev()
+                .map(|entry| entry.commit().clone())
+                .collect(),
+        )
     };
     let complete = scan.advance(|| Instant::now() < deadline, &|commit: &GitCommitRef| {
         declare_historical_commit(repository, relation_id, commit)
@@ -1313,10 +1325,7 @@ fn advance_historical_scan(
     if unidentified > 0 {
         eprintln!(
             "committed schema scan of table {}: skipped {unidentified} commit(s) without committed identities",
-            relation_id
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
+            hex_lower(&relation_id)
         );
     }
     Ok(HistoricalStep::Settled(HistoricalTableSchemas {
@@ -1469,7 +1478,7 @@ impl MountWriter {
         };
         admit_row_under_descriptor(
             relation_id,
-            *generation,
+            generation,
             descriptor,
             &historical.introductions,
             canonical_key,
@@ -1608,6 +1617,7 @@ impl MountWriter {
             .map_err(|error| format!("mounted editor CWD row could not be read: {error:?}"))
     }
 
+#[allow(clippy::too_many_lines)]
     fn candidate(
         &self,
         row: &RowSaveContext,
@@ -1795,7 +1805,7 @@ impl MountWriter {
         }
         let content_transfers = pins
             .iter()
-            .map(|pin| pin.transfer_record())
+            .map(orna_repository_v1::ProtectedContentPin::transfer_record)
             .collect::<Vec<_>>();
         let replacement_bytes = mutation
             .value()
@@ -1925,6 +1935,7 @@ fn runtime_row_for_exact_key<'a>(
         .map(|index| rows[index].1.as_slice())
 }
 
+#[allow(clippy::option_option)]
 fn runtime_row_baseline_from_rows<'a>(
     rows: &'a RuntimeTableRows,
     table: &RuntimeTableIdentity,
@@ -1933,6 +1944,7 @@ fn runtime_row_baseline_from_rows<'a>(
     Some(runtime_row_for_exact_key(rows.get(table.table())?, key))
 }
 
+#[allow(clippy::option_option)]
 fn runtime_row_matches_layout(
     runtime_fields: &Raw,
     pinned_layout: &[StoredFieldShape],
@@ -2024,7 +2036,7 @@ fn row_save_context(
         .map(|runtime_table| writer.row_baseline(runtime_table, &key_bytes))
         .transpose()?
         .flatten()
-        .map(|row| row.to_vec());
+        .map(<[u8]>::to_vec);
     // A row this view already accepted keeps that baseline across the processes
     // that save through it; the live durable row is only the first baseline. A
     // temporary is the exception: its baseline is re-read when it is created.
@@ -2118,7 +2130,7 @@ impl DocumentCommitError {
             Self::Stale => "sys.vfs.stale_edit",
             Self::Rejected(_) => "sys.vfs.invalid_document",
             Self::Quota(_) => "draft quota exhausted",
-            Self::Unretained { cause, .. } => *cause,
+            Self::Unretained { cause, .. } => cause,
             Self::NoCandidate | Self::Failed(_) => "backing I/O failure",
         }
     }
@@ -2279,6 +2291,7 @@ impl RowSaveContext {
             })
     }
 
+    #[allow(clippy::type_complexity)]
     /// Re-admits an unbound scratch's candidate under the Blob `blob_field` target, the same
     /// target a Blob-bound create uses, so the rename commits through that target.
     fn retarget_unbound_scratch(
@@ -2315,6 +2328,7 @@ impl RowSaveContext {
         Ok((target, Arc::new(retargeted)))
     }
 
+    #[allow(clippy::type_complexity)]
     fn fsync_temporary(
         &self,
         scratch: &TemporarySave<RowMapSnapshot>,
@@ -2388,6 +2402,8 @@ impl RowSaveContext {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_arguments)]
     /// Commits a replacement for a large Str's sibling text file (profiles/vfs-1.md). The bytes
     /// must be valid UTF-8 and replace the Str through the durable row transaction; no Blob
     /// binding is created.
@@ -2451,6 +2467,7 @@ impl RowSaveContext {
         )
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     /// Records an accepted replacement on its field, or maps the save outcome to a refusal. The
     /// accepted row is recorded as the baseline when the caller asked for one.
     fn settle_replacement(
@@ -2585,6 +2602,7 @@ impl RowSaveContext {
             .map_err(|error| format!("replacement Blob identity is invalid: {error:?}").into())
     }
 
+#[allow(clippy::too_many_arguments)]
     /// One capture-and-commit attempt against `expected_identity`. A racing
     /// scratch write is reported as `RacingWrite`; no row was touched by then.
     fn commit_blob_attempt(
@@ -2808,6 +2826,7 @@ impl From<&str> for EditError {
     }
 }
 
+#[allow(clippy::type_complexity)]
 /// An explicit edit prepared against a live row tree: `initial_bytes` seeds the
 /// editor draft, and `commit` admits the editor's candidate exactly once.
 pub(super) struct PreparedEdit {
@@ -2818,6 +2837,7 @@ pub(super) struct PreparedEdit {
 }
 
 impl PreparedEdit {
+    #[allow(clippy::type_complexity)]
     /// Admits `candidate` for the draft at `draft_path`; the draft is removed once accepted.
     /// `record_baseline` false leaves the mounted captured baseline unchanged (ORNA-VFS-015).
     fn commit(self, candidate: &[u8], draft_path: &Path, record_baseline: bool) -> Result<(), EditError> {
@@ -2825,6 +2845,7 @@ impl PreparedEdit {
     }
 }
 
+#[allow(clippy::items_after_statements)]
 /// Writes `initial` to a new explicit editor draft, runs `$EDITOR` on it and
 /// returns the draft path. The draft is retained on every failure.
 pub(super) fn run_editor_on_draft(runtime_root: &Path, initial: &[u8]) -> Result<PathBuf, EditError> {
@@ -2866,6 +2887,7 @@ pub(super) fn run_editor_on_draft(runtime_root: &Path, initial: &[u8]) -> Result
     Ok(draft_path)
 }
 
+#[allow(clippy::items_after_statements)]
 fn retained_edit_error(detail: &str, draft_path: &Path) -> EditError {
     EditError::Failed(format!("{detail}; draft retained at {}", draft_path.display()))
 }
@@ -2881,14 +2903,13 @@ fn admit_edit_result(
             // The commit is durable, so the owner reports acceptance even when the
             // explicit draft cannot be removed (ORNA-ADMIN-003). The leftover draft
             // is named in the warning for the operator to remove.
-            if let Err(error) = std::fs::remove_file(draft_path) {
-                if error.kind() != std::io::ErrorKind::NotFound {
+            if let Err(error) = std::fs::remove_file(draft_path)
+                && error.kind() != std::io::ErrorKind::NotFound {
                     eprintln!(
                         "warning: edit was accepted but its explicit draft could not be removed: {error}; remove {} by hand",
                         draft_path.display()
                     );
                 }
-            }
             Ok(())
         }
         Err(DocumentCommitError::Stale) => Err(EditError::Stale(format!(
@@ -2903,6 +2924,8 @@ fn admit_edit_result(
 }
 
 impl WorkspaceFilesystem {
+    #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_lines)]
     /// Resolves `relative` in the live row tree to its editable target and
     /// prepares the admission step. No draft is created on refusal.
     fn prepare_edit(&self, relative: &Path, grouped_row: bool) -> Result<PreparedEdit, EditError> {
@@ -3002,16 +3025,53 @@ impl WorkspaceFilesystem {
             }
         };
         let reproject = blob_edit.is_none().then(|| (inode, Arc::clone(&save)));
-        let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = match blob_edit {
-            Some((target, scratch, field, schema_identity)) => Box::new(move |candidate, draft_path, record_baseline| {
+        let commit: Box<dyn FnOnce(&[u8], &Path, bool) -> Result<(), EditError>> = if let Some((target, scratch, field, schema_identity)) = blob_edit { Box::new(move |candidate, draft_path, record_baseline| {
+            writer
+                .runtime
+                .block_on(async {
+                    scratch.truncate(0).await.map_err(|error| {
+                        format!("Blob candidate exceeds draft limits: {error:?}")
+                    })?;
+                    scratch.write_at(0, candidate).await.map_err(|error| {
+                        format!("Blob candidate exceeds draft limits: {error:?}")
+                    })
+                })
+                .map_err(|error| retained_edit_error(&error, draft_path))?;
+            let expected = save
+                .explicit_edit_baseline(grouped_row)
+                .map_err(|error| retained_edit_error(&error, draft_path))?;
+            admit_edit_result(
+                save.commit_blob_temporary(
+                    &target,
+                    &scratch,
+                    &field,
+                    expected,
+                    schema_identity,
+                    record_baseline,
+                )
+                    .map(|_| ()),
+                draft_path,
+            )
+        }) } else {
+            let opened = crate::table_schema::committed_table_schema_identity(
+                &writer.repository,
+                save.table.object_id(),
+            )
+            .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
+            let draft = Arc::new(
+                writer
+                    .runtime
+                    .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
+            );
+            Box::new(move |candidate, draft_path, record_baseline| {
                 writer
                     .runtime
                     .block_on(async {
-                        scratch.truncate(0).await.map_err(|error| {
-                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        draft.truncate(0).await.map_err(|error| {
+                            format!("edited candidate exceeds draft limits: {error:?}")
                         })?;
-                        scratch.write_at(0, candidate).await.map_err(|error| {
-                            format!("Blob candidate exceeds draft limits: {error:?}")
+                        draft.write_at(0, candidate).await.map_err(|error| {
+                            format!("edited candidate exceeds draft limits: {error:?}")
                         })
                     })
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
@@ -3019,59 +3079,20 @@ impl WorkspaceFilesystem {
                     .explicit_edit_baseline(grouped_row)
                     .map_err(|error| retained_edit_error(&error, draft_path))?;
                 admit_edit_result(
-                    save.commit_blob_temporary(
-                        &target,
-                        &scratch,
-                        &field,
-                        expected,
-                        schema_identity,
-                        record_baseline,
-                    )
+                    save.commit_document_against(&draft, record_baseline, expected, &opened)
                         .map(|_| ()),
                     draft_path,
                 )
-            }),
-            None => {
-                let opened = crate::table_schema::committed_table_schema_identity(
-                    &writer.repository,
-                    save.table.object_id(),
-                )
-                .map_err(|error| format!("edit could not capture the table schema: {error}"))?;
-                let draft = Arc::new(
-                    writer
-                        .runtime
-                        .block_on(save.target.open_draft(DRAFT_FILE_BOUND_BYTES)),
-                );
-                Box::new(move |candidate, draft_path, record_baseline| {
-                    writer
-                        .runtime
-                        .block_on(async {
-                            draft.truncate(0).await.map_err(|error| {
-                                format!("edited candidate exceeds draft limits: {error:?}")
-                            })?;
-                            draft.write_at(0, candidate).await.map_err(|error| {
-                                format!("edited candidate exceeds draft limits: {error:?}")
-                            })
-                        })
-                        .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    let expected = save
-                        .explicit_edit_baseline(grouped_row)
-                        .map_err(|error| retained_edit_error(&error, draft_path))?;
-                    admit_edit_result(
-                        save.commit_document_against(&draft, record_baseline, expected, &opened)
-                            .map(|_| ()),
-                        draft_path,
-                    )
-                })
-            }
+            })
         };
         Ok(PreparedEdit {
             initial_bytes,
-            reproject,
             commit,
+            reproject,
         })
     }
 
+    #[allow(clippy::type_complexity)]
     /// Attributes of `inode` as a path stat reports them. A document's size is
     /// the accepted image its new opens read (`ManagedFile::stat`), so an owner
     /// write is visible to stat at once (profiles/vfs-1.md:133, ORNA-VFS-019).
@@ -3105,6 +3126,7 @@ impl WorkspaceFilesystem {
         Some(attr)
     }
 
+    #[allow(clippy::case_sensitive_file_extension_comparisons)]
     /// Commits an explicit edit requested through the `user.orna.edit-commit`
     /// control (ORNA-VFS-015). `request` is `mode NUL path NUL draft NUL digest`; the draft
     /// must be a regular editor draft in this repository's recovery store.
@@ -3196,7 +3218,7 @@ impl WorkspaceFilesystem {
 /// The digest an explicit edit carries from its read to its save (41-vfs.md:75-77): the
 /// lowercase hex SHA-256 of the mounted bytes the editor was seeded from.
 pub(crate) fn edit_view_digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+    hex_lower(&Sha256::digest(bytes))
 }
 
 /// Reads an editor draft through one descriptor opened without following a
@@ -3435,6 +3457,7 @@ struct DocumentBaseline {
     row: Option<Vec<u8>>,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone)]
 enum OpenFile {
     Document(
@@ -3506,11 +3529,10 @@ impl DraftState {
     /// one, so the refusal no longer names that handle. An accepted save must not
     /// end the unresolved state of that newer candidate (ORNA-VFS-008).
     fn candidate_written(&mut self, handle: u64, inode: u64) {
-        if let Some(refusal) = self.rejected_documents.get_mut(&inode) {
-            if refusal.handle == Some(handle) {
+        if let Some(refusal) = self.rejected_documents.get_mut(&inode)
+            && refusal.handle == Some(handle) {
                 refusal.handle = None;
             }
-        }
     }
 
     /// An accepted save of `inode` at row `path` supersedes the refusals it replaces: the one
@@ -3590,6 +3612,7 @@ struct WorkspaceFilesystem {
     next_handle: AtomicU64,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 /// The errno a retention refusal reports when several refusals meet: a full
 /// store (EDQUOT) wins over other storage failures (EIO).
 fn worst_retention_errno(current: Option<Errno>, next: Errno) -> Option<Errno> {
@@ -3695,7 +3718,11 @@ impl WorkspaceFilesystem {
             .directory_mut(parent)
             .is_some_and(|directory| directory.rename_entry(name, newname));
         if !renamed {
-            eprintln!("mounted Blob rename: {name:?} could not take the name {newname:?} in its directory");
+            eprintln!(
+                "mounted Blob rename: \"{name}\" could not take the name \"{newname}\" in its directory",
+                name = name.to_string_lossy(),
+                newname = newname.to_string_lossy(),
+            );
         }
         if let Some(NodeKind::Blob {
             candidate: Some(candidate),
@@ -3782,7 +3809,10 @@ impl WorkspaceFilesystem {
             .and_then(|directory| directory.remove_entry(name))
             .is_none()
         {
-            eprintln!("mounted Blob unlink: {name:?} had already left its directory");
+            eprintln!(
+                "mounted Blob unlink: \"{name}\" had already left its directory",
+                name = name.to_string_lossy(),
+            );
         }
         // Open handles keep reading the captured bytes until their last release (profiles/vfs-1.md).
         state.retire_node(inode);
@@ -3808,6 +3838,8 @@ impl WorkspaceFilesystem {
         state.report_refresh(document_inode, save, &path);
     }
 
+    #[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::too_many_lines)]
     fn from_snapshot(
         repository: &Repository,
         commit: &GitCommitRef,
@@ -3846,7 +3878,7 @@ impl WorkspaceFilesystem {
                     .resolve_committed_source_table_schema(repository, commit, table_id)
                     .map_err(|error| format!("committed table schema is unavailable: {error:?}"))?;
                 let runtime_table =
-                    RuntimeTableIdentity::new(&pinned_schema.qualified_name(), table_id)
+                    RuntimeTableIdentity::new(pinned_schema.qualified_name(), table_id)
                         .map_err(|error| format!("runtime table identity is invalid: {error:?}"))?;
                 let runtime_field_layout = loader
                     .resolve_committed_source_table_schema(
@@ -3914,8 +3946,7 @@ impl WorkspaceFilesystem {
             })?;
             let (runtime_table, runtime_field_layout) = runtime_tables
                 .remove(&relation_id)
-                .map(|(table, layout)| (Some(table), layout))
-                .unwrap_or((None, None));
+                .map_or((None, None), |(table, layout)| (Some(table), layout));
             builder.add_table_rows(
                 table_directory,
                 graph,
@@ -3986,6 +4017,7 @@ impl WorkspaceFilesystem {
             next_handle: AtomicU64::new(1),
         })
     }
+    #[allow(clippy::needless_pass_by_value)]
     /// Keeps a legacy ORNAVFS1 candidate as a retained draft instead of binding it to the live
     /// schema (ORNA-VFS-019, ORNA-VFS-009). A legacy record has no creation schema identity, so its
     /// staleness cannot be decided: the candidate is listed as a retained draft (cause
@@ -4182,11 +4214,10 @@ impl WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(node) = state.nodes.get_mut(&inode) {
-            if let NodeKind::Temporary { len: current, .. } = &mut node.kind {
+        if let Some(node) = state.nodes.get_mut(&inode)
+            && let NodeKind::Temporary { len: current, .. } = &mut node.kind {
                 *current = len;
             }
-        }
     }
     fn has_unresolved_drafts(&self) -> bool {
         !self.unresolved_drafts().is_empty()
@@ -4386,6 +4417,7 @@ impl WorkspaceFilesystem {
         }
     }
 
+#[allow(clippy::too_many_lines)]
     /// Accepts a Blob write-open's candidate as the row's replacement (41-vfs.md EDIT-1).
     /// The baseline is the one captured when the handle opened (ORNA-VFS-011), so an accept by a
     /// sibling handle since then fails the row CAS and the candidate is refused. After an accept,
@@ -4466,11 +4498,10 @@ impl WorkspaceFilesystem {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Ok(Some(document)) = state.lookup_child(parent, OsStr::new("data.orna")) {
-                if let Err(error) = state.project_accepted_document(document, save) {
+            if let Ok(Some(document)) = state.lookup_child(parent, OsStr::new("data.orna"))
+                && let Err(error) = state.project_accepted_document(document, save) {
                     eprintln!("the accepted row document could not be re-projected: {error}");
                 }
-            }
         }
         // The accepted candidate is no longer draft state (same as an accepted rename).
         draft_state.retained_scratch.remove(&inode);
@@ -4563,6 +4594,7 @@ impl WorkspaceFilesystem {
         self.retain_candidate(draft_state, inode, handle, save, draft, cause, false);
     }
 
+#[allow(clippy::too_many_arguments)]
     /// Writes a candidate that was not accepted to recovery storage and records
     /// it against the file for unmount reporting (ORNA-VFS-009). A stale save
     /// also re-projects the row, so a new open shows and saves against the row
@@ -4810,6 +4842,8 @@ impl WorkspaceFilesystem {
         kept.join("\n")
     }
 
+    #[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_lines)]
     /// Stop-time retention (ORNA-VFS-024): no unresolved draft is silently
     /// discarded when the mount stops. Refused documents are already in
     /// recovery storage; unsynced document writes and truncates are added to
@@ -4989,28 +5023,24 @@ impl WorkspaceFilesystem {
                         retained.id,
                         retained.record.display()
                     ));
-                    if truncated {
-                        if let Some((old, _)) = superseded.remove(&inode) {
-                            if old != retained.id {
-                                if let Err(error) = save.writer.retained_drafts.remove(&old) {
+                    if truncated
+                        && let Some((old, _)) = superseded.remove(&inode)
+                            && old != retained.id
+                                && let Err(error) = save.writer.retained_drafts.remove(&old) {
                                     reports.insert(format!(
                                         "superseded draft {old} for {path} could not be removed: {error}"
                                     ));
                                 }
-                            }
-                        }
-                    }
                 }
                 Err(error) => {
                     refused = worst_retention_errno(refused, error.errno);
                     reports.insert(format!(
                         "draft for {path} ({cause}) could not be retained: {error}"
                     ));
-                    if truncated {
-                        if let Some((_, report)) = superseded.remove(&inode) {
+                    if truncated
+                        && let Some((_, report)) = superseded.remove(&inode) {
                             reports.insert(report);
                         }
-                    }
                     // Recovery storage refused the candidate: it stays unresolved, and its
                     // live source is retried at the next retention rather than copied here.
                     let live = source.live_draft();
@@ -5092,6 +5122,7 @@ impl WorkspaceFilesystem {
 }
 
 impl Filesystem for WorkspaceFilesystem {
+    #[allow(clippy::type_complexity)]
     fn getxattr(
         &self,
         _request: &Request,
@@ -5244,7 +5275,7 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn removexattr(&self, _request: &Request, _inode: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        reply.error(refuse_unsupported(&format!("removexattr {name:?}")));
+        reply.error(refuse_unsupported(&format!("removexattr \"{name}\"", name = name.to_string_lossy())));
     }
 
     fn mknod(
@@ -5339,10 +5370,12 @@ impl Filesystem for WorkspaceFilesystem {
                 OpenFile::Source(source_inode) => self.source_candidate_len(*source_inode),
             })
         };
-        let candidate_size = match handle {
-            Some(handle) => open_len(handle.0),
-            // fstat without a handle reaches here; an open Document, Temporary or Source candidate is the file.
-            None => {
+        // fstat without a handle reaches here; an open Document, Temporary or
+        // Source candidate is the file.
+        let candidate_size = if let Some(handle) = handle {
+            open_len(handle.0)
+        } else {
+            {
                 let handles: Vec<u64> = self
                     .draft_state
                     .lock()
@@ -5385,6 +5418,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
     }
 
+#[allow(clippy::too_many_lines)]
     fn open(&self, request: &Request, inode: INodeNo, flags: fuser::OpenFlags, reply: ReplyOpen) {
         // A Blob projection has no private candidate (41-vfs.md:42-44 places writes
         // in one), so a write-intent open, including O_TRUNC, is refused with EPERM
@@ -5724,6 +5758,7 @@ impl Filesystem for WorkspaceFilesystem {
         }
         reply.opened(fuser::FileHandle(handle), EDITABLE_OPEN_FLAGS);
     }
+#[allow(clippy::too_many_lines)]
     fn create(
         &self,
         request: &Request,
@@ -5758,19 +5793,14 @@ impl Filesystem for WorkspaceFilesystem {
                 reply.error(Errno::EPERM);
                 return;
             }
-            let destination = match state.lookup_child(parent.0, OsStr::new("data.orna")) {
-                Ok(Some(inode)) => inode,
-                Ok(None) | Err(_) => {
-                    reply.error(Errno::EIO);
-                    return;
-                }
+            let Ok(Some(destination)) = state.lookup_child(parent.0, OsStr::new("data.orna"))
+            else {
+                reply.error(Errno::EIO);
+                return;
             };
-            let save = match state.nodes.get(&destination).map(|node| &node.kind) {
-                Some(NodeKind::Document { save, .. }) => Arc::clone(save),
-                _ => {
-                    reply.error(Errno::EPERM);
-                    return;
-                }
+            let save = if let Some(NodeKind::Document { save, .. }) = state.nodes.get(&destination).map(|node| &node.kind) { Arc::clone(save) } else {
+                reply.error(Errno::EPERM);
+                return;
             };
             // 41-vfs.md Temporary-save replacement: an unknown file inside a row directory is
             // private editor scratch, not a new column. A replacement name of a Blob field binds
@@ -5820,7 +5850,7 @@ impl Filesystem for WorkspaceFilesystem {
                     return;
                 }
             }
-            let inode = match state.add_file(
+            let Ok(inode) = state.add_file(
                 parent.0,
                 name,
                 NodeKind::Temporary {
@@ -5833,13 +5863,10 @@ impl Filesystem for WorkspaceFilesystem {
                     identity: Arc::clone(&identity),
                     schema_identity,
                 },
-            ) {
-                Ok(inode) => inode,
-                Err(_) => {
-                    save.writer.scratch_store.release_unbound(&identity);
-                    reply.error(Errno::EEXIST);
-                    return;
-                }
+            ) else {
+                save.writer.scratch_store.release_unbound(&identity);
+                reply.error(Errno::EEXIST);
+                return;
             };
             let Some(attr) = state.attr(inode) else {
                 reply.error(Errno::EIO);
@@ -5864,6 +5891,7 @@ impl Filesystem for WorkspaceFilesystem {
             EDITABLE_OPEN_FLAGS,
         );
     }
+#[allow(clippy::too_many_lines)]
     fn rename(
         &self,
         _request: &Request,
@@ -5912,12 +5940,9 @@ impl Filesystem for WorkspaceFilesystem {
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let source_inode = match state.lookup_child(parent.0, name) {
-                Ok(Some(inode)) => inode,
-                Ok(None) | Err(_) => {
-                    reply.error(Errno::ENOENT);
-                    return;
-                }
+            let Ok(Some(source_inode)) = state.lookup_child(parent.0, name) else {
+                reply.error(Errno::ENOENT);
+                return;
             };
             let Some(NodeKind::Temporary {
                 save,
@@ -5966,12 +5991,9 @@ impl Filesystem for WorkspaceFilesystem {
                     Some(field)
                 }
             };
-            let destination_inode = match state.lookup_child(newparent.0, newname) {
-                Ok(Some(inode)) => inode,
-                Ok(None) | Err(_) => {
-                    reply.error(Errno::ENOENT);
-                    return;
-                }
+            let Ok(Some(destination_inode)) = state.lookup_child(newparent.0, newname) else {
+                reply.error(Errno::ENOENT);
+                return;
             };
             match (
                 blob_field.as_ref(),
@@ -6044,7 +6066,7 @@ impl Filesystem for WorkspaceFilesystem {
             Ok(accepted) => accepted,
             Err(error) => {
                 eprintln!("mounted replacement failed: {error}");
-                let stale = matches!(error, DocumentCommitError::Stale);
+                let commit_was_stale = matches!(error, DocumentCommitError::Stale);
                 let path = self
                     .state
                     .lock()
@@ -6061,7 +6083,7 @@ impl Filesystem for WorkspaceFilesystem {
                     &path,
                     error,
                 );
-                if stale {
+                if commit_was_stale {
                     let mut state = self
                         .state
                         .lock()
@@ -6104,15 +6126,13 @@ impl Filesystem for WorkspaceFilesystem {
                     reply.error(Errno::EIO);
                     return;
                 }
-                if let Some(row) = accepted_row {
-                    if let Ok(Some(document)) = state.lookup_child(newparent.0, OsStr::new("data.orna")) {
-                        if let Some(NodeKind::Document { bytes, .. }) =
+                if let Some(row) = accepted_row
+                    && let Ok(Some(document)) = state.lookup_child(newparent.0, OsStr::new("data.orna"))
+                        && let Some(NodeKind::Document { bytes, .. }) =
                             state.nodes.get_mut(&document).map(|node| &mut node.kind)
                         {
                             *bytes = row;
                         }
-                    }
-                }
             }
             None if state.subtree_pinned(destination_inode) => {
                 // 41-vfs.md:38-40: a handle pinned to the replaced row keeps the generation it
@@ -6272,17 +6292,14 @@ impl Filesystem for WorkspaceFilesystem {
             reply.error(Errno::EBUSY);
             return;
         }
-        let (save, identity, scratch) = match state.nodes.get(&inode).map(|node| &node.kind) {
-            Some(NodeKind::Temporary {
+        let (save, identity, scratch) = if let Some(NodeKind::Temporary {
                 save,
                 identity,
                 scratch,
                 ..
-            }) => (Arc::clone(save), Arc::clone(identity), Arc::clone(scratch)),
-            _ => {
-                reply.error(refused_mutation_errno());
-                return;
-            }
+            }) = state.nodes.get(&inode).map(|node| &node.kind) { (Arc::clone(save), Arc::clone(identity), Arc::clone(scratch)) } else {
+            reply.error(refused_mutation_errno());
+            return;
         };
         if let Some(cause) = draft_state.rejected_scratch.get(&inode).map(|refusal| refusal.cause) {
             // A refused replacement stays recoverable (ORNA-VFS-009): its
@@ -6320,6 +6337,7 @@ impl Filesystem for WorkspaceFilesystem {
         draft_state.rejected_scratch.remove(&inode);
         reply.ok();
     }
+#[allow(clippy::too_many_lines)]
     fn read(
         &self,
         _request: &Request,
@@ -6352,8 +6370,7 @@ impl Filesystem for WorkspaceFilesystem {
                 offset,
                 reply_read_size(size),
             )),
-            Some(OpenFile::Source(_)) => None,
-            None => None,
+            Some(OpenFile::Source(_)) | None => None,
         };
         if let Some(bytes) = private_read {
             match bytes {
@@ -6455,12 +6472,9 @@ impl Filesystem for WorkspaceFilesystem {
             return;
         }
         let end = offset.saturating_add(u64::from(size)).min(length);
-        let scope = match graph.open_read_scope() {
-            Ok(scope) => scope,
-            Err(_) => {
-                reply.error(Errno::EIO);
-                return;
-            }
+        let Ok(scope) = graph.open_read_scope() else {
+            reply.error(Errno::EIO);
+            return;
         };
         match graph.read_blob_range(&reference, offset..end, &scope) {
             Ok(range) => reply.data(range.bytes()),
@@ -6734,6 +6748,7 @@ impl Filesystem for WorkspaceFilesystem {
         reply.ok();
     }
 
+#[allow(clippy::too_many_lines)]
     fn setattr(
         &self,
         request: &Request,
@@ -6877,12 +6892,9 @@ impl Filesystem for WorkspaceFilesystem {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let parent = match state.nodes.get(&inode.0) {
-            Some(node) => node.parent,
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
+        let parent = if let Some(node) = state.nodes.get(&inode.0) { node.parent } else {
+            reply.error(Errno::ENOENT);
+            return;
         };
         if state.directory(inode.0).is_none() {
             reply.error(Errno::ENOTDIR);
@@ -7118,6 +7130,7 @@ impl FsBuilder {
         Ok(escaped)
     }
 
+#[allow(clippy::too_many_arguments)]
     fn table_directory(&mut self, module_name: &str, table_name: &str) -> Result<u64, String> {
         let mut parent = ROOT_INODE;
         if !module_name.is_empty() {
@@ -7130,6 +7143,7 @@ impl FsBuilder {
         self.ensure_directory(parent, &name)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_table_rows(
         &mut self,
         table_directory: u64,
@@ -7436,12 +7450,10 @@ impl FsBuilder {
     fn record_table_error(&mut self, table_inode: u64, error: &str) {
         if let Some(NodeKind::Table(table)) =
             self.nodes.get_mut(&table_inode).map(|node| &mut node.kind)
-        {
-            if table.error.is_none() {
+            && table.error.is_none() {
                 table.error = Some(error.to_owned());
                 eprintln!("FUSE table row listing failed: {error}");
             }
-        }
     }
 
     fn add_key_path(
@@ -7560,6 +7572,7 @@ impl FsBuilder {
         )
     }
 
+    #[allow(clippy::zero_sized_map_values)]
     fn ensure_row_loaded(&mut self, inode: u64) -> Result<(), RowLoadError> {
         let (source, key, state) = match self.nodes.get(&inode).map(|node| &node.kind) {
             Some(NodeKind::Row(row)) => (
@@ -7635,6 +7648,7 @@ impl FsBuilder {
         self.project_row_files(source, key, runtime_row, None)
     }
 
+#[allow(clippy::too_many_lines)]
     /// Projects one row's document and content files from the pinned row and
     /// the CWD row the runtime holds for it. A CWD row that fails validation is
     /// reported (EIO) rather than replaced by the pinned HEAD row (W08-08).
@@ -7897,13 +7911,10 @@ impl FsBuilder {
                 .find(|field| field.file_name == file.name())
                 .cloned()
                 .ok_or_else(|| "projected file has no admitted field".to_owned())?;
-            let candidate = match &document_save {
-                Some(save) => Some(BlobCandidate {
+            let candidate = document_save.as_ref().map(|save| BlobCandidate {
                     save: Arc::clone(save),
                     field: candidate_field.clone(),
-                }),
-                None => None,
-            };
+                });
             if file.is_text() {
                 let bytes = Arc::clone(
                     candidate_field
@@ -8132,7 +8143,8 @@ impl FsBuilder {
                 .is_some_and(|entry| !self.is_text_node(entry.inode));
             if collides {
                 return Err(format!(
-                    "the projected text file {name:?} collides with a sibling"
+                    "the projected text file \"{name}\" collides with a sibling",
+                    name = name.to_string_lossy(),
                 ));
             }
         }
@@ -8751,6 +8763,7 @@ impl Directory {
         }
         Some(removed)
     }
+    #[allow(clippy::assigning_clones)]
     /// Renames `name` in place, so every entry keeps its readdir position (ORNA-VFS-017).
     /// Returns false, leaving the directory unchanged, when `name` is absent or `newname` is taken.
     fn rename_entry(&mut self, name: &OsStr, newname: &OsStr) -> bool {
@@ -9038,6 +9051,7 @@ fn commit_blob_descriptor_change(
     committed
 }
 
+#[allow(clippy::option_option)]
 /// The suffix hint for renaming Blob field `field_name` of `media_type` to the sibling
 /// `newname`, when `newname` is that field's projected name under a compatible suffix (VFS-012).
 fn blob_rename_hint(media_type: &str, field_name: &str, newname: &str) -> Option<Option<String>> {
@@ -9205,6 +9219,7 @@ fn admit_accepted_replacement(
     Err(refusal)
 }
 
+#[allow(clippy::option_option)]
 /// A stored optional (`Tag(60013, [index, payload])`, index 1 = present): `Some(Some(payload))`
 /// when present, `Some(None)` when absent, `None` when the value is not an optional.
 fn optional_state(value: &Raw) -> Option<Option<&Raw>> {
@@ -9885,20 +9900,23 @@ mod tests {
     }
 
     #[test]
+#[allow(clippy::too_many_lines, clippy::trivially_copy_pass_by_ref)]
     fn candidate_read_is_chunked_and_stops_at_candidate_end() {
         use super::{CANDIDATE_CHUNK_BYTES, read_candidate_range};
         let total = CANDIDATE_CHUNK_BYTES * 2 + 5;
-        let bytes: Vec<u8> = (0..total).map(|index| (index % 251) as u8).collect();
+        let bytes: Vec<u8> = (0..total)
+            .map(|index| u8::try_from(index % 251).expect("masked to one byte"))
+            .collect();
         let mut requests = Vec::new();
         let read = read_candidate_range(
             |offset, length| {
                 requests.push(length);
-                let start = (offset as usize).min(bytes.len());
+                let start = usize::try_from(offset).expect("offset fits usize").min(bytes.len());
                 let end = (start + length).min(bytes.len());
                 Ok::<_, ()>(bytes[start..end].to_vec())
             },
-            CANDIDATE_CHUNK_BYTES as u64 / 2,
-            (total + 10) as u32,
+            u64::try_from(CANDIDATE_CHUNK_BYTES).expect("chunk bound fits u64") / 2,
+            u32::try_from(total + 10).expect("total fits u32"),
         )
         .unwrap();
         assert_eq!(read, bytes[CANDIDATE_CHUNK_BYTES / 2..].to_vec());
@@ -10234,7 +10252,7 @@ mod tests {
     fn table_and_text_key_paths_use_runtime_components() {
         let mut builder = FsBuilder::new();
         let table = builder.table_directory("Music", "data.orna").unwrap();
-        let row = key_directory(&mut builder, table, &TypedKey::Text("".into())).unwrap();
+        let row = key_directory(&mut builder, table, &TypedKey::Text(String::new())).unwrap();
 
         let NodeKind::Directory(root) = &builder.nodes.get(&ROOT_INODE).unwrap().kind else {
             panic!("root is a directory");
@@ -10285,6 +10303,7 @@ mod tests {
             .unwrap();
         assert_eq!(second.inode, row);
     }
+#[allow(clippy::too_many_lines)]
     #[test]
     fn editor_open_flags_bypass_kernel_cache_without_writeback_capability() {
         assert!(EDITOR_INIT_CAPABILITIES.contains(fuser::InitFlags::FUSE_ATOMIC_O_TRUNC));
@@ -10293,6 +10312,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)]
     async fn workspace_readdir_uses_lazy_indexed_pages() {
         const SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
         let fixture_rows = (0..ROW_PAGE_LIMIT)
@@ -10374,7 +10394,7 @@ mod tests {
         assert_eq!(first_page.len(), ROW_PAGE_LIMIT);
         assert_eq!(first_page.first().map(String::as_str), Some("row-000"));
         assert_eq!(first_page.last().map(String::as_str), Some("row-255"));
-        assert!(builder.nodes.get(&indexed_inode).is_some());
+        assert!(builder.nodes.contains_key(&indexed_inode));
         let NodeKind::Table(table) = &builder.nodes.get(&table_inode).unwrap().kind else {
             panic!("projected Music path is a table directory");
         };
@@ -10916,7 +10936,7 @@ mod nested_projection_tests {
     }
 
     fn optional(present: bool, payload: Raw) -> Raw {
-        let index = if present { 1 } else { 0 };
+        let index = i32::from(present);
         Raw::Tag(
             60013,
             Box::new(Raw::Array(vec![Raw::Int(index.into()), payload])),
@@ -11063,6 +11083,7 @@ mod historical_scan_budget_tests {
         ScanProgress::new(vec![1, 2, 2, 3])
     }
 
+    #[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)]
     fn declare(commit: &u32) -> Result<CommitDeclaration<u32>, String> {
         Ok(CommitDeclaration::Declares(HistoricalDeclaration {
             generation: *commit,
@@ -11130,6 +11151,7 @@ mod historical_scan_budget_tests {
 
     /// Commit `0` has no committed identities and commit `9` does not declare the table. The other
     /// commits declare their own generation.
+    #[allow(clippy::trivially_copy_pass_by_ref, clippy::unnecessary_wraps)]
     fn classify(commit: &u32) -> Result<CommitDeclaration<u32>, String> {
         match commit {
             0 => Ok(CommitDeclaration::Unidentified),

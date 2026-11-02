@@ -235,6 +235,7 @@ fn hydrate(root: &Path) {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn concurrent_publication_from_a_cold_and_a_warm_partial_clone_keeps_one_winner() {
     let directory = TempDir::new().expect("create the test directory");
     let origin = initialized_database(&directory, NOTE_SOURCE);

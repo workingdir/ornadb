@@ -147,7 +147,7 @@ impl ApplicationAuthority {
                 None,
                 declared,
             )
-            .map_err(|error| failure(error.into()))?;
+            .map_err(failure)?;
         let activation = normalize_repl_mutations(
             scope,
             &tables_for_storage,
@@ -155,7 +155,7 @@ impl ApplicationAuthority {
             &committed,
             activation,
         )
-            .map_err(|error| failure(error.into()))?;
+            .map_err(failure)?;
         Ok((value, successor, activation, external_effects_possible))
     }
 }
@@ -394,15 +394,19 @@ fn committed_table_rows(
     Ok((rows, committed))
 }
 
-fn admitted_project_tables(
-    authority: &ApplicationAuthority,
-    scope: &ReplTransactionScope<'_>,
-) -> Result<(
+/// Project tables admitted for one REPL transaction: the schema map, the object
+/// identity map, the insert defaults and the callable functions.
+type AdmittedProjectTables = (
     BTreeMap<String, TableSchema>,
     BTreeMap<String, TableObjectId>,
     TableInsertDefaults,
     Functions,
-), ApplicationError> {
+);
+
+fn admitted_project_tables(
+    authority: &ApplicationAuthority,
+    scope: &ReplTransactionScope<'_>,
+) -> Result<AdmittedProjectTables, ApplicationError> {
     let project = scope.project;
     let analysis = analyze_with_providers(project.modules(), &authority.catalogue, SystemProviders::Production);
     if !analysis.is_ok() {
@@ -1147,7 +1151,7 @@ fn restore_contextual_blob_values(
         else {
             continue;
         };
-        if !blob_value(ty, original).is_some_and(|value| value.is_some()) {
+        if blob_value(ty, original).flatten().is_none() {
             continue;
         }
         let Some((_, value)) = restored

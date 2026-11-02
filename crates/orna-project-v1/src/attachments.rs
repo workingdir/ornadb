@@ -22,6 +22,30 @@ use orna_syntax_v1::{Declaration, Keyword, TokenKind, lex, parse_module};
 
 use crate::{LoadedProject, LooseRowCandidate, ProjectLoadError, ProjectLoader};
 
+/// One depth label with the pinned databases it restores.
+pub type DepthPinnedRound<'a> = (&'a NestedPairDepthLabel, &'a [[PinnedDatabase; 2]]);
+
+/// One depth label with an optional pinned database set, where `None` means the
+/// round deliberately restores no database.
+pub type DepthOptionalPinnedRound<'a> =
+    (&'a NestedPairDepthLabel, Option<&'a [[PinnedDatabase; 2]]>);
+
+/// A checkpoint with the pinned databases it records.
+pub type CheckpointPinnedRound<'a> = (&'a ReboundPathCheckpoint, &'a [[PinnedDatabase; 2]]);
+
+/// A row and column position with the pinned databases it addresses.
+pub type PositionedPinnedRound<'a> = (usize, usize, &'a [[PinnedDatabase; 2]]);
+
+/// The terminal route identity before and after a nested pair transition.
+pub type TerminalRouteTransition = (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity);
+
+/// Three terminal route identities observed across one rebind chain.
+pub type TerminalRouteTransitionChain = (
+    NestedPairTerminalRouteIdentity,
+    NestedPairTerminalRouteIdentity,
+    NestedPairTerminalRouteIdentity,
+);
+
 /// The committed file containing exact package attachment pins.
 pub const PACKAGE_PIN_MANIFEST_PATH: &str = ".orna/packages";
 const MAX_PACKAGE_PIN_MANIFEST_BYTES: usize = 64 * 1024;
@@ -772,7 +796,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+            Vec<TerminalRouteTransition>,
         ),
         AttachmentError,
     > {
@@ -802,7 +826,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+            Vec<Vec<TerminalRouteTransition>>,
         ),
         AttachmentError,
     > {
@@ -834,7 +858,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>>,
+            Vec<Vec<TerminalRouteTransition>>,
         ),
         AttachmentError,
     > {
@@ -871,7 +895,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+            Vec<TerminalRouteTransition>,
         ),
         AttachmentError,
     > {
@@ -919,7 +943,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+            Vec<TerminalRouteTransition>,
         ),
         AttachmentError,
     > {
@@ -944,7 +968,7 @@ impl PackageResolver {
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+            Vec<TerminalRouteTransition>,
         ),
         AttachmentError,
     > {
@@ -1162,7 +1186,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_cascades(
         &self,
         previous: &ReboundPathResolution,
-        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        cascades: &[CheckpointPinnedRound<'_>],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_checkpoint_labels = Vec::new();
@@ -1191,11 +1215,11 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_cascades_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        cascades: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
-        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+        cascades: &[CheckpointPinnedRound<'_>],
+        expected_transitions: &[TerminalRouteTransition],
     ) -> Result<(
         ReboundPathResolution,
-        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        Vec<TerminalRouteTransition>,
     ), AttachmentError> {
         if cascades.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1240,14 +1264,14 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_restoration_folds_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        restoration_folds: &[[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]]); 2]],
+        restoration_folds: &[[CheckpointPinnedRound<'_>; 2]],
         expected_fold_transitions: &[
-            [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]
+            [TerminalRouteTransition; 2]
         ],
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+            Vec<[TerminalRouteTransition; 2]>,
         ),
         AttachmentError,
     > {
@@ -1277,13 +1301,13 @@ impl PackageResolver {
         restoration_folds: impl IntoIterator<
             Item = (
                 [(&'a ReboundPathCheckpoint, &'a [[PinnedDatabase; 2]]); 2],
-                [(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2],
+                [TerminalRouteTransition; 2],
             ),
         >,
     ) -> Result<
         (
             ReboundPathResolution,
-            Vec<[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity); 2]>,
+            Vec<[TerminalRouteTransition; 2]>,
         ),
         AttachmentError,
     > {
@@ -1319,7 +1343,7 @@ impl PackageResolver {
 
             route.validate_terminal_route_identity(&starting_identity)?;
             let transitions: [
-                (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity);
+                TerminalRouteTransition;
                 2
             ] = transitions
                 .try_into()
@@ -1403,7 +1427,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_storms(
         &self,
         previous: &ReboundPathResolution,
-        storms: &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+        storms: &[CheckpointPinnedRound<'_>],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_checkpoint_labels = Vec::new();
@@ -1448,7 +1472,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
         &self,
         previous: &ReboundPathResolution,
-        rounds: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+        rounds: &[&[DepthPinnedRound<'_>]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_labels = Vec::new();
@@ -1480,7 +1504,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
         &self,
         previous: &ReboundPathResolution,
-        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+        rounds: &[&[Option<DepthPinnedRound<'_>>]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_labels: Option<Vec<Option<NestedPairDepthLabel>>> = None;
@@ -1536,7 +1560,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rounds_from_depth_labels(
         &self,
         previous: &ReboundPathResolution,
-        rounds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
+        rounds: &[&[DepthOptionalPinnedRound<'_>]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
@@ -1591,7 +1615,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
         &self,
         previous: &ReboundPathResolution,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         let mut route = previous.clone();
         let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
@@ -1632,7 +1656,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         expected_terminal_identity: &NestedPairTerminalRouteIdentity,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         previous.validate_terminal_route_identity(expected_terminal_identity)?;
         let route = self
@@ -1652,7 +1676,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identities(
         &self,
         previous: &ReboundPathResolution,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         expected_terminal_identities: &[NestedPairTerminalRouteIdentity],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         if chains.len() != expected_terminal_identities.len() {
@@ -1679,7 +1703,7 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identities(
         &self,
         previous: &ReboundPathResolution,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
         let mut route = previous.clone();
         let mut terminal_identities = Vec::with_capacity(chains.len());
@@ -1702,10 +1726,10 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<(
         ReboundPathResolution,
-        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        Vec<TerminalRouteTransition>,
     ), AttachmentError> {
         let mut route = previous.clone();
         let mut transitions = Vec::with_capacity(chains.len());
@@ -1730,8 +1754,8 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_chains_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+        chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+        expected_transitions: &[TerminalRouteTransition],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         if chains.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1760,11 +1784,11 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_cascades_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        rebind_cascades: &[&[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]]],
-        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+        rebind_cascades: &[&[&[&[DepthOptionalPinnedRound<'_>]]]],
+        expected_transitions: &[TerminalRouteTransition],
     ) -> Result<(
         ReboundPathResolution,
-        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        Vec<TerminalRouteTransition>,
     ), AttachmentError> {
         if rebind_cascades.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1780,7 +1804,7 @@ impl PackageResolver {
             route = self
                 .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
                     &route,
-                    *cascade,
+                    cascade,
                 )?;
             route.validate_terminal_route_identity(expected_after)?;
             let after = route.terminal_route_identity();
@@ -1798,8 +1822,8 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_pin_folds_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        pin_folds: &[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]],
-        expected_transitions: &[(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)],
+        pin_folds: &[&[DepthOptionalPinnedRound<'_>]],
+        expected_transitions: &[TerminalRouteTransition],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         if pin_folds.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1840,8 +1864,8 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_preserving_terminal_identities(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
         if rebind_chains.len() != omission_chains.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -1869,8 +1893,8 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_preserving_terminal_identity(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         reject_omission_replacement_waves(omission_chains)?;
 
@@ -1895,9 +1919,9 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_validating_rebound_terminal_identity(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<ReboundPathResolution, AttachmentError> {
         reject_omission_replacement_waves(omission_chains)?;
         let rebound_route = self
@@ -1922,12 +1946,12 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_then_omission_chains_capturing_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<(
         ReboundPathResolution,
-        Vec<(NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity)>,
+        Vec<TerminalRouteTransition>,
     ), AttachmentError> {
         for chain in omission_chains {
             for round in *chain {
@@ -1971,15 +1995,11 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_capturing_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
     ) -> Result<(
         ReboundPathResolution,
-        Vec<(
-            NestedPairTerminalRouteIdentity,
-            NestedPairTerminalRouteIdentity,
-            NestedPairTerminalRouteIdentity,
-        )>,
+        Vec<TerminalRouteTransitionChain>,
     ), AttachmentError> {
         if rebind_chains.len() != omission_chains.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -2025,8 +2045,8 @@ impl PackageResolver {
     pub fn extend_nested_terminal_pair_sparse_checkpoint_storm_rebind_omission_segments_validating_terminal_identity_transitions(
         &self,
         previous: &ReboundPathResolution,
-        rebind_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-        omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
+        rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+        omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         expected_transitions: &[(
             NestedPairTerminalRouteIdentity,
             NestedPairTerminalRouteIdentity,
@@ -2084,7 +2104,7 @@ impl PackageResolver {
         &self,
         paths: &[(
             &ReboundPathResolution,
-            &[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])],
+            &[CheckpointPinnedRound<'_>],
         )],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let routes = paths
@@ -2105,7 +2125,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
         &self,
         previous: &SiblingRebindResolution,
-        storms_by_row: &[&[(&ReboundPathCheckpoint, &[[PinnedDatabase; 2]])]],
+        storms_by_row: &[&[CheckpointPinnedRound<'_>]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         if storms_by_row.len() != previous.routes.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -2142,7 +2162,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depths(
         &self,
         previous: &SiblingRebindResolution,
-        storms_by_row: &[&[(usize, usize, &[[PinnedDatabase; 2]])]],
+        storms_by_row: &[&[PositionedPinnedRound<'_>]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         if storms_by_row.len() != previous.routes.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -2188,7 +2208,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
         &self,
         previous: &SiblingRebindResolution,
-        storms_by_row: &[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]],
+        storms_by_row: &[&[DepthPinnedRound<'_>]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         if storms_by_row.len() != previous.routes.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
@@ -2239,7 +2259,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
         &self,
         previous: &SiblingRebindResolution,
-        rounds: &[&[&[(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])]]],
+        rounds: &[&[&[DepthPinnedRound<'_>]]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let mut folded = previous.clone();
         for round in rounds {
@@ -2260,7 +2280,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
         &self,
         previous: &SiblingRebindResolution,
-        rounds: &[&[Option<(&NestedPairDepthLabel, &[[PinnedDatabase; 2]])>]],
+        rounds: &[&[Option<DepthPinnedRound<'_>>]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let mut folded = previous.clone();
         for round in rounds {
@@ -2312,7 +2332,7 @@ impl PackageResolver {
     pub fn extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depths(
         &self,
         previous: &SiblingRebindResolution,
-        rounds: &[&[&[(usize, usize, &[[PinnedDatabase; 2]])]]],
+        rounds: &[&[&[PositionedPinnedRound<'_>]]],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let mut folded = previous.clone();
         for round in rounds {
@@ -3477,6 +3497,24 @@ fn unit_signature(project: &LoadedProject, requested_name: &str) -> Option<Strin
         }
     }
     found
+}
+
+/// Omission chains may only drop nested rebinds. A non-empty replacement wave
+/// would re-attach snapshots, so the omission phase rejects it before any
+/// route work starts.
+fn reject_omission_replacement_waves(
+    omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
+) -> Result<(), AttachmentError> {
+    for chain in omission_chains {
+        for round in *chain {
+            for entry in round.iter() {
+                if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
+                    return Err(AttachmentError::RetainedSnapshotUnavailable);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -12927,7 +12965,7 @@ mod tests {
     #[test]
     fn equivalent_units_interoperate_across_attachments_but_name_match_is_not_enough() {
         let primary_source = include_str!("fixtures/attached-primary-main.orna");
-        let (_primary_dir, primary_repository, primary_commit) = repository(&primary_source);
+        let (_primary_dir, primary_repository, primary_commit) = repository(primary_source);
         let (_same_dir, same_repository, same_commit) = repository(
             &include_str!("fixtures/attached-package-main.orna")
                 .replace("unit meter:", "pub unit meter :")
@@ -13126,22 +13164,4 @@ mod tests {
         assert_eq!(sources[1].commit().as_str(), archive_commit);
         assert!(sources[1].row().source().contains("value: 42"));
     }
-}
-
-/// Omission chains may only drop nested rebinds. A non-empty replacement wave
-/// would re-attach snapshots, so the omission phase rejects it before any
-/// route work starts.
-fn reject_omission_replacement_waves(
-    omission_chains: &[&[&[(&NestedPairDepthLabel, Option<&[[PinnedDatabase; 2]]>)]]],
-) -> Result<(), AttachmentError> {
-    for chain in omission_chains {
-        for round in *chain {
-            for entry in round.iter() {
-                if matches!(entry.1, Some(replacements) if !replacements.is_empty()) {
-                    return Err(AttachmentError::RetainedSnapshotUnavailable);
-                }
-            }
-        }
-    }
-    Ok(())
 }

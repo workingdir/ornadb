@@ -161,7 +161,7 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
             "--debug" => {
                 words.next();
             }
-            "--db" => {
+            "--db" | "--format" => {
                 words.next();
                 if words.next().is_none() {
                     break;
@@ -177,12 +177,7 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
                 };
                 color = mode;
             }
-            "--format" => {
-                words.next();
-                if words.next().is_none() {
-                    break;
-                }
-            }
+
             _ => break,
         }
     }
@@ -309,6 +304,7 @@ fn refused_command(name: &str) -> Diagnostic {
 }
 
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;
@@ -317,7 +313,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut words = arguments.iter().map(String::as_str).peekable();
     while matches!(
         words.peek(),
-        Some(&"--db") | Some(&"--color") | Some(&"--format") | Some(&"--debug")
+        Some(&"--db" | &"--color" | &"--format" | &"--debug")
     ) {
         match words.next() {
             Some("--debug") => {}
@@ -681,7 +677,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         }
         Some("diff") => {
             let mut arguments = Vec::new();
-            while let Some(argument) = words.next() {
+            for argument in words.by_ref() {
                 arguments.push(argument.to_owned());
             }
             Command::Diff(arguments)
@@ -833,6 +829,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
 mod tests {
     use super::*;
 
+#[allow(clippy::too_many_lines)]
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }

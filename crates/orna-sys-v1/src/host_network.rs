@@ -122,6 +122,9 @@ impl HttpProvider {
     #[sys_host_operation(
         r###"{"name":"std.net.http.send","version":{"major":1,"minor":0},"signature":"fn std.net.http.send(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): (Int, [(Str, Str)], Blob)","effects":["invoke"],"preconditions":["origin is explicitly allowlisted by the host","only http and https are accepted","redirects and ambient proxy settings are disabled","timeout and response byte limits are within provider limits"],"failures":["sys.host.http.denied","sys.host.http.invalid_request","sys.host.http.header_limit","sys.host.http.body_limit","sys.host.http.timeout","sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"send"}"###
     )]
+    /// The parameter list is the registry-declared operation signature above;
+    /// it mirrors the `#[sys_host_operation]` attribute field for field.
+    #[allow(clippy::too_many_arguments)]
     pub fn send(
         &self,
         method: &str,
@@ -210,6 +213,9 @@ impl HttpProvider {
     #[sys_host_operation(
         r###"{"name":"std.net.http.start","version":{"major":1,"minor":0},"signature":"fn std.net.http.start(method: Str, url: Str, headers: [(Str, Str)], request_body: Blob?, timeout: Duration?, max_header_bytes: Int, max_body_bytes: Int): Uuid","effects":["invoke"],"preconditions":["the host HTTP provider can allocate a request handle"],"failures":["sys.host.http.unavailable"],"role":"host.std.net.http@1.0","provider":"orna.sys.host.http.v1","implementation":"start"}"###
     )]
+    /// The parameter list is the registry-declared operation signature above;
+    /// it mirrors the `#[sys_host_operation]` attribute field for field.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         &self,
         method: &str,

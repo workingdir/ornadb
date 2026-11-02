@@ -723,10 +723,7 @@ impl Repository {
         self.objects.check_tree_budget(root, Some(0), 0)?;
         let mut listed = Vec::new();
         let mut pending = vec![(String::new(), self.objects.tree_entries(root)?.into_iter())];
-        loop {
-            let Some((directory, entries)) = pending.last_mut() else {
-                break;
-            };
+        while let Some((directory, entries)) = pending.last_mut() {
             let Some(entry) = entries.next() else {
                 pending.pop();
                 continue;

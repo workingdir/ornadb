@@ -1557,7 +1557,7 @@ fn verify_blob(directory: &Path, oid: &str, size: u64) -> Result<(), CompleteCop
     let mut child = command
         .spawn()
         .map_err(|_| CompleteCopyError::GitUnavailable)?;
-    let mut hasher = object_hasher(&oid)?;
+    let mut hasher = object_hasher(oid)?;
     hasher.update(format!("blob {size}\0").as_bytes());
     let mut stream = child
         .stdout

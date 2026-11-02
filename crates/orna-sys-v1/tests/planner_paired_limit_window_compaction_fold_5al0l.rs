@@ -642,7 +642,7 @@ fn nested_aggregate_compaction_identity_tracks_paired_limit_restores() {
     );
     assert_eq!(
         integer(
-            &joins_by_source(&changed_spill)["table:Restore"],
+            joins_by_source(&changed_spill)["table:Restore"],
             "paired_limit_window_compaction_estimated_bytes"
         ),
         12_002

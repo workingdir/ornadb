@@ -8,9 +8,9 @@
 //! retries a setxattr that fails with `ESTALE` once, with `LOOKUP_REVAL`
 //! (`retry_estale` in `filename_setxattr`, fs/xattr.c lines 669-671), so the
 //! daemon receives two calls. The production daemon uses `ESTALE` for the stale
-//! refusal (fuse_mount.rs, the `EditError::Stale` arm of the xattr commit).
+//! refusal (`fuse_mount.rs`, the `EditError::Stale` arm of the xattr commit).
 //!
-//! Production coverage of that arm is end to end in tests/vfs_mount_isolation.rs:
+//! Production coverage of that arm is end to end in `tests/vfs_mount_isolation.rs`:
 //! `orna_edit_refuses_save_when_row_changed_during_editor_session` asserts E2000
 //! at line 446, and `blind_replacement_after_late_temp_overwrites_owner_change_while_orna_edit_refuses`
 //! asserts E2000 at line 824. Tracked by ornadb-eufo.1.1; the spec amendment is
@@ -38,13 +38,10 @@ use fuser::{
 use rustix::fs::XattrFlags;
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 use editor_mount::{mountinfo_contains, require_fuse_or_skip};
@@ -138,9 +135,7 @@ fn client_errno_for_daemon_reply(reply: Errno) -> (i32, usize) {
 
 /// The running kernel release, as `uname -r` reports it, for the proof output.
 fn kernel_release() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|release| release.trim().to_owned())
-        .unwrap_or_else(|error| format!("unknown ({error})"))
+    std::fs::read_to_string("/proc/sys/kernel/osrelease").map_or_else(|error| format!("unknown ({error})"), |release| release.trim().to_owned())
 }
 
 /// Names the errnos this proof expects, for the proof output.
