@@ -11,9 +11,9 @@ use std::{
     process::{Command, Output},
 };
 
-use orna_evaluator_v1::{evaluate_expression_ovb2_with_effects, Limits, SysHostBindingRegistry};
+use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::offline_copy::{
-    write_offline_copy, OfflineHistoryEntry, OfflineRow, PAYLOAD_BUFFER_BYTES,
+    OfflineHistoryEntry, OfflineRow, PAYLOAD_BUFFER_BYTES, write_offline_copy,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use sha2::{Digest, Sha256};
@@ -206,7 +206,11 @@ fn write_large_synthetic_bundle(directory: &Path, size: u64) -> PathBuf {
     let mut written = 0_u64;
     while written < size {
         let chunk = vec![
-            if written.is_multiple_of(2) { 0x5a_u8 } else { 0xa5_u8 };
+            if written.is_multiple_of(2) {
+                0x5a_u8
+            } else {
+                0xa5_u8
+            };
             (size - written).min(1 << 16) as usize
         ];
         digest.update(&chunk);

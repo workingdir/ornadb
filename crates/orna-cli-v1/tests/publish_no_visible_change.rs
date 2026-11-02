@@ -18,8 +18,8 @@ use std::process::{Command, Output};
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation,
-    TableObjectId, TerminalOutcome, WriterLease,
+    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
+    TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use tempfile::TempDir;
@@ -97,7 +97,11 @@ async fn commit_capture(
         .load_committed_snapshot(repository, source_commit)
         .expect("load the committed source project");
     let schema = loader
-        .resolve_committed_source_table_schema(repository, source_commit, TableObjectId::new(relation_id))
+        .resolve_committed_source_table_schema(
+            repository,
+            source_commit,
+            TableObjectId::new(relation_id),
+        )
         .expect("resolve the Object table from its committed identity");
     // Format 3 keeps rows only in `.orna/store` (ORNA-REPO-004): the row
     // source is the fixture document, never a committed file.
@@ -125,10 +129,14 @@ async fn commit_capture(
         [ordinal + 3; 16],
     )
     .expect("admit a complete source-owned row");
-    let (source_mutation, source_bindings, resolved_schema) =
-        admitted.into_mutation_and_bindings();
-    assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
-    let key = key_override.unwrap_or_else(|| source_mutation.key()).to_vec();
+    let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
+    assert_eq!(
+        resolved_schema.table_object_id(),
+        TableObjectId::new(relation_id)
+    );
+    let key = key_override
+        .unwrap_or_else(|| source_mutation.key())
+        .to_vec();
     let value = source_mutation
         .value()
         .expect("admitted source row has complete fields")
@@ -177,7 +185,9 @@ async fn commit_capture(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
-            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
         )
         .await
         .unwrap();
@@ -255,7 +265,10 @@ async fn publish_rejects_noncanonical_source_key_before_candidate_changes() {
         "source failure: {error}"
     );
     assert_eq!(head(root_path), head_before);
-    assert_eq!(git_output(root_path, &["show-ref", "--head"], None), refs_before);
+    assert_eq!(
+        git_output(root_path, &["show-ref", "--head"], None),
+        refs_before
+    );
     assert_eq!(
         std::fs::read(root_path.join(".git/index")).unwrap(),
         index_before
@@ -605,9 +618,7 @@ async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
         &base_head,
         index,
         &freeze,
-        |_mutation| {
-            orna_storage_v1::LoosePath::for_key("Object", &["image".to_owned()])
-        },
+        |_mutation| orna_storage_v1::LoosePath::for_key("Object", &["image".to_owned()]),
         "orna: interrupted publication",
     )
     .await

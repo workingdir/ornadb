@@ -11,9 +11,7 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn pinned_reflection_modules_are_snapshot_bound_and_importable() {
     let sources = orna_standard_sources::reference_standard_sources_v1()
         .into_iter()
-        .filter(|(path, _)| {
-            path == "std/introspection.orna" || path == "std/reflection.orna"
-        })
+        .filter(|(path, _)| path == "std/introspection.orna" || path == "std/reflection.orna")
         .collect::<Vec<_>>();
     let profile = StandardDependencyProfile::from_sources(
         "orna.std/y3xo7-reflection-introspection",
@@ -32,13 +30,14 @@ fn pinned_reflection_modules_are_snapshot_bound_and_importable() {
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("the modules resolve against core and the mandatory sys surface");
-    let mut session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured reflection modules failed to load: {}", error.code()));
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "captured reflection modules failed to load: {}",
+                    error.code()
+                )
+            });
     session
         .submit(include_str!("fixtures/stdlib-use-introspection-y3xo7.orna"))
         .unwrap_or_else(|error| panic!("captured introspection import failed: {}", error.code()));
@@ -51,18 +50,24 @@ fn pinned_reflection_modules_are_snapshot_bound_and_importable() {
 fn core_assertions_work_without_std_and_reflection_stays_optional() {
     let mut core = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-core-without-reflection-y3xo7.orna")),
+        core.submit(include_str!(
+            "fixtures/stdlib-core-without-reflection-y3xo7.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-core-call-without-reflection-y3xo7.orna")),
+        core.submit(include_str!(
+            "fixtures/stdlib-core-call-without-reflection-y3xo7.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
 
     let mut without_std = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_std
-            .submit(include_str!("fixtures/stdlib-reflection-without-snapshot-y3xo7.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-reflection-without-snapshot-y3xo7.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"

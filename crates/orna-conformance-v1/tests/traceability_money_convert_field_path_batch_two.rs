@@ -5,7 +5,8 @@
 //! path-codec boundary; it is not a claim of complete language conformance.
 
 use orna_semantic_v1::{
-    Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze, analyze_with_catalogue,
+    Catalogue, DIAG_MONEY_BINARY_FLOAT, DIAG_TYPE, ModuleInput, Type, analyze,
+    analyze_with_catalogue,
 };
 use orna_storage_v1::LoosePath;
 
@@ -75,9 +76,13 @@ fn money_003_exact_rate_algebra_admits_decimal_and_rejects_float() {
     );
     assert!(inexact.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == DIAG_MONEY_BINARY_FLOAT
-            && diagnostic.message() == "binary Float cannot enter an exact Money calculation implicitly"
+            && diagnostic.message()
+                == "binary Float cannot enter an exact Money calculation implicitly"
     }));
-    passed("ORNA-MONEY-003", "decimal-rate-typecheck-and-float-rejection");
+    passed(
+        "ORNA-MONEY-003",
+        "decimal-rate-typecheck-and-float-rejection",
+    );
 }
 
 // Specified: ORNA-MONEY-004, frozen source/05-types.md:282.
@@ -111,7 +116,10 @@ fn convert_001_explicit_target_from_selects_nested_implementation() {
         Type::Function { result, .. }
             if result.as_ref() == &Type::Named("explicit-from.EmailAddress".into())
     ));
-    passed("ORNA-CONVERT-001", "explicit-target-from-dispatch-typecheck");
+    passed(
+        "ORNA-CONVERT-001",
+        "explicit-target-from-dispatch-typecheck",
+    );
 }
 
 // Specified: ORNA-CONVERT-006, frozen source/05-types.md:442.
@@ -134,13 +142,19 @@ fn field_006_computed_field_cannot_be_supplied_to_insert() {
     );
     // Spec 07-tables and manifest: computed insert is E3010, not a generic type error.
     assert!(
-        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == "E3010"),
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == "E3010"),
         "{:?}",
         result.diagnostics
     );
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message().contains("computed field")
-    }));
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message().contains("computed field") })
+    );
     passed("ORNA-FIELD-006", "computed-field-insert-type-error");
 }
 
@@ -169,8 +183,14 @@ fn path_007_composite_key_path_uses_declared_order_and_final_suffix() {
     assert!(result.is_ok(), "{:?}", result.diagnostics);
 
     let path = LoosePath::for_key("Pair", &["north".into(), "17".into()]).unwrap();
-    assert_eq!(path.as_managed_path().as_path().to_string_lossy(), "Pair/north/17.orna");
-    passed("ORNA-PATH-007", "fixture-typecheck-and-composite-path-order");
+    assert_eq!(
+        path.as_managed_path().as_path().to_string_lossy(),
+        "Pair/north/17.orna"
+    );
+    passed(
+        "ORNA-PATH-007",
+        "fixture-typecheck-and-composite-path-order",
+    );
 }
 
 // Specified: ORNA-PATH-011, frozen source/07-tables.md:362.
@@ -186,5 +206,8 @@ fn path_011_noncanonical_alias_is_rejected_during_discovery() {
             "noncanonical encoded component must be rejected: {component}"
         );
     }
-    passed("ORNA-PATH-011", "fixture-typecheck-and-noncanonical-path-rejection");
+    passed(
+        "ORNA-PATH-011",
+        "fixture-typecheck-and-noncanonical-path-rejection",
+    );
 }

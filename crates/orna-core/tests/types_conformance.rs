@@ -17,7 +17,11 @@ const FLOAT_VECTORS: &str = include_str!("fixtures/float-vectors.json");
 #[test]
 fn checked_in_numeric_type_fixture_is_valid_source() {
     let parsed = orna_syntax_v1::parse_module(NUMERIC_FIXTURE);
-    assert!(parsed.is_ok(), "fixture diagnostics: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "fixture diagnostics: {:?}",
+        parsed.diagnostics
+    );
 }
 
 #[test]
@@ -61,9 +65,7 @@ fn reference_total_order_vectors_survive_runtime_float_construction() {
 fn reference_float_equality_vectors_match_runtime_float() {
     let vectors: serde_json::Value = serde_json::from_str(FLOAT_VECTORS).unwrap();
     for vector in vectors["ordinary_equality"].as_array().unwrap() {
-        let bits = |side: &str| {
-            u64::from_str_radix(vector[side].as_str().unwrap(), 16).unwrap()
-        };
+        let bits = |side: &str| u64::from_str_radix(vector[side].as_str().unwrap(), 16).unwrap();
         let left = RuntimeFloat::new(f64::from_bits(bits("left"))).unwrap();
         let right = RuntimeFloat::new(f64::from_bits(bits("right"))).unwrap();
         assert_eq!(left == right, vector["equal"].as_bool().unwrap());
@@ -107,9 +109,9 @@ fn result_rows_preserve_non_finite_float_values_and_signed_zero_bits() {
     ];
     let rows = ResultRows::new(
         [column],
-        values.into_iter().map(|value| {
-            ResultRow::new([RuntimeValue::Float(RuntimeFloat::new(value).unwrap())])
-        }),
+        values
+            .into_iter()
+            .map(|value| ResultRow::new([RuntimeValue::Float(RuntimeFloat::new(value).unwrap())])),
     )
     .expect("all binary64 values are valid values in a Float column");
 

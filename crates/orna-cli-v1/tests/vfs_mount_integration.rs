@@ -10,7 +10,6 @@
     clippy::cast_sign_loss,
     clippy::too_many_lines
 )]
-
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -216,7 +215,10 @@ fn directory_entries(path: &Path) -> String {
     match std::fs::read_dir(path) {
         Ok(entries) => entries
             .map(|entry| {
-                entry.map_or_else(|error| format!("<entry error: {error}>"), |entry| entry.file_name().to_string_lossy().into_owned())
+                entry.map_or_else(
+                    |error| format!("<entry error: {error}>"),
+                    |entry| entry.file_name().to_string_lossy().into_owned(),
+                )
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -314,7 +316,9 @@ fn unescape_mountinfo_field(field: &str) -> String {
     while index < bytes.len() {
         let is_octal_escape = bytes[index] == b'\\'
             && index + 3 < bytes.len()
-            && bytes[index + 1..index + 4].iter().all(|digit| (b'0'..=b'7').contains(digit));
+            && bytes[index + 1..index + 4]
+                .iter()
+                .all(|digit| (b'0'..=b'7').contains(digit));
         if is_octal_escape {
             let value = bytes[index + 1..index + 4]
                 .iter()
@@ -331,8 +335,7 @@ fn unescape_mountinfo_field(field: &str) -> String {
 
 fn mountinfo_contains(mountpoint: &Path) -> bool {
     // The kernel records the resolved mountpoint, so a symlinked TMPDIR must be resolved too.
-    let mountpoint =
-        std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
+    let mountpoint = std::fs::canonicalize(mountpoint).unwrap_or_else(|_| mountpoint.to_path_buf());
     let mountpoint = mountpoint.to_str().expect("mountpoint is UTF-8");
     std::fs::read_to_string("/proc/self/mountinfo")
         .expect("read Linux mount table")
@@ -347,7 +350,10 @@ fn mountinfo_contains(mountpoint: &Path) -> bool {
 #[test]
 fn unescape_mountinfo_field_decodes_octal_escapes() {
     assert_eq!(unescape_mountinfo_field("/tmp/a\\040b"), "/tmp/a b");
-    assert_eq!(unescape_mountinfo_field("x\\011y\\012z\\134w"), "x\ty\nz\\w");
+    assert_eq!(
+        unescape_mountinfo_field("x\\011y\\012z\\134w"),
+        "x\ty\nz\\w"
+    );
     assert_eq!(unescape_mountinfo_field("plain/path"), "plain/path");
     assert_eq!(unescape_mountinfo_field("trailing\\04"), "trailing\\04");
 }
@@ -456,10 +462,7 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     )
     .await;
     drop(state);
-    assert_ne!(
-        repository.head().unwrap().unwrap(),
-        historical_commit
-    );
+    assert_ne!(repository.head().unwrap().unwrap(), historical_commit);
     assert_ne!(
         format3::committed_store_rows(&repository, relation_id)[0].value(),
         historical_rows[0].value(),
@@ -476,7 +479,9 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
     let graph = historical_format
         .open_native_graph(&row_map)
         .expect("open the prior commit native store graph");
-    let scope = graph.open_read_scope().expect("open a historical graph read scope");
+    let scope = graph
+        .open_read_scope()
+        .expect("open a historical graph read scope");
     let stored_row = graph
         .lookup_row(
             &orna_repository_v1::TypedKey::Text("london".to_owned()),
@@ -667,7 +672,8 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
 /// ORNA-VFS-005: workspace editing stays attached to the selected worktree snapshot after HEAD advances.
 async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
     // A comment-only head advance leaves the Music declaration, and so its committed schema identity, unchanged.
-    let advanced = format!("{MUSIC_SOURCE}// head advances without changing the Music declaration\n");
+    let advanced =
+        format!("{MUSIC_SOURCE}// head advances without changing the Music declaration\n");
     let Some(run) = edit_row_after_head_advances(&advanced).await else {
         return;
     };
@@ -689,7 +695,10 @@ async fn cwd_mount_edit_row_uses_pinned_snapshot_after_head_advances() {
             .raw(),
         &orna_value_v1::Raw::Array(vec![orna_value_v1::Raw::Text("after".to_owned())]),
     );
-    assert!(run.head_unchanged_by_edit, "edit --row leaves the advanced HEAD in place");
+    assert!(
+        run.head_unchanged_by_edit,
+        "edit --row leaves the advanced HEAD in place"
+    );
 }
 
 #[tokio::test]
@@ -713,15 +722,17 @@ async fn cwd_mount_edit_row_refused_after_head_changes_music_schema() {
         "a definite refusal is not reported as unknown; stderr={stderr}"
     );
     assert!(
-        stderr.contains("mounted entry could not be read")
-            && stderr.contains("Input/output error"),
+        stderr.contains("mounted entry could not be read") && stderr.contains("Input/output error"),
         "the mount refuses to serve the row under the changed schema with EIO; stderr={stderr}"
     );
     assert_eq!(
         run.after, run.before,
         "the refused edit leaves the admitted row unchanged"
     );
-    assert!(run.head_unchanged_by_edit, "the refused edit leaves the advanced HEAD in place");
+    assert!(
+        run.head_unchanged_by_edit,
+        "the refused edit leaves the advanced HEAD in place"
+    );
 }
 
 const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
@@ -745,8 +756,13 @@ async fn edit_row_after_head_advances(advanced_main: &str) -> Option<PinnedRowEd
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(MUSIC_SOURCE, "Music");
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
-    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     media_commit::commit_source_captures_for_table(
         &repository,
@@ -821,7 +837,11 @@ async fn edit_row_after_head_advances(advanced_main: &str) -> Option<PinnedRowEd
     assert_ne!(head_after_move, pinned_commit);
     let scripts = TempDir::new().unwrap();
     let editor = scripts.path().join("editor");
-    std::fs::write(&editor, "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n").unwrap();
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf '%s\n' '{ title: \"after\", }' > \"$1\"\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
@@ -837,8 +857,13 @@ async fn edit_row_after_head_advances(advanced_main: &str) -> Option<PinnedRowEd
         .expect("run edit --row against mounted absolute row directory");
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
-    assert!(status.success(), "mount exits cleanly after edit and unmount");
-    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
+    assert!(
+        status.success(),
+        "mount exits cleanly after edit and unmount"
+    );
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
     let after = state
         .begin_admitted_table_activation(&tables)
         .await
@@ -882,7 +907,10 @@ async fn mount_music_row_with_source(source: &str, initial: &str) -> Option<Moun
 
 /// [`mount_music_row_with_source`] seeding every `(key, source row)` in `rows` under `Music`. The
 /// returned handle's `row_path` is the first row; the other rows sit beside it.
-async fn mount_music_rows_with_source(source: &str, rows: &[(&str, &str)]) -> Option<MountedMusicRow> {
+async fn mount_music_rows_with_source(
+    source: &str,
+    rows: &[(&str, &str)],
+) -> Option<MountedMusicRow> {
     if !fuse_test_available() {
         return None;
     }
@@ -900,13 +928,15 @@ async fn mount_music_rows_with_source(source: &str, rows: &[(&str, &str)]) -> Op
     let captures = rows
         .iter()
         .enumerate()
-        .map(|(index, &(key, source_row))| media_commit::SourceCaptureRow {
-            key,
-            blob_fields: &[],
-            source_row,
-            ordinal: 0x92 + index as u16,
-            insert_only: true,
-        })
+        .map(
+            |(index, &(key, source_row))| media_commit::SourceCaptureRow {
+                key,
+                blob_fields: &[],
+                source_row,
+                ordinal: 0x92 + index as u16,
+                insert_only: true,
+            },
+        )
         .collect::<Vec<_>>();
     media_commit::commit_source_captures_for_table(
         &repository,
@@ -945,7 +975,10 @@ async fn mount_music_rows_with_source(source: &str, rows: &[(&str, &str)]) -> Op
         .iter()
         .map(|(key, _)| mountpoint.join("Music").join(key).join("data.orna"))
         .collect::<Vec<_>>();
-    let document_path_refs = document_paths.iter().map(std::path::PathBuf::as_path).collect::<Vec<_>>();
+    let document_path_refs = document_paths
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .collect::<Vec<_>>();
     if !wait_for_mount_paths(&mut mounted, &document_path_refs) {
         return None;
     }
@@ -1047,10 +1080,7 @@ impl MountedMusicRow {
     }
 
     fn unmount(&mut self) {
-        run_unmount(
-            self.repository_directory.path(),
-            &self.mounted.mountpoint,
-        );
+        run_unmount(self.repository_directory.path(), &self.mounted.mountpoint);
         let status = self.mounted.child.wait().unwrap();
         assert!(status.success(), "mount exits cleanly after unmount");
     }
@@ -1067,7 +1097,11 @@ fn assert_saved(output: &std::process::Output, label: &str) {
 
 /// The draft files recovery storage keeps for `row` (ORNA-VFS-009); empty when none was retained.
 fn retained_drafts(row: &MountedMusicRow) -> Vec<std::path::PathBuf> {
-    let directory = row.repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    let directory = row
+        .repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1");
     match std::fs::read_dir(&directory) {
         Ok(entries) => entries
             .map(|entry| entry.expect("list retained draft").path())
@@ -1094,8 +1128,14 @@ async fn cwd_mount_consecutive_saves_of_one_row_both_commit() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
     };
-    assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
-    assert_saved(&row.save("second", "{ title: \"after-two\", }"), "second save");
+    assert_saved(
+        &row.save("first", "{ title: \"after-one\", }"),
+        "first save",
+    );
+    assert_saved(
+        &row.save("second", "{ title: \"after-two\", }"),
+        "second save",
+    );
     row.unmount();
     assert_title(&row.stored_row().await, "after-two");
 }
@@ -1107,7 +1147,10 @@ async fn cwd_mount_save_after_another_writer_advances_head_is_stale() {
     let Some(mut row) = mount_music_row("{ title: \"before\", }\n").await else {
         return;
     };
-    assert_saved(&row.save("first", "{ title: \"after-one\", }"), "first save");
+    assert_saved(
+        &row.save("first", "{ title: \"after-one\", }"),
+        "first save",
+    );
     row.assert_direct_writer_refused().await;
     row.replace_row_through_owner("{ title: \"other\", }");
     let repository = row.repository_directory.path().to_path_buf();
@@ -1447,7 +1490,10 @@ async fn cwd_mount_save_after_head_renames_table_keeps_pinned_declaration() {
         head_source.contains("Archive"),
         "HEAD declares the renamed table: {head_source}"
     );
-    assert_saved(&row.save("save", "{ title: \"after\", }"), "save through pinned name");
+    assert_saved(
+        &row.save("save", "{ title: \"after\", }"),
+        "save through pinned name",
+    );
     row.unmount();
     assert_title(&row.stored_row().await, "after");
 }
@@ -1465,8 +1511,13 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
             "Music",
         );
     let (runtime_identity, digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, runtime_identity, digest).await.unwrap();
-    let writer = state.acquire_lease(runtime_identity.repository_id).await.unwrap();
+    let state = RuntimeState::open(&repository, runtime_identity, digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     media_commit::commit_source_captures_for_table(
         &repository,
@@ -1518,7 +1569,11 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
     let scripts = TempDir::new().unwrap();
     let editor = scripts.path().join("editor");
     let marker = scripts.path().join("editor-was-run");
-    std::fs::write(&editor, "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n").unwrap();
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nprintf invoked > \"$ORNA_EDIT_MARKER\"\n",
+    )
+    .unwrap();
     std::fs::set_permissions(&editor, std::fs::Permissions::from_mode(0o755)).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_orna"))
         .args([
@@ -1536,13 +1591,22 @@ async fn edit_row_refuses_read_only_historical_mount_without_mutation() {
         !output.status.success(),
         "edit --row must refuse a read-only --at mount"
     );
-    assert!(!marker.exists(), "read-only refusal must happen before launching the editor");
+    assert!(
+        !marker.exists(),
+        "read-only refusal must happen before launching the editor"
+    );
     assert_eq!(repository.head().unwrap().unwrap(), head_before);
-    assert_eq!(format3::committed_store_rows(&repository, relation_id), rows_before);
+    assert_eq!(
+        format3::committed_store_rows(&repository, relation_id),
+        rows_before
+    );
 
     run_unmount(repository_directory.path(), &mountpoint);
     let status = mounted.child.wait().unwrap();
-    assert!(status.success(), "historical mount exits cleanly after unmount");
+    assert!(
+        status.success(),
+        "historical mount exits cleanly after unmount"
+    );
 }
 
 #[tokio::test]
@@ -1756,7 +1820,7 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
     std::fs::set_permissions(&chunk_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     std::fs::write(&chunk_path, b"corrupt Git loose object bytes").unwrap();
 
-     let mount_parent = TempDir::new().unwrap();
+    let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
     std::fs::create_dir(&mountpoint).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_orna"))
@@ -1780,7 +1844,6 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         return;
     }
 
-
     let metadata = Command::new("cat")
         .arg(mountpoint.join("Music/london/data.orna"))
         .output()
@@ -1790,12 +1853,11 @@ async fn cwd_mount_metadata_save_avoids_corrupt_sibling_payload() {
         "metadata read must not fetch corrupt media payload"
     );
     let metadata = String::from_utf8(metadata.stdout).unwrap();
-    assert!(metadata.contains(
-        "content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"
-    ));
+    assert!(metadata.contains("content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"));
 
     let data_path = mountpoint.join("Music/london/data.orna");
-    let replacement_document = "{\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n}\n";
+    let replacement_document =
+        "{\n    content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" },\n}\n";
     let mut document = OpenOptions::new()
         .write(true)
         .truncate(true)
@@ -2001,7 +2063,8 @@ fn cwd_mount_sigterm_unmounts_and_detaches_the_view() {
         thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
-        let stderr = std::fs::read_to_string(mount_parent.path().join("mount-stderr.log")).unwrap_or_default();
+        let stderr = std::fs::read_to_string(mount_parent.path().join("mount-stderr.log"))
+            .unwrap_or_default();
         panic!("mount process exits cleanly after SIGTERM ({status}): {stderr}");
     }
 
@@ -2196,7 +2259,10 @@ async fn cwd_mount_refuses_unmount_with_dirty_draft_and_allows_clean_unmount() {
         .arg(&mountpoint)
         .output()
         .expect("run dirty-state unmount");
-    assert!(!refused.status.success(), "dirty mount unmount was accepted");
+    assert!(
+        !refused.status.success(),
+        "dirty mount unmount was accepted"
+    );
     let diagnostic = format!(
         "{}{}",
         String::from_utf8_lossy(&refused.stdout),
@@ -2296,7 +2362,10 @@ async fn cwd_mount_refuses_unmount_with_invalid_dirty_draft_and_allows_clean_unm
         .arg(&mountpoint)
         .output()
         .expect("run dirty-state unmount");
-    assert!(!refused.status.success(), "dirty mount unmount was accepted");
+    assert!(
+        !refused.status.success(),
+        "dirty mount unmount was accepted"
+    );
     let diagnostic = format!(
         "{}{}",
         String::from_utf8_lossy(&refused.stdout),
@@ -2425,7 +2494,10 @@ async fn cwd_mount_tracks_released_drafts_and_path_truncates() {
         .arg(&mountpoint)
         .output()
         .expect("run pending path-truncate unmount");
-    assert!(!refused.status.success(), "pending path truncate was discarded");
+    assert!(
+        !refused.status.success(),
+        "pending path truncate was discarded"
+    );
     assert!(mountinfo_contains(&mountpoint));
 
     let mut document = OpenOptions::new().write(true).open(&data_path).unwrap();
@@ -2577,7 +2649,10 @@ async fn truncate_after_close_keeps_unsynced_writes() {
         .arg(&mountpoint)
         .output()
         .expect("run pending path-truncate unmount");
-    assert!(!refused.status.success(), "pending path truncate was discarded");
+    assert!(
+        !refused.status.success(),
+        "pending path truncate was discarded"
+    );
     assert!(mountinfo_contains(&mountpoint));
     // Records are written only when the mount process stops (ORNA-VFS-024), so stop it and inspect the store.
     let signal = Command::new("kill")
@@ -2590,18 +2665,28 @@ async fn truncate_after_close_keeps_unsynced_writes() {
         if let Some(status) = mounted.child.try_wait().unwrap() {
             break status;
         }
-        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        assert!(
+            Instant::now() < deadline,
+            "mount did not stop after SIGTERM"
+        );
         thread::sleep(Duration::from_millis(20));
     };
     let stop_stderr = take_child_stderr(&mut mounted.child);
-    assert!(!status.success(), "mount stopped with unresolved drafts must exit non-zero");
     assert!(
-        stop_stderr.contains("sys.vfs.draft_retained") && stop_stderr.contains("Music/london/data.orna"),
+        !status.success(),
+        "mount stopped with unresolved drafts must exit non-zero"
+    );
+    assert!(
+        stop_stderr.contains("sys.vfs.draft_retained")
+            && stop_stderr.contains("Music/london/data.orna"),
         "stop reports the retained draft: {stop_stderr}"
     );
 
     let records_of = || -> Vec<String> {
-        let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+        let directory = repository
+            .runtime_paths()
+            .root()
+            .join("vfs-retained-drafts-v1");
         match std::fs::read_dir(&directory) {
             Ok(entries) => entries
                 .map(|entry| entry.expect("list retained draft").path())
@@ -2696,7 +2781,10 @@ fn set_mode(path: &Path, mode: u32) {
 /// Truncates `path` by name, as `truncate(2)` does: the mount sees a setattr with no open handle.
 fn path_truncate(path: &Path, size: u64) {
     let output = Command::new("python3")
-        .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+        .args([
+            "-c",
+            "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))",
+        ])
         .arg(path)
         .arg(size.to_string())
         .output()
@@ -2715,7 +2803,10 @@ fn path_truncate_retrying_busy(path: &Path, size: u64) {
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let output = Command::new("python3")
-            .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+            .args([
+                "-c",
+                "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))",
+            ])
             .arg(path)
             .arg(size.to_string())
             .output()
@@ -2745,7 +2836,10 @@ fn send_sigterm(mounted: &MountedProcess) {
 fn wait_for_mount_exit(mounted: &mut MountedProcess) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while mounted.child.try_wait().unwrap().is_none() {
-        assert!(Instant::now() < deadline, "mount did not stop after SIGTERM");
+        assert!(
+            Instant::now() < deadline,
+            "mount did not stop after SIGTERM"
+        );
         thread::sleep(Duration::from_millis(20));
     }
 }
@@ -2778,7 +2872,10 @@ fn wait_for_stderr_line(mounted: &mut MountedProcess, needle: &str) {
 
 /// The contents of every draft record recovery storage holds (ORNA-VFS-009); empty when none.
 fn retained_record_texts(repository: &orna_repository_v1::Repository) -> Vec<String> {
-    let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    let directory = repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1");
     match std::fs::read_dir(&directory) {
         Ok(entries) => entries
             .map(|entry| entry.expect("list retained draft").path())
@@ -2806,7 +2903,10 @@ fn retained_record_bodies(repository: &orna_repository_v1::Repository) -> Vec<St
 
 /// The recovery directory of `repository`, where retained draft records are written.
 fn record_directory(repository: &orna_repository_v1::Repository) -> std::path::PathBuf {
-    let directory = repository.runtime_paths().root().join("vfs-retained-drafts-v1");
+    let directory = repository
+        .runtime_paths()
+        .root()
+        .join("vfs-retained-drafts-v1");
     std::fs::create_dir_all(&directory).unwrap();
     directory
 }
@@ -2820,8 +2920,13 @@ async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() 
     };
     let record_dir = record_directory(&mount.repository);
     set_mode(&record_dir, 0o500);
-    let mut document = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    document.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    let mut document = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    document
+        .write_all(b"{ title: \"unsynced writes kept\", }\n")
+        .unwrap();
     drop(document);
     // FUSE release is asynchronous to close(2); let the release refuse retention first.
     thread::sleep(Duration::from_millis(300));
@@ -2829,7 +2934,10 @@ async fn cwd_mount_truncate_after_failed_retention_keeps_one_truncated_record() 
     send_sigterm(&mount.mounted);
     // Stop keeps the mount up while its drafts cannot be kept (ORNA-VFS-024). The mount reports
     // each failed retention before it waits to retry, so the check runs once that report arrives.
-    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
+    wait_for_stderr_line(
+        &mut mount.mounted,
+        "retrying draft retention before unmount",
+    );
     assert!(
         mount.mounted.child.try_wait().unwrap().is_none(),
         "mount stopped while its drafts could not be kept"
@@ -2861,7 +2969,10 @@ async fn cwd_mount_truncate_during_pending_stop_retry_keeps_one_record() {
     path_truncate(&mount.data_path, 13);
     send_sigterm(&mount.mounted);
     // Stop keeps the mount up while the cut cannot be kept, then retries retention.
-    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
+    wait_for_stderr_line(
+        &mut mount.mounted,
+        "retrying draft retention before unmount",
+    );
     assert!(
         mount.mounted.child.try_wait().unwrap().is_none(),
         "mount stopped while its truncate could not be kept"
@@ -2891,8 +3002,13 @@ async fn cwd_mount_truncate_after_failed_release_retains_one_record() {
     };
     let record_dir = record_directory(&mount.repository);
     set_mode(&record_dir, 0o500);
-    let mut document = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    document.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    let mut document = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    document
+        .write_all(b"{ title: \"unsynced writes kept\", }\n")
+        .unwrap();
     drop(document);
     // FUSE release is asynchronous to close(2); let the release refuse retention first.
     thread::sleep(Duration::from_millis(300));
@@ -3020,7 +3136,10 @@ async fn cwd_mount_truncate_after_refused_unretained_candidate_retains_one_recor
     path_truncate(&mount.data_path, 13);
     send_sigterm(&mount.mounted);
     // Stop keeps the mount up while the candidate cannot be kept, then retries retention.
-    wait_for_stderr_line(&mut mount.mounted, "retrying draft retention before unmount");
+    wait_for_stderr_line(
+        &mut mount.mounted,
+        "retrying draft retention before unmount",
+    );
     assert!(
         mount.mounted.child.try_wait().unwrap().is_none(),
         "mount stopped while its candidate could not be kept"
@@ -3049,8 +3168,13 @@ async fn cwd_mount_reopen_after_path_truncate_applies_truncate_to_accepted_basel
     let Some(mut mount) = start_cwd_music_mount("{ title: \"before\", }\n").await else {
         return;
     };
-    let mut earlier = OpenOptions::new().write(true).open(&mount.data_path).unwrap();
-    earlier.write_all(b"{ title: \"unsynced writes kept\", }\n").unwrap();
+    let mut earlier = OpenOptions::new()
+        .write(true)
+        .open(&mount.data_path)
+        .unwrap();
+    earlier
+        .write_all(b"{ title: \"unsynced writes kept\", }\n")
+        .unwrap();
     earlier.sync_all().unwrap();
     drop(earlier);
     path_truncate(&mount.data_path, 13);
@@ -3091,7 +3215,11 @@ async fn cwd_mount_read_only_open_after_path_truncate_retains_nothing_early() {
     send_sigterm(&mount.mounted);
     wait_for_mount_exit(&mut mount.mounted);
     let records = retained_record_texts(&mount.repository);
-    assert_eq!(records.len(), 1, "the pending truncate is retained once: {records:?}");
+    assert_eq!(
+        records.len(),
+        1,
+        "the pending truncate is retained once: {records:?}"
+    );
     assert!(
         records[0].contains("\nbytes 13\n")
             && records[0].ends_with(std::str::from_utf8(&baseline[..13]).unwrap()),
@@ -3107,20 +3235,31 @@ async fn cwd_mount_atomic_replacement_clears_pending_path_truncate() {
         return;
     };
     path_truncate(&mount.data_path, 13);
-    let scratch = mount.mountpoint.join("Music/london/.data.orna.replacement-tmp");
+    let scratch = mount
+        .mountpoint
+        .join("Music/london/.data.orna.replacement-tmp");
     let mut replacement = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&scratch)
         .expect("create replacement scratch beside data.orna");
-    replacement.write_all(b"{ title: \"replaced\", }\n").unwrap();
+    replacement
+        .write_all(b"{ title: \"replaced\", }\n")
+        .unwrap();
     replacement.sync_all().expect("accept replacement scratch");
     drop(replacement);
     std::fs::rename(&scratch, &mount.data_path).expect("atomically replace data.orna");
     let accepted = std::fs::read_to_string(&mount.data_path).unwrap();
-    assert!(accepted.contains("replaced"), "the accepted replacement reads back: {accepted:?}");
+    assert!(
+        accepted.contains("replaced"),
+        "the accepted replacement reads back: {accepted:?}"
+    );
 
-    run_unmount_from(mount.repository_directory.path(), Path::new("."), &mount.mountpoint);
+    run_unmount_from(
+        mount.repository_directory.path(),
+        Path::new("."),
+        &mount.mountpoint,
+    );
     assert!(!mountinfo_contains(&mount.mountpoint));
     assert!(mount.repository.mount_status().unwrap().is_empty());
 }
@@ -3351,7 +3490,9 @@ async fn cwd_mount_atomic_replacement_clears_rejected_draft_for_unmount() {
         .create_new(true)
         .open(&scratch)
         .expect("create replacement scratch beside data.orna");
-    replacement.write_all(b"{ title: \"replaced\", }\n").unwrap();
+    replacement
+        .write_all(b"{ title: \"replaced\", }\n")
+        .unwrap();
     replacement.sync_all().expect("accept replacement scratch");
     drop(replacement);
     std::fs::rename(&scratch, &data_path).expect("atomically replace data.orna");
@@ -3431,10 +3572,7 @@ async fn cwd_mount_unmodified_document_fsync_does_not_block_unmount() {
         return;
     }
 
-    let document = OpenOptions::new()
-        .write(true)
-        .open(&data_path)
-        .unwrap();
+    let document = OpenOptions::new().write(true).open(&data_path).unwrap();
     // The handle submitted no candidate, so the fsync result is not a rejection and is not asserted.
     let _ = document.sync_all();
     drop(document);
@@ -3558,7 +3696,10 @@ fn stop_mount_retaining_drafts(mounted: &mut MountedProcess) {
         .args(["-TERM", &mounted.child.id().to_string()])
         .status()
         .expect("send SIGTERM to the mount process");
-    assert!(status.success(), "SIGTERM is delivered to the mount process");
+    assert!(
+        status.success(),
+        "SIGTERM is delivered to the mount process"
+    );
     let _ = mounted.child.wait().unwrap();
 }
 
@@ -4203,7 +4344,9 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
         .open(&blob_path)
         .expect("write-mode open of a projected Blob must succeed");
     for chunk in 0..CHUNKS {
-        handle.write_all(&chunk_of(chunk)).expect("write a 1 MiB candidate chunk");
+        handle
+            .write_all(&chunk_of(chunk))
+            .expect("write a 1 MiB candidate chunk");
     }
     assert_eq!(
         handle.metadata().unwrap().len(),
@@ -4214,12 +4357,19 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     handle.seek(SeekFrom::Start(0)).unwrap();
     let mut read_back = vec![0u8; CHUNK_BYTES];
     for chunk in 0..CHUNKS {
-        handle.read_exact(&mut read_back).expect("read a 1 MiB candidate chunk");
-        assert!(read_back == chunk_of(chunk), "chunk {chunk} reads back from the candidate");
+        handle
+            .read_exact(&mut read_back)
+            .expect("read a 1 MiB candidate chunk");
+        assert!(
+            read_back == chunk_of(chunk),
+            "chunk {chunk} reads back from the candidate"
+        );
     }
 
     let growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
-    eprintln!("mount daemon peak RSS growth during 64 MiB candidate write and read-back: {growth} bytes");
+    eprintln!(
+        "mount daemon peak RSS growth during 64 MiB candidate write and read-back: {growth} bytes"
+    );
     assert!(
         growth < RSS_GROWTH_BOUND_BYTES,
         "mount daemon peak RSS grew {growth} bytes during the candidate, reaching the bound {RSS_GROWTH_BOUND_BYTES} bytes"
@@ -4231,7 +4381,9 @@ async fn cwd_mount_blob_64_mib_candidate_streams_in_bounded_rss() {
     // 20,045,824 B (19.1 MiB) on 7fa27a6eb; 88,264,704 B (84.2 MiB) on origin/main 9eab295fd. The 32 MiB
     // ceiling is a regression bound with about 11 MiB headroom. The 16 MiB goal over the floor is not yet met (ornadb-u715, partial).
     let accept_growth = peak_rss_bytes(row.mounted.child.id()).saturating_sub(baseline);
-    eprintln!("mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes");
+    eprintln!(
+        "mount daemon peak RSS growth through 64 MiB candidate accept: {accept_growth} bytes"
+    );
     assert!(
         accept_growth < ACCEPT_CEILING_BYTES,
         "mount daemon peak RSS grew {accept_growth} bytes through the accept, over the ceiling {ACCEPT_CEILING_BYTES} bytes"
@@ -4276,12 +4428,16 @@ async fn cwd_mount_scratch_64_mib_chunked_write_is_bounded_time_and_rss() {
         .expect("creating an unbound scratch inside a Blob-field row directory is supported");
     let started = Instant::now();
     for chunk in &chunks {
-        handle.write_all(chunk).expect("write a 1 MiB scratch chunk");
+        handle
+            .write_all(chunk)
+            .expect("write a 1 MiB scratch chunk");
     }
     handle.seek(SeekFrom::Start(0)).unwrap();
     let mut read_back = vec![0u8; CHUNK_BYTES];
     for chunk in &chunks {
-        handle.read_exact(&mut read_back).expect("read a 1 MiB scratch chunk");
+        handle
+            .read_exact(&mut read_back)
+            .expect("read a 1 MiB scratch chunk");
         assert!(read_back == *chunk, "scratch chunk reads back unchanged");
     }
     let elapsed = started.elapsed();
@@ -4353,7 +4509,10 @@ async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
         .arg(&row.mounted.mountpoint)
         .output()
         .expect("run orna unmount");
-    assert!(!refused.status.success(), "a retained stale blob draft must refuse unmount");
+    assert!(
+        !refused.status.success(),
+        "a retained stale blob draft must refuse unmount"
+    );
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("sys.vfs.stale_edit"),
         "unmount must name the retained stale candidate: {}",
@@ -4409,7 +4568,10 @@ async fn cwd_mount_blob_write_open_before_schema_change_is_stale_eagain() {
         .arg(&row.mounted.mountpoint)
         .output()
         .expect("run orna unmount");
-    assert!(!refused.status.success(), "a retained stale blob draft must refuse unmount");
+    assert!(
+        !refused.status.success(),
+        "a retained stale blob draft must refuse unmount"
+    );
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("sys.vfs.stale_edit"),
         "unmount must name the retained stale candidate: {}",
@@ -4518,9 +4680,14 @@ async fn cwd_mount_blob_64_mib_committed_restore_streams_in_bounded_rss() {
     let mut handle = File::open(&restored_blob).unwrap();
     let mut read_back = vec![0u8; CHUNK_BYTES];
     for chunk in 0..CHUNKS {
-        handle.read_exact(&mut read_back).expect("read a 1 MiB range of the restored Blob");
+        handle
+            .read_exact(&mut read_back)
+            .expect("read a 1 MiB range of the restored Blob");
         let range = &original[chunk * CHUNK_BYTES..(chunk + 1) * CHUNK_BYTES];
-        assert!(read_back == range, "chunk {chunk} reads back from the restored Blob");
+        assert!(
+            read_back == range,
+            "chunk {chunk} reads back from the restored Blob"
+        );
     }
     let growth = peak_rss_bytes(restored.child.id()).saturating_sub(baseline);
     eprintln!("mount daemon peak RSS growth during 64 MiB restored Blob read-back: {growth} bytes");
@@ -4587,7 +4754,10 @@ async fn cwd_mount_blob_read_write_open_is_coherent() {
     handle.seek(SeekFrom::Start(0)).unwrap();
     let mut readback = vec![0u8; 4 * 1024];
     handle.read_exact(&mut readback).unwrap();
-    assert_eq!(readback, patch, "a read after a write on one handle must see the write");
+    assert_eq!(
+        readback, patch,
+        "a read after a write on one handle must see the write"
+    );
     handle.sync_all().unwrap();
     drop(handle);
 
@@ -4624,7 +4794,11 @@ async fn cwd_mount_symlink_and_hard_link_fail_eperm_without_row_change() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, ["data.orna"], "refused links leave no directory entry");
+    assert_eq!(
+        names,
+        ["data.orna"],
+        "refused links leave no directory entry"
+    );
     row.unmount();
     assert_title(&row.stored_row().await, "before");
 }
@@ -4636,8 +4810,8 @@ async fn cwd_mount_unlink_mkdir_and_document_rename_fail_eperm_without_row_chang
         return;
     };
     let row_path = row.row_path.clone();
-    let unlink_error = std::fs::remove_file(row_path.join("data.orna"))
-        .expect_err("data.orna cannot be unlinked");
+    let unlink_error =
+        std::fs::remove_file(row_path.join("data.orna")).expect_err("data.orna cannot be unlinked");
     assert_eq!(unlink_error.raw_os_error(), Some(EPERM));
     let mkdir_error = std::fs::create_dir(row_path.join("nested"))
         .expect_err("plain mkdir does not invent schema or key semantics");
@@ -4687,13 +4861,21 @@ async fn cwd_mount_blob_compatible_suffix_rename_keeps_bytes() {
     let refused = std::fs::rename(&blob_path, row_path.join("content.wav"))
         .expect_err("renaming a Blob to a suffix its MIME does not admit is refused");
     assert_eq!(refused.raw_os_error(), Some(EPERM));
-    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "a refused rename keeps the Blob");
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        original,
+        "a refused rename keeps the Blob"
+    );
 
     std::fs::rename(&blob_path, row_path.join("content.mp1"))
         .expect("renaming a Blob to a compatible suffix is accepted");
     assert!(!blob_path.exists(), "the old suffix name is gone");
     let renamed = row_path.join("content.mp1");
-    assert_eq!(std::fs::read(&renamed).unwrap(), original, "the bytes are not transcoded");
+    assert_eq!(
+        std::fs::read(&renamed).unwrap(),
+        original,
+        "the bytes are not transcoded"
+    );
     let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
     assert!(
         document.contains("content: { path: \"./content.mp1\", media_type: \"audio/mpeg\" }"),
@@ -4726,7 +4908,11 @@ async fn cwd_mount_required_blob_unlink_is_refused() {
 
     let unlinked = std::fs::remove_file(&blob_path).expect_err("a required Blob is never unlinked");
     assert_eq!(unlinked.raw_os_error(), Some(EPERM));
-    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "the Blob keeps its bytes");
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        original,
+        "the Blob keeps its bytes"
+    );
     let document = String::from_utf8(std::fs::read(row_path.join("data.orna")).unwrap()).unwrap();
     assert!(
         document.contains("content: { path: \"./content.mp3\", media_type: \"audio/mpeg\" }"),
@@ -4968,7 +5154,11 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     // Captures the original row baseline; it becomes stale once the Blob is replaced below.
     let stale = row_path.join(".content.wav.replace");
     create_scratch(&stale, b"stale candidate");
-    assert_eq!(std::fs::read(&blob_path).unwrap(), original, "scratch does not change the Blob");
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        original,
+        "scratch does not change the Blob"
+    );
 
     // A Blob-bound scratch accepts its own rename and replaces the Blob.
     let bound = row_path.join(".content.mp3.replace");
@@ -4981,19 +5171,31 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
         .expect_err("a scratch with a stale baseline must not replace the Blob");
     assert_eq!(refused.raw_os_error(), Some(EAGAIN));
     assert!(stale.exists(), "the refused scratch remains recoverable");
-    assert_eq!(std::fs::read(&blob_path).unwrap(), second, "the accepted Blob is unchanged");
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        second,
+        "the accepted Blob is unchanged"
+    );
 
     // An unbound scratch, created after the accepted replacement, commits to the Blob its rename names.
     let unbound = row_path.join(".clip.wav.replace");
     create_scratch(&unbound, &replacement);
     let _document_before = std::fs::read(row_path.join("data.orna")).unwrap();
-    std::fs::rename(&unbound, &blob_path).expect("renaming unbound scratch over the Blob is accepted");
+    std::fs::rename(&unbound, &blob_path)
+        .expect("renaming unbound scratch over the Blob is accepted");
     assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
     // The row document carries the Blob's path and media type, not its bytes, so an accepted byte replacement leaves those names in place; the remount check below proves the document against the store.
     let document_after = std::fs::read(row_path.join("data.orna")).unwrap();
-    let document_after_text = String::from_utf8(document_after.clone()).expect("data.orna is UTF-8");
-    assert!(document_after_text.contains("./content.mp3"), "data.orna still names the Blob");
-    assert!(!unbound.exists(), "the accepted scratch is consumed by its rename");
+    let document_after_text =
+        String::from_utf8(document_after.clone()).expect("data.orna is UTF-8");
+    assert!(
+        document_after_text.contains("./content.mp3"),
+        "data.orna still names the Blob"
+    );
+    assert!(
+        !unbound.exists(),
+        "the accepted scratch is consumed by its rename"
+    );
 
     // A retained stale candidate blocks unmount until removed (sys.vfs.stale_edit); remove it so the mount drains.
     std::fs::remove_file(&stale).expect("removing the refused stale scratch");
@@ -5002,12 +5204,26 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     // Remount: data.orna and the Blob bytes must be rebuilt from the committed store row that holds the accepted replacement.
     let committed = format3::committed_store_rows(&row.repository, row.relation_id);
     assert_eq!(committed.len(), 1, "the relation keeps one committed row");
-    assert!(committed[0].value().encoded_fields().is_some(), "the accepted row is inline");
+    assert!(
+        committed[0].value().encoded_fields().is_some(),
+        "the accepted row is inline"
+    );
     let mountpoint = row.mounted.mountpoint.clone();
     let mut remounted = spawn_cwd_mount(row.repository_directory.path(), &mountpoint);
-    assert!(wait_for_mount_paths(&mut remounted, &[blob_path.as_path()]), "remount exposes the Blob");
-    assert_eq!(std::fs::read(&blob_path).unwrap(), replacement, "remount serves the accepted Blob bytes");
-    assert_eq!(std::fs::read(row_path.join("data.orna")).unwrap(), document_after, "remounted data.orna matches the document served before unmount");
+    assert!(
+        wait_for_mount_paths(&mut remounted, &[blob_path.as_path()]),
+        "remount exposes the Blob"
+    );
+    assert_eq!(
+        std::fs::read(&blob_path).unwrap(),
+        replacement,
+        "remount serves the accepted Blob bytes"
+    );
+    assert_eq!(
+        std::fs::read(row_path.join("data.orna")).unwrap(),
+        document_after,
+        "remounted data.orna matches the document served before unmount"
+    );
     unmount_and_reap(row.repository_directory.path(), &mut remounted);
 }
 
@@ -5019,7 +5235,9 @@ async fn cwd_mount_unbound_scratch_cap_is_per_mount() {
         return;
     };
     let row_path = row.mounted.mountpoint.join("Music/london");
-    let names: Vec<_> = (0..16).map(|i| row_path.join(format!(".clip{i}.wav.replace"))).collect();
+    let names: Vec<_> = (0..16)
+        .map(|i| row_path.join(format!(".clip{i}.wav.replace")))
+        .collect();
     for name in &names {
         create_scratch(name, b"draft");
     }
@@ -5136,7 +5354,11 @@ async fn mount_case_distinct_keys_project_to_distinct_rows() {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
-    assert_eq!(names, ["ABC", "abc"], "case-distinct keys keep their own directories");
+    assert_eq!(
+        names,
+        ["ABC", "abc"],
+        "case-distinct keys keep their own directories"
+    );
     for (name, title) in [("abc", "lower"), ("ABC", "upper")] {
         let document = std::fs::read_to_string(table_path.join(name).join("data.orna"))
             .unwrap_or_else(|error| panic!("read the row at {name}: {error}"));
@@ -5220,7 +5442,9 @@ async fn cwd_mount_shrunk_str_drops_its_text_sibling() {
 
 /// `count` bytes of ASCII text, so a Str built from it is over the inline bound when `count` is.
 fn ascii_text(count: usize) -> String {
-    (0..count).map(|index| char::from(b'a' + (index % 26) as u8)).collect()
+    (0..count)
+        .map(|index| char::from(b'a' + (index % 26) as u8))
+        .collect()
 }
 
 /// Writes `document` to `path` through a write-intent open and syncs it, as an editor's save does.
@@ -5233,7 +5457,11 @@ fn write_text_and_sync(path: &Path, document: &str) -> std::io::Result<()> {
 /// The leading `"..."` string literal of `text`, honouring backslash escapes.
 fn leading_string_literal(text: &str) -> &str {
     let bytes = text.as_bytes();
-    assert_eq!(bytes.first(), Some(&b'"'), "a string literal starts the field: {text:?}");
+    assert_eq!(
+        bytes.first(),
+        Some(&b'"'),
+        "a string literal starts the field: {text:?}"
+    );
     let mut index = 1;
     while index < bytes.len() {
         match bytes[index] {
@@ -5252,15 +5480,25 @@ async fn cwd_mount_text_round_trips_special_characters_through_document() {
         return;
     };
     assert_saved(
-        &row.save("large", &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024))),
+        &row.save(
+            "large",
+            &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024)),
+        ),
         "large Str save",
     );
     let title = row.row_path.join("title.txt");
     let special = "nul\0 quote\" back\\slash\nlf\r\ncrlf\ttab {brace} bell\u{7} astral\u{1F600} é";
     let oversized = special.repeat(1_200);
-    assert!(oversized.len() > 64 * 1024, "the replacement stays over the inline bound");
+    assert!(
+        oversized.len() > 64 * 1024,
+        "the replacement stays over the inline bound"
+    );
     write_text_and_sync(&title, &oversized).expect("a large UTF-8 replacement is accepted");
-    assert_eq!(std::fs::read(&title).unwrap(), oversized.as_bytes(), "the .txt is byte-exact");
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        oversized.as_bytes(),
+        "the .txt is byte-exact"
+    );
 
     write_text_and_sync(&title, special).expect("a short replacement is accepted");
     assert!(!title.exists(), "a short replacement is inline");
@@ -5295,7 +5533,10 @@ async fn cwd_mount_text_write_after_owner_advances_row_is_stale_then_retries() {
     };
     let big = ascii_text(70 * 1024);
     assert_saved(
-        &row.save("large", &format!("{{ title: \"{big}\", artist: \"Kieran\", }}")),
+        &row.save(
+            "large",
+            &format!("{{ title: \"{big}\", artist: \"Kieran\", }}"),
+        ),
         "large Str save",
     );
     let repository = row.repository_directory.path().to_path_buf();
@@ -5306,20 +5547,31 @@ async fn cwd_mount_text_write_after_owner_advances_row_is_stale_then_retries() {
         .open(&title)
         .expect("a write-intent open captures the baseline");
     owner_edit_row_text(&repository, "artist: \"Kieran\"", "artist: \"Other\"");
-    stale.write_all(b"stale replacement").expect("the bytes are accepted into the handle");
+    stale
+        .write_all(b"stale replacement")
+        .expect("the bytes are accepted into the handle");
     let refused = stale
         .sync_all()
         .expect_err("a write against a row another writer advanced is stale");
     assert_eq!(refused.raw_os_error(), Some(EAGAIN));
     drop(stale);
-    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "a stale write keeps the Str");
-    let retained = std::fs::read_dir(row.repository.runtime_paths().root().join("vfs-retained-drafts-v1"))
-        .expect("the refused candidate is kept in recovery storage (ORNA-VFS-009)")
-        .map(|entry| entry.expect("list retained draft").path())
-        .filter(|path| path.is_file())
-        .map(|path| std::fs::read(path).unwrap())
-        .map(|record| String::from_utf8_lossy(&record).into_owned())
-        .collect::<Vec<_>>();
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        big.as_bytes(),
+        "a stale write keeps the Str"
+    );
+    let retained = std::fs::read_dir(
+        row.repository
+            .runtime_paths()
+            .root()
+            .join("vfs-retained-drafts-v1"),
+    )
+    .expect("the refused candidate is kept in recovery storage (ORNA-VFS-009)")
+    .map(|entry| entry.expect("list retained draft").path())
+    .filter(|path| path.is_file())
+    .map(|path| std::fs::read(path).unwrap())
+    .map(|record| String::from_utf8_lossy(&record).into_owned())
+    .collect::<Vec<_>>();
     assert!(
         retained
             .iter()
@@ -5331,7 +5583,8 @@ async fn cwd_mount_text_write_after_owner_advances_row_is_stale_then_retries() {
         .expect("the retried write commits against the refreshed row");
     let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
     assert!(
-        document.contains("title: \"retried replacement\"") && document.contains("artist: \"Other\""),
+        document.contains("title: \"retried replacement\"")
+            && document.contains("artist: \"Other\""),
         "the retry keeps the other writer's artist: {document}"
     );
     row.unmount();
@@ -5377,7 +5630,10 @@ async fn cwd_mount_unrelated_commit_does_not_refuse_held_document_handle() {
         .expect("a commit that leaves Music unchanged does not refuse the held handle");
     drop(held);
     let stored = std::fs::read_to_string(&document).unwrap();
-    assert!(stored.contains("Unrelated"), "the held save is accepted: {stored}");
+    assert!(
+        stored.contains("Unrelated"),
+        "the held save is accepted: {stored}"
+    );
     row.unmount();
 }
 
@@ -5408,7 +5664,11 @@ async fn cwd_mount_two_handles_on_two_rows_are_both_refused_after_schema_change(
         .truncate(true)
         .open(&paris)
         .expect("a write-intent open on paris captures its baseline");
-    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    commit_source_change(
+        &repository,
+        TWO_FIELD_MUSIC_WITH_NOTE,
+        "Add optional note to Music",
+    );
     for (name, handle) in [("london", &mut london_handle), ("paris", &mut paris_handle)] {
         handle
             .write_all(b"{ title: \"Stale\", artist: \"Kieran\", }\n")
@@ -5416,7 +5676,11 @@ async fn cwd_mount_two_handles_on_two_rows_are_both_refused_after_schema_change(
         let refused = handle
             .sync_all()
             .expect_err("a write against the changed schema is stale");
-        assert_eq!(refused.raw_os_error(), Some(EAGAIN), "the {name} handle is refused EAGAIN: {refused}");
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(EAGAIN),
+            "the {name} handle is refused EAGAIN: {refused}"
+        );
     }
     drop(london_handle);
     drop(paris_handle);
@@ -5437,7 +5701,10 @@ async fn cwd_mount_text_handle_opened_before_schema_change_is_eagain() {
     };
     let big = ascii_text(70 * 1024);
     assert_saved(
-        &row.save("large", &format!("{{ title: \"{big}\", artist: \"Kieran\", }}")),
+        &row.save(
+            "large",
+            &format!("{{ title: \"{big}\", artist: \"Kieran\", }}"),
+        ),
         "large Str save",
     );
     let repository = row.repository_directory.path().to_path_buf();
@@ -5447,13 +5714,21 @@ async fn cwd_mount_text_handle_opened_before_schema_change_is_eagain() {
         .truncate(true)
         .open(&title)
         .expect("a write-intent open captures the .txt baseline");
-    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    commit_source_change(
+        &repository,
+        TWO_FIELD_MUSIC_WITH_NOTE,
+        "Add optional note to Music",
+    );
     held.write_all(b"schema replacement")
         .expect("the bytes are accepted into the handle");
     let refused = held
         .sync_all()
         .expect_err("a .txt write against the changed schema is stale");
-    assert_eq!(refused.raw_os_error(), Some(EAGAIN), "stale .txt is EAGAIN: {refused}");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(EAGAIN),
+        "stale .txt is EAGAIN: {refused}"
+    );
     drop(held);
     assert_eq!(
         std::fs::read(&title).unwrap(),
@@ -5487,18 +5762,29 @@ async fn cwd_mount_schema_change_between_saves_refuses_the_next_save_on_same_han
     held.sync_all()
         .expect("the save before the schema change is accepted");
     assert!(
-        std::fs::read_to_string(&document).unwrap().contains("First"),
+        std::fs::read_to_string(&document)
+            .unwrap()
+            .contains("First"),
         "the accepted save is stored before the schema change"
     );
-    commit_source_change(&repository, TWO_FIELD_MUSIC_WITH_NOTE, "Add optional note to Music");
+    commit_source_change(
+        &repository,
+        TWO_FIELD_MUSIC_WITH_NOTE,
+        "Add optional note to Music",
+    );
     held.set_len(0).expect("truncate the private candidate");
-    held.seek(SeekFrom::Start(0)).expect("rewind the handle to the start");
+    held.seek(SeekFrom::Start(0))
+        .expect("rewind the handle to the start");
     held.write_all(b"{ title: \"Second\", artist: \"Kieran\", }\n")
         .expect("the next bytes are accepted into the handle");
     let refused = held
         .sync_all()
         .expect_err("the next save on the handle is stale after the schema change");
-    assert_eq!(refused.raw_os_error(), Some(EAGAIN), "next save is EAGAIN: {refused}");
+    assert_eq!(
+        refused.raw_os_error(),
+        Some(EAGAIN),
+        "next save is EAGAIN: {refused}"
+    );
     drop(held);
     // Reads through the mount fail with EIO once the schema has changed (see the edit --row test), so the
     // refusal is checked by EAGAIN above. The accepted save was checked before the change.
@@ -5521,12 +5807,18 @@ async fn cwd_mount_required_text_rename_and_unlink_are_refused() {
     let renamed = std::fs::rename(&title, row.row_path.join("title.md"))
         .expect_err("a large Str .txt is not renamed");
     assert_eq!(renamed.raw_os_error(), Some(EPERM));
-    let unlinked =
-        std::fs::remove_file(&title).expect_err("a required Str .txt is never unlinked");
+    let unlinked = std::fs::remove_file(&title).expect_err("a required Str .txt is never unlinked");
     assert_eq!(unlinked.raw_os_error(), Some(EPERM));
-    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the Str keeps its text");
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        big.as_bytes(),
+        "the Str keeps its text"
+    );
     let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
-    assert!(document.contains("./title.txt"), "data.orna still names the .txt: {document}");
+    assert!(
+        document.contains("./title.txt"),
+        "data.orna still names the .txt: {document}"
+    );
     row.unmount();
 }
 
@@ -5542,13 +5834,19 @@ async fn cwd_mount_optional_text_unlink_commits_null() {
         return;
     };
     assert_saved(
-        &row.save("large", &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024))),
+        &row.save(
+            "large",
+            &format!("{{ title: \"{}\", }}", ascii_text(70 * 1024)),
+        ),
         "large optional Str save",
     );
     let title = row.row_path.join("title.txt");
     std::fs::remove_file(&title).expect("unlinking an optional large Str is accepted");
     assert!(!title.exists(), "the unlinked optional Str has no file");
     let document = std::fs::read_to_string(row.row_path.join("data.orna")).unwrap();
-    assert!(document.contains("title: null"), "data.orna commits the optional Str as null: {document}");
+    assert!(
+        document.contains("title: null"),
+        "data.orna commits the optional Str as null: {document}"
+    );
     row.unmount();
 }

@@ -25,7 +25,10 @@ fn dimension_products_preserve_terms_and_operators() {
             .terms
             .iter()
             .map(|(_, ty, exponent, _)| {
-                let TypeExpr::Name { path, arguments, .. } = ty else {
+                let TypeExpr::Name {
+                    path, arguments, ..
+                } = ty
+                else {
                     panic!("dimension term must be a qualified name: {ty:?}");
                 };
                 assert!(arguments.is_empty());

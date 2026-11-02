@@ -480,13 +480,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
     };
     let evaluator = DurableTransactionalEvaluator::new("parent", Limits::default());
     let valid_outcome = evaluator
-        .execute_source(
-            &repository,
-            identity,
-            [93; 16],
-            [94; 32],
-            &valid_source,
-        )
+        .execute_source(&repository, identity, [93; 16], [94; 32], &valid_source)
         .await
         .expect("durable pure function assertion commit");
     assert!(
@@ -501,12 +495,16 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         .await
         .expect("committed Note rows");
     assert_eq!(valid_rows.len(), 2);
-    assert!(valid_rows
-        .iter()
-        .any(|(key, _)| key == &Value::int(1.into()).encode().unwrap()));
-    assert!(valid_rows
-        .iter()
-        .any(|(key, _)| key == &Value::int(2.into()).encode().unwrap()));
+    assert!(
+        valid_rows
+            .iter()
+            .any(|(key, _)| key == &Value::int(1.into()).encode().unwrap())
+    );
+    assert!(
+        valid_rows
+            .iter()
+            .any(|(key, _)| key == &Value::int(2.into()).encode().unwrap())
+    );
     valid_state
         .recover_abandoned([93; 16], [95; 16])
         .await
@@ -518,13 +516,7 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         include_str!("fixtures/durable-function-value-invalid.orna"),
     );
     let invalid_outcome = evaluator
-        .execute_source(
-            &repository,
-            identity,
-            [95; 16],
-            [94; 32],
-            &invalid_source,
-        )
+        .execute_source(&repository, identity, [95; 16], [94; 32], &invalid_source)
         .await
         .expect("durable pure function assertion rollback");
     assert!(
@@ -547,10 +539,12 @@ async fn durable_function_value_table_assertion_commits_and_rolls_back_candidate
         2,
         "the assertion failure must preserve only the prior committed rows"
     );
-    assert!(rows_after_rollback
-        .iter()
-        .all(|(key, _)| key == &Value::int(1.into()).encode().unwrap()
-            || key == &Value::int(2.into()).encode().unwrap()));
+    assert!(
+        rows_after_rollback
+            .iter()
+            .all(|(key, _)| key == &Value::int(1.into()).encode().unwrap()
+                || key == &Value::int(2.into()).encode().unwrap())
+    );
 }
 
 #[tokio::test]
@@ -716,10 +710,7 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
         database_id: [61; 16],
         repository_id: [62; 16],
     };
-    let source = durable_source(
-        "PUB-001",
-        include_str!("fixtures/durable-publication.orna"),
-    );
+    let source = durable_source("PUB-001", include_str!("fixtures/durable-publication.orna"));
     assert!(matches!(
         evaluator
             .execute_source(&repository, identity, [63; 16], [64; 32], &source)
@@ -741,7 +732,10 @@ async fn durable_source_publication_onto_a_legacy_snapshot_is_refused_without_wr
     )
     .expect("legacy database sidecar");
     git(temp.path(), &["add", ".orna"]);
-    git(temp.path(), &["commit", "--quiet", "-m", "format 2 metadata"]);
+    git(
+        temp.path(),
+        &["commit", "--quiet", "-m", "format 2 metadata"],
+    );
     let head = repository.head().unwrap().expect("legacy head");
     assert_eq!(
         orna_storage_v1::writable_snapshot_context(&repository, &head).err(),

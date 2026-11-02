@@ -453,7 +453,10 @@ fn corrupt_committed_row_node_is_refused_without_a_value() {
     let (_server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
-    assert_eq!(body.trim(), r#"{"error":"serve.table_identity_unavailable"}"#);
+    assert_eq!(
+        body.trim(),
+        r#"{"error":"serve.table_identity_unavailable"}"#
+    );
 }
 
 const BLOB_SOURCE: &str = "pub table media(id: Str) { content: Blob, }\n\npub fn store(id: Str, content: Blob) = media.insert({ id: id, content: content });\n\npub fn serve() = media | count();\n";

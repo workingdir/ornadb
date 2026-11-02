@@ -947,15 +947,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(scanned, keys[300..].to_vec());
-        assert!(scanned.len() > super::MAX_QUERY_LIMIT, "range spans a second page");
+        assert!(
+            scanned.len() > super::MAX_QUERY_LIMIT,
+            "range spans a second page"
+        );
     }
 
     #[test]
     fn scan_pages_continues_past_a_full_page_at_the_greatest_unsigned_key() {
         let keys: Vec<TypedKey> = (u64::MAX - 255..=u64::MAX).map(TypedKey::UInt).collect();
-        assert_eq!(scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap(), keys);
+        assert_eq!(
+            scan_fixture(&keys, None, None, super::MAX_QUERY_LIMIT).unwrap(),
+            keys
+        );
         let short: Vec<TypedKey> = (u64::MAX - 2..=u64::MAX).map(TypedKey::UInt).collect();
-        assert_eq!(scan_fixture(&short, None, None, super::MAX_QUERY_LIMIT).unwrap(), short);
+        assert_eq!(
+            scan_fixture(&short, None, None, super::MAX_QUERY_LIMIT).unwrap(),
+            short
+        );
     }
 
     #[test]

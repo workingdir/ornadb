@@ -354,7 +354,11 @@ impl Producer<'_> {
                 if !signature.generics.is_empty() {
                     return Err(self.error(key, SemanticPayloadErrorKind::OpenGenericDeclaration));
                 }
-                let Type::Function { parameter_names, result, .. } = &symbol.ty
+                let Type::Function {
+                    parameter_names,
+                    result,
+                    ..
+                } = &symbol.ty
                 else {
                     return Err(
                         self.error(key, SemanticPayloadErrorKind::ParameterNamesUnavailable)
@@ -1096,12 +1100,12 @@ impl Producer<'_> {
                 let expected = self.record_pattern_fields(key, ty, scope)?;
                 let mut encoded = Vec::with_capacity(fields.len());
                 for (name, nested, span) in fields {
-                    let field_ty = expected
-                        .get(name)
-                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
-                    let nested = nested.clone().unwrap_or_else(|| {
-                        Pattern::Name(name.clone(), span.clone())
-                    });
+                    let field_ty = expected.get(name).ok_or_else(|| {
+                        self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)
+                    })?;
+                    let nested = nested
+                        .clone()
+                        .unwrap_or_else(|| Pattern::Name(name.clone(), span.clone()));
                     encoded.push(array(vec![
                         text(name),
                         self.pattern(key, &nested, field_ty, scope, locals)?,
@@ -1133,12 +1137,13 @@ impl Producer<'_> {
                     .collect::<Result<Vec<_>>>()?;
                 let mut encoded_fields = Vec::with_capacity(fields.len());
                 for field in fields {
-                    let field_ty = field_types
-                        .get(&field.name)
-                        .ok_or_else(|| self.error(key, SemanticPayloadErrorKind::UnsupportedPattern))?;
-                    let nested = field.pattern.clone().unwrap_or_else(|| {
-                        Pattern::Name(field.name.clone(), field.span.clone())
-                    });
+                    let field_ty = field_types.get(&field.name).ok_or_else(|| {
+                        self.error(key, SemanticPayloadErrorKind::UnsupportedPattern)
+                    })?;
+                    let nested = field
+                        .pattern
+                        .clone()
+                        .unwrap_or_else(|| Pattern::Name(field.name.clone(), field.span.clone()));
                     encoded_fields.push(array(vec![
                         text(&field.name),
                         self.pattern(key, &nested, field_ty, scope, locals)?,
@@ -1217,7 +1222,6 @@ impl Producer<'_> {
         }
     }
 
-
     fn constructor_pattern_shape(
         &self,
         key: &Key,
@@ -1236,9 +1240,10 @@ impl Producer<'_> {
             return Err(self.unsupported_pattern(key));
         };
         if path.len() == 1
-            && let Some(Type::Record(fields)) = scope.nominal_rows.get(enum_or_nominal) {
-                return Ok((Vec::new(), fields.clone()));
-            }
+            && let Some(Type::Record(fields)) = scope.nominal_rows.get(enum_or_nominal)
+        {
+            return Ok((Vec::new(), fields.clone()));
+        }
         if path.len() >= 2 {
             let owner = path[..path.len() - 1]
                 .iter()
@@ -1246,15 +1251,11 @@ impl Producer<'_> {
                 .collect::<Vec<_>>()
                 .join(".");
             let variant = path.last().expect("path length checked").text.as_str();
-            let variants = scope
-                .enum_variants
-                .get(enum_or_nominal)
-                .or_else(|| {
-                    scope.enum_variants.iter().find_map(|(name, variants)| {
-                        (name == &owner || name.ends_with(&format!(".{owner}")))
-                            .then_some(variants)
-                    })
-                });
+            let variants = scope.enum_variants.get(enum_or_nominal).or_else(|| {
+                scope.enum_variants.iter().find_map(|(name, variants)| {
+                    (name == &owner || name.ends_with(&format!(".{owner}"))).then_some(variants)
+                })
+            });
             if let Some(fields) = variants.and_then(|variants| variants.get(variant)) {
                 return Ok((Vec::new(), fields.clone()));
             }
@@ -1526,7 +1527,9 @@ mod tests {
 
     #[test]
     fn parameter_names_preserve_declaration_order() {
-        let result = produce(include_str!("fixtures/semantic-payload/parameter-order.orna"));
+        let result = produce(include_str!(
+            "fixtures/semantic-payload/parameter-order.orna"
+        ));
         let parameters = named(&result, "payload.choose").parameters();
         assert_eq!(
             parameters
@@ -1539,8 +1542,12 @@ mod tests {
 
     #[test]
     fn annotation_explicitness_is_retained_outside_semantic_bytes() {
-        let inferred = produce(include_str!("fixtures/semantic-payload/increment-inferred.orna"));
-        let explicit = produce(include_str!("fixtures/semantic-payload/increment-explicit.orna"));
+        let inferred = produce(include_str!(
+            "fixtures/semantic-payload/increment-inferred.orna"
+        ));
+        let explicit = produce(include_str!(
+            "fixtures/semantic-payload/increment-explicit.orna"
+        ));
         let a = named(&inferred, "payload.increment");
         let b = named(&explicit, "payload.increment");
         assert_eq!(a.canonical_payload(), b.canonical_payload());
@@ -1554,8 +1561,12 @@ mod tests {
 
     #[test]
     fn body_defaults_and_private_fields_change_meaning() {
-        let first = produce(include_str!("fixtures/semantic-payload/box-defaults-first.orna"));
-        let second = produce(include_str!("fixtures/semantic-payload/box-defaults-second.orna"));
+        let first = produce(include_str!(
+            "fixtures/semantic-payload/box-defaults-first.orna"
+        ));
+        let second = produce(include_str!(
+            "fixtures/semantic-payload/box-defaults-second.orna"
+        ));
         for name in ["payload.Box", "payload.value"] {
             assert_ne!(
                 named(&first, name).canonical_payload(),
@@ -1622,9 +1633,15 @@ mod tests {
             &Catalogue::empty(),
         )
         .unwrap();
-        assert!(result.analysis().is_ok(), "{:#?}", result.analysis().diagnostics);
+        assert!(
+            result.analysis().is_ok(),
+            "{:#?}",
+            result.analysis().diagnostics
+        );
         assert_eq!(
-            named(&result, "payload.tuple_sum").semantic_parameters().len(),
+            named(&result, "payload.tuple_sum")
+                .semantic_parameters()
+                .len(),
             1
         );
         assert!(named(&result, "payload.tuple_sum").semantic_parameters()[0].has_default);
@@ -1651,7 +1668,11 @@ mod tests {
         );
         let tuple = named(&result, "payload.tuple_sum");
         assert!(has_tag(decoded(tuple).raw(), "tuple_pattern"));
-        assert!(has_tag(decoded(tuple).raw(), "wildcard"), "{:#?}", decoded(tuple).raw());
+        assert!(
+            has_tag(decoded(tuple).raw(), "wildcard"),
+            "{:#?}",
+            decoded(tuple).raw()
+        );
         assert!(has_tag(
             decoded(named(&result, "payload.list_head")).raw(),
             "list_pattern"
@@ -1697,11 +1718,9 @@ mod tests {
         }
         fn has_tag(raw: &Raw, tag: &str) -> bool {
             match raw {
-                Raw::Array(values) => {
-                    values.iter().any(|value| {
-                        matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
-                    })
-                }
+                Raw::Array(values) => values.iter().any(|value| {
+                    matches!(value, Raw::Text(text) if text == tag) || has_tag(value, tag)
+                }),
                 _ => false,
             }
         }
@@ -1763,11 +1782,7 @@ mod tests {
             .pattern(
                 &key,
                 &Pattern::Record {
-                    fields: vec![(
-                        "x".into(),
-                        None,
-                        span(),
-                    )],
+                    fields: vec![("x".into(), None, span())],
                     span: span(),
                 },
                 &Type::Record(BTreeMap::from([("x".into(), Type::Int)])),
@@ -1802,7 +1817,9 @@ mod tests {
 
     #[test]
     fn stage_two_cannot_manufacture_identity() {
-        let result = produce(include_str!("fixtures/semantic-payload/value-function.orna"));
+        let result = produce(include_str!(
+            "fixtures/semantic-payload/value-function.orna"
+        ));
         let value = named(&result, "payload.value");
         assert_eq!(
             value.revision_id().unwrap_err().kind,

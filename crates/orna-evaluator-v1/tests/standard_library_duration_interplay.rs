@@ -194,26 +194,34 @@ fn pinned_duration_formatters_preserve_exact_fractional_elapsed_values() {
 fn duration_formatter_rejects_subnanosecond_and_calendar_period_inputs() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-subnanosecond-6ev0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-subnanosecond-6ev0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-calendar-period-6ev0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-calendar-period-6ev0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S021-TYPE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-bad-zone-6ev0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-bad-zone-6ev0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
@@ -228,7 +236,9 @@ fn exact_decimal_duration_respects_seconds_digit_limit_not_nanosecond_intermedia
     };
     let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     let source = include_str!("fixtures/stdlib-time-duration-limited-digits-gy9ln.orna");
@@ -249,16 +259,22 @@ fn integer_duration_units_enforce_limit_after_seconds_scaling() {
     };
     let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-hour-boundary-vfh0m.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-hour-boundary-vfh0m.orna"
+        )),
         Ok(Some(text("27:00:00")))
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-hour-overflow-vfh0m.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-hour-overflow-vfh0m.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -270,12 +286,16 @@ fn integer_duration_units_enforce_limit_after_seconds_scaling() {
     };
     let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-minute-overflow-vfh0m.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-minute-overflow-vfh0m.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -286,7 +306,9 @@ fn integer_duration_units_enforce_limit_after_seconds_scaling() {
 fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
 
@@ -324,7 +346,9 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
             "-PT0.000000001S",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-decimal-scale-nanosecond-divide-kmy4x.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-nanosecond-divide-kmy4x.orna"
+            ),
             "PT0.000000002S",
         ),
         (
@@ -336,7 +360,9 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
             "PT0S",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-decimal-scale-nanosecond-product-28a35.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-nanosecond-product-28a35.orna"
+            ),
             "PT0.000000001S",
         ),
         (
@@ -344,7 +370,9 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
             "PT1S",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-decimal-scale-negative-reciprocal-28a35.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-negative-reciprocal-28a35.orna"
+            ),
             "PT0.000000002S",
         ),
     ] {
@@ -359,35 +387,45 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
 
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-scale-inexact-mbiom.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-scale-inexact-mbiom.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-scale-zero-mbiom.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-scale-zero-mbiom.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-inexact-c57w6.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-inexact-c57w6.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-subnanosecond-c57w6.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-subnanosecond-c57w6.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-zero-c57w6.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-zero-c57w6.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-DIVIDE-BY-ZERO"
@@ -399,19 +437,25 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
     };
     let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        bounded.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
         bounded
-            .submit(include_str!("fixtures/stdlib-time-duration-scale-overflow-mbiom.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-scale-overflow-mbiom.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
     );
     assert_eq!(
         bounded
-            .submit(include_str!("fixtures/stdlib-time-duration-decimal-scale-overflow-c57w6.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-decimal-scale-overflow-c57w6.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -422,28 +466,40 @@ fn elapsed_duration_scaling_keeps_nanosecond_precision_and_sign() {
 fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-scale-chain-7agp9.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-scale-chain-7agp9.orna"
+        )),
         Ok(Some(text("PT0.000000001S")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-scale-multistep-chain-opffs.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-scale-multistep-chain-opffs.orna"
+        )),
         Ok(Some(text("PT0.000000001S")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-scale-cancel-negative-chain-opffs.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-scale-cancel-negative-chain-opffs.orna"
+        )),
         Ok(Some(text("PT0S")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-scale-instant-boundary-7agp9.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-scale-instant-boundary-7agp9.orna"
+        )),
         Ok(Some(boolean(true)))
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-scale-inexact-chain-7agp9.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-scale-inexact-chain-7agp9.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
@@ -455,12 +511,16 @@ fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
     };
     let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        bounded.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
         bounded
-            .submit(include_str!("fixtures/stdlib-time-duration-scale-overflow-chain-opffs.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-scale-overflow-chain-opffs.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -471,7 +531,9 @@ fn decimal_duration_scaling_chains_preserve_exact_tails_across_instants() {
 fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     for (source, expected) in [
@@ -484,51 +546,75 @@ fn duration_clock_format_keeps_fractional_minute_and_sign_boundaries() {
             "00:01:00.000000001",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-scaled-before-minute-efsv6.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-scaled-before-minute-efsv6.orna"
+            ),
             "-00:00:59.999999999",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-scaled-after-minute-efsv6.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-scaled-after-minute-efsv6.orna"
+            ),
             "-00:01:00.000000001",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-tail-before-minute-iqqdy.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-tail-before-minute-iqqdy.orna"
+            ),
             "-00:00:59.99988",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-tail-after-minute-iqqdy.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-tail-after-minute-iqqdy.orna"
+            ),
             "-00:01:00.00012",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-before-minute-1lj0e.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-factor-before-minute-1lj0e.orna"
+            ),
             "-00:00:59.99988",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-after-minute-1lj0e.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-factor-after-minute-1lj0e.orna"
+            ),
             "-00:01:00.00012",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-fine-factor-before-minute-9cfl2.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-fine-factor-before-minute-9cfl2.orna"
+            ),
             "-00:00:59.99999997",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-fine-factor-after-minute-9cfl2.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-fine-factor-after-minute-9cfl2.orna"
+            ),
             "-00:01:00.00000003",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-fine-factor-chain-before-minute-x6lyg.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-fine-factor-chain-before-minute-x6lyg.orna"
+            ),
             "-00:00:59.99999997",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-fine-factor-chain-after-minute-x6lyg.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-fine-factor-chain-after-minute-x6lyg.orna"
+            ),
             "-00:01:00.00000003",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-closure-before-minute-za8t2.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-factor-closure-before-minute-za8t2.orna"
+            ),
             "-00:00:59.999999994",
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-clock-negative-factor-closure-after-minute-za8t2.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-clock-negative-factor-closure-after-minute-za8t2.orna"
+            ),
             "-00:01:00.000000006",
         ),
         (
@@ -630,7 +716,9 @@ fn positive_factor_tails_keep_the_minute_edge_after_duration_arithmetic() {
             ]),
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-factor-tail-at-minute-from-below-p9kew.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-tail-at-minute-from-below-p9kew.orna"
+            ),
             texts(&["1m", "00:01:00", "1 minute", "PT1M"]),
         ),
         (
@@ -643,7 +731,9 @@ fn positive_factor_tails_keep_the_minute_edge_after_duration_arithmetic() {
             ]),
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-factor-tail-at-minute-from-above-p9kew.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-tail-at-minute-from-above-p9kew.orna"
+            ),
             texts(&["1m", "00:01:00", "1 minute", "PT1M"]),
         ),
     ] {
@@ -673,7 +763,9 @@ fn positive_factor_tail_chains_keep_the_minute_side_after_rescaling() {
 
     for (source, expected) in [
         (
-            include_str!("fixtures/stdlib-time-duration-factor-tail-chain-before-minute-rfzcx.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-tail-chain-before-minute-rfzcx.orna"
+            ),
             texts(&[
                 "1m 59.999999998s",
                 "00:01:59.999999998",
@@ -761,7 +853,9 @@ fn positive_factor_values_around_three_keep_the_minute_remainder_tails() {
 
     for (source, expected) in [
         (
-            include_str!("fixtures/stdlib-time-duration-factor-near-three-before-minute-b2kid.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-near-three-before-minute-b2kid.orna"
+            ),
             texts(&[
                 "59.999999998s",
                 "00:00:59.999999998",
@@ -840,7 +934,9 @@ fn positive_factor_subnanosecond_remainders_at_minute_edges_are_rejected() {
     // the minute: 59.9999999995s and 60.0000000005s are not rounded.
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-iso-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-iso-b1e0.orna"
+        )),
         Ok(None)
     );
 
@@ -849,11 +945,7 @@ fn positive_factor_subnanosecond_remainders_at_minute_edges_are_rejected() {
         include_str!("fixtures/stdlib-time-duration-factor-half-ns-after-minute-f6bmg.orna"),
     ] {
         let result = session.submit(source);
-        assert_eq!(
-            result.unwrap_err().code(),
-            "ORNA-EVAL-VALUE",
-            "{source}"
-        );
+        assert_eq!(result.unwrap_err().code(), "ORNA-EVAL-VALUE", "{source}");
     }
 }
 
@@ -874,7 +966,9 @@ fn positive_factor_subnanosecond_tails_compose_to_exact_minute_edges() {
 
     for (source, expected) in [
         (
-            include_str!("fixtures/stdlib-time-duration-factor-composed-half-ns-before-minute-f7dqb.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-composed-half-ns-before-minute-f7dqb.orna"
+            ),
             texts(&[
                 "59.999999997s",
                 "00:00:59.999999997",
@@ -883,7 +977,9 @@ fn positive_factor_subnanosecond_tails_compose_to_exact_minute_edges() {
             ]),
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-factor-composed-half-ns-after-minute-f7dqb.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-composed-half-ns-after-minute-f7dqb.orna"
+            ),
             texts(&[
                 "1m 0.000000003s",
                 "00:01:00.000000003",
@@ -919,7 +1015,9 @@ fn positive_factor_subnanosecond_tails_rescale_through_duration_edges() {
 
     for (source, expected) in [
         (
-            include_str!("fixtures/stdlib-time-duration-factor-rescaled-half-ns-before-minute-0okws.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-rescaled-half-ns-before-minute-0okws.orna"
+            ),
             texts(&[
                 "59.999999997s",
                 "00:00:59.999999997",
@@ -928,7 +1026,9 @@ fn positive_factor_subnanosecond_tails_rescale_through_duration_edges() {
             ]),
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-factor-rescaled-half-ns-after-minute-0okws.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-rescaled-half-ns-after-minute-0okws.orna"
+            ),
             texts(&[
                 "1m 0.000000003s",
                 "00:01:00.000000003",
@@ -964,7 +1064,9 @@ fn positive_factor_subnanosecond_tails_rescale_across_the_second_minute_edge() {
 
     for (source, expected) in [
         (
-            include_str!("fixtures/stdlib-time-duration-factor-rescaled-second-minute-before-mtdzz.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-rescaled-second-minute-before-mtdzz.orna"
+            ),
             texts(&[
                 "1m 59.999999994s",
                 "00:01:59.999999994",
@@ -973,7 +1075,9 @@ fn positive_factor_subnanosecond_tails_rescale_across_the_second_minute_edge() {
             ]),
         ),
         (
-            include_str!("fixtures/stdlib-time-duration-factor-rescaled-second-minute-after-mtdzz.orna"),
+            include_str!(
+                "fixtures/stdlib-time-duration-factor-rescaled-second-minute-after-mtdzz.orna"
+            ),
             texts(&[
                 "2m 0.000000006s",
                 "00:02:00.000000006",
@@ -999,12 +1103,7 @@ fn positive_factor_subnanosecond_rescaled_tails_close_at_two_minutes() {
     assert_rescaled_factor_tail_closes(
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-below-f55yc.orna"),
         include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-from-above-f55yc.orna"),
-        &[
-            "2m",
-            "00:02:00",
-            "2 minutes",
-            "PT2M",
-        ],
+        &["2m", "00:02:00", "2 minutes", "PT2M"],
     );
 }
 
@@ -1014,14 +1113,13 @@ fn positive_factor_rescaled_tails_close_after_second_doubling() {
     // rescaling. Two doublings carry the 3 ns tail to 12 ns around four
     // minutes; an exact 12 ns correction closes both sides at 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-below-3ohyv.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-above-3ohyv.orna"),
-        &[
-            "4m",
-            "00:04:00",
-            "4 minutes",
-            "PT4M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-below-3ohyv.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-second-doubling-from-above-3ohyv.orna"
+        ),
+        &["4m", "00:04:00", "4 minutes", "PT4M"],
     );
 }
 
@@ -1031,14 +1129,13 @@ fn positive_factor_rescaled_tails_close_after_third_doubling() {
     // another rescaling step. Three doublings carry the 3 ns tail to 24 ns
     // around eight minutes; correcting by 24 ns closes both sides at 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-below-9ymm6.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-above-9ymm6.orna"),
-        &[
-            "8m",
-            "00:08:00",
-            "8 minutes",
-            "PT8M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-below-9ymm6.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-third-doubling-from-above-9ymm6.orna"
+        ),
+        &["8m", "00:08:00", "8 minutes", "PT8M"],
     );
 }
 
@@ -1048,14 +1145,13 @@ fn positive_factor_rescaled_tails_close_after_fourth_doubling() {
     // step. Four doublings carry the 3 ns tail to 48 ns around sixteen
     // minutes; correcting by 48 ns closes both sides at 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-below-ghs9x.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-above-ghs9x.orna"),
-        &[
-            "16m",
-            "00:16:00",
-            "16 minutes",
-            "PT16M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-below-ghs9x.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fourth-doubling-from-above-ghs9x.orna"
+        ),
+        &["16m", "00:16:00", "16 minutes", "PT16M"],
     );
 }
 
@@ -1065,14 +1161,13 @@ fn positive_factor_rescaled_tails_close_after_fifth_doubling() {
     // step. Five doublings carry the 3 ns tail to 96 ns around thirty-two
     // minutes; correcting by 96 ns closes both sides at 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-below-9tosd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-above-9tosd.orna"),
-        &[
-            "32m",
-            "00:32:00",
-            "32 minutes",
-            "PT32M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-below-9tosd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifth-doubling-from-above-9tosd.orna"
+        ),
+        &["32m", "00:32:00", "32 minutes", "PT32M"],
     );
 }
 
@@ -1082,14 +1177,13 @@ fn positive_factor_rescaled_tails_close_after_sixth_doubling() {
     // step. Six doublings carry the 3 ns tail to 192 ns around sixty-four
     // minutes; correcting by 192 ns closes both sides at 64m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-below-sx8m7.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-above-sx8m7.orna"),
-        &[
-            "1h 4m",
-            "01:04:00",
-            "1 hour, 4 minutes",
-            "PT1H4M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-below-sx8m7.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixth-doubling-from-above-sx8m7.orna"
+        ),
+        &["1h 4m", "01:04:00", "1 hour, 4 minutes", "PT1H4M"],
     );
 }
 
@@ -1099,14 +1193,13 @@ fn positive_factor_rescaled_tails_close_after_seventh_doubling() {
     // step. Seven doublings carry the 3 ns tail to 384 ns around two hours;
     // correcting by 384 ns closes both sides at 128m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-below-81ori.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-above-81ori.orna"),
-        &[
-            "2h 8m",
-            "02:08:00",
-            "2 hours, 8 minutes",
-            "PT2H8M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-below-81ori.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventh-doubling-from-above-81ori.orna"
+        ),
+        &["2h 8m", "02:08:00", "2 hours, 8 minutes", "PT2H8M"],
     );
 }
 
@@ -1116,14 +1209,13 @@ fn positive_factor_rescaled_tails_close_after_eighth_doubling() {
     // step. Eight doublings carry the 3 ns tail to 768 ns around 256 minutes;
     // correcting by 768 ns closes both sides at 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-below-g7ako.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-above-g7ako.orna"),
-        &[
-            "4h 16m",
-            "04:16:00",
-            "4 hours, 16 minutes",
-            "PT4H16M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-below-g7ako.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighth-doubling-from-above-g7ako.orna"
+        ),
+        &["4h 16m", "04:16:00", "4 hours, 16 minutes", "PT4H16M"],
     );
 }
 
@@ -1133,14 +1225,13 @@ fn positive_factor_rescaled_tails_close_after_ninth_doubling() {
     // step. Nine doublings carry the 3 ns tail to 1,536 ns around 512 minutes;
     // correcting by 1,536 ns closes both sides at 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-below-ty93h.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-above-ty93h.orna"),
-        &[
-            "8h 32m",
-            "08:32:00",
-            "8 hours, 32 minutes",
-            "PT8H32M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-below-ty93h.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninth-doubling-from-above-ty93h.orna"
+        ),
+        &["8h 32m", "08:32:00", "8 hours, 32 minutes", "PT8H32M"],
     );
 }
 
@@ -1150,14 +1241,13 @@ fn positive_factor_rescaled_tails_close_after_tenth_doubling() {
     // step. Ten doublings carry the 3 ns tail to 3,072 ns around 1,024
     // minutes; correcting by 3,072 ns closes both sides at 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-below-huqsy.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-above-huqsy.orna"),
-        &[
-            "17h 4m",
-            "17:04:00",
-            "17 hours, 4 minutes",
-            "PT17H4M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-below-huqsy.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-tenth-doubling-from-above-huqsy.orna"
+        ),
+        &["17h 4m", "17:04:00", "17 hours, 4 minutes", "PT17H4M"],
     );
 }
 
@@ -1167,8 +1257,12 @@ fn positive_factor_rescaled_tails_close_after_eleventh_doubling() {
     // step. Eleven doublings carry the 3 ns tail to 6,144 ns around 2,048
     // minutes; correcting by 6,144 ns closes both sides at 1d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-below-ek7bo.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-above-ek7bo.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-below-ek7bo.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eleventh-doubling-from-above-ek7bo.orna"
+        ),
         &[
             "1d 10h 8m",
             "34:08:00",
@@ -1184,8 +1278,12 @@ fn positive_factor_rescaled_tails_close_after_twelfth_doubling() {
     // step. Twelve doublings carry the 3 ns tail to 12,288 ns around 4,096
     // minutes; correcting by 12,288 ns closes both sides at 2d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-below-mav32.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-above-mav32.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-below-mav32.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twelfth-doubling-from-above-mav32.orna"
+        ),
         &[
             "2d 20h 16m",
             "68:16:00",
@@ -1201,8 +1299,12 @@ fn positive_factor_rescaled_tails_close_after_thirteenth_doubling() {
     // step. Thirteen doublings carry the 3 ns tail to 24,576 ns around 8,192
     // minutes; correcting by 24,576 ns closes both sides at 5d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-below-2tfji.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-above-2tfji.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-below-2tfji.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirteenth-doubling-from-above-2tfji.orna"
+        ),
         &[
             "5d 16h 32m",
             "136:32:00",
@@ -1218,8 +1320,12 @@ fn positive_factor_rescaled_tails_close_after_fourteenth_doubling() {
     // step. Fourteen doublings carry the 3 ns tail to 49,152 ns around
     // 16,384 minutes; correcting by 49,152 ns closes both sides at 11d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-below-cz3dj.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-above-cz3dj.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-below-cz3dj.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fourteenth-doubling-from-above-cz3dj.orna"
+        ),
         &[
             "11d 9h 4m",
             "273:04:00",
@@ -1235,8 +1341,12 @@ fn positive_factor_rescaled_tails_close_after_fifteenth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 98,304 ns around 32,768 minutes, pinning 22d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifteenth-doubling-from-below-rsy9k.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifteenth-doubling-from-above-rsy9k.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifteenth-doubling-from-below-rsy9k.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifteenth-doubling-from-above-rsy9k.orna"
+        ),
         &[
             "22d 18h 8m",
             "546:08:00",
@@ -1252,8 +1362,12 @@ fn positive_factor_rescaled_tails_close_after_sixteenth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 196,608 ns around 65,536 minutes, pinning 45d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixteenth-doubling-from-below-94n07.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixteenth-doubling-from-above-94n07.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixteenth-doubling-from-below-94n07.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixteenth-doubling-from-above-94n07.orna"
+        ),
         &[
             "45d 12h 16m",
             "1092:16:00",
@@ -1269,14 +1383,13 @@ fn positive_factor_rescaled_tails_close_after_seventeenth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 393,216 ns around 131,072 minutes, pinning 91d 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventeenth-doubling-from-below-yiis7.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventeenth-doubling-from-above-yiis7.orna"),
-        &[
-            "91d 32m",
-            "2184:32:00",
-            "91 days, 32 minutes",
-            "P91DT32M",
-        ],
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventeenth-doubling-from-below-yiis7.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventeenth-doubling-from-above-yiis7.orna"
+        ),
+        &["91d 32m", "2184:32:00", "91 days, 32 minutes", "P91DT32M"],
     );
 }
 
@@ -1286,8 +1399,12 @@ fn positive_factor_rescaled_tails_close_after_eighteenth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 786,432 ns around 262,144 minutes, pinning 182d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-below-5pwio.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-above-5pwio.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-below-5pwio.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighteenth-doubling-from-above-5pwio.orna"
+        ),
         &[
             "182d 1h 4m",
             "4369:04:00",
@@ -1303,8 +1420,12 @@ fn positive_factor_rescaled_tails_close_after_nineteenth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 1,572,864 ns around 524,288 minutes, pinning 364d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-nineteenth-doubling-from-below-3kipa.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-nineteenth-doubling-from-above-3kipa.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-nineteenth-doubling-from-below-3kipa.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-nineteenth-doubling-from-above-3kipa.orna"
+        ),
         &[
             "364d 2h 8m",
             "8738:08:00",
@@ -1320,8 +1441,12 @@ fn positive_factor_rescaled_tails_close_after_twentieth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 3,145,728 ns around 1,048,576 minutes, pinning 728d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twentieth-doubling-from-below-5hesi.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twentieth-doubling-from-above-5hesi.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twentieth-doubling-from-below-5hesi.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twentieth-doubling-from-above-5hesi.orna"
+        ),
         &[
             "728d 4h 16m",
             "17476:16:00",
@@ -1337,8 +1462,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_first_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 6,291,456 ns around 2,097,152 minutes, pinning 1456d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-first-doubling-from-below-3zcm5.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-first-doubling-from-above-3zcm5.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-first-doubling-from-below-3zcm5.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-first-doubling-from-above-3zcm5.orna"
+        ),
         &[
             "1456d 8h 32m",
             "34952:32:00",
@@ -1354,8 +1483,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_second_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 12,582,912 ns around 4,194,304 minutes, pinning 2912d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-second-doubling-from-below-lb4fd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-second-doubling-from-above-lb4fd.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-second-doubling-from-below-lb4fd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-second-doubling-from-above-lb4fd.orna"
+        ),
         &[
             "2912d 17h 4m",
             "69905:04:00",
@@ -1371,8 +1504,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_third_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 25,165,824 ns around 8,388,608 minutes, pinning 5825d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-below-rin86.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-above-rin86.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-below-rin86.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-third-doubling-from-above-rin86.orna"
+        ),
         &[
             "5825d 10h 8m",
             "139810:08:00",
@@ -1388,8 +1525,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_fourth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 50,331,648 ns around 16,777,216 minutes, pinning 11650d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fourth-doubling-from-below-uk8xx.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fourth-doubling-from-above-uk8xx.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fourth-doubling-from-below-uk8xx.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fourth-doubling-from-above-uk8xx.orna"
+        ),
         &[
             "11650d 20h 16m",
             "279620:16:00",
@@ -1405,8 +1546,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_fifth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 100,663,296 ns around 33,554,432 minutes, pinning 23301d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fifth-doubling-from-below-hmsm4.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fifth-doubling-from-above-hmsm4.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fifth-doubling-from-below-hmsm4.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-fifth-doubling-from-above-hmsm4.orna"
+        ),
         &[
             "23301d 16h 32m",
             "559240:32:00",
@@ -1422,8 +1567,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_sixth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 201,326,592 ns around 67,108,864 minutes, pinning 46603d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-sixth-doubling-from-below-yki5c.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-sixth-doubling-from-above-yki5c.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-sixth-doubling-from-below-yki5c.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-sixth-doubling-from-above-yki5c.orna"
+        ),
         &[
             "46603d 9h 4m",
             "1118481:04:00",
@@ -1439,8 +1588,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_seventh_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 402,653,184 ns around 134,217,728 minutes, pinning 93206d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-seventh-doubling-from-below-dafue.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-seventh-doubling-from-above-dafue.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-seventh-doubling-from-below-dafue.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-seventh-doubling-from-above-dafue.orna"
+        ),
         &[
             "93206d 18h 8m",
             "2236962:08:00",
@@ -1456,8 +1609,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_eighth_doubling() {
     // far. Continue the symmetric edge correction through one more scaling:
     // the 3 ns tail becomes 805,306,368 ns around 268,435,456 minutes, pinning 186413d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-eighth-doubling-from-below-vds1m.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-eighth-doubling-from-above-vds1m.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-eighth-doubling-from-below-vds1m.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-eighth-doubling-from-above-vds1m.orna"
+        ),
         &[
             "186413d 12h 16m",
             "4473924:16:00",
@@ -1474,8 +1631,12 @@ fn positive_factor_rescaled_tails_close_after_twenty_ninth_doubling() {
     // the 3 ns tail becomes 1,610,612,736 ns around 536,870,912 minutes,
     // pinning 372827d 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-ninth-doubling-from-below-jztpq.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-twenty-ninth-doubling-from-above-jztpq.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-ninth-doubling-from-below-jztpq.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-twenty-ninth-doubling-from-above-jztpq.orna"
+        ),
         &[
             "372827d 32m",
             "8947848:32:00",
@@ -1492,8 +1653,12 @@ fn positive_factor_rescaled_tails_close_after_thirtieth_doubling() {
     // the 3 ns tail becomes 3,221,225,472 ns around 1,073,741,824 minutes,
     // pinning 745654d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirtieth-doubling-from-below-vetoe.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirtieth-doubling-from-above-vetoe.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirtieth-doubling-from-below-vetoe.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirtieth-doubling-from-above-vetoe.orna"
+        ),
         &[
             "745654d 1h 4m",
             "17895697:04:00",
@@ -1510,8 +1675,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_first_doubling() {
     // the 3 ns tail becomes 6,442,450,944 ns around 2,147,483,648 minutes,
     // pinning 1491308d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-first-doubling-from-below-jacpl.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-first-doubling-from-above-jacpl.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-first-doubling-from-below-jacpl.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-first-doubling-from-above-jacpl.orna"
+        ),
         &[
             "1491308d 2h 8m",
             "35791394:08:00",
@@ -1528,8 +1697,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_second_doubling() {
     // the 3 ns tail becomes 12,884,901,888 ns around 4,294,967,296 minutes,
     // pinning 2982616d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-second-doubling-from-below-ogf2o.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-second-doubling-from-above-ogf2o.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-second-doubling-from-below-ogf2o.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-second-doubling-from-above-ogf2o.orna"
+        ),
         &[
             "2982616d 4h 16m",
             "71582788:16:00",
@@ -1546,8 +1719,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_third_doubling() {
     // the 3 ns tail becomes 25,769,803,776 ns around 8,589,934,592 minutes,
     // pinning 5965232d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-third-doubling-from-below-vgnsi.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-third-doubling-from-above-vgnsi.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-third-doubling-from-below-vgnsi.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-third-doubling-from-above-vgnsi.orna"
+        ),
         &[
             "5965232d 8h 32m",
             "143165576:32:00",
@@ -1564,8 +1741,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_fourth_doubling() {
     // the 3 ns tail becomes 51,539,607,552 ns around 17,179,869,184 minutes,
     // pinning 11930464d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fourth-doubling-from-below-8six5.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fourth-doubling-from-above-8six5.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fourth-doubling-from-below-8six5.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fourth-doubling-from-above-8six5.orna"
+        ),
         &[
             "11930464d 17h 4m",
             "286331153:04:00",
@@ -1582,8 +1763,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_fifth_doubling() {
     // the 3 ns tail becomes 103,079,215,104 ns around 34,359,738,368 minutes,
     // pinning 23860929d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fifth-doubling-from-below-dc54e.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fifth-doubling-from-above-dc54e.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fifth-doubling-from-below-dc54e.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-fifth-doubling-from-above-dc54e.orna"
+        ),
         &[
             "23860929d 10h 8m",
             "572662306:08:00",
@@ -1600,8 +1785,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_sixth_doubling() {
     // the 3 ns tail becomes 206,158,430,208 ns around 68,719,476,736 minutes,
     // pinning 47721858d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-sixth-doubling-from-below-5sqnf.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-sixth-doubling-from-above-5sqnf.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-sixth-doubling-from-below-5sqnf.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-sixth-doubling-from-above-5sqnf.orna"
+        ),
         &[
             "47721858d 20h 16m",
             "1145324612:16:00",
@@ -1618,8 +1807,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_seventh_doubling() {
     // the 3 ns tail becomes 412,316,860,416 ns around 137,438,953,472 minutes,
     // pinning 95443717d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-seventh-doubling-from-below-pohlo.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-seventh-doubling-from-above-pohlo.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-seventh-doubling-from-below-pohlo.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-seventh-doubling-from-above-pohlo.orna"
+        ),
         &[
             "95443717d 16h 32m",
             "2290649224:32:00",
@@ -1636,8 +1829,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_eighth_doubling() {
     // the 3 ns tail becomes 824,633,720,832 ns around 274,877,906,944 minutes,
     // pinning 190887435d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-eighth-doubling-from-below-b2t19.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-eighth-doubling-from-above-b2t19.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-eighth-doubling-from-below-b2t19.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-eighth-doubling-from-above-b2t19.orna"
+        ),
         &[
             "190887435d 9h 4m",
             "4581298449:04:00",
@@ -1654,8 +1851,12 @@ fn positive_factor_rescaled_tails_close_after_thirty_ninth_doubling() {
     // the 3 ns tail becomes 1,649,267,441,664 ns around 549,755,813,888 minutes,
     // pinning 381774870d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-ninth-doubling-from-below-uxgoh.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-thirty-ninth-doubling-from-above-uxgoh.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-ninth-doubling-from-below-uxgoh.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-thirty-ninth-doubling-from-above-uxgoh.orna"
+        ),
         &[
             "381774870d 18h 8m",
             "9162596898:08:00",
@@ -1672,8 +1873,12 @@ fn positive_factor_rescaled_tails_close_after_fortieth_doubling() {
     // the 3 ns tail becomes 3,298,534,883,328 ns around 1,099,511,627,776 minutes,
     // pinning 763549741d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fortieth-doubling-from-below-fbdf6.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fortieth-doubling-from-above-fbdf6.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fortieth-doubling-from-below-fbdf6.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fortieth-doubling-from-above-fbdf6.orna"
+        ),
         &[
             "763549741d 12h 16m",
             "18325193796:16:00",
@@ -1690,8 +1895,12 @@ fn positive_factor_rescaled_tails_close_after_forty_first_doubling() {
     // the 3 ns tail becomes 6,597,069,766,656 ns around 2,199,023,255,552 minutes,
     // pinning 1527099483d 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-first-doubling-from-below-tde74.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-first-doubling-from-above-tde74.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-first-doubling-from-below-tde74.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-first-doubling-from-above-tde74.orna"
+        ),
         &[
             "1527099483d 32m",
             "36650387592:32:00",
@@ -1708,8 +1917,12 @@ fn positive_factor_rescaled_tails_close_after_forty_second_doubling() {
     // the 3 ns tail becomes 13,194,139,533,312 ns around 4,398,046,511,104 minutes,
     // pinning 3054198966d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-second-doubling-from-below-jp6xf.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-second-doubling-from-above-jp6xf.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-second-doubling-from-below-jp6xf.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-second-doubling-from-above-jp6xf.orna"
+        ),
         &[
             "3054198966d 1h 4m",
             "73300775185:04:00",
@@ -1726,8 +1939,12 @@ fn positive_factor_rescaled_tails_close_after_forty_third_doubling() {
     // the 3 ns tail becomes 26,388,279,066,624 ns around 8,796,093,022,208 minutes,
     // pinning 6108397932d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-third-doubling-from-below-14ekt.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-third-doubling-from-above-14ekt.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-third-doubling-from-below-14ekt.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-third-doubling-from-above-14ekt.orna"
+        ),
         &[
             "6108397932d 2h 8m",
             "146601550370:08:00",
@@ -1744,8 +1961,12 @@ fn positive_factor_rescaled_tails_close_after_forty_fourth_doubling() {
     // the 3 ns tail becomes 52,776,558,133,248 ns around 17,592,186,044,416 minutes,
     // pinning 12216795864d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-fourth-doubling-from-below-ycs5d.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-fourth-doubling-from-above-ycs5d.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-fourth-doubling-from-below-ycs5d.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-fourth-doubling-from-above-ycs5d.orna"
+        ),
         &[
             "12216795864d 4h 16m",
             "293203100740:16:00",
@@ -1762,8 +1983,12 @@ fn positive_factor_rescaled_tails_close_after_forty_fifth_doubling() {
     // the 3 ns tail becomes 105,553,116,266,496 ns around 35,184,372,088,832 minutes,
     // pinning 24433591728d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-fifth-doubling-from-below-7c0na.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-fifth-doubling-from-above-7c0na.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-fifth-doubling-from-below-7c0na.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-fifth-doubling-from-above-7c0na.orna"
+        ),
         &[
             "24433591728d 8h 32m",
             "586406201480:32:00",
@@ -1780,8 +2005,12 @@ fn positive_factor_rescaled_tails_close_after_forty_sixth_doubling() {
     // the 3 ns tail becomes 211,106,232,532,992 ns around 70,368,744,177,664 minutes,
     // pinning 48867183456d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-sixth-doubling-from-below-mlchm.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-sixth-doubling-from-above-mlchm.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-sixth-doubling-from-below-mlchm.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-sixth-doubling-from-above-mlchm.orna"
+        ),
         &[
             "48867183456d 17h 4m",
             "1172812402961:04:00",
@@ -1798,8 +2027,12 @@ fn positive_factor_rescaled_tails_close_after_forty_seventh_doubling() {
     // the 3 ns tail becomes 422,212,465,065,984 ns around 140,737,488,355,328 minutes,
     // pinning 97734366913d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-seventh-doubling-from-below-v60uf.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-seventh-doubling-from-above-v60uf.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-seventh-doubling-from-below-v60uf.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-seventh-doubling-from-above-v60uf.orna"
+        ),
         &[
             "97734366913d 10h 8m",
             "2345624805922:08:00",
@@ -1816,8 +2049,12 @@ fn positive_factor_rescaled_tails_close_after_forty_eighth_doubling() {
     // the 3 ns tail becomes 844,424,930,131,968 ns around 281,474,976,710,656 minutes,
     // pinning 195468733826d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-eighth-doubling-from-below-fmws0.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-eighth-doubling-from-above-fmws0.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-eighth-doubling-from-below-fmws0.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-eighth-doubling-from-above-fmws0.orna"
+        ),
         &[
             "195468733826d 20h 16m",
             "4691249611844:16:00",
@@ -1834,8 +2071,12 @@ fn positive_factor_rescaled_tails_close_after_forty_ninth_doubling() {
     // the 3 ns tail becomes 1,688,849,860,263,936 ns around 562,949,953,421,312 minutes,
     // pinning 390937467653d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-ninth-doubling-from-below-rf5yg.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-forty-ninth-doubling-from-above-rf5yg.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-ninth-doubling-from-below-rf5yg.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-forty-ninth-doubling-from-above-rf5yg.orna"
+        ),
         &[
             "390937467653d 16h 32m",
             "9382499223688:32:00",
@@ -1851,8 +2092,12 @@ fn positive_factor_rescaled_tails_close_after_fiftieth_doubling() {
     // correction by doubling the prior tail to 3,377,699,720,527,872 ns around
     // 1,125,899,906,842,624 minutes, pinning 781874935307d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fiftieth-doubling-from-below-cp53z.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fiftieth-doubling-from-above-cp53z.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fiftieth-doubling-from-below-cp53z.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fiftieth-doubling-from-above-cp53z.orna"
+        ),
         &[
             "781874935307d 9h 4m",
             "18764998447377:04:00",
@@ -1868,8 +2113,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_first_doubling() {
     // correction by doubling the prior tail to 6,755,399,441,055,744 ns around
     // 2,251,799,813,685,248 minutes, pinning 1563749870614d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-first-doubling-from-below-g5d1u.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-first-doubling-from-above-g5d1u.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-first-doubling-from-below-g5d1u.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-first-doubling-from-above-g5d1u.orna"
+        ),
         &[
             "1563749870614d 18h 8m",
             "37529996894754:08:00",
@@ -1885,8 +2134,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_second_doubling() {
     // correction by doubling the prior tail to 13,510,798,882,111,488 ns around
     // 4,503,599,627,370,496 minutes, pinning 3127499741229d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-second-doubling-from-below-gxlme.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-second-doubling-from-above-gxlme.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-second-doubling-from-below-gxlme.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-second-doubling-from-above-gxlme.orna"
+        ),
         &[
             "3127499741229d 12h 16m",
             "75059993789508:16:00",
@@ -1902,8 +2155,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_third_doubling() {
     // correction by doubling the prior tail to 27,021,597,764,222,976 ns around
     // 9,007,199,254,740,992 minutes, pinning 6254999482459d 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-third-doubling-from-below-n0iky.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-third-doubling-from-above-n0iky.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-third-doubling-from-below-n0iky.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-third-doubling-from-above-n0iky.orna"
+        ),
         &[
             "6254999482459d 32m",
             "150119987579016:32:00",
@@ -1919,8 +2176,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_fourth_doubling() {
     // correction by doubling the prior tail to 54,043,195,528,445,952 ns around
     // 18,014,398,509,481,984 minutes, pinning 12509998964918d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fourth-doubling-from-below-csnst.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fourth-doubling-from-above-csnst.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fourth-doubling-from-below-csnst.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fourth-doubling-from-above-csnst.orna"
+        ),
         &[
             "12509998964918d 1h 4m",
             "300239975158033:04:00",
@@ -1936,8 +2197,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_fifth_doubling() {
     // correction by doubling the prior tail to 108,086,391,056,891,904 ns around
     // 36,028,797,018,963,968 minutes, pinning 25019997929836d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fifth-doubling-from-below-h2qin.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fifth-doubling-from-above-h2qin.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fifth-doubling-from-below-h2qin.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-fifth-doubling-from-above-h2qin.orna"
+        ),
         &[
             "25019997929836d 2h 8m",
             "600479950316066:08:00",
@@ -1953,8 +2218,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_sixth_doubling() {
     // correction by doubling the prior tail to 216,172,782,113,783,808 ns around
     // 72,057,594,037,927,936 minutes, pinning 50039995859672d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-sixth-doubling-from-below-ninf8.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-sixth-doubling-from-above-ninf8.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-sixth-doubling-from-below-ninf8.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-sixth-doubling-from-above-ninf8.orna"
+        ),
         &[
             "50039995859672d 4h 16m",
             "1200959900632132:16:00",
@@ -1970,8 +2239,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_seventh_doubling() {
     // correction by doubling the prior tail to 432,345,564,227,567,616 ns around
     // 144,115,188,075,855,872 minutes, pinning 100079991719344d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-seventh-doubling-from-below-8x2y6.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-seventh-doubling-from-above-8x2y6.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-seventh-doubling-from-below-8x2y6.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-seventh-doubling-from-above-8x2y6.orna"
+        ),
         &[
             "100079991719344d 8h 32m",
             "2401919801264264:32:00",
@@ -1987,8 +2260,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_eighth_doubling() {
     // correction by doubling the prior tail to 864,691,128,455,135,232 ns around
     // 288,230,376,151,711,744 minutes, pinning 200159983438688d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-eighth-doubling-from-below-27i5c.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-eighth-doubling-from-above-27i5c.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-eighth-doubling-from-below-27i5c.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-eighth-doubling-from-above-27i5c.orna"
+        ),
         &[
             "200159983438688d 17h 4m",
             "4803839602528529:04:00",
@@ -2004,8 +2281,12 @@ fn positive_factor_rescaled_tails_close_after_fifty_ninth_doubling() {
     // correction by doubling the prior tail to 1,729,382,256,910,270,464 ns
     // around 576,460,752,303,423,488 minutes, pinning 400319966877377d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-ninth-doubling-from-below-0lzmd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-fifty-ninth-doubling-from-above-0lzmd.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-ninth-doubling-from-below-0lzmd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-fifty-ninth-doubling-from-above-0lzmd.orna"
+        ),
         &[
             "400319966877377d 10h 8m",
             "9607679205057058:08:00",
@@ -2021,8 +2302,12 @@ fn positive_factor_rescaled_tails_close_after_sixtieth_doubling() {
     // correction by doubling the prior tail to 3,458,764,513,820,540,928 ns
     // around 1,152,921,504,606,846,976 minutes, pinning 800639933754754d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixtieth-doubling-from-below-92vxf.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixtieth-doubling-from-above-92vxf.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixtieth-doubling-from-below-92vxf.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixtieth-doubling-from-above-92vxf.orna"
+        ),
         &[
             "800639933754754d 20h 16m",
             "19215358410114116:16:00",
@@ -2038,8 +2323,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_first_doubling() {
     // correction by doubling the prior tail to 6,917,529,027,641,081,856 ns
     // around 2,305,843,009,213,693,952 minutes, pinning 1601279867509509d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-first-doubling-from-below-hzxzd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-first-doubling-from-above-hzxzd.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-first-doubling-from-below-hzxzd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-first-doubling-from-above-hzxzd.orna"
+        ),
         &[
             "1601279867509509d 16h 32m",
             "38430716820228232:32:00",
@@ -2055,8 +2344,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_second_doubling() {
     // correction by doubling the prior tail to 13,835,058,055,282,163,712 ns
     // around 4,611,686,018,427,387,904 minutes, pinning 3202559735019019d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-second-doubling-from-below-fm4ke.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-second-doubling-from-above-fm4ke.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-second-doubling-from-below-fm4ke.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-second-doubling-from-above-fm4ke.orna"
+        ),
         &[
             "3202559735019019d 9h 4m",
             "76861433640456465:04:00",
@@ -2072,8 +2365,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_third_doubling() {
     // correction by doubling the prior tail to 27,670,116,110,564,327,424 ns
     // around 9,223,372,036,854,775,808 minutes, pinning 6405119470038038d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-third-doubling-from-below-l5vbz.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-third-doubling-from-above-l5vbz.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-third-doubling-from-below-l5vbz.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-third-doubling-from-above-l5vbz.orna"
+        ),
         &[
             "6405119470038038d 18h 8m",
             "153722867280912930:08:00",
@@ -2089,8 +2386,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_fourth_doubling() {
     // correction by doubling the prior tail to 55,340,232,221,128,654,848 ns
     // around 18,446,744,073,709,551,616 minutes, pinning 12810238940076077d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-below-y7dit.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-above-y7dit.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-below-y7dit.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fourth-doubling-from-above-y7dit.orna"
+        ),
         &[
             "12810238940076077d 12h 16m",
             "307445734561825860:16:00",
@@ -2106,8 +2407,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_fifth_doubling() {
     // correction by doubling the prior tail to 110,680,464,442,257,309,696 ns
     // around 36,893,488,147,419,103,232 minutes, pinning 25620477880152155d 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-below-0q58q.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-above-0q58q.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-below-0q58q.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-fifth-doubling-from-above-0q58q.orna"
+        ),
         &[
             "25620477880152155d 32m",
             "614891469123651720:32:00",
@@ -2123,8 +2428,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_sixth_doubling() {
     // correction by doubling the prior tail to 221,360,928,884,514,619,392 ns
     // around 73,786,976,294,838,206,464 minutes, pinning 51240955760304310d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-sixth-doubling-from-below-6in0r.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-sixth-doubling-from-above-6in0r.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-sixth-doubling-from-below-6in0r.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-sixth-doubling-from-above-6in0r.orna"
+        ),
         &[
             "51240955760304310d 1h 4m",
             "1229782938247303441:04:00",
@@ -2140,8 +2449,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_seventh_doubling() {
     // correction by doubling the prior tail to 442,721,857,769,029,238,784 ns
     // around 147,573,952,589,676,412,928 minutes, pinning 102481911520608620d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-seventh-doubling-from-below-08bkb.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-seventh-doubling-from-above-08bkb.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-seventh-doubling-from-below-08bkb.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-seventh-doubling-from-above-08bkb.orna"
+        ),
         &[
             "102481911520608620d 2h 8m",
             "2459565876494606882:08:00",
@@ -2157,8 +2470,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_eighth_doubling() {
     // correction by doubling the prior tail to 885,443,715,538,058,477,568 ns
     // around 295,147,905,179,352,825,856 minutes, pinning 204963823041217240d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-eighth-doubling-from-below-59jn6.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-eighth-doubling-from-above-59jn6.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-eighth-doubling-from-below-59jn6.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-eighth-doubling-from-above-59jn6.orna"
+        ),
         &[
             "204963823041217240d 4h 16m",
             "4919131752989213764:16:00",
@@ -2174,8 +2491,12 @@ fn positive_factor_rescaled_tails_close_after_sixty_ninth_doubling() {
     // correction by doubling the prior tail to 1,770,887,431,076,116,955,136 ns
     // around 590,295,810,358,705,651,712 minutes, pinning 409927646082434480d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-ninth-doubling-from-below-csbtw.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-sixty-ninth-doubling-from-above-csbtw.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-ninth-doubling-from-below-csbtw.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-sixty-ninth-doubling-from-above-csbtw.orna"
+        ),
         &[
             "409927646082434480d 8h 32m",
             "9838263505978427528:32:00",
@@ -2191,8 +2512,12 @@ fn positive_factor_rescaled_tails_close_after_seventieth_doubling() {
     // correction by doubling the prior tail to 3,541,774,862,152,233,910,272 ns
     // around 1,180,591,620,717,411,303,424 minutes, pinning 819855292164868960d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventieth-doubling-from-below-llwf9.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventieth-doubling-from-above-llwf9.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventieth-doubling-from-below-llwf9.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventieth-doubling-from-above-llwf9.orna"
+        ),
         &[
             "819855292164868960d 17h 4m",
             "19676527011956855057:04:00",
@@ -2208,8 +2533,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_first_doubling() {
     // correction by doubling the prior tail to 7,083,549,724,304,467,820,544 ns
     // around 2,361,183,241,434,822,606,848 minutes, pinning 1639710584329737921d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-first-doubling-from-below-wsxl1.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-first-doubling-from-above-wsxl1.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-first-doubling-from-below-wsxl1.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-first-doubling-from-above-wsxl1.orna"
+        ),
         &[
             "1639710584329737921d 10h 8m",
             "39353054023913710114:08:00",
@@ -2225,8 +2554,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_second_doubling() {
     // correction by doubling the prior tail to 14,167,099,448,608,935,641,088 ns
     // around 4,722,366,482,869,645,213,696 minutes, pinning 3279421168659475842d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-second-doubling-from-below-2s8vj.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-second-doubling-from-above-2s8vj.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-second-doubling-from-below-2s8vj.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-second-doubling-from-above-2s8vj.orna"
+        ),
         &[
             "3279421168659475842d 20h 16m",
             "78706108047827420228:16:00",
@@ -2242,8 +2575,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_third_doubling() {
     // correction by doubling the prior tail to 28,334,198,897,217,871,282,176 ns
     // around 9,444,732,965,739,290,427,392 minutes, pinning 6558842337318951685d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-third-doubling-from-below-9kc8j.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-third-doubling-from-above-9kc8j.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-third-doubling-from-below-9kc8j.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-third-doubling-from-above-9kc8j.orna"
+        ),
         &[
             "6558842337318951685d 16h 32m",
             "157412216095654840456:32:00",
@@ -2259,8 +2596,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_fourth_doubling() {
     // correction by doubling the prior tail to 56,668,397,794,435,742,564,352 ns
     // around 18,889,465,931,478,580,854,784 minutes, pinning 13117684674637903371d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fourth-doubling-from-below-re46p.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fourth-doubling-from-above-re46p.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fourth-doubling-from-below-re46p.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fourth-doubling-from-above-re46p.orna"
+        ),
         &[
             "13117684674637903371d 9h 4m",
             "314824432191309680913:04:00",
@@ -2276,8 +2617,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_fifth_doubling() {
     // correction by doubling the prior tail to 113,336,795,588,871,485,128,704 ns
     // around 37,778,931,862,957,161,709,568 minutes, pinning 26235369349275806742d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fifth-doubling-from-below-03vng.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fifth-doubling-from-above-03vng.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fifth-doubling-from-below-03vng.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-fifth-doubling-from-above-03vng.orna"
+        ),
         &[
             "26235369349275806742d 18h 8m",
             "629648864382619361826:08:00",
@@ -2293,8 +2638,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_sixth_doubling() {
     // correction by doubling the prior tail to 226,673,591,177,742,970,257,408 ns
     // around 75,557,863,725,914,323,419,136 minutes, pinning 52470738698551613485d 12h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-sixth-doubling-from-below-613sk.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-sixth-doubling-from-above-613sk.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-sixth-doubling-from-below-613sk.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-sixth-doubling-from-above-613sk.orna"
+        ),
         &[
             "52470738698551613485d 12h 16m",
             "1259297728765238723652:16:00",
@@ -2310,8 +2659,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_seventh_doubling() {
     // correction by doubling the prior tail to 453,347,182,355,485,940,514,816 ns
     // around 151,115,727,451,828,646,838,272 minutes, pinning 104941477397103226971d 0h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-seventh-doubling-from-below-crtks.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-seventh-doubling-from-above-crtks.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-seventh-doubling-from-below-crtks.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-seventh-doubling-from-above-crtks.orna"
+        ),
         &[
             "104941477397103226971d 32m",
             "2518595457530477447304:32:00",
@@ -2327,8 +2680,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_eighth_doubling() {
     // correction by doubling the prior tail to 906,694,364,710,971,881,029,632 ns
     // around 302,231,454,903,657,293,676,544 minutes, pinning 209882954794206453942d 1h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-below-02cp0.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-above-02cp0.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-below-02cp0.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-eighth-doubling-from-above-02cp0.orna"
+        ),
         &[
             "209882954794206453942d 1h 4m",
             "5037190915060954894609:04:00",
@@ -2344,8 +2701,12 @@ fn positive_factor_rescaled_tails_close_after_seventy_ninth_doubling() {
     // correction by doubling the prior tail to 1,813,388,729,421,943,762,059,264 ns
     // around 604,462,909,807,314,587,353,088 minutes, pinning 419765909588412907884d 2h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-ninth-doubling-from-below-ze5r4.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-seventy-ninth-doubling-from-above-ze5r4.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-ninth-doubling-from-below-ze5r4.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-seventy-ninth-doubling-from-above-ze5r4.orna"
+        ),
         &[
             "419765909588412907884d 2h 8m",
             "10074381830121909789218:08:00",
@@ -2361,8 +2722,12 @@ fn positive_factor_rescaled_tails_close_after_eightieth_doubling() {
     // correction by doubling the prior tail to 3,626,777,458,843,887,524,118,528 ns
     // around 1,208,925,819,614,629,174,706,176 minutes, pinning 839531819176825815768d 4h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eightieth-doubling-from-below-s2sja.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eightieth-doubling-from-above-s2sja.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eightieth-doubling-from-below-s2sja.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eightieth-doubling-from-above-s2sja.orna"
+        ),
         &[
             "839531819176825815768d 4h 16m",
             "20148763660243819578436:16:00",
@@ -2381,43 +2746,63 @@ fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     };
     let mut session = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-24-hours-h4ei4.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-24-hours-h4ei4.orna"
+        )),
         Ok(Some(text("24:00:00")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-before-24-hours-2j4s2.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-before-24-hours-2j4s2.orna"
+        )),
         Ok(Some(text("23:59:59.999999999")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-after-24-hours-2j4s2.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-after-24-hours-2j4s2.orna"
+        )),
         Ok(Some(text("24:00:00.000000001")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-negative-scaled-before-24-hours-c2zdh.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-negative-scaled-before-24-hours-c2zdh.orna"
+        )),
         Ok(Some(text("-23:59:59.999999999")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-negative-scaled-after-24-hours-c2zdh.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-negative-scaled-after-24-hours-c2zdh.orna"
+        )),
         Ok(Some(text("-24:00:00.000000001")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-before-24h-tail-auorn.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-before-24h-tail-auorn.orna"
+        )),
         Ok(Some(text("23:59:59.99988")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-after-24h-tail-auorn.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-after-24h-tail-auorn.orna"
+        )),
         Ok(Some(text("24:00:00.00012")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-negative-before-24h-tail-8g41m.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-negative-before-24h-tail-8g41m.orna"
+        )),
         Ok(Some(text("-23:59:59.99988")))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-duration-clock-scaled-negative-after-24h-tail-8g41m.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-duration-clock-scaled-negative-after-24h-tail-8g41m.orna"
+        )),
         Ok(Some(text("-24:00:00.00012")))
     );
     let source = include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna");
@@ -2431,7 +2816,9 @@ fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-clock-calendar-period-h4ei4.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-clock-calendar-period-h4ei4.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S021-TYPE"
@@ -2444,12 +2831,16 @@ fn clock_output_bound_keeps_elapsed_hours_and_fractional_tail() {
     };
     let mut bounded = AdmittedReplSession::with_reference_standard(limits).unwrap();
     assert_eq!(
-        bounded.submit(include_str!("fixtures/stdlib-time-duration-use-clock-b1e0.orna")),
+        bounded.submit(include_str!(
+            "fixtures/stdlib-time-duration-use-clock-b1e0.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
         bounded
-            .submit(include_str!("fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-clock-max-hours-h4ei4.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -2472,7 +2863,9 @@ fn core_elapsed_instant_arithmetic_works_without_std() {
 fn pinned_std_formats_normalized_elapsed_arithmetic() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-time-elapsed-duration-use-iso-y2w0.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-time-elapsed-duration-use-iso-y2w0.orna"
+        )),
         Ok(None)
     );
     for (source, expected) in [
@@ -2507,14 +2900,18 @@ fn pinned_std_formats_normalized_elapsed_arithmetic() {
     }
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-instant-overflow-y2w0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-instant-overflow-y2w0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-instant-calendar-period-y2w0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-instant-calendar-period-y2w0.orna"
+            ))
             .unwrap_err()
             .code(),
         // Instant plus a calendar period is an undefined operand pair; the
@@ -2532,7 +2929,9 @@ fn elapsed_duration_arithmetic_enforces_result_digit_limit() {
     let mut session = AdmittedReplSession::new(limits);
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-sum-digit-limit-y2w0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-sum-digit-limit-y2w0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -2545,7 +2944,9 @@ fn elapsed_duration_arithmetic_enforces_result_digit_limit() {
     let mut session = AdmittedReplSession::new(limits);
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-instant-difference-digit-limit-y2w0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-instant-difference-digit-limit-y2w0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-LIMIT"
@@ -2558,8 +2959,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_first_doubling() {
     // correction by doubling the prior tail to 7,253,554,917,687,775,048,237,056 ns
     // around 2,417,851,639,229,258,349,412,352 minutes, pinning 1679063638353651631536d 8h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-below-qrtts.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-above-qrtts.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-below-qrtts.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-first-doubling-from-above-qrtts.orna"
+        ),
         &[
             "1679063638353651631536d 8h 32m",
             "40297527320487639156872:32:00",
@@ -2575,8 +2980,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_second_doubling() {
     // closure rule by doubling the 81st edge correction to 14,507,109,835,375,550,096,474,112 ns
     // around 4,835,703,278,458,516,698,824,704 minutes, pinning 3358127276707303263072d 17h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-second-doubling-from-below-xfuey.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-second-doubling-from-above-xfuey.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-second-doubling-from-below-xfuey.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-second-doubling-from-above-xfuey.orna"
+        ),
         &[
             "3358127276707303263072d 17h 4m",
             "80595054640975278313745:04:00",
@@ -2592,8 +3001,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_third_doubling() {
     // correction by doubling the prior tail to 29,014,219,670,751,100,192,948,224 ns
     // around 9,671,406,556,917,033,397,649,408 minutes, pinning 6716254553414606526145d 10h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-third-doubling-from-below-cgljp.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-third-doubling-from-above-cgljp.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-third-doubling-from-below-cgljp.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-third-doubling-from-above-cgljp.orna"
+        ),
         &[
             "6716254553414606526145d 10h 8m",
             "161190109281950556627490:08:00",
@@ -2609,8 +3022,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_fourth_doubling() {
     // correction by doubling the prior tail to 58,028,439,341,502,200,385,896,448 ns
     // around 19,342,813,113,834,066,795,298,816 minutes, pinning 13432509106829213052290d 20h 16m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fourth-doubling-from-below-c5kho.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fourth-doubling-from-above-c5kho.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fourth-doubling-from-below-c5kho.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fourth-doubling-from-above-c5kho.orna"
+        ),
         &[
             "13432509106829213052290d 20h 16m",
             "322380218563901113254980:16:00",
@@ -2626,8 +3043,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_fifth_doubling() {
     // correction by doubling the prior tail to 116,056,878,683,004,400,771,792,896 ns
     // around 38,685,626,227,668,133,590,597,632 minutes, pinning 26865018213658426104581d 16h 32m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fifth-doubling-from-below-w2kd1.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fifth-doubling-from-above-w2kd1.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fifth-doubling-from-below-w2kd1.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-fifth-doubling-from-above-w2kd1.orna"
+        ),
         &[
             "26865018213658426104581d 16h 32m",
             "644760437127802226509960:32:00",
@@ -2643,8 +3064,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_sixth_doubling() {
     // correction by doubling the prior tail to 232,113,757,366,008,801,543,585,792 ns
     // around 77,371,252,455,336,267,181,195,264 minutes, pinning 53730036427316852209163d 9h 4m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-sixth-doubling-from-below-7xzso.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-sixth-doubling-from-above-7xzso.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-sixth-doubling-from-below-7xzso.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-sixth-doubling-from-above-7xzso.orna"
+        ),
         &[
             "53730036427316852209163d 9h 4m",
             "1289520874255604453019921:04:00",
@@ -2660,8 +3085,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_seventh_doubling() {
     // correction by doubling the prior tail to 464,227,514,732,017,603,087,171,584 ns
     // around 154,742,504,910,672,534,362,390,528 minutes, pinning 107460072854633704418326d 18h 8m.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-below-hui4r.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-above-hui4r.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-below-hui4r.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-seventh-doubling-from-above-hui4r.orna"
+        ),
         &[
             "107460072854633704418326d 18h 8m",
             "2579041748511208906039842:08:00",
@@ -2678,8 +3107,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_eighth_doubling() {
     // around 309,485,009,821,345,068,724,781,056 minutes, pinning 214920145709267408836653d 12h 16m.
     // The fixture stages its 60 doublings in 20-factor bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-eighth-doubling-from-below-lt1ug.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-eighth-doubling-from-above-lt1ug.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-eighth-doubling-from-below-lt1ug.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-eighth-doubling-from-above-lt1ug.orna"
+        ),
         &[
             "214920145709267408836653d 12h 16m",
             "5158083497022417812079684:16:00",
@@ -2696,8 +3129,12 @@ fn positive_factor_rescaled_tails_close_after_eighty_ninth_doubling() {
     // around 618,970,019,642,690,137,449,562,112 minutes, pinning 429840291418534817673307d 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-ninth-doubling-from-below-79wlg.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-eighty-ninth-doubling-from-above-79wlg.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-ninth-doubling-from-below-79wlg.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-eighty-ninth-doubling-from-above-79wlg.orna"
+        ),
         &[
             "429840291418534817673307d 32m",
             "10316166994044835624159368:32:00",
@@ -2714,8 +3151,12 @@ fn positive_factor_rescaled_tails_close_after_ninetieth_doubling() {
     // around 1,237,940,039,285,380,274,899,124,224 minutes, pinning 859680582837069635346614d 1h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninetieth-doubling-from-below-7nrg7.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninetieth-doubling-from-above-7nrg7.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninetieth-doubling-from-below-7nrg7.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninetieth-doubling-from-above-7nrg7.orna"
+        ),
         &[
             "859680582837069635346614d 1h 4m",
             "20632333988089671248318737:04:00",
@@ -2732,8 +3173,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_first_doubling() {
     // around 2,475,880,078,570,760,549,798,248,448 minutes, pinning 1719361165674139270693228d 2h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-first-doubling-from-below-t1u4p.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-first-doubling-from-above-t1u4p.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-first-doubling-from-below-t1u4p.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-first-doubling-from-above-t1u4p.orna"
+        ),
         &[
             "1719361165674139270693228d 2h 8m",
             "41264667976179342496637474:08:00",
@@ -2750,8 +3195,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_second_doubling() {
     // around 4,951,760,157,141,521,099,596,496,896 minutes, pinning 3438722331348278541386456d 4h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-second-doubling-from-below-cgiq2.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-second-doubling-from-above-cgiq2.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-second-doubling-from-below-cgiq2.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-second-doubling-from-above-cgiq2.orna"
+        ),
         &[
             "3438722331348278541386456d 4h 16m",
             "82529335952358684993274948:16:00",
@@ -2768,8 +3217,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_third_doubling() {
     // around 9,903,520,314,283,042,199,192,993,792 minutes, pinning 6877444662696557082772912d 8h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-third-doubling-from-below-sf8pj.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-third-doubling-from-above-sf8pj.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-third-doubling-from-below-sf8pj.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-third-doubling-from-above-sf8pj.orna"
+        ),
         &[
             "6877444662696557082772912d 8h 32m",
             "165058671904717369986549896:32:00",
@@ -2786,8 +3239,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_fourth_doubling() {
     // around 19,807,040,628,566,084,398,385,987,584 minutes, pinning 13754889325393114165545824d 17h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fourth-doubling-from-below-m8wcl.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fourth-doubling-from-above-m8wcl.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fourth-doubling-from-below-m8wcl.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fourth-doubling-from-above-m8wcl.orna"
+        ),
         &[
             "13754889325393114165545824d 17h 4m",
             "330117343809434739973099793:04:00",
@@ -2804,8 +3261,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_fifth_doubling() {
     // around 39,614,081,257,132,168,796,771,975,168 minutes, pinning 27509778650786228331091649d 10h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fifth-doubling-from-below-di886.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fifth-doubling-from-above-di886.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fifth-doubling-from-below-di886.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-fifth-doubling-from-above-di886.orna"
+        ),
         &[
             "27509778650786228331091649d 10h 8m",
             "660234687618869479946199586:08:00",
@@ -2822,8 +3283,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_sixth_doubling() {
     // around 79,228,162,514,264,337,593,543,950,336 minutes, pinning 55019557301572456662183298d 20h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-sixth-doubling-from-below-t2h45.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-sixth-doubling-from-above-t2h45.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-sixth-doubling-from-below-t2h45.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-sixth-doubling-from-above-t2h45.orna"
+        ),
         &[
             "55019557301572456662183298d 20h 16m",
             "1320469375237738959892399172:16:00",
@@ -2840,8 +3305,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_seventh_doubling() {
     // around 158,456,325,028,528,675,187,087,900,672 minutes, pinning 110039114603144913324366597d 16h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-seventh-doubling-from-below-8ba4o.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-seventh-doubling-from-above-8ba4o.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-seventh-doubling-from-below-8ba4o.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-seventh-doubling-from-above-8ba4o.orna"
+        ),
         &[
             "110039114603144913324366597d 16h 32m",
             "2640938750475477919784798344:32:00",
@@ -2858,8 +3327,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_eighth_doubling() {
     // around 316,912,650,057,057,350,374,175,801,344 minutes, pinning 220078229206289826648733195d 9h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-eighth-doubling-from-below-jdf45.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-eighth-doubling-from-above-jdf45.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-eighth-doubling-from-below-jdf45.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-eighth-doubling-from-above-jdf45.orna"
+        ),
         &[
             "220078229206289826648733195d 9h 4m",
             "5281877500950955839569596689:04:00",
@@ -2876,8 +3349,12 @@ fn positive_factor_rescaled_tails_close_after_ninety_ninth_doubling() {
     // around 633,825,300,114,114,700,748,351,602,688 minutes, pinning 440156458412579653297466390d 18h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-ninth-doubling-from-below-0py3i.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-ninety-ninth-doubling-from-above-0py3i.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-ninth-doubling-from-below-0py3i.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-ninety-ninth-doubling-from-above-0py3i.orna"
+        ),
         &[
             "440156458412579653297466390d 18h 8m",
             "10563755001901911679139193378:08:00",
@@ -2894,8 +3371,12 @@ fn positive_factor_rescaled_tails_close_after_hundredth_doubling() {
     // around 1,267,650,600,228,229,401,496,703,205,376 minutes, pinning 880312916825159306594932781d 12h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-hundredth-doubling-from-below-pc7og.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-hundredth-doubling-from-above-pc7og.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-hundredth-doubling-from-below-pc7og.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-hundredth-doubling-from-above-pc7og.orna"
+        ),
         &[
             "880312916825159306594932781d 12h 16m",
             "21127510003803823358278386756:16:00",
@@ -2912,8 +3393,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_first_doubling() {
     // around 2,535,301,200,456,458,802,993,406,410,752 minutes, pinning 1760625833650318613189865563d 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-first-doubling-from-below-jc2p0.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-first-doubling-from-above-jc2p0.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-first-doubling-from-below-jc2p0.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-first-doubling-from-above-jc2p0.orna"
+        ),
         &[
             "1760625833650318613189865563d 32m",
             "42255020007607646716556773512:32:00",
@@ -2930,8 +3415,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_second_doubling() {
     // around 5,070,602,400,912,917,605,986,812,821,504 minutes, pinning 3521251667300637226379731126d 1h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-second-doubling-from-below-xtx7l.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-second-doubling-from-above-xtx7l.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-second-doubling-from-below-xtx7l.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-second-doubling-from-above-xtx7l.orna"
+        ),
         &[
             "3521251667300637226379731126d 1h 4m",
             "84510040015215293433113547025:04:00",
@@ -2948,8 +3437,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_third_doubling() {
     // around 10,141,204,801,825,835,211,973,625,643,008 minutes, pinning 7042503334601274452759462252d 2h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-third-doubling-from-below-bnp2g.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-third-doubling-from-above-bnp2g.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-third-doubling-from-below-bnp2g.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-third-doubling-from-above-bnp2g.orna"
+        ),
         &[
             "7042503334601274452759462252d 2h 8m",
             "169020080030430586866227094050:08:00",
@@ -2966,8 +3459,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_fourth_doubling() {
     // around 20,282,409,603,651,670,423,947,251,286,016 minutes, pinning 14085006669202548905518924504d 4h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourth-doubling-from-below-ewkqi.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourth-doubling-from-above-ewkqi.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourth-doubling-from-below-ewkqi.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourth-doubling-from-above-ewkqi.orna"
+        ),
         &[
             "14085006669202548905518924504d 4h 16m",
             "338040160060861173732454188100:16:00",
@@ -2984,8 +3481,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_fifth_doubling() {
     // around 40,564,819,207,303,340,847,894,502,572,032 minutes, pinning 28170013338405097811037849008d 8h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifth-doubling-from-below-2qfsi.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifth-doubling-from-above-2qfsi.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifth-doubling-from-below-2qfsi.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifth-doubling-from-above-2qfsi.orna"
+        ),
         &[
             "28170013338405097811037849008d 8h 32m",
             "676080320121722347464908376200:32:00",
@@ -3002,8 +3503,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_sixth_doubling() {
     // around 81,129,638,414,606,681,695,789,005,144,064 minutes, pinning 56340026676810195622075698016d 17h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixth-doubling-from-below-3n7d3.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixth-doubling-from-above-3n7d3.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixth-doubling-from-below-3n7d3.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixth-doubling-from-above-3n7d3.orna"
+        ),
         &[
             "56340026676810195622075698016d 17h 4m",
             "1352160640243444694929816752401:04:00",
@@ -3020,8 +3525,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_seventh_doubling() {
     // around 162,259,276,829,213,363,391,578,010,288,128 minutes, pinning 112680053353620391244151396033d 10h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventh-doubling-from-below-rfol1.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventh-doubling-from-above-rfol1.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventh-doubling-from-below-rfol1.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventh-doubling-from-above-rfol1.orna"
+        ),
         &[
             "112680053353620391244151396033d 10h 8m",
             "2704321280486889389859633504802:08:00",
@@ -3038,8 +3547,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_eighth_doubling() {
     // around 324,518,553,658,426,726,783,156,020,576,256 minutes, pinning 225360106707240782488302792066d 20h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighth-doubling-from-below-iyk89.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighth-doubling-from-above-iyk89.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighth-doubling-from-below-iyk89.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighth-doubling-from-above-iyk89.orna"
+        ),
         &[
             "225360106707240782488302792066d 20h 16m",
             "5408642560973778779719267009604:16:00",
@@ -3056,8 +3569,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_ninth_doubling() {
     // around 649,037,107,316,853,453,566,312,041,152,512 minutes, pinning 450720213414481564976605584133d 16h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-ninth-doubling-from-below-iilhr.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-ninth-doubling-from-above-iilhr.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-ninth-doubling-from-below-iilhr.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-ninth-doubling-from-above-iilhr.orna"
+        ),
         &[
             "450720213414481564976605584133d 16h 32m",
             "10817285121947557559438534019208:32:00",
@@ -3074,8 +3591,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_tenth_doubling() {
     // around 1,298,074,214,633,706,907,132,624,082,305,024 minutes, pinning 901440426828963129953211168267d 9h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-tenth-doubling-from-below-0scv0.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-tenth-doubling-from-above-0scv0.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-tenth-doubling-from-below-0scv0.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-tenth-doubling-from-above-0scv0.orna"
+        ),
         &[
             "901440426828963129953211168267d 9h 4m",
             "21634570243895115118877068038417:04:00",
@@ -3092,8 +3613,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_eleventh_doubling() {
     // around 2,596,148,429,267,413,814,265,248,164,610,048 minutes, pinning 1802880853657926259906422336534d 18h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-below-xjeto.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-above-xjeto.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-below-xjeto.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eleventh-doubling-from-above-xjeto.orna"
+        ),
         &[
             "1802880853657926259906422336534d 18h 8m",
             "43269140487790230237754136076834:08:00",
@@ -3110,8 +3635,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twelfth_doubling() {
     // around 5,192,296,858,534,827,628,530,496,329,220,096 minutes, pinning 3605761707315852519812844673069d 12h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twelfth-doubling-from-below-otedl.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twelfth-doubling-from-above-otedl.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twelfth-doubling-from-below-otedl.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twelfth-doubling-from-above-otedl.orna"
+        ),
         &[
             "3605761707315852519812844673069d 12h 16m",
             "86538280975580460475508272153668:16:00",
@@ -3128,8 +3657,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_thirteenth_doubling() 
     // around 10,384,593,717,069,655,257,060,992,658,440,192 minutes, pinning 7211523414631705039625689346139d 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-thirteenth-doubling-from-below-oulj4.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-thirteenth-doubling-from-above-oulj4.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-thirteenth-doubling-from-below-oulj4.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-thirteenth-doubling-from-above-oulj4.orna"
+        ),
         &[
             "7211523414631705039625689346139d 32m",
             "173076561951160920951016544307336:32:00",
@@ -3146,8 +3679,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_fourteenth_doubling() 
     // around 20,769,187,434,139,310,514,121,985,316,880,384 minutes, pinning 14423046829263410079251378692278d 1h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourteenth-doubling-from-below-a6vp7.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourteenth-doubling-from-above-a6vp7.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourteenth-doubling-from-below-a6vp7.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fourteenth-doubling-from-above-a6vp7.orna"
+        ),
         &[
             "14423046829263410079251378692278d 1h 4m",
             "346153123902321841902033088614673:04:00",
@@ -3164,8 +3701,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_fifteenth_doubling() {
     // around 41,538,374,868,278,621,028,243,970,633,760,768 minutes, pinning 28846093658526820158502757384556d 2h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifteenth-doubling-from-below-cxekg.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifteenth-doubling-from-above-cxekg.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifteenth-doubling-from-below-cxekg.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-fifteenth-doubling-from-above-cxekg.orna"
+        ),
         &[
             "28846093658526820158502757384556d 2h 8m",
             "692306247804643683804066177229346:08:00",
@@ -3182,8 +3723,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_sixteenth_doubling() {
     // around 83,076,749,736,557,242,056,487,941,267,521,536 minutes, pinning 57692187317053640317005514769112d 4h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixteenth-doubling-from-below-bm95g.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixteenth-doubling-from-above-bm95g.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixteenth-doubling-from-below-bm95g.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-sixteenth-doubling-from-above-bm95g.orna"
+        ),
         &[
             "57692187317053640317005514769112d 4h 16m",
             "1384612495609287367608132354458692:16:00",
@@ -3200,8 +3745,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_seventeenth_doubling()
     // around 166,153,499,473,114,484,112,975,882,535,043,072 minutes, pinning 115384374634107280634011029538224d 8h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventeenth-doubling-from-below-h3ez5.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventeenth-doubling-from-above-h3ez5.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventeenth-doubling-from-below-h3ez5.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-seventeenth-doubling-from-above-h3ez5.orna"
+        ),
         &[
             "115384374634107280634011029538224d 8h 32m",
             "2769224991218574735216264708917384:32:00",
@@ -3218,8 +3767,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_eighteenth_doubling() 
     // around 332,306,998,946,228,968,225,951,765,070,086,144 minutes, pinning 230768749268214561268022059076448d 17h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighteenth-doubling-from-below-bvehd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighteenth-doubling-from-above-bvehd.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighteenth-doubling-from-below-bvehd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-eighteenth-doubling-from-above-bvehd.orna"
+        ),
         &[
             "230768749268214561268022059076448d 17h 4m",
             "5538449982437149470432529417834769:04:00",
@@ -3236,8 +3789,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_nineteenth_doubling() 
     // around 664,613,997,892,457,936,451,903,530,140,172,288 minutes, pinning 461537498536429122536044118152897d 10h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-nineteenth-doubling-from-below-kj41o.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-nineteenth-doubling-from-above-kj41o.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-nineteenth-doubling-from-below-kj41o.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-nineteenth-doubling-from-above-kj41o.orna"
+        ),
         &[
             "461537498536429122536044118152897d 10h 8m",
             "11076899964874298940865058835669538:08:00",
@@ -3254,8 +3811,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twentieth_doubling() {
     // around 1,329,227,995,784,915,872,903,807,060,280,344,576 minutes, pinning 923074997072858245072088236305794d 20h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twentieth-doubling-from-below-fzv35.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twentieth-doubling-from-above-fzv35.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twentieth-doubling-from-below-fzv35.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twentieth-doubling-from-above-fzv35.orna"
+        ),
         &[
             "923074997072858245072088236305794d 20h 16m",
             "22153799929748597881730117671339076:16:00",
@@ -3272,8 +3833,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_first_doubling(
     // around 2,658,455,991,569,831,745,807,614,120,560,689,152 minutes, pinning 1846149994145716490144176472611589d 16h 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-first-doubling-from-below-za74y.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-first-doubling-from-above-za74y.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-first-doubling-from-below-za74y.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-first-doubling-from-above-za74y.orna"
+        ),
         &[
             "1846149994145716490144176472611589d 16h 32m",
             "44307599859497195763460235342678152:32:00",
@@ -3290,8 +3855,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_second_doubling
     // around 5,316,911,983,139,663,491,615,228,241,121,378,304 minutes, pinning 3692299988291432980288352945223179d 9h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-second-doubling-from-below-kdutr.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-second-doubling-from-above-kdutr.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-second-doubling-from-below-kdutr.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-second-doubling-from-above-kdutr.orna"
+        ),
         &[
             "3692299988291432980288352945223179d 9h 4m",
             "88615199718994391526920470685356305:04:00",
@@ -3308,8 +3877,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_third_doubling(
     // around 10,633,823,966,279,326,983,230,456,482,242,756,608 minutes, pinning 7384599976582865960576705890446358d 18h 8m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-third-doubling-from-below-1wyrd.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-third-doubling-from-above-1wyrd.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-third-doubling-from-below-1wyrd.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-third-doubling-from-above-1wyrd.orna"
+        ),
         &[
             "7384599976582865960576705890446358d 18h 8m",
             "177230399437988783053840941370712610:08:00",
@@ -3326,8 +3899,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_fourth_doubling
     // around 21,267,647,932,558,653,966,460,912,964,485,513,216 minutes, pinning 14769199953165731921153411780892717d 12h 16m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-below-psz4m.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-above-psz4m.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-below-psz4m.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fourth-doubling-from-above-psz4m.orna"
+        ),
         &[
             "14769199953165731921153411780892717d 12h 16m",
             "354460798875977566107681882741425220:16:00",
@@ -3344,8 +3921,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_fifth_doubling(
     // around 42,535,295,865,117,307,932,921,825,928,971,026,432 minutes, pinning 29538399906331463842306823561785435d 32m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fifth-doubling-from-below-edijr.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fifth-doubling-from-above-edijr.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fifth-doubling-from-below-edijr.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-fifth-doubling-from-above-edijr.orna"
+        ),
         &[
             "29538399906331463842306823561785435d 32m",
             "708921597751955132215363765482850440:32:00",
@@ -3362,8 +3943,12 @@ fn positive_factor_rescaled_tails_close_after_one_hundred_twenty_sixth_doubling(
     // around 85,070,591,730,234,615,865,843,651,857,942,052,864 minutes, pinning 59076799812662927684613647123570870d 1h 4m.
     // The fixture stages its doublings in bounded bindings to stay under the parser's AST-depth bound.
     assert_rescaled_factor_tail_closes(
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-sixth-doubling-from-below-2arrv.orna"),
-        include_str!("fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-sixth-doubling-from-above-2arrv.orna"),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-sixth-doubling-from-below-2arrv.orna"
+        ),
+        include_str!(
+            "fixtures/stdlib-time-duration-factor-rescaled-close-one-hundred-twenty-sixth-doubling-from-above-2arrv.orna"
+        ),
         &[
             "59076799812662927684613647123570870d 1h 4m",
             "1417843195503910264430727530965700881:04:00",

@@ -7,7 +7,10 @@
 
 use orna_repository_v1::{CandidateAssertionGate, CandidateAssertionRefusal, PrivateCommit};
 
-use super::{BTreeMap, semantic_catalogue, admitted_project_tables, table_identities_from_manifest, BTreeSet, stage_outcome_cause, Diagnostic, Exit};
+use super::{
+    BTreeMap, BTreeSet, Diagnostic, Exit, admitted_project_tables, semantic_catalogue,
+    stage_outcome_cause, table_identities_from_manifest,
+};
 
 /// The candidate assertion gate that `orna commit` and `orna publish` run
 /// before any ref, pin or journal names a candidate (ORNA-ASSERT-042,
@@ -92,10 +95,12 @@ fn head_table_rows(
     let project = orna_project_v1::ProjectLoader::default()
         .load_committed_snapshot(repository, &head)
         .map_err(|_| "HEAD project could not be loaded")?;
-    Ok(match committed_admitted_rows(repository, &head, &project)? {
-        Some(committed) => committed.rows,
-        None => orna_runtime_v1::RuntimeTableRows::new(),
-    })
+    Ok(
+        match committed_admitted_rows(repository, &head, &project)? {
+            Some(committed) => committed.rows,
+            None => orna_runtime_v1::RuntimeTableRows::new(),
+        },
+    )
 }
 
 /// One committed commit's admitted tables, read under that commit's own
@@ -200,12 +205,11 @@ fn validate_candidate_assertions(
     if table_names.is_empty() {
         return Ok(());
     }
-    let manifest = orna_project_v1::ObjectIdentityManifest::read_private_candidate(
-        repository, candidate,
-    )
-    .ok()
-    .flatten()
-    .ok_or_else(|| unvalidated(&format!("{word} object identities are unavailable")))?;
+    let manifest =
+        orna_project_v1::ObjectIdentityManifest::read_private_candidate(repository, candidate)
+            .ok()
+            .flatten()
+            .ok_or_else(|| unvalidated(&format!("{word} object identities are unavailable")))?;
     let identities = table_identities_from_manifest(&manifest, table_names)
         .map_err(|_| unvalidated(&format!("{word} table identities are unavailable")))?;
     let table_object_ids: BTreeMap<String, orna_runtime_v1::TableObjectId> = identities
@@ -324,17 +328,29 @@ pub(crate) fn refusal_diagnostic(
                 None => format!("table assertion is false over the {word} rows"),
             };
             let help = match command {
-                GatedCommand::Commit => "change the staged rows or source so every assertion holds, stage them, then retry `orna commit -m MESSAGE`; no commit was created",
-                GatedCommand::Publish => "change the pending rows or source so every assertion holds, then retry `orna publish`; nothing was published",
-                GatedCommand::Checkout => "change the target commit's source or rows so every assertion holds, then retry the checkout; HEAD and the working tree were not changed",
+                GatedCommand::Commit => {
+                    "change the staged rows or source so every assertion holds, stage them, then retry `orna commit -m MESSAGE`; no commit was created"
+                }
+                GatedCommand::Publish => {
+                    "change the pending rows or source so every assertion holds, then retry `orna publish`; nothing was published"
+                }
+                GatedCommand::Checkout => {
+                    "change the target commit's source or rows so every assertion holds, then retry the checkout; HEAD and the working tree were not changed"
+                }
             };
             ("ORNA-A091-009", title, help)
         }
         CandidateAssertionRefusal::Unvalidated(cause) => {
             let help = match command {
-                GatedCommand::Commit => "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created",
-                GatedCommand::Publish => "fix the pending source or store, then retry `orna publish`; nothing was published",
-                GatedCommand::Checkout => "fix the target commit's source or store, then retry the checkout; HEAD and the working tree were not changed",
+                GatedCommand::Commit => {
+                    "fix the staged source or store, then retry `orna commit -m MESSAGE`; no commit was created"
+                }
+                GatedCommand::Publish => {
+                    "fix the pending source or store, then retry `orna publish`; nothing was published"
+                }
+                GatedCommand::Checkout => {
+                    "fix the target commit's source or store, then retry the checkout; HEAD and the working tree were not changed"
+                }
             };
             (
                 "E2300",

@@ -53,7 +53,11 @@ fn stored_metadata(row: &[u8]) -> orna_value_v1::BlobMetadata {
 
 fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
     rows.iter()
-        .find(|(candidate, _)| candidate == key).map_or_else(|| panic!("committed row {key:?}"), |(_, value)| value.as_slice())
+        .find(|(candidate, _)| candidate == key)
+        .map_or_else(
+            || panic!("committed row {key:?}"),
+            |(_, value)| value.as_slice(),
+        )
 }
 
 fn fixture_expression(fixture: &str, root: &str) -> String {

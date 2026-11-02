@@ -1078,7 +1078,12 @@ fn failure_replay_requires_a_typed_version_precondition() {
     let symbol =
         &valid.modules[&orna_semantic_v1::Namespace(vec!["replay".into()])].exports["replay"];
     assert!(symbol.effects.opaque);
-    assert!(!symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
+    assert!(
+        !symbol
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
+    );
     assert!(symbol.effects.may_fail);
 }
 
@@ -1389,7 +1394,12 @@ fn imported_std_net_callables_preserve_effects_and_imports_remain_analysis_only(
         .expect("consumer module");
     for name in ["aliased", "named"] {
         let symbol = module.symbols.get(name).expect("imported callable summary");
-        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
+        assert!(
+            symbol
+                .effects
+                .effects
+                .contains(&orna_semantic_v1::EffectKind::Network)
+        );
         assert!(symbol.effects.may_fail);
     }
 }
@@ -1954,7 +1964,9 @@ fn table_keys_reject_float_and_affine_temperatures_reject_addition() {
 
     let temperature = analyze_corpus(&[ModuleInput::new(
         "temperature.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/e4d502137c61.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/e4d502137c61.orna"
+        )),
     )]);
     assert!(has(&temperature, DIAG_AFFINE_TEMPERATURE_ADD));
 }
@@ -2164,7 +2176,11 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
         "{:?}",
         analysis.diagnostics
     );
-    assert!(has(&analysis, DIAG_MONEY_BINARY_FLOAT), "{:?}", analysis.diagnostics);
+    assert!(
+        has(&analysis, DIAG_MONEY_BINARY_FLOAT),
+        "{:?}",
+        analysis.diagnostics
+    );
 
     let unknown = analyze_corpus(&[ModuleInput::new(
         "unknown.orna",
@@ -2177,7 +2193,9 @@ fn money_rate_unit_resolves_before_float_exactness_check() {
 fn published_money_and_affine_diagnostics_are_preserved() {
     let affine_sum = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/35dcb5e92b6c.orna"
+        )),
     )]);
     assert!(
         affine_sum
@@ -2339,7 +2357,10 @@ fn module_assertion_invoking_pure_helper_retains_transitive_table_dependencies()
         .expect("module assertion plan");
     assert_eq!(
         plan.dependencies,
-        std::collections::BTreeSet::from(["transitive-helper.Account".into(), "transitive-helper.User".into()])
+        std::collections::BTreeSet::from([
+            "transitive-helper.Account".into(),
+            "transitive-helper.User".into()
+        ])
     );
     assert_eq!(plan.effects, helper.effects);
 }
@@ -2378,7 +2399,10 @@ fn module_assertion_dependencies_follow_resolved_lowercase_table_names() {
         .expect("module assertion plan");
     assert_eq!(
         plans[0].dependencies,
-        std::collections::BTreeSet::from(["lowercase-tables.accounts".into(), "lowercase-tables.users".into()])
+        std::collections::BTreeSet::from([
+            "lowercase-tables.accounts".into(),
+            "lowercase-tables.users".into()
+        ])
     );
 }
 
@@ -2435,7 +2459,9 @@ fn closed_literal_addition_diagnostics_preserve_published_meaning() {
 
     let dimensions = analyze_corpus(&[ModuleInput::new(
         "dimensions.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/14ce14a24d45.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/14ce14a24d45.orna"
+        )),
     )]);
     assert!(
         dimensions
@@ -2458,7 +2484,11 @@ fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     assert!(
         has(&unsupplied, DIAG_UNRESOLVED),
         "{:?}",
-        unsupplied.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+        unsupplied
+            .diagnostics
+            .iter()
+            .map(|d| (d.code(), d.message()))
+            .collect::<Vec<_>>()
     );
 
     let rates = analyze(&[ModuleInput::new(
@@ -2468,13 +2498,19 @@ fn contextual_numeric_and_exact_money_unit_postfixes_remain_closed() {
     assert!(
         has(&rates, DIAG_UNRESOLVED),
         "{:?}",
-        rates.diagnostics.iter().map(|d| (d.code(), d.message())).collect::<Vec<_>>()
+        rates
+            .diagnostics
+            .iter()
+            .map(|d| (d.code(), d.message()))
+            .collect::<Vec<_>>()
     );
 
     // With the corpus environment supplied, the same postfix literals succeed.
     let supplied = analyze_corpus(&[ModuleInput::new(
         "literals.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/7f039374396b.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/7f039374396b.orna"
+        )),
     )]);
     assert!(supplied.is_ok(), "{:?}", supplied.diagnostics);
 
@@ -2793,7 +2829,10 @@ fn historical_callable_context_survives_namespace_decomposition() {
 fn distinct_historical_callable_contexts_cannot_be_mixed() {
     let source = include_str!("fixtures/historical-closure-context-mixed.orna");
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-closure-context-mixed.orna", source)],
+        &[ModuleInput::new(
+            "historical-closure-context-mixed.orna",
+            source,
+        )],
         &Catalogue::authoritative_fixture(),
     );
     assert!(
@@ -2823,7 +2862,10 @@ fn distinct_historical_callable_contexts_cannot_be_mixed() {
 fn equivalent_head_selectors_share_historical_callable_context() {
     let source = include_str!("fixtures/historical-selector-equivalent-head.orna");
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-selector-equivalent-head.orna", source)],
+        &[ModuleInput::new(
+            "historical-selector-equivalent-head.orna",
+            source,
+        )],
         &Catalogue::authoritative_fixture(),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2833,7 +2875,10 @@ fn equivalent_head_selectors_share_historical_callable_context() {
 fn reassigned_dynamic_selector_does_not_reuse_a_historical_pin() {
     let source = include_str!("fixtures/historical-dynamic-pin-reassignment.orna");
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-dynamic-pin-reassignment.orna", source)],
+        &[ModuleInput::new(
+            "historical-dynamic-pin-reassignment.orna",
+            source,
+        )],
         &Catalogue::authoritative_fixture(),
     );
     let codes = result
@@ -2856,7 +2901,10 @@ fn reassigned_dynamic_selector_does_not_reuse_a_historical_pin() {
 fn reused_dynamic_snapshot_ref_preserves_its_historical_pin() {
     let source = include_str!("fixtures/historical-dynamic-pin-reused.orna");
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-dynamic-pin-reused.orna", source)],
+        &[ModuleInput::new(
+            "historical-dynamic-pin-reused.orna",
+            source,
+        )],
         &Catalogue::authoritative_fixture(),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -2875,7 +2923,10 @@ fn dynamic_selector_occurrences_from_distinct_modules_do_not_alias() {
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let left = &result.modules[&Namespace(vec!["left".into()])].symbols["pin"].ty;
     let right = &result.modules[&Namespace(vec!["right".into()])].symbols["pin"].ty;
-    assert_ne!(left, right, "source-local dynamic pins must remain distinct");
+    assert_ne!(
+        left, right,
+        "source-local dynamic pins must remain distinct"
+    );
 }
 
 fn historical_nested_callable_catalogue() -> Catalogue {
@@ -2944,7 +2995,10 @@ fn historical_nested_callable_catalogue_with_other(include_other: bool) -> Catal
 fn nested_historical_callable_context_survives_decomposition() {
     let source = include_str!("fixtures/historical-nested-closure-context.orna");
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-nested-closure-context.orna", source)],
+        &[ModuleInput::new(
+            "historical-nested-closure-context.orna",
+            source,
+        )],
         &historical_nested_callable_catalogue(),
     );
     assert!(result.is_ok(), "{:?}", result.diagnostics);
@@ -3168,9 +3222,8 @@ fn each_call_specializes_all_stages_of_a_pinned_rebinding_chain() {
 
 #[test]
 fn closure_contexts_from_parameter_rebinding_stages_stay_distinct() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna");
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "historical-pinned-closure-chain-parameter-rebinding-mixed.orna",
@@ -3194,9 +3247,8 @@ fn closure_contexts_from_parameter_rebinding_stages_stay_distinct() {
 
 #[test]
 fn closure_contexts_from_distinct_rebinding_chain_calls_do_not_merge() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-pinned-closure-chain-parameter-rebinding-mixed.orna");
     let result = analyze_with_catalogue(
         &[ModuleInput::new(
             "historical-pinned-closure-chain-parameter-rebinding-mixed.orna",
@@ -3292,9 +3344,7 @@ fn closure_rebinding_retains_identity_through_nested_callables() {
 
 #[test]
 fn closure_rebinding_does_not_merge_old_and_new_pin_contexts() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-closure-rebind-mixed.orna"
-    );
+    let source = include_str!("fixtures/historical-pinned-closure-chain-closure-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3320,9 +3370,8 @@ fn closure_rebinding_does_not_merge_old_and_new_pin_contexts() {
 
 #[test]
 fn closure_rebinding_rejects_a_changed_callable_shape() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-pinned-closure-chain-closure-rebind-shape-mismatch.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3351,9 +3400,7 @@ fn closure_identity_returns_with_its_pin_after_rebinding_round_trips() {
     // The reference requires exact SnapshotRef pinning but does not specify
     // whether repeated local closure rebinds create a new identity. Identity
     // follows the pinned snapshot value, so returning to a prior pin rejoins it.
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-rebind-round-trip.orna"
-    );
+    let source = include_str!("fixtures/historical-pinned-closure-chain-rebind-round-trip.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3376,9 +3423,8 @@ fn closure_identity_returns_with_its_pin_after_rebinding_round_trips() {
 
 #[test]
 fn closure_identity_round_trips_do_not_merge_intermediate_pins() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-chain-rebind-round-trip-mixed.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-pinned-closure-chain-rebind-round-trip-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3427,9 +3473,7 @@ fn closure_bundle_rebinding_retains_component_pin_identities() {
 
 #[test]
 fn closure_bundle_round_trips_keep_intermediate_pins_distinct() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-bundle-rebind-mixed.orna"
-    );
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-rebind-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3481,9 +3525,7 @@ fn structural_closure_rebind_storm_preserves_every_stage_pin() {
 
 #[test]
 fn structural_closure_rebind_storm_keeps_nonadjacent_pins_distinct() {
-    let source = include_str!(
-        "fixtures/historical-pinned-closure-bundle-storm-mixed.orna"
-    );
+    let source = include_str!("fixtures/historical-pinned-closure-bundle-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3732,7 +3774,8 @@ fn structural_storms_preserve_curried_cascade_pins_at_every_depth() {
 
 #[test]
 fn structural_storm_round_trip_keeps_nested_cascade_pins_distinct() {
-    let source = include_str!("fixtures/historical-pinned-closure-cascade-structural-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-pinned-closure-cascade-structural-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3781,7 +3824,8 @@ fn structural_storms_preserve_identity_through_chained_rebind_cascades() {
 
 #[test]
 fn chained_rebind_round_trips_keep_intermediate_structural_pins_distinct() {
-    let source = include_str!("fixtures/historical-pinned-closure-chained-cascade-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-pinned-closure-chained-cascade-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -3830,7 +3874,8 @@ fn shared_ancestor_pin_survives_sibling_cascade_rebind_storms() {
 
 #[test]
 fn sibling_bridge_pins_do_not_merge_after_structural_round_trip() {
-    let source = include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-pinned-closure-sibling-cascade-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -4104,9 +4149,8 @@ fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
                 .contains_key("concurrent_paired_tuple_pins_survive_rebind")
         })
         .expect("concurrent paired tuple-pin fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["concurrent_paired_tuple_pins_survive_rebind"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["concurrent_paired_tuple_pins_survive_rebind"].ty
     else {
         panic!("paired callback proof must be a function");
     };
@@ -4128,11 +4172,26 @@ fn concurrent_tuple_pin_callbacks_keep_paired_depth_identities_after_rebind() {
     // define an identity merge for captured historical pins. Keep each lane
     // and depth exact so a rebind cannot make unrelated concurrent callbacks
     // type-compatible.
-    assert_ne!(pin_type("restored_left_root"), pin_type("restored_right_root"));
-    assert_ne!(pin_type("restored_left_leaf"), pin_type("restored_right_leaf"));
-    assert_ne!(pin_type("restored_left_root"), pin_type("restored_left_leaf"));
-    assert_ne!(pin_type("rebound_left_root"), pin_type("restored_left_root"));
-    assert_ne!(pin_type("rebound_right_leaf"), pin_type("restored_right_leaf"));
+    assert_ne!(
+        pin_type("restored_left_root"),
+        pin_type("restored_right_root")
+    );
+    assert_ne!(
+        pin_type("restored_left_leaf"),
+        pin_type("restored_right_leaf")
+    );
+    assert_ne!(
+        pin_type("restored_left_root"),
+        pin_type("restored_left_leaf")
+    );
+    assert_ne!(
+        pin_type("rebound_left_root"),
+        pin_type("restored_left_root")
+    );
+    assert_ne!(
+        pin_type("rebound_right_leaf"),
+        pin_type("restored_right_leaf")
+    );
 }
 
 #[test]
@@ -4192,9 +4251,8 @@ fn concurrent_callback_tuples_preserve_pin_identity_across_rebind() {
                 .contains_key("paired_callback_pins_survive_tuple_rebind")
         })
         .expect("tuple-stored concurrent callback fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_callback_pins_survive_tuple_rebind"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_callback_pins_survive_tuple_rebind"].ty
     else {
         panic!("tuple callback proof must be a function");
     };
@@ -4250,9 +4308,8 @@ fn sequential_paired_callback_leaf_rebinds_preserve_sibling_pins() {
                 .contains_key("paired_callback_leaf_rebinds_preserve_siblings")
         })
         .expect("sequential paired callback rebind fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_callback_leaf_rebinds_preserve_siblings"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_callback_leaf_rebinds_preserve_siblings"].ty
     else {
         panic!("paired callback rebind proof must be a function");
     };
@@ -4284,7 +4341,8 @@ fn sequential_paired_callback_leaf_rebinds_preserve_sibling_pins() {
 
 #[test]
 fn sequential_paired_callback_leaf_rebinds_reject_cross_lane_parallel_mix() {
-    let source = include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-sequential-paired-callback-leaf-rebinds-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -4338,9 +4396,8 @@ fn paired_shadowed_callbacks_specialize_each_chained_inner_pin() {
                 .contains_key("paired_shadowed_callback_rebinds_preserve_inner_pins")
         })
         .expect("paired shadowed callback fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_shadowed_callback_rebinds_preserve_inner_pins"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_rebinds_preserve_inner_pins"].ty
     else {
         panic!("paired shadowed callback proof must be a function");
     };
@@ -4392,9 +4449,8 @@ fn paired_shadowed_callback_depth_rebinds_preserve_selected_pins() {
                 .contains_key("paired_shadowed_callback_depth_rebinds_preserve_selected_pins")
         })
         .expect("paired shadowed callback depth fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_shadowed_callback_depth_rebinds_preserve_selected_pins"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_depth_rebinds_preserve_selected_pins"].ty
     else {
         panic!("paired shadowed callback depth proof must be a function");
     };
@@ -4496,9 +4552,8 @@ fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
                 .contains_key("paired_shadowed_callback_contracts_keep_depth_pin_scope")
         })
         .expect("paired shadowed callback contract fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_shadowed_callback_contracts_keep_depth_pin_scope"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_contracts_keep_depth_pin_scope"].ty
     else {
         panic!("paired callback contract proof must be a function");
     };
@@ -4521,7 +4576,10 @@ fn paired_shadowed_callback_parameter_contracts_keep_depth_pin_scope() {
             ..
         } = &parameters[1]
         else {
-            panic!("nested callback contract must be a function: {:?}", parameters[1]);
+            panic!(
+                "nested callback contract must be a function: {:?}",
+                parameters[1]
+            );
         };
         let Type::Applied { base, arguments } = callback_result.as_ref() else {
             panic!("callback contract result must retain its historical pin");
@@ -4572,9 +4630,8 @@ fn paired_shadowed_callback_depth_rebinds_retain_untouched_lanes() {
                 .contains_key("paired_shadowed_callback_depth_rebinds_retain_untouched_lanes")
         })
         .expect("paired shadowed callback retention fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_shadowed_callback_depth_rebinds_retain_untouched_lanes"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_depth_rebinds_retain_untouched_lanes"].ty
     else {
         panic!("paired shadowed callback retention proof must be a function");
     };
@@ -4639,9 +4696,15 @@ fn paired_shadowed_callback_depths_retain_each_lane() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_shadowed_callback_depths_retain_each_lane"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_shadowed_callback_depths_retain_each_lane")
+        })
         .expect("paired callback depth capture fixture module");
-    let Type::Function { result, .. } = &module.symbols["paired_shadowed_callback_depths_retain_each_lane"].ty else {
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_depths_retain_each_lane"].ty
+    else {
         panic!("paired callback depth capture proof must be a function");
     };
     let Type::Record(streams) = result.as_ref() else {
@@ -4702,9 +4765,8 @@ fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
                 .contains_key("paired_shadowed_callback_depth_waves_preserve_capture_identity")
         })
         .expect("paired shadowed callback depth wave fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_shadowed_callback_depth_waves_preserve_capture_identity"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_shadowed_callback_depth_waves_preserve_capture_identity"].ty
     else {
         panic!("paired callback depth wave proof must be a function");
     };
@@ -4756,10 +4818,22 @@ fn paired_shadowed_callback_depth_waves_preserve_capture_identity() {
     assert_ne!(pin_type("left_old_first"), pin_type("left_rebound_first"));
     assert_ne!(pin_type("left_old_second"), pin_type("left_rebound_second"));
     assert_ne!(pin_type("left_old_third"), pin_type("left_rebound_third"));
-    assert_ne!(pin_type("left_rebound_maker"), pin_type("right_rebound_maker"));
-    assert_ne!(pin_type("left_rebound_first"), pin_type("right_rebound_first"));
-    assert_ne!(pin_type("left_rebound_second"), pin_type("right_rebound_second"));
-    assert_ne!(pin_type("left_rebound_third"), pin_type("right_rebound_third"));
+    assert_ne!(
+        pin_type("left_rebound_maker"),
+        pin_type("right_rebound_maker")
+    );
+    assert_ne!(
+        pin_type("left_rebound_first"),
+        pin_type("right_rebound_first")
+    );
+    assert_ne!(
+        pin_type("left_rebound_second"),
+        pin_type("right_rebound_second")
+    );
+    assert_ne!(
+        pin_type("left_rebound_third"),
+        pin_type("right_rebound_third")
+    );
 }
 
 #[test]
@@ -4818,9 +4892,8 @@ fn paired_tuple_shadow_waves_preserve_local_pin_scope() {
                 .contains_key("paired_tuple_shadow_waves_preserve_local_pin_scope")
         })
         .expect("paired tuple shadow wave fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_tuple_shadow_waves_preserve_local_pin_scope"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_tuple_shadow_waves_preserve_local_pin_scope"].ty
     else {
         panic!("paired tuple shadow wave proof must be a function");
     };
@@ -4882,7 +4955,11 @@ fn paired_nested_tuple_shadow_waves_keep_each_capture_depth_pin() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_nested_tuple_shadow_waves"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_tuple_shadow_waves")
+        })
         .expect("nested tuple shadow wave fixture module");
     let Type::Function { result, .. } = &module.symbols["paired_nested_tuple_shadow_waves"].ty
     else {
@@ -5167,7 +5244,11 @@ fn bottom_terminal_tuple_wave_preserves_each_capture_depth_pin_identity() {
         ("middle_left", "HEAD~370"),
         ("middle_right", "HEAD~360"),
     ] {
-        assert_eq!(pin_type(lanes, "left", field), &expected(selector), "left.{field}");
+        assert_eq!(
+            pin_type(lanes, "left", field),
+            &expected(selector),
+            "left.{field}"
+        );
     }
     for (field, selector) in [
         ("outer_selected", "HEAD~420"),
@@ -5215,17 +5296,13 @@ fn bottom_cascade_keeps_completed_capture_depth_identities() {
                 .contains_key("paired_nested_tuple_bottom_cascade_identity")
         })
         .expect("bottom cascade fixture module");
-    let summary = format!("{:?}", module.symbols["paired_nested_tuple_bottom_cascade_identity"].ty);
+    let summary = format!(
+        "{:?}",
+        module.symbols["paired_nested_tuple_bottom_cascade_identity"].ty
+    );
     for selector in [
-        "HEAD~450",
-        "HEAD~440",
-        "HEAD~430",
-        "HEAD~420",
-        "HEAD~410",
-        "HEAD~400",
-        "HEAD~350",
-        "HEAD~340",
-        "HEAD~330",
+        "HEAD~450", "HEAD~440", "HEAD~430", "HEAD~420", "HEAD~410", "HEAD~400", "HEAD~350",
+        "HEAD~340", "HEAD~330",
     ] {
         assert!(
             summary.contains(&format!("selector:{selector}")),
@@ -5233,13 +5310,7 @@ fn bottom_cascade_keeps_completed_capture_depth_identities() {
         );
     }
     for selector in [
-        "HEAD~380",
-        "HEAD~370",
-        "HEAD~360",
-        "HEAD~320",
-        "HEAD~310",
-        "HEAD~290",
-        "HEAD~280",
+        "HEAD~380", "HEAD~370", "HEAD~360", "HEAD~320", "HEAD~310", "HEAD~290", "HEAD~280",
         "HEAD~270",
     ] {
         assert!(
@@ -5511,9 +5582,8 @@ fn bottom_incomplete_tuple_argument_does_not_rebind_sibling_snapshot_pin() {
     }
     let incomplete = global_selector(cases, "incomplete");
     assert!(
-        incomplete.starts_with(
-            "dynamic-call:historical-nested-tuple-bottom-cascade-depth-wave.orna:"
-        ),
+        incomplete
+            .starts_with("dynamic-call:historical-nested-tuple-bottom-cascade-depth-wave.orna:"),
         "a call with a non-returning tuple argument cannot bind its sibling snapshot: {incomplete}"
     );
     assert!(
@@ -5555,8 +5625,7 @@ fn malformed_tuple_wave_suppresses_rebinding_across_sibling_captures() {
                 .contains_key("malformed_tuple_sibling_capture_wave")
         })
         .expect("sibling capture suppression fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["malformed_tuple_sibling_capture_wave"].ty
+    let Type::Function { result, .. } = &module.symbols["malformed_tuple_sibling_capture_wave"].ty
     else {
         panic!("sibling capture suppression proof must be a function");
     };
@@ -5566,13 +5635,7 @@ fn malformed_tuple_wave_suppresses_rebinding_across_sibling_captures() {
     let incomplete = cases.get("incomplete").expect("incomplete wave");
     let mut incomplete_contexts = BTreeSet::new();
     collect_snapshot_contexts(incomplete, &mut incomplete_contexts);
-    for selector in [
-        "HEAD~600",
-        "HEAD~590",
-        "HEAD~580",
-        "HEAD~550",
-        "HEAD~530",
-    ] {
+    for selector in ["HEAD~600", "HEAD~590", "HEAD~580", "HEAD~550", "HEAD~530"] {
         assert!(
             !incomplete_contexts
                 .iter()
@@ -5606,7 +5669,8 @@ fn malformed_tuple_wave_suppresses_rebinding_across_sibling_captures() {
 
 #[test]
 fn missing_tuple_wave_suppresses_sibling_rebinding_without_stub_results() {
-    let source = include_str!("fixtures/historical-missing-tuple-pin-suppresses-sibling-captures.orna");
+    let source =
+        include_str!("fixtures/historical-missing-tuple-pin-suppresses-sibling-captures.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -5814,14 +5878,12 @@ fn missing_required_sibling_suppresses_tuple_pin_rebinding() {
             "a complete call must preserve computed pin {selector}: {complete_contexts:?}"
         );
     }
-
 }
 
 #[test]
 fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
-    let source = include_str!(
-        "fixtures/historical-paired-rebind-width-suppressed-by-omission.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-rebind-width-suppressed-by-omission.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -6066,8 +6128,7 @@ fn omitted_rebind_preserves_each_sibling_pin_identity_label() {
 
 #[test]
 fn record_rebind_preserves_shared_sibling_pin_depth_labels() {
-    let source =
-        include_str!("fixtures/historical-record-sibling-pin-topology-rebind.orna");
+    let source = include_str!("fixtures/historical-record-sibling-pin-topology-rebind.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -6123,9 +6184,7 @@ fn record_rebind_preserves_shared_sibling_pin_depth_labels() {
 
 #[test]
 fn unknown_paired_width_suppresses_sibling_pin_promotion() {
-    let source = include_str!(
-        "fixtures/historical-unknown-paired-width-rebind-suppression.orna"
-    );
+    let source = include_str!("fixtures/historical-unknown-paired-width-rebind-suppression.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -6203,7 +6262,11 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
                 symbolic_pins, 2,
                 "only the first pair's symbolic identities survive: {contexts:?}"
             );
-            assert_eq!(contexts.len(), 2, "learned fill keeps two identities: {contexts:?}");
+            assert_eq!(
+                contexts.len(),
+                2,
+                "learned fill keeps two identities: {contexts:?}"
+            );
             assert!(
                 contexts.contains(
                     "selector:dynamic-call:historical-unknown-paired-width-rebind-suppression.orna:1206..1329:parameter:left_selected:formal-binder:<unknown>@124..137"
@@ -6218,9 +6281,9 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
             );
             assert!(
                 !contexts.iter().any(|context| {
-                    ["HEAD~50", "HEAD~49", "HEAD~48"].iter().any(|selector| {
-                        context == &format!("selector:{selector}")
-                    })
+                    ["HEAD~50", "HEAD~49", "HEAD~48"]
+                        .iter()
+                        .any(|selector| context == &format!("selector:{selector}"))
                 }),
                 "no valid sibling identity may be promoted across an unknown pair width: {contexts:?}"
             );
@@ -6230,9 +6293,8 @@ fn unknown_paired_width_suppresses_sibling_pin_promotion() {
 
 #[test]
 fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
-    let source = include_str!(
-        "fixtures/historical-paired-omission-depth-identity-preservation.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-omission-depth-identity-preservation.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -6506,13 +6568,20 @@ fn paired_collapse_rebinds_preserve_global_depth_label_topology() {
         let Type::Tuple(slots) = element.as_ref() else {
             panic!("{function}.{field} must preserve all tuple positions: {element:?}");
         };
-        assert_eq!(slots.len(), 3, "{function}.{field} must keep three depth slots");
+        assert_eq!(
+            slots.len(),
+            3,
+            "{function}.{field} must keep three depth slots"
+        );
         slots
             .iter()
             .map(|slot| {
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut contexts);
-                assert!(!contexts.is_empty(), "{function}.{field} slot must keep real pin values");
+                assert!(
+                    !contexts.is_empty(),
+                    "{function}.{field} slot must keep real pin values"
+                );
                 contexts
             })
             .collect::<Vec<_>>()
@@ -6603,13 +6672,20 @@ fn multi_parent_checkpoint_reconciliation_keeps_depth_labels_transactional() {
         let Type::Tuple(slots) = element.as_ref() else {
             panic!("{function} must preserve paired tuple positions: {element:?}");
         };
-        assert_eq!(slots.len(), 2, "{function} must retain both tuple positions");
+        assert_eq!(
+            slots.len(),
+            2,
+            "{function} must retain both tuple positions"
+        );
         slots
             .iter()
             .map(|slot| {
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut contexts);
-                assert!(!contexts.is_empty(), "{function} slot must contain real selectors");
+                assert!(
+                    !contexts.is_empty(),
+                    "{function} slot must contain real selectors"
+                );
                 contexts
             })
             .collect::<Vec<_>>()
@@ -6706,17 +6782,32 @@ fn sequential_three_way_tuple_folds_anchor_late_rebound_widths() {
     let (stable_root, stable_tracked) =
         tuple_slots("stable_three_way_tuple_fold_keeps_first_rebound_width");
     for (slot, value, expected) in [
-        ("root", stable_root, BTreeSet::from([
-            "selector:HEAD~10".to_owned(), "selector:HEAD~11".to_owned(),
-            "selector:HEAD~12".to_owned(), "selector:HEAD~13".to_owned(),
-            "selector:HEAD~14".to_owned(), "selector:HEAD~15".to_owned(),
-        ])),
-        ("tracked", stable_tracked, BTreeSet::from([
-            "selector:HEAD~20".to_owned(), "selector:HEAD~21".to_owned(),
-            "selector:HEAD~22".to_owned(), "selector:HEAD~23".to_owned(),
-            "selector:HEAD~24".to_owned(), "selector:HEAD~25".to_owned(),
-            "selector:HEAD~26".to_owned(), "selector:HEAD~27".to_owned(),
-        ])),
+        (
+            "root",
+            stable_root,
+            BTreeSet::from([
+                "selector:HEAD~10".to_owned(),
+                "selector:HEAD~11".to_owned(),
+                "selector:HEAD~12".to_owned(),
+                "selector:HEAD~13".to_owned(),
+                "selector:HEAD~14".to_owned(),
+                "selector:HEAD~15".to_owned(),
+            ]),
+        ),
+        (
+            "tracked",
+            stable_tracked,
+            BTreeSet::from([
+                "selector:HEAD~20".to_owned(),
+                "selector:HEAD~21".to_owned(),
+                "selector:HEAD~22".to_owned(),
+                "selector:HEAD~23".to_owned(),
+                "selector:HEAD~24".to_owned(),
+                "selector:HEAD~25".to_owned(),
+                "selector:HEAD~26".to_owned(),
+                "selector:HEAD~27".to_owned(),
+            ]),
+        ),
     ] {
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(value, &mut contexts);
@@ -6733,9 +6824,12 @@ fn sequential_three_way_tuple_folds_anchor_late_rebound_widths() {
     assert_eq!(
         first_slot_contexts,
         BTreeSet::from([
-            "selector:HEAD~50".to_owned(), "selector:HEAD~51".to_owned(),
-            "selector:HEAD~52".to_owned(), "selector:HEAD~53".to_owned(),
-            "selector:HEAD~54".to_owned(), "selector:HEAD~55".to_owned(),
+            "selector:HEAD~50".to_owned(),
+            "selector:HEAD~51".to_owned(),
+            "selector:HEAD~52".to_owned(),
+            "selector:HEAD~53".to_owned(),
+            "selector:HEAD~54".to_owned(),
+            "selector:HEAD~55".to_owned(),
         ]),
         "the independent root tuple must keep its real values through the rejected tracked width"
     );
@@ -6747,8 +6841,10 @@ fn sequential_three_way_tuple_folds_anchor_late_rebound_widths() {
     assert_eq!(
         rejected_slot_contexts,
         BTreeSet::from([
-            "selector:HEAD~60".to_owned(), "selector:HEAD~61".to_owned(),
-            "selector:HEAD~62".to_owned(), "selector:HEAD~63".to_owned(),
+            "selector:HEAD~60".to_owned(),
+            "selector:HEAD~61".to_owned(),
+            "selector:HEAD~62".to_owned(),
+            "selector:HEAD~63".to_owned(),
         ]),
         "a late map-width rebind must roll back to the learned fill of the first row's omitted tuple slot"
     );
@@ -6831,17 +6927,15 @@ fn sparse_three_way_tuple_folds_learn_and_preserve_paired_pin_identity() {
     );
     assert_eq!(
         pins("rejects_sparse_pair_identity_split_cascade"),
-        [
-            BTreeSet::from(["selector:HEAD~40".into()]),
-            BTreeSet::new(),
-        ],
+        [BTreeSet::from(["selector:HEAD~40".into()]), BTreeSet::new(),],
         "a later split restores the sparse first-row pair without leaking partial identities"
     );
 }
 
 #[test]
 fn sequential_sparse_tuple_rebinds_keep_sibling_values_deterministic() {
-    let source = include_str!("fixtures/historical-sequential-sparse-tuple-rebind-determinism.orna");
+    let source =
+        include_str!("fixtures/historical-sequential-sparse-tuple-rebind-determinism.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -6893,7 +6987,11 @@ fn sequential_sparse_tuple_rebinds_keep_sibling_values_deterministic() {
         let Type::Tuple(slots) = &fields["pins"] else {
             panic!("{function}.{sibling} must retain its paired tuple");
         };
-        assert_eq!(slots.len(), 2, "{function}.{sibling} must retain both slots");
+        assert_eq!(
+            slots.len(),
+            2,
+            "{function}.{sibling} must retain both slots"
+        );
         slots
             .iter()
             .map(|slot| {
@@ -7379,7 +7477,10 @@ fn three_way_tuple_storm_preserves_independent_sibling_rebinds() {
     let witness_contexts = |function: &str| {
         let fields = row_fields(function);
         let mut contexts = BTreeSet::new();
-        collect_snapshot_contexts(fields.get("witness").expect("witness sibling"), &mut contexts);
+        collect_snapshot_contexts(
+            fields.get("witness").expect("witness sibling"),
+            &mut contexts,
+        );
         contexts
     };
 
@@ -7495,7 +7596,10 @@ fn paired_tuple_identity_survives_sequential_three_way_omission_chains() {
     let witness_contexts = |function: &str| {
         let fields = row_fields(function);
         let mut contexts = BTreeSet::new();
-        collect_snapshot_contexts(fields.get("witness").expect("witness sibling"), &mut contexts);
+        collect_snapshot_contexts(
+            fields.get("witness").expect("witness sibling"),
+            &mut contexts,
+        );
         contexts
     };
 
@@ -7525,7 +7629,9 @@ fn paired_tuple_identity_survives_sequential_three_way_omission_chains() {
         "a late split rolls back only itself; both tuple slots keep the accepted pair rebinds"
     );
     assert_eq!(
-        witness_contexts("rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"),
+        witness_contexts(
+            "rejects_pair_split_after_three_way_omission_chain_without_losing_siblings"
+        ),
         BTreeSet::from([
             "selector:HEAD~801".into(),
             "selector:HEAD~811".into(),
@@ -7606,7 +7712,9 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
     let witness_contexts = |function: &str| {
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(
-            row_fields(function).get("witness").expect("witness sibling"),
+            row_fields(function)
+                .get("witness")
+                .expect("witness sibling"),
             &mut contexts,
         );
         contexts
@@ -7638,7 +7746,10 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
             panic!("{function}.details must retain its computed record");
         };
         let mut contexts = BTreeSet::new();
-        collect_snapshot_contexts(details.get("witness").expect("nested witness"), &mut contexts);
+        collect_snapshot_contexts(
+            details.get("witness").expect("nested witness"),
+            &mut contexts,
+        );
         contexts
     };
 
@@ -7674,10 +7785,7 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
                 "selector:HEAD~4020".into(),
                 "selector:HEAD~4050".into(),
             ]),
-            BTreeSet::from([
-                "selector:HEAD~4000".into(),
-                "selector:HEAD~4050".into(),
-            ]),
+            BTreeSet::from(["selector:HEAD~4000".into(), "selector:HEAD~4050".into(),]),
         ],
         "a rejected sparse split rolls back only itself; accepted rebinds and the later re-pair stay"
     );
@@ -7726,9 +7834,7 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
 
 #[test]
 fn paired_sparse_omission_replay_recovers_learned_lane_identities() {
-    let source = include_str!(
-        "fixtures/historical-paired-sparse-omission-replay-recovery.orna"
-    );
+    let source = include_str!("fixtures/historical-paired-sparse-omission-replay-recovery.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -7816,10 +7922,16 @@ fn paired_sparse_omission_replay_recovers_learned_lane_identities() {
     );
     assert_eq!(
         witness_contexts,
-        ["HEAD~1010", "HEAD~1022", "HEAD~1030", "HEAD~1042", "HEAD~1052"]
-            .map(|selector| format!("selector:{selector}"))
-            .into_iter()
-            .collect(),
+        [
+            "HEAD~1010",
+            "HEAD~1022",
+            "HEAD~1030",
+            "HEAD~1042",
+            "HEAD~1052"
+        ]
+        .map(|selector| format!("selector:{selector}"))
+        .into_iter()
+        .collect(),
         "rejecting a lane split must retain independent witness identities"
     );
 }
@@ -7848,7 +7960,11 @@ fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("accepts_cascaded_sparse_rebinds"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_cascaded_sparse_rebinds")
+        })
         .expect("cascaded sparse rebind fixture module");
     let Type::Function { result, .. } = &module.symbols["accepts_cascaded_sparse_rebinds"].ty
     else {
@@ -7917,7 +8033,9 @@ fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
     );
     let mut outer_witnesses = BTreeSet::new();
     collect_snapshot_contexts(
-        cascade_fields.get("witness").expect("outer witness sibling"),
+        cascade_fields
+            .get("witness")
+            .expect("outer witness sibling"),
         &mut outer_witnesses,
     );
     assert_eq!(
@@ -7935,7 +8053,8 @@ fn paired_tuple_rebind_cascades_preserve_both_depths_of_identity() {
 
 #[test]
 fn opposed_sparse_three_way_chains_preserve_paired_tuple_identity() {
-    let source = include_str!("fixtures/historical-opposed-sparse-paired-three-way-rebind-chains.orna");
+    let source =
+        include_str!("fixtures/historical-opposed-sparse-paired-three-way-rebind-chains.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -8034,7 +8153,9 @@ fn opposed_sparse_three_way_chains_preserve_paired_tuple_identity() {
     );
     let mut outer_witnesses = BTreeSet::new();
     collect_snapshot_contexts(
-        cascade_fields.get("witness").expect("outer computed witness"),
+        cascade_fields
+            .get("witness")
+            .expect("outer computed witness"),
         &mut outer_witnesses,
     );
     assert_eq!(
@@ -8078,7 +8199,11 @@ fn sparse_frame_rebind_chains_preserve_paired_three_way_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("accepts_sparse_frame_rebind_chains"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_sparse_frame_rebind_chains")
+        })
         .expect("sparse frame rebind fixture module");
     let Type::Function { result, .. } = &module.symbols["accepts_sparse_frame_rebind_chains"].ty
     else {
@@ -8132,8 +8257,16 @@ fn sparse_frame_rebind_chains_preserve_paired_three_way_identity() {
             "selector:HEAD~8240".into(),
         ]),
     ];
-    assert_eq!(contexts("first"), expected, "first frame retains slot-local selectors");
-    assert_eq!(contexts("second"), expected, "sibling frame retains paired selectors");
+    assert_eq!(
+        contexts("first"),
+        expected,
+        "first frame retains slot-local selectors"
+    );
+    assert_eq!(
+        contexts("second"),
+        expected,
+        "sibling frame retains paired selectors"
+    );
 
     let mut frame_witnesses = BTreeSet::new();
     collect_snapshot_contexts(
@@ -8324,9 +8457,9 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
         .modules
         .values()
         .find(|module| {
-            module.symbols.contains_key(
-                "rejects_late_paired_boundary_depth_drift_after_omission_storm",
-            )
+            module
+                .symbols
+                .contains_key("rejects_late_paired_boundary_depth_drift_after_omission_storm")
         })
         .expect("paired boundary selector storm fixture module");
     let folded_element = |function: &str| {
@@ -8346,8 +8479,7 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
     // multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions. It is not a
     // whole-record rollback to the first row, which came from the superseded #7161 generation.
     // Observed at 5b73047d7: left [{901,902,903},{921}], right [{911,912,913},{921}].
-    let rejected =
-        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm");
+    let rejected = folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm");
     let Type::Record(rejected_boundaries) = rejected else {
         panic!("rejected fold element must remain a record: {rejected:?}");
     };
@@ -8390,8 +8522,7 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            contexts,
-            expected,
+            contexts, expected,
             "rejected {boundary} selectors must fold to the union of stable labels"
         );
     }
@@ -8455,8 +8586,7 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            contexts,
-            expected,
+            contexts, expected,
             "stable {boundary} selectors must stay at their original paired depths"
         );
     }
@@ -8492,9 +8622,9 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
         .modules
         .values()
         .find(|module| {
-            module.symbols.contains_key(
-                "rejects_nested_paired_boundary_depth_drift_after_selector_storm",
-            )
+            module
+                .symbols
+                .contains_key("rejects_nested_paired_boundary_depth_drift_after_selector_storm")
         })
         .expect("nested paired boundary selector storm fixture module");
     let folded_element = |function: &str| {
@@ -8515,7 +8645,8 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
     // multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions, not a whole-record
     // rollback to the first row (that came from the superseded #7161 generation).
     // Observed at 5b73047d7: left [{1101,1102,1103},{1121}], right [{1111,1112,1113},{1121}].
-    let rejected = folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm");
+    let rejected =
+        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm");
     let Type::Record(rejected_fields) = rejected else {
         panic!("rejected nested fold element must remain a record: {rejected:?}");
     };
@@ -8561,14 +8692,12 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            contexts,
-            expected,
+            contexts, expected,
             "rejected nested {side} selectors must fold to the union of stable labels"
         );
     }
 
-    let folded_value =
-        folded_element("accepts_nested_paired_boundary_depths_after_selector_storm");
+    let folded_value = folded_element("accepts_nested_paired_boundary_depths_after_selector_storm");
     let Type::Record(folded) = folded_value else {
         panic!("stable nested storm must preserve its computed record: {folded_value:?}");
     };
@@ -8584,10 +8713,7 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
                     "selector:HEAD~1152".into(),
                     "selector:HEAD~1153".into(),
                 ]),
-                BTreeSet::from([
-                    "selector:HEAD~1171".to_owned(),
-                    "selector:HEAD~1172".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~1171".to_owned(), "selector:HEAD~1172".into()]),
             ],
         ),
         (
@@ -8598,10 +8724,7 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
                     "selector:HEAD~1162".into(),
                     "selector:HEAD~1163".into(),
                 ]),
-                BTreeSet::from([
-                    "selector:HEAD~1171".to_owned(),
-                    "selector:HEAD~1172".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~1171".to_owned(), "selector:HEAD~1172".into()]),
             ],
         ),
     ] {
@@ -8620,8 +8743,7 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
             })
             .collect::<Vec<_>>();
         assert_eq!(
-            contexts,
-            expected,
+            contexts, expected,
             "stable nested {side} selectors must retain their computed depths"
         );
     }
@@ -8629,8 +8751,7 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
 
 #[test]
 fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
-    let source =
-        include_str!("fixtures/historical-tuple-wrapped-paired-boundary-depth-storm.orna");
+    let source = include_str!("fixtures/historical-tuple-wrapped-paired-boundary-depth-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -8658,9 +8779,9 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
         .modules
         .values()
         .find(|module| {
-            module.symbols.contains_key(
-                "rejects_tuple_wrapped_paired_depth_drift_after_selector_storm",
-            )
+            module
+                .symbols
+                .contains_key("rejects_tuple_wrapped_paired_depth_drift_after_selector_storm")
         })
         .expect("tuple-wrapped paired selector storm fixture module");
     let folded_element = |function: &str| {
@@ -8682,9 +8803,9 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     // rollback to the first row (that came from the superseded #7161 generation).
     // Observed at 5b73047d7: group[0] left [{1201,1202,1203},{1241}], right [{1211,1212,1213},{1241}];
     // group[1] left [{1221,1222,1223},{1251,1252}], right [{1231,1232,1233},{1251,1252}].
-    let Type::Record(folded) = folded_element(
-        "rejects_tuple_wrapped_paired_depth_drift_after_selector_storm",
-    ) else {
+    let Type::Record(folded) =
+        folded_element("rejects_tuple_wrapped_paired_depth_drift_after_selector_storm")
+    else {
         panic!("rejected fold element must remain a record");
     };
     let Type::Tuple(rejected_groups) = folded.get("group").expect("folded group tuple") else {
@@ -8758,8 +8879,7 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
                 })
                 .collect::<Vec<_>>();
             assert_eq!(
-                contexts,
-                expected,
+                contexts, expected,
                 "rejected tuple-wrapped group {group_index} {side_name} selectors must fold to the union of stable labels"
             );
         }
@@ -8776,14 +8896,30 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
     for (group_index, left_first, right_first, shared_depth) in [
         (
             0,
-            ["selector:HEAD~1261", "selector:HEAD~1262", "selector:HEAD~1263"],
-            ["selector:HEAD~1271", "selector:HEAD~1272", "selector:HEAD~1273"],
+            [
+                "selector:HEAD~1261",
+                "selector:HEAD~1262",
+                "selector:HEAD~1263",
+            ],
+            [
+                "selector:HEAD~1271",
+                "selector:HEAD~1272",
+                "selector:HEAD~1273",
+            ],
             ["selector:HEAD~1301", "selector:HEAD~1302"],
         ),
         (
             1,
-            ["selector:HEAD~1281", "selector:HEAD~1282", "selector:HEAD~1283"],
-            ["selector:HEAD~1291", "selector:HEAD~1292", "selector:HEAD~1293"],
+            [
+                "selector:HEAD~1281",
+                "selector:HEAD~1282",
+                "selector:HEAD~1283",
+            ],
+            [
+                "selector:HEAD~1291",
+                "selector:HEAD~1292",
+                "selector:HEAD~1293",
+            ],
             ["selector:HEAD~1311", "selector:HEAD~1312"],
         ),
     ] {
@@ -8858,9 +8994,9 @@ fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
         .modules
         .values()
         .find(|module| {
-            module.symbols.contains_key(
-                "rejects_multi_level_paired_depth_drift_after_selector_storm",
-            )
+            module
+                .symbols
+                .contains_key("rejects_multi_level_paired_depth_drift_after_selector_storm")
         })
         .expect("multi-level paired boundary selector storm fixture module");
     let folded_element = |function: &str| {
@@ -8887,8 +9023,9 @@ fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
     else {
         panic!("rejected storm fold element must remain a record");
     };
-    let Type::Record(rejected_cluster) =
-        rejected_folded.get("cluster").expect("rejected folded cluster")
+    let Type::Record(rejected_cluster) = rejected_folded
+        .get("cluster")
+        .expect("rejected folded cluster")
     else {
         panic!("rejected storm cluster must remain a record");
     };
@@ -8896,13 +9033,21 @@ fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
         (
             "west",
             "left",
-            ["selector:HEAD~1401", "selector:HEAD~1402", "selector:HEAD~1403"],
+            [
+                "selector:HEAD~1401",
+                "selector:HEAD~1402",
+                "selector:HEAD~1403",
+            ],
             ["selector:HEAD~1421"],
         ),
         (
             "east",
             "right",
-            ["selector:HEAD~1411", "selector:HEAD~1412", "selector:HEAD~1413"],
+            [
+                "selector:HEAD~1411",
+                "selector:HEAD~1412",
+                "selector:HEAD~1413",
+            ],
             ["selector:HEAD~1421"],
         ),
     ] {
@@ -8953,13 +9098,21 @@ fn multi_level_paired_boundary_depths_stay_stable_through_selector_storms() {
         (
             "west",
             "left",
-            ["selector:HEAD~1451", "selector:HEAD~1452", "selector:HEAD~1453"],
+            [
+                "selector:HEAD~1451",
+                "selector:HEAD~1452",
+                "selector:HEAD~1453",
+            ],
             ["selector:HEAD~1471", "selector:HEAD~1472"],
         ),
         (
             "east",
             "right",
-            ["selector:HEAD~1461", "selector:HEAD~1462", "selector:HEAD~1463"],
+            [
+                "selector:HEAD~1461",
+                "selector:HEAD~1462",
+                "selector:HEAD~1463",
+            ],
             ["selector:HEAD~1471", "selector:HEAD~1472"],
         ),
     ] {
@@ -9052,16 +9205,18 @@ fn pairwise_selector_topology_folds_preserve_paired_boundary_depths() {
                 .map(|slot| {
                     let mut contexts = BTreeSet::new();
                     collect_snapshot_contexts(slot, &mut contexts);
-                    assert!(!contexts.is_empty(), "{name} depth must keep real selectors");
+                    assert!(
+                        !contexts.is_empty(),
+                        "{name} depth must keep real selectors"
+                    );
                     contexts
                 })
                 .collect::<Vec<_>>()
         })
     };
 
-    let Type::Function { result, .. } = &module.symbols
-        ["rejects_pairwise_selector_topology_drift_across_boundaries"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["rejects_pairwise_selector_topology_drift_across_boundaries"].ty
     else {
         panic!("rejected pair must retain its computed result");
     };
@@ -9106,9 +9261,8 @@ fn pairwise_selector_topology_folds_preserve_paired_boundary_depths() {
         "a pairwise boundary mismatch must preserve the first row without promoting labels"
     );
 
-    let Type::Function { result, .. } = &module.symbols
-        ["accepts_pairwise_alpha_renamed_selector_topology_across_boundaries"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["accepts_pairwise_alpha_renamed_selector_topology_across_boundaries"].ty
     else {
         panic!("stable pair must return its computed list");
     };
@@ -9174,8 +9328,7 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
         let Type::Record(fields) = result.as_ref() else {
             panic!("{function} must return the computed parent fold: {result:?}");
         };
-        let Type::List(element) = fields.get("parent_fold").expect("computed parent fold")
-        else {
+        let Type::List(element) = fields.get("parent_fold").expect("computed parent fold") else {
             panic!("{function} must retain its reconciled parent list");
         };
         let Type::Record(siblings) = element.as_ref() else {
@@ -9266,8 +9419,7 @@ fn nested_sibling_pin_reconciliation_storms_preserve_depth_identity() {
 
 #[test]
 fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
-    let source =
-        include_str!("fixtures/historical-nested-sibling-fold-isolation-storm.orna");
+    let source = include_str!("fixtures/historical-nested-sibling-fold-isolation-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -9300,9 +9452,8 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
                 .contains_key("nested_sibling_storm_isolates_crossed_depth_labels")
         })
         .expect("nested sibling fold isolation fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["nested_sibling_storm_isolates_crossed_depth_labels"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["nested_sibling_storm_isolates_crossed_depth_labels"].ty
     else {
         panic!("nested sibling storm must retain its computed result");
     };
@@ -9376,8 +9527,7 @@ fn nested_sibling_reconciliation_storm_rolls_back_only_crossed_scopes() {
 
 #[test]
 fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
-    let source =
-        include_str!("fixtures/historical-nested-sibling-omission-depth-storm.orna");
+    let source = include_str!("fixtures/historical-nested-sibling-omission-depth-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -9405,14 +9555,13 @@ fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
         .modules
         .values()
         .find(|module| {
-            module.symbols.contains_key(
-                "omitted_sibling_depth_storm_keeps_adjacent_depth_labels",
-            )
+            module
+                .symbols
+                .contains_key("omitted_sibling_depth_storm_keeps_adjacent_depth_labels")
         })
         .expect("nested sibling omission-depth fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["omitted_sibling_depth_storm_keeps_adjacent_depth_labels"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["omitted_sibling_depth_storm_keeps_adjacent_depth_labels"].ty
     else {
         panic!("omission-depth storm must retain its computed result");
     };
@@ -9477,14 +9626,8 @@ fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
         pin_contexts("left"),
         [
             vec![
-                BTreeSet::from([
-                    "selector:HEAD~200".into(),
-                    "selector:HEAD~300".into(),
-                ]),
-                BTreeSet::from([
-                    "selector:HEAD~201".into(),
-                    "selector:HEAD~301".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~300".into(),]),
+                BTreeSet::from(["selector:HEAD~201".into(), "selector:HEAD~301".into(),]),
             ],
             vec![
                 BTreeSet::from([
@@ -9517,14 +9660,8 @@ fn nested_sibling_omission_storm_drops_the_whole_crossing_row() {
                 ]),
             ],
             vec![
-                BTreeSet::from([
-                    "selector:HEAD~230".into(),
-                    "selector:HEAD~330".into(),
-                ]),
-                BTreeSet::from([
-                    "selector:HEAD~231".into(),
-                    "selector:HEAD~331".into(),
-                ]),
+                BTreeSet::from(["selector:HEAD~230".into(), "selector:HEAD~330".into(),]),
+                BTreeSet::from(["selector:HEAD~231".into(), "selector:HEAD~331".into(),]),
             ],
         ],
         "learned fill: omitted row-0 depth-1 slots take the first-row identity (HEAD~230, HEAD~231); crossing row 2 drops its right pins at both depths as well"
@@ -9566,9 +9703,8 @@ fn nested_extension_omissions_preserve_sibling_depth_identities() {
                 .contains_key("nested_extension_omission_storm_keeps_depth_identities")
         })
         .expect("nested extension omission-depth fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["nested_extension_omission_storm_keeps_depth_identities"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["nested_extension_omission_storm_keeps_depth_identities"].ty
     else {
         panic!("extension-depth storm must retain its computed result");
     };
@@ -9701,9 +9837,8 @@ fn paired_depth_omissions_drop_the_crossing_row_at_every_depth() {
                 .contains_key("paired_depth_omission_storm_keeps_labels")
         })
         .expect("paired depth omission fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_depth_omission_storm_keeps_labels"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_depth_omission_storm_keeps_labels"].ty
     else {
         panic!("paired depth omission storm must retain its computed result");
     };
@@ -9856,10 +9991,13 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("sibling_extension_omission_depth_wave"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("sibling_extension_omission_depth_wave")
+        })
         .expect("chained extension omission fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["sibling_extension_omission_depth_wave"].ty
+    let Type::Function { result, .. } = &module.symbols["sibling_extension_omission_depth_wave"].ty
     else {
         panic!("extension omission wave must retain its computed function type");
     };
@@ -10012,7 +10150,6 @@ fn chained_extension_omissions_keep_sibling_depth_labels_scoped() {
     );
 }
 
-
 #[test]
 fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
     let source = include_str!("fixtures/historical-extension-nested-list-rollback-depth-26.orna");
@@ -10034,15 +10171,22 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
             .count(),
         0,
         "the nested extension omissions are filled from the first accepted row and not diagnosed at either fold boundary: {:?}",
-        result.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>()
+        result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
     );
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("nested_extension_list_rollback_depths"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_extension_list_rollback_depths")
+        })
         .expect("nested extension list fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["nested_extension_list_rollback_depths"].ty
+    let Type::Function { result, .. } = &module.symbols["nested_extension_list_rollback_depths"].ty
     else {
         panic!("nested extension rollback must compute a function result");
     };
@@ -10067,7 +10211,9 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
         contexts
     };
     let depth_contexts = |depth: &Type| {
-        let Type::Tuple(slots) = depth else { panic!("depth pair: {depth:?}") };
+        let Type::Tuple(slots) = depth else {
+            panic!("depth pair: {depth:?}")
+        };
         slots.iter().map(contexts).collect::<Vec<_>>()
     };
     assert_eq!(
@@ -10136,9 +10282,8 @@ fn nested_extension_list_rollbacks_preserve_unaffected_depth_identities() {
 
 #[test]
 fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
-    let source = include_str!(
-        "fixtures/historical-paired-omission-multi-parent-reconciliation.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-omission-multi-parent-reconciliation.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -10200,8 +10345,20 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
         "the rolled-back fold must keep both paired slots when its first parent omits both pins"
     );
     for (slot, expected) in [
-        (0, BTreeSet::from(["selector:HEAD~100".to_owned(), "selector:HEAD~102".to_owned()])),
-        (1, BTreeSet::from(["selector:HEAD~101".to_owned(), "selector:HEAD~103".to_owned()])),
+        (
+            0,
+            BTreeSet::from([
+                "selector:HEAD~100".to_owned(),
+                "selector:HEAD~102".to_owned(),
+            ]),
+        ),
+        (
+            1,
+            BTreeSet::from([
+                "selector:HEAD~101".to_owned(),
+                "selector:HEAD~103".to_owned(),
+            ]),
+        ),
     ] {
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(&rolled_back[slot], &mut contexts);
@@ -10240,9 +10397,8 @@ fn multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions() {
 
 #[test]
 fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
-    let source = include_str!(
-        "fixtures/historical-nested-paired-reconciliation-omission-wave.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-nested-paired-reconciliation-omission-wave.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -10269,7 +10425,11 @@ fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("nested_paired_reconciliation_omission_wave"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("nested_paired_reconciliation_omission_wave")
+        })
         .expect("nested paired omission fixture module");
     let Type::Function { result, .. } =
         &module.symbols["nested_paired_reconciliation_omission_wave"].ty
@@ -10364,10 +10524,7 @@ fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
     );
     assert_eq!(
         right[1][1][0],
-        BTreeSet::from([
-            "selector:HEAD~430".into(),
-            "selector:HEAD~730".into(),
-        ]),
+        BTreeSet::from(["selector:HEAD~430".into(), "selector:HEAD~730".into(),]),
         "the right-side omitted depth carries HEAD~430 and HEAD~730; HEAD~570 is absent from it"
     );
     assert_eq!(
@@ -10383,9 +10540,7 @@ fn nested_paired_omissions_reconcile_each_fold_depth_to_its_labels() {
 
 #[test]
 fn paired_rollback_omissions_keep_extension_depth_identities() {
-    let source = include_str!(
-        "fixtures/historical-paired-rollback-extension-depths-27.orna"
-    );
+    let source = include_str!("fixtures/historical-paired-rollback-extension-depths-27.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -10412,10 +10567,13 @@ fn paired_rollback_omissions_keep_extension_depth_identities() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_rollback_extension_depths"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_rollback_extension_depths")
+        })
         .expect("paired rollback fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_rollback_extension_depths"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_rollback_extension_depths"].ty
     else {
         panic!("paired rollback proof must retain its computed function result");
     };
@@ -10506,7 +10664,6 @@ fn paired_rollback_omissions_keep_extension_depth_identities() {
     );
 }
 
-
 #[test]
 fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
     let source = include_str!("fixtures/historical-late-paired-omission-sibling-fold.orna");
@@ -10536,10 +10693,13 @@ fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("late_paired_omission_sibling_fold"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("late_paired_omission_sibling_fold")
+        })
         .expect("late paired omission fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["late_paired_omission_sibling_fold"].ty
+    let Type::Function { result, .. } = &module.symbols["late_paired_omission_sibling_fold"].ty
     else {
         panic!("late paired omission must retain its computed function type");
     };
@@ -10576,10 +10736,7 @@ fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
     // HEAD~601 does at slot 1. The #7161 expectation {HEAD~100} omitted that later label.
     assert_eq!(
         pin_contexts("left", 0, 0),
-        BTreeSet::from([
-            "selector:HEAD~100".into(),
-            "selector:HEAD~600".into(),
-        ]),
+        BTreeSet::from(["selector:HEAD~100".into(), "selector:HEAD~600".into(),]),
         "the crossed left pin restores its first-parent identity"
     );
     assert_eq!(
@@ -10597,18 +10754,12 @@ fn late_paired_omission_rolls_back_only_crossed_nested_sibling_depths() {
     // expectation {HEAD~200} omitted that later label.
     assert_eq!(
         pin_contexts("right", 0, 0),
-        BTreeSet::from([
-            "selector:HEAD~200".into(),
-            "selector:HEAD~700".into(),
-        ]),
+        BTreeSet::from(["selector:HEAD~200".into(), "selector:HEAD~700".into(),]),
         "the omitted right pin shares the rollback boundary with the crossing"
     );
     assert_eq!(
         pin_contexts("right", 0, 1),
-        BTreeSet::from([
-            "selector:HEAD~201".into(),
-            "selector:HEAD~701".into(),
-        ]),
+        BTreeSet::from(["selector:HEAD~201".into(), "selector:HEAD~701".into(),]),
         "the neighboring right pin keeps folding while its crossed sibling rolls back"
     );
     assert_eq!(
@@ -10706,10 +10857,7 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
             .collect::<Vec<_>>()
     };
 
-    let rolled_back = nested_pins(
-        "nested_omission_storm_rolls_back_after_crossing",
-        "left",
-    );
+    let rolled_back = nested_pins("nested_omission_storm_rolls_back_after_crossing", "left");
     // Learned fill (ornadb-3iqo ruling): an omitted tuple slot takes its snapshot identity
     // from accepted rows; the crossing row is rejected as a whole, so its labels are absent.
     assert_eq!(
@@ -10744,10 +10892,7 @@ fn nested_omission_checkpoint_storms_preserve_depth_labels_transactionally() {
     );
     // Ruling (ornadb-3iqo): the rejected crossing row (fixture row 3) drops its right labels too.
     assert_eq!(
-        nested_pins(
-            "nested_omission_storm_rolls_back_after_crossing",
-            "right",
-        ),
+        nested_pins("nested_omission_storm_rolls_back_after_crossing", "right",),
         [
             vec![
                 BTreeSet::from([
@@ -11147,7 +11292,10 @@ fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
-        &[ModuleInput::new("historical-stacked-selector-depth-fold.orna", source)],
+        &[ModuleInput::new(
+            "historical-stacked-selector-depth-fold.orna",
+            source,
+        )],
         &historical_nested_callable_catalogue(),
     );
     assert_eq!(
@@ -11215,8 +11363,7 @@ fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
     }
 
     let Type::Function {
-        result: safe_list,
-        ..
+        result: safe_list, ..
     } = &module.symbols["accepts_depth_stable_record_fold"].ty
     else {
         panic!("depth-stable proof must be a computed function");
@@ -11240,9 +11387,7 @@ fn stacked_record_checkpoint_folds_preserve_selector_depth_labels() {
 
 #[test]
 fn unknown_direct_pair_sibling_suppresses_pin_promotion() {
-    let source = include_str!(
-        "fixtures/historical-direct-paired-pin-rebind-suppression.orna"
-    );
+    let source = include_str!("fixtures/historical-direct-paired-pin-rebind-suppression.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11416,7 +11561,6 @@ fn missing_outer_tuple_keeps_sibling_pins_symbolic_across_later_depths() {
             "later valid depth must still compute pin {selector}: {incomplete_contexts:?}"
         );
     }
-
 }
 
 #[test]
@@ -11447,7 +11591,8 @@ fn concurrent_callback_tuples_reject_cross_lane_identity_mix_after_rebind() {
 
 #[test]
 fn tuple_pin_cascade_paired_depths_reject_cross_pair_mixing_after_storm_rebinds() {
-    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-tuple-pin-cascade-paired-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11496,7 +11641,8 @@ fn tuple_pin_cascade_paired_chains_preserve_every_depth_through_storm_rebinds() 
 
 #[test]
 fn tuple_pin_cascade_paired_chains_reject_cross_chain_mixing_after_storm_rebinds() {
-    let source = include_str!("fixtures/historical-tuple-pin-cascade-paired-chain-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-tuple-pin-cascade-paired-chain-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11643,7 +11789,8 @@ fn paired_nested_closure_chain_depth_storms_preserve_each_captured_pin() {
 
 #[test]
 fn paired_nested_closure_chain_depth_storms_reject_cross_chain_leaf_mixing() {
-    let source = include_str!("fixtures/historical-paired-nested-closure-chain-depth-storm-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-closure-chain-depth-storm-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11718,7 +11865,8 @@ fn paired_nested_chain_rebind_cascades_reject_cross_chain_terminal_mixing() {
 
 #[test]
 fn paired_nested_chain_rebind_replays_preserve_captured_pin_identity() {
-    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11741,7 +11889,8 @@ fn paired_nested_chain_rebind_replays_preserve_captured_pin_identity() {
 
 #[test]
 fn paired_nested_chain_rebind_replays_reject_cross_chain_terminal_mixing() {
-    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-chain-rebind-replay-stability-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11790,7 +11939,8 @@ fn paired_nested_chain_reproduction_after_depth_storms_preserves_pin_identity() 
 
 #[test]
 fn paired_nested_chain_reproduction_rejects_cross_chain_terminal_mixing() {
-    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-reproduction-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-chain-rebind-reproduction-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11839,7 +11989,8 @@ fn paired_nested_chain_rebind_paths_stay_consistent_across_storm_orders() {
 
 #[test]
 fn paired_nested_chain_rebind_consistency_keeps_rebuilt_pair_sides_distinct() {
-    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-consistency-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-chain-rebind-consistency-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11888,7 +12039,8 @@ fn paired_nested_chain_reproductions_stay_consistent_at_each_storm_depth() {
 
 #[test]
 fn paired_nested_chain_reproductions_keep_checkpoint_sides_distinct() {
-    let source = include_str!("fixtures/historical-paired-nested-chain-rebind-checkpoints-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-nested-chain-rebind-checkpoints-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11937,7 +12089,8 @@ fn paired_depth_storm_reproductions_keep_nested_pin_consistency() {
 
 #[test]
 fn paired_depth_storm_reproductions_reject_cross_lane_terminal_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-rebind-reproduction-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-rebind-reproduction-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -11986,7 +12139,8 @@ fn paired_depth_storm_reproductions_preserve_chained_nested_identity() {
 
 #[test]
 fn paired_depth_storm_chained_reproductions_reject_cross_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-chained-reproduction-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-chained-reproduction-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12012,7 +12166,8 @@ fn paired_depth_storm_chained_reproductions_reject_cross_pair_mixing() {
 
 #[test]
 fn paired_depth_storm_chained_rebinds_preserve_followup_stability() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12035,7 +12190,8 @@ fn paired_depth_storm_chained_rebinds_preserve_followup_stability() {
 
 #[test]
 fn paired_depth_storm_chained_rebinds_reject_followup_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-chained-rebind-stability-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12084,7 +12240,8 @@ fn paired_depth_storm_followup_continuations_preserve_rebind_identity() {
 
 #[test]
 fn paired_depth_storm_followup_continuations_reject_cross_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-followup-continuation-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12110,7 +12267,8 @@ fn paired_depth_storm_followup_continuations_reject_cross_pair_mixing() {
 
 #[test]
 fn paired_depth_storm_followup_continuation_chains_remain_consistent() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-chain.orna");
+    let source =
+        include_str!("fixtures/historical-paired-depth-storm-followup-continuation-chain.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12133,7 +12291,9 @@ fn paired_depth_storm_followup_continuation_chains_remain_consistent() {
 
 #[test]
 fn paired_depth_storm_followup_continuation_chains_reject_cross_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-chain-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-depth-storm-followup-continuation-chain-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12159,7 +12319,9 @@ fn paired_depth_storm_followup_continuation_chains_reject_cross_pair_mixing() {
 
 #[test]
 fn paired_followup_continuation_checkpoints_verify_nested_storm_rebinds() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-depth-storm-followup-continuation-verification.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12182,7 +12344,9 @@ fn paired_followup_continuation_checkpoints_verify_nested_storm_rebinds() {
 
 #[test]
 fn paired_followup_continuation_checkpoints_reject_cross_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-depth-storm-followup-continuation-verification-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-depth-storm-followup-continuation-verification-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12208,7 +12372,8 @@ fn paired_followup_continuation_checkpoints_reject_cross_pair_mixing() {
 
 #[test]
 fn paired_continuation_rebind_chains_verify_depth_storms() {
-    let source = include_str!("fixtures/historical-paired-continuation-rebind-chain-verification.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-rebind-chain-verification.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12231,7 +12396,9 @@ fn paired_continuation_rebind_chains_verify_depth_storms() {
 
 #[test]
 fn paired_continuation_rebind_chains_reject_cross_pair_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-rebind-chain-verification-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-rebind-chain-verification-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12280,7 +12447,8 @@ fn paired_continuation_chain_depth_storms_preserve_rebind_stability() {
 
 #[test]
 fn paired_continuation_chain_depth_storms_reject_mixed_lanes() {
-    let source = include_str!("fixtures/historical-paired-continuation-chain-storm-stability-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-chain-storm-stability-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12306,7 +12474,8 @@ fn paired_continuation_chain_depth_storms_reject_mixed_lanes() {
 
 #[test]
 fn paired_continuation_chains_survive_chained_depth_storm_rebinds() {
-    let source = include_str!("fixtures/historical-paired-continuation-chain-depth-storm-rebinds.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-chain-depth-storm-rebinds.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12329,7 +12498,9 @@ fn paired_continuation_chains_survive_chained_depth_storm_rebinds() {
 
 #[test]
 fn paired_continuation_chains_reject_final_cross_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-chain-depth-storm-rebinds-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-chain-depth-storm-rebinds-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12355,7 +12526,8 @@ fn paired_continuation_chains_reject_final_cross_lane_mixing() {
 
 #[test]
 fn paired_continuation_chain_consistency_survives_rebind_order_changes() {
-    let source = include_str!("fixtures/historical-paired-continuation-chain-consistency-rebind-order.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-chain-consistency-rebind-order.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12378,7 +12550,9 @@ fn paired_continuation_chain_consistency_survives_rebind_order_changes() {
 
 #[test]
 fn paired_continuation_chain_consistency_rebind_orders_reject_cross_pairing() {
-    let source = include_str!("fixtures/historical-paired-continuation-chain-consistency-rebind-order-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-chain-consistency-rebind-order-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12404,7 +12578,8 @@ fn paired_continuation_chain_consistency_rebind_orders_reject_cross_pairing() {
 
 #[test]
 fn paired_continuation_rebind_cascades_remain_consistent() {
-    let source = include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12427,7 +12602,8 @@ fn paired_continuation_rebind_cascades_remain_consistent() {
 
 #[test]
 fn paired_continuation_rebind_cascades_reject_cross_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-rebind-cascade-stability-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12476,7 +12652,8 @@ fn paired_continuation_rebind_reproductions_remain_consistent() {
 
 #[test]
 fn paired_continuation_rebind_reproductions_reject_cross_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-rebind-reproduction-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-rebind-reproduction-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12502,7 +12679,8 @@ fn paired_continuation_rebind_reproductions_reject_cross_lane_mixing() {
 
 #[test]
 fn paired_continuation_reproductions_remain_stable_across_storm_cycles() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-reproduction-stability.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12525,7 +12703,8 @@ fn paired_continuation_reproductions_remain_stable_across_storm_cycles() {
 
 #[test]
 fn paired_continuation_reproductions_reject_cross_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-reproduction-stability-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12551,7 +12730,8 @@ fn paired_continuation_reproductions_reject_cross_lane_mixing() {
 
 #[test]
 fn paired_continuation_reproduction_consistency_survives_repeated_storm_rebinds() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-consistency.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-reproduction-consistency.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12574,7 +12754,8 @@ fn paired_continuation_reproduction_consistency_survives_repeated_storm_rebinds(
 
 #[test]
 fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-consistency-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-reproduction-consistency-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12600,7 +12781,8 @@ fn paired_continuation_reproduction_consistency_rejects_lane_mixing() {
 
 #[test]
 fn paired_continuation_reproductions_remain_consistent_across_paired_depth_storms() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms.orna");
+    let source =
+        include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12619,7 +12801,9 @@ fn paired_continuation_reproductions_remain_consistent_across_paired_depth_storm
 
 #[test]
 fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-paired-storms-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-reproduction-paired-storms-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12645,7 +12829,9 @@ fn paired_continuation_reproduction_storms_reject_cross_lane_mixing() {
 
 #[test]
 fn paired_continuation_reproductions_remain_stable_across_chained_rebind_orders() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-rebind-order.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-reproduction-stability-rebind-order.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12668,7 +12854,9 @@ fn paired_continuation_reproductions_remain_stable_across_chained_rebind_orders(
 
 #[test]
 fn paired_continuation_reproduction_storms_reject_mixed_repeated_lanes() {
-    let source = include_str!("fixtures/historical-paired-continuation-reproduction-stability-rebind-order-mixed.orna");
+    let source = include_str!(
+        "fixtures/historical-paired-continuation-reproduction-stability-rebind-order-mixed.orna"
+    );
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -12723,9 +12911,8 @@ fn paired_reproductions_remain_stable_across_alternating_storm_orders() {
                 .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
         })
         .expect("paired reproduction verification module");
-    let function_ty = &module.symbols
-        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
-        .ty;
+    let function_ty =
+        &module.symbols["paired_reproductions_remain_stable_across_chained_storm_orders"].ty;
     let Type::Function { result, .. } = function_ty else {
         panic!("paired reproduction proof must export a function");
     };
@@ -12781,9 +12968,8 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
                 .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
         })
         .expect("paired reproduction checkpoint module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_reproductions_remain_stable_across_chained_storm_orders"].ty
     else {
         panic!("paired reproduction proof must export a function");
     };
@@ -12798,7 +12984,11 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
                 ("roots", &["selector:HEAD~760"][..]),
                 (
                     "bridges",
-                    &["selector:HEAD~730", "selector:HEAD~740", "selector:HEAD~760"][..],
+                    &[
+                        "selector:HEAD~730",
+                        "selector:HEAD~740",
+                        "selector:HEAD~760",
+                    ][..],
                 ),
                 (
                     "leaves",
@@ -12828,10 +13018,7 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
             "right_checkpoints",
             [
                 ("roots", &["selector:HEAD~750"][..]),
-                (
-                    "bridges",
-                    &["selector:HEAD~730", "selector:HEAD~750"][..],
-                ),
+                ("bridges", &["selector:HEAD~730", "selector:HEAD~750"][..]),
                 (
                     "leaves",
                     &[
@@ -12852,7 +13039,9 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
             ],
         ),
     ] {
-        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let ty = checkpoints
+            .get(lane)
+            .expect("paired lane checkpoint record");
         let Type::Record(depths) = ty else {
             panic!("{lane} must expose checkpoint depth records");
         };
@@ -12867,7 +13056,10 @@ fn paired_checkpoints_retain_their_selected_lane_contexts() {
                 .collect::<BTreeSet<_>>();
             assert_eq!(
                 selected_contexts,
-                expected.iter().map(|context| (*context).to_owned()).collect(),
+                expected
+                    .iter()
+                    .map(|context| (*context).to_owned())
+                    .collect(),
                 "{lane}.{depth} must keep every concrete pin selected at that rebind depth"
             );
             assert!(
@@ -12925,15 +13117,24 @@ fn assert_canonical_snapshot_context_maps(ty: &Type) {
     match ty {
         Type::Applied { base, arguments } => {
             if base == "semantic.SnapshotContextMap" {
-                assert!(arguments.len() > 1, "singleton maps must use SnapshotRefContext");
-                assert!(arguments.iter().all(|argument| matches!(
-                    argument,
-                    Type::Named(selector) if selector.starts_with("selector:")
-                )), "maps contain only canonical snapshot selectors");
-                assert!(arguments.windows(2).all(|pair| matches!(
-                    pair,
-                    [Type::Named(left), Type::Named(right)] if left < right
-                )), "map selectors are sorted and unique");
+                assert!(
+                    arguments.len() > 1,
+                    "singleton maps must use SnapshotRefContext"
+                );
+                assert!(
+                    arguments.iter().all(|argument| matches!(
+                        argument,
+                        Type::Named(selector) if selector.starts_with("selector:")
+                    )),
+                    "maps contain only canonical snapshot selectors"
+                );
+                assert!(
+                    arguments.windows(2).all(|pair| matches!(
+                        pair,
+                        [Type::Named(left), Type::Named(right)] if left < right
+                    )),
+                    "map selectors are sorted and unique"
+                );
             }
             for argument in arguments {
                 assert_canonical_snapshot_context_maps(argument);
@@ -13007,9 +13208,8 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
                 .contains_key("paired_reproductions_remain_stable_across_chained_storm_orders")
         })
         .expect("paired reproduction checkpoint module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_reproductions_remain_stable_across_chained_storm_orders"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_reproductions_remain_stable_across_chained_storm_orders"].ty
     else {
         panic!("paired reproduction proof must export a function");
     };
@@ -13022,7 +13222,13 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
             "left_checkpoints",
             [
                 ("roots", &["760"][..], None, None, None),
-                ("bridges", &["760"][..], Some(&["740", "730"][..]), None, None),
+                (
+                    "bridges",
+                    &["760"][..],
+                    Some(&["740", "730"][..]),
+                    None,
+                    None,
+                ),
                 (
                     "leaves",
                     &["760"][..],
@@ -13061,14 +13267,15 @@ fn paired_checkpoint_outputs_keep_lane_to_snapshot_mapping() {
             ],
         ),
     ] {
-        let ty = checkpoints.get(lane).expect("paired lane checkpoint record");
+        let ty = checkpoints
+            .get(lane)
+            .expect("paired lane checkpoint record");
         let Type::Record(depths) = ty else {
             panic!("{lane} must expose checkpoint depth records");
         };
         for (depth, root, bridge, leaf, terminal) in expected_depths {
-            let fields = checkpoint_output_fields(
-                depths.get(depth).expect("checkpoint depth field"),
-            );
+            let fields =
+                checkpoint_output_fields(depths.get(depth).expect("checkpoint depth field"));
             for (field, expected_contexts) in [
                 ("root", Some(root)),
                 ("bridge", bridge),
@@ -13117,7 +13324,11 @@ fn shadowed_paired_checkpoint_parameters_keep_their_innermost_pins() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_nested_rebind_checkpoints"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_nested_rebind_checkpoints")
+        })
         .expect("paired nested checkpoint module");
     let Type::Function { result, .. } = &module.symbols["paired_nested_rebind_checkpoints"].ty
     else {
@@ -13237,7 +13448,10 @@ fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
                 );
                 assert_eq!(
                     contexts,
-                    expected.iter().map(|context| (*context).to_owned()).collect(),
+                    expected
+                        .iter()
+                        .map(|context| (*context).to_owned())
+                        .collect(),
                     "{lane}.{checkpoint_map}.{field} must keep its own snapshot map across rebind waves"
                 );
             }
@@ -13247,9 +13461,8 @@ fn paired_checkpoint_lists_preserve_field_specific_pin_maps() {
 
 #[test]
 fn paired_checkpoint_maps_merge_distinct_lambda_binders_without_cross_field_loss() {
-    let source = include_str!(
-        "fixtures/historical-paired-checkpoint-distinct-binder-field-map-storm.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-checkpoint-distinct-binder-field-map-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -13386,9 +13599,8 @@ fn exact_checkpoint_map_equality_returns_boolean_and_real_checkpoint() {
                 .contains_key("exact_checkpoint_map_equality_returns_value")
         })
         .expect("exact-equality fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["exact_checkpoint_map_equality_returns_value"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["exact_checkpoint_map_equality_returns_value"].ty
     else {
         panic!("exact map equality fixture must export a function");
     };
@@ -13414,9 +13626,7 @@ fn exact_checkpoint_map_equality_returns_boolean_and_real_checkpoint() {
 
 #[test]
 fn checkpoint_map_compatible_rebind_returns_each_real_snapshot_value() {
-    let source = include_str!(
-        "fixtures/historical-checkpoint-map-compatible-rebind-values.orna"
-    );
+    let source = include_str!("fixtures/historical-checkpoint-map-compatible-rebind-values.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -13501,9 +13711,8 @@ fn checkpoint_map_compaction_chain_fold_keeps_each_real_snapshot_selector() {
 
 #[test]
 fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
-    let source = include_str!(
-        "fixtures/historical-paired-checkpoint-map-compatible-shape-rebind.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-checkpoint-map-compatible-shape-rebind.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -13531,9 +13740,8 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
                 .contains_key("paired_checkpoint_map_compatible_shape_rebind_returns_values")
         })
         .expect("paired checkpoint-map shape fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_checkpoint_map_compatible_shape_rebind_returns_values"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_map_compatible_shape_rebind_returns_values"].ty
     else {
         panic!("paired checkpoint-map rebind proof must export a function");
     };
@@ -13541,14 +13749,8 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
         panic!("paired checkpoint-map rebind must return its computed fields");
     };
     for (name, expected) in [
-        (
-            "saved",
-            ["selector:HEAD~12", "selector:HEAD~11"],
-        ),
-        (
-            "rolling",
-            ["selector:HEAD~10", "selector:HEAD~9"],
-        ),
+        ("saved", ["selector:HEAD~12", "selector:HEAD~11"]),
+        ("rolling", ["selector:HEAD~10", "selector:HEAD~9"]),
     ] {
         let Type::Record(fields) = values.get(name).expect("checkpoint record value") else {
             panic!("{name} must remain a computed checkpoint record");
@@ -13558,7 +13760,11 @@ fn paired_checkpoint_map_shape_rebind_preserves_each_real_selector_set() {
             assert_canonical_snapshot_context_maps(value);
             let mut contexts = BTreeSet::new();
             collect_snapshot_contexts(value, &mut contexts);
-            assert_eq!(contexts, BTreeSet::from([selector.to_owned()]), "{name}.{field}");
+            assert_eq!(
+                contexts,
+                BTreeSet::from([selector.to_owned()]),
+                "{name}.{field}"
+            );
         }
     }
 }
@@ -13593,9 +13799,15 @@ fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("accepts_sparse_checkpoint_rebind_chains"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("accepts_sparse_checkpoint_rebind_chains")
+        })
         .expect("sparse checkpoint rebind fixture module");
-    let Type::Function { result, .. } = &module.symbols["accepts_sparse_checkpoint_rebind_chains"].ty else {
+    let Type::Function { result, .. } =
+        &module.symbols["accepts_sparse_checkpoint_rebind_chains"].ty
+    else {
         panic!("checkpoint chain must return its computed type");
     };
     let Type::Record(stages) = result.as_ref() else {
@@ -13617,7 +13829,10 @@ fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
             .map(|slot| {
                 let mut selectors = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut selectors);
-                assert!(!selectors.is_empty(), "{stage}.{lane} contains real checkpoint values");
+                assert!(
+                    !selectors.is_empty(),
+                    "{stage}.{lane} contains real checkpoint values"
+                );
                 selectors
             })
             .collect::<Vec<_>>()
@@ -13631,8 +13846,14 @@ fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
     for (stage, left, right) in [
         (
             "saved",
-            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
-            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+            [
+                selectors(&["8200", "8220", "8260"]),
+                selectors(&["8220", "8260"]),
+            ],
+            [
+                selectors(&["8120", "8160"]),
+                selectors(&["8100", "8120", "8160"]),
+            ],
         ),
         (
             "after_first_rebind",
@@ -13646,12 +13867,26 @@ fn sparse_checkpoint_rebind_chains_keep_paired_three_way_identity() {
         ),
         (
             "restored",
-            [selectors(&["8200", "8220", "8260"]), selectors(&["8220", "8260"])],
-            [selectors(&["8120", "8160"]), selectors(&["8100", "8120", "8160"])],
+            [
+                selectors(&["8200", "8220", "8260"]),
+                selectors(&["8220", "8260"]),
+            ],
+            [
+                selectors(&["8120", "8160"]),
+                selectors(&["8100", "8120", "8160"]),
+            ],
         ),
     ] {
-        assert_eq!(tuple_maps(stage, "left_checkpoint"), left, "{stage} left identity");
-        assert_eq!(tuple_maps(stage, "right_checkpoint"), right, "{stage} right identity");
+        assert_eq!(
+            tuple_maps(stage, "left_checkpoint"),
+            left,
+            "{stage} left identity"
+        );
+        assert_eq!(
+            tuple_maps(stage, "right_checkpoint"),
+            right,
+            "{stage} right identity"
+        );
         assert_ne!(left, right, "{stage} keeps each checkpoint lane distinct");
     }
 }
@@ -13692,8 +13927,7 @@ fn paired_sparse_snapshot_fold_chain_rejects_late_identity_split() {
                 .contains_key("paired_sparse_snapshot_fold_chain")
         })
         .expect("paired sparse snapshot fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_sparse_snapshot_fold_chain"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_sparse_snapshot_fold_chain"].ty
     else {
         panic!("snapshot fold proof must return computed checkpoint values");
     };
@@ -13725,17 +13959,25 @@ fn paired_sparse_snapshot_fold_chain_rejects_late_identity_split() {
     };
     assert_eq!(
         tuple_maps("left_checkpoint"),
-        [selectors(&["9100", "9200", "9400"]), selectors(&["9200", "9400"])],
+        [
+            selectors(&["9100", "9200", "9400"]),
+            selectors(&["9200", "9400"])
+        ],
         "the failed split must roll both left pins back while accepted rows still fold"
     );
     assert_eq!(
         tuple_maps("right_checkpoint"),
-        [selectors(&["9200", "9400"]), selectors(&["9100", "9200", "9400"])],
+        [
+            selectors(&["9200", "9400"]),
+            selectors(&["9100", "9200", "9400"])
+        ],
         "paired right pins keep their shared identity through the sparse fold"
     );
     let mut witness_contexts = BTreeSet::new();
     collect_snapshot_contexts(
-        fields.get("witness").expect("witness survives rejected pair"),
+        fields
+            .get("witness")
+            .expect("witness survives rejected pair"),
         &mut witness_contexts,
     );
     assert_eq!(
@@ -13781,8 +14023,7 @@ fn paired_sparse_reanchor_fold_chain_recovers_after_rejected_split() {
                 .contains_key("paired_sparse_reanchor_fold_chain")
         })
         .expect("paired sparse re-anchor fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_sparse_reanchor_fold_chain"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_sparse_reanchor_fold_chain"].ty
     else {
         panic!("re-anchor proof must return computed checkpoint values");
     };
@@ -13870,9 +14111,8 @@ fn tuple_checkpoint_pin_identity_survives_map_compaction_rebind() {
                 .contains_key("tuple_checkpoint_maps_survive_compaction_rebind")
         })
         .expect("tuple checkpoint compaction fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["tuple_checkpoint_maps_survive_compaction_rebind"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_maps_survive_compaction_rebind"].ty
     else {
         panic!("tuple checkpoint compaction proof must return computed values");
     };
@@ -13894,12 +14134,18 @@ fn tuple_checkpoint_pin_identity_survives_map_compaction_rebind() {
             .map(|slot| {
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut contexts);
-                assert!(!contexts.is_empty(), "{name} slot must retain a real pin map");
+                assert!(
+                    !contexts.is_empty(),
+                    "{name} slot must retain a real pin map"
+                );
                 contexts
             })
             .collect::<Vec<_>>();
         assert_eq!(maps.len(), 2, "{name} must preserve both tuple positions");
-        assert_eq!(maps[0], maps[1], "{name} must preserve same-pin slot identity");
+        assert_eq!(
+            maps[0], maps[1],
+            "{name} must preserve same-pin slot identity"
+        );
         maps[0].clone()
     };
     assert_eq!(
@@ -13973,9 +14219,8 @@ fn tuple_checkpoint_map_promotion_stops_at_width_drift() {
                 .contains_key("tuple_checkpoint_promotion_is_suppressed_on_width_drift")
         })
         .expect("tuple checkpoint width-drift fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["tuple_checkpoint_promotion_is_suppressed_on_width_drift"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["tuple_checkpoint_promotion_is_suppressed_on_width_drift"].ty
     else {
         panic!("tuple width-drift proof must return computed values");
     };
@@ -13998,7 +14243,10 @@ fn tuple_checkpoint_map_promotion_stops_at_width_drift() {
             .map(|slot| {
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut contexts);
-                assert!(!contexts.is_empty(), "{name} must retain actual selector values");
+                assert!(
+                    !contexts.is_empty(),
+                    "{name} must retain actual selector values"
+                );
                 contexts
             })
             .collect::<Vec<_>>()
@@ -14061,7 +14309,11 @@ fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("tuple_checkpoint_cross_slot_compaction_fold"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("tuple_checkpoint_cross_slot_compaction_fold")
+        })
         .expect("tuple checkpoint cross-slot fold fixture module");
     let Type::Function { result, .. } =
         &module.symbols["tuple_checkpoint_cross_slot_compaction_fold"].ty
@@ -14086,7 +14338,10 @@ fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
             .map(|slot| {
                 let mut contexts = BTreeSet::new();
                 collect_snapshot_contexts(slot, &mut contexts);
-                assert!(!contexts.is_empty(), "{name} must retain actual selector values");
+                assert!(
+                    !contexts.is_empty(),
+                    "{name} must retain actual selector values"
+                );
                 contexts
             })
             .collect::<Vec<_>>()
@@ -14096,7 +14351,11 @@ fn tuple_checkpoint_compaction_fold_preserves_slot_pin_identity() {
         BTreeSet::from(["selector:HEAD~20".into()]),
         BTreeSet::from(["selector:HEAD~21".into()]),
     ];
-    assert_eq!(slot_maps("saved"), expected, "saved tuple pins stay slot-local");
+    assert_eq!(
+        slot_maps("saved"),
+        expected,
+        "saved tuple pins stay slot-local"
+    );
     assert_eq!(
         slot_maps("folded"),
         expected,
@@ -14137,8 +14396,7 @@ fn tuple_checkpoint_label_fold_rebind_keeps_computed_pin_maps() {
                 .contains_key("tuple_checkpoint_label_fold_rebind")
         })
         .expect("tuple checkpoint label-fold fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["tuple_checkpoint_label_fold_rebind"].ty
+    let Type::Function { result, .. } = &module.symbols["tuple_checkpoint_label_fold_rebind"].ty
     else {
         panic!("tuple checkpoint label-fold proof must return computed values");
     };
@@ -14315,9 +14573,8 @@ fn nested_snapshot_boundary_rebinds_preserve_values_and_reject_crossing() {
                 .contains_key("nested_snapshot_boundary_values_survive_rebinding")
         })
         .expect("nested snapshot boundary fixture module");
-    let Type::Function { result, .. } = &module.symbols
-        ["nested_snapshot_boundary_values_survive_rebinding"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["nested_snapshot_boundary_values_survive_rebinding"].ty
     else {
         panic!("nested boundary proof must return computed values");
     };
@@ -14441,11 +14698,7 @@ fn nested_snapshot_checkpoint_reset_chains_restore_selected_values() {
         ("reset_first", "selector:HEAD~110", "selector:HEAD~60"),
         ("reset_base", "selector:HEAD~120", "selector:HEAD~50"),
         ("reset_second", "selector:HEAD~100", "selector:HEAD~40"),
-        (
-            "reset_base_again",
-            "selector:HEAD~120",
-            "selector:HEAD~30",
-        ),
+        ("reset_base_again", "selector:HEAD~120", "selector:HEAD~30"),
     ] {
         let Type::Record(values) = chain.get(stage).expect("checkpoint stage") else {
             panic!("{stage} must contain real selected values");
@@ -14770,8 +15023,7 @@ fn paired_checkpoint_reset_replay_preserves_each_lane_identity() {
                 .contains_key("paired_checkpoint_reset_replay_values")
         })
         .expect("paired checkpoint reset replay module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_checkpoint_reset_replay_values"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_checkpoint_reset_replay_values"].ty
     else {
         panic!("paired checkpoint reset replay must be callable");
     };
@@ -14903,7 +15155,9 @@ fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
                     "{lane}.{field} must retain one symbolic identity for its omitted pin"
                 );
                 assert!(
-                    contexts.iter().all(|context| context.starts_with("selector:dynamic-call:")),
+                    contexts
+                        .iter()
+                        .all(|context| context.starts_with("selector:dynamic-call:")),
                     "{lane}.{field} must remain a symbolic omitted pin, not inherit a storm pin: {contexts:?}"
                 );
             }
@@ -14913,9 +15167,8 @@ fn paired_nested_omission_reset_replay_restores_lane_pin_maps() {
 
 #[test]
 fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
-    let source = include_str!(
-        "fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-checkpoint-snapshot-retention-depth-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -14975,10 +15228,7 @@ fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
                 .collect::<BTreeSet<_>>();
             for field in ["root_pin", "root"] {
                 let mut contexts = BTreeSet::new();
-                collect_snapshot_contexts(
-                    fields.get(field).expect("root field"),
-                    &mut contexts,
-                );
+                collect_snapshot_contexts(fields.get(field).expect("root field"), &mut contexts);
                 assert_eq!(contexts, expected_roots, "{lane}.{stage}.{field} root map");
             }
             for field in ["middle_pin", "middle", "leaf_pin", "leaf"] {
@@ -15033,7 +15283,8 @@ fn paired_checkpoint_snapshot_maps_survive_chained_depth_storms() {
 
 #[test]
 fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
-    let source = include_str!("fixtures/historical-paired-checkpoint-retained-maps-rebind-storm.orna");
+    let source =
+        include_str!("fixtures/historical-paired-checkpoint-retained-maps-rebind-storm.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -15070,10 +15321,7 @@ fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
         let mut stage_maps = BTreeMap::new();
         for stage in ["saved", "after_storm", "restored"] {
             let mut contexts = BTreeSet::new();
-            collect_snapshot_contexts(
-                stages.get(stage).expect("checkpoint stage"),
-                &mut contexts,
-            );
+            collect_snapshot_contexts(stages.get(stage).expect("checkpoint stage"), &mut contexts);
             assert_eq!(
                 contexts.len(),
                 2,
@@ -15100,17 +15348,15 @@ fn paired_checkpoint_retains_merged_snapshot_maps_through_rebind_storms() {
         lane_maps.insert(lane, stage_maps);
     }
     assert_ne!(
-        lane_maps["left"]["saved"],
-        lane_maps["right"]["saved"],
+        lane_maps["left"]["saved"], lane_maps["right"]["saved"],
         "paired lanes must not collapse retained checkpoint maps"
     );
 }
 
 #[test]
 fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
-    let source = include_str!(
-        "fixtures/historical-paired-checkpoint-depth-storm-chained-rebind.orna"
-    );
+    let source =
+        include_str!("fixtures/historical-paired-checkpoint-depth-storm-chained-rebind.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -15130,9 +15376,8 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
                 .contains_key("paired_checkpoint_depth_storm_chained_rebind_retains_maps")
         })
         .expect("paired depth-storm checkpoint module");
-    let Type::Function { result, .. } = &module.symbols
-        ["paired_checkpoint_depth_storm_chained_rebind_retains_maps"]
-        .ty
+    let Type::Function { result, .. } =
+        &module.symbols["paired_checkpoint_depth_storm_chained_rebind_retains_maps"].ty
     else {
         panic!("paired depth-storm checkpoint must be callable");
     };
@@ -15152,14 +15397,7 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
 
     let cases: [PairedDepthCase; 18] = [
         ("left", "root", "saved", &["950", "948"], None, None),
-        (
-            "left",
-            "root",
-            "after_storm",
-            &["945", "944"],
-            None,
-            None,
-        ),
+        ("left", "root", "after_storm", &["945", "944"], None, None),
         ("left", "root", "restored", &["950", "948"], None, None),
         (
             "left",
@@ -15210,14 +15448,7 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
             Some(&["750", "748"]),
         ),
         ("right", "root", "saved", &["930", "928"], None, None),
-        (
-            "right",
-            "root",
-            "after_storm",
-            &["925", "924"],
-            None,
-            None,
-        ),
+        ("right", "root", "after_storm", &["925", "924"], None, None),
         ("right", "root", "restored", &["930", "928"], None, None),
         (
             "right",
@@ -15335,15 +15566,13 @@ fn paired_depth_storms_retain_field_maps_at_each_rebound_depth() {
 
 #[test]
 fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses() {
-    const FUNCTION: &str =
-        "paired_reproductions_remain_stable_across_chained_storm_orders";
+    const FUNCTION: &str = "paired_reproductions_remain_stable_across_chained_storm_orders";
     let paired = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip.orna");
     let mixed =
         include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
     let catalogue = historical_nested_callable_catalogue();
-    let analyze_fixture = |path, source| {
-        analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue)
-    };
+    let analyze_fixture =
+        |path, source| analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue);
     let checkpoint_type = |analysis: &orna_semantic_v1::Analysis| {
         analysis
             .modules
@@ -15391,7 +15620,8 @@ fn paired_reproduction_checkpoint_types_stay_stable_across_interleaved_analyses(
 
 #[test]
 fn paired_reproductions_reject_cross_lane_after_alternating_storms() {
-    let source = include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
+    let source =
+        include_str!("fixtures/historical-paired-reproduction-stability-roundtrip-mixed.orna");
     let parsed = orna_syntax_v1::parse_module(source);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
     let result = analyze_with_catalogue(
@@ -15599,7 +15829,11 @@ fn authoritative_lambda_fixture_infers_comparison_shapes_and_connector_effects()
             )
     ));
     let sync = &module.exports["sync_selected"];
-    assert!(sync.effects.effects.contains(&orna_semantic_v1::EffectKind::Network));
+    assert!(
+        sync.effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::Network)
+    );
     assert!(sync.effects.may_fail);
 
     let invalid = analyze(&[ModuleInput::new(
@@ -15847,7 +16081,12 @@ fn root_relation_and_stream_intrinsics_cover_reference_pipelines_without_executi
         .find(|module| module.namespace.display() == "sensors")
         .unwrap();
     let ingest = module.symbols.get("ingest").unwrap();
-    assert!(ingest.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
+    assert!(
+        ingest
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
+    );
     assert!(ingest.effects.may_fail);
 }
 
@@ -16029,7 +16268,12 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                 arguments: vec![Type::Int],
             }
     ));
-    assert!(metadata.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+    assert!(
+        metadata
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
+    );
     assert!(metadata.effects.may_fail);
 
     let named_metadata = analyze(&[ModuleInput::new(
@@ -16071,7 +16315,12 @@ fn json_described_read_only_sys_views_resolve_without_fabricating_other_members(
                     arguments: vec![value_type.clone()],
                 }
         ));
-        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+        assert!(
+            symbol
+                .effects
+                .effects
+                .contains(&orna_semantic_v1::EffectKind::TableRead)
+        );
         assert!(symbol.effects.may_fail);
     }
     let generic = &explicit_metadata.exports["generic"];
@@ -16199,10 +16448,7 @@ fn sys_await_substitutes_the_invocation_handle_result_type_and_rejects_bad_calls
                     arguments: vec![Type::Int],
                 }
         ));
-        assert_eq!(
-            typed.effects.effects,
-            std::collections::BTreeSet::new()
-        );
+        assert_eq!(typed.effects.effects, std::collections::BTreeSet::new());
         assert!(typed.effects.opaque);
         assert!(typed.effects.may_fail);
     }
@@ -16329,10 +16575,7 @@ fn sys_cancel_infers_and_validates_the_invocation_handle_result_type() {
             &symbol.ty,
             Type::Function { result, .. } if result.as_ref() == &Type::Bool
         ));
-        assert_eq!(
-            symbol.effects.effects,
-            std::collections::BTreeSet::new()
-        );
+        assert_eq!(symbol.effects.effects, std::collections::BTreeSet::new());
         assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
@@ -16412,10 +16655,7 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
             &symbol.ty,
             Type::Function { result, .. } if result.as_ref() == &Type::Int
         ));
-        assert_eq!(
-            symbol.effects.effects,
-            std::collections::BTreeSet::new()
-        );
+        assert_eq!(symbol.effects.effects, std::collections::BTreeSet::new());
         assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
@@ -16436,10 +16676,7 @@ fn sys_invoke_typed_admission_substitutes_the_explicit_result_witness() {
         Type::Function { result, .. }
             if result.as_ref() == &Type::Named("sys.Value".into())
     ));
-    assert_eq!(
-        erased.effects.effects,
-        std::collections::BTreeSet::new()
-    );
+    assert_eq!(erased.effects.effects, std::collections::BTreeSet::new());
     assert!(erased.effects.opaque);
     assert!(erased.effects.may_fail);
 
@@ -16540,10 +16777,7 @@ fn sys_start_typed_admission_requires_a_matching_result_witness_and_exact_shape(
                     arguments: vec![Type::Int],
                 }
         ));
-        assert_eq!(
-            symbol.effects.effects,
-            std::collections::BTreeSet::new()
-        );
+        assert_eq!(symbol.effects.effects, std::collections::BTreeSet::new());
         assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
@@ -16660,10 +16894,7 @@ fn sys_start_erased_admission_returns_a_value_handle_without_a_witness() {
                     arguments: vec![Type::Named("sys.Value".into())],
                 }
         ));
-        assert_eq!(
-            symbol.effects.effects,
-            std::collections::BTreeSet::new()
-        );
+        assert_eq!(symbol.effects.effects, std::collections::BTreeSet::new());
         assert!(symbol.effects.opaque);
         assert!(symbol.effects.may_fail);
     }
@@ -16696,10 +16927,7 @@ fn sys_start_generic_pipeline_preserves_handle_type_and_rejects_bad_shape() {
                 arguments: vec![Type::Int],
             }
     ));
-    assert_eq!(
-        piped.effects.effects,
-        std::collections::BTreeSet::new()
-    );
+    assert_eq!(piped.effects.effects, std::collections::BTreeSet::new());
     assert!(piped.effects.opaque);
     assert!(piped.effects.may_fail);
 
@@ -16828,7 +17056,12 @@ fn default_expression_effects_remain_visible_on_the_callable() {
         )]);
         assert!(result.is_ok(), "{:?}", result.diagnostics);
         let symbol = &result.modules.values().next().unwrap().exports["pinned"];
-        assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+        assert!(
+            symbol
+                .effects
+                .effects
+                .contains(&orna_semantic_v1::EffectKind::TableRead)
+        );
         assert!(symbol.effects.may_fail);
     }
 }
@@ -16932,7 +17165,12 @@ fn logical_operators_require_boolean_operands_without_losing_effects() {
         assert!(result.is_ok(), "{expression}: {:?}", result.diagnostics);
         if expression.contains("snapshot") {
             let symbol = &result.modules.values().next().expect("module").symbols["logical"];
-            assert!(symbol.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+            assert!(
+                symbol
+                    .effects
+                    .effects
+                    .contains(&orna_semantic_v1::EffectKind::TableRead)
+            );
             assert!(symbol.effects.may_fail);
         }
     }
@@ -17121,7 +17359,12 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("relation-distinct.Reading".into())))
     ));
-    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+    assert!(
+        readings
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
+    );
     assert!(readings.effects.may_fail);
     let direct = &module.symbols["direct"];
     assert!(matches!(
@@ -17129,7 +17372,12 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         Type::Function { result, .. }
             if result.as_ref() == &Type::Relation(Box::new(Type::Named("relation-distinct.Reading".into())))
     ));
-    assert!(direct.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+    assert!(
+        direct
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
+    );
     assert!(direct.effects.may_fail);
 
     let catalogue_valid = analyze_with_catalogue(
@@ -17155,7 +17403,12 @@ fn relation_distinct_preserves_relation_type_and_rejects_non_relation_fallbacks(
         "{:?}",
         readings.ty
     );
-    assert!(readings.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead));
+    assert!(
+        readings
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead)
+    );
     assert!(readings.effects.may_fail);
 
     let relation_argument = analyze(&[ModuleInput::new(
@@ -17452,24 +17705,61 @@ fn finite_list_sort_by_rejects_bad_callbacks_keys_and_boundaries() {
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 }
 
 #[test]
 fn root_intrinsic_calls_are_checked_against_their_signatures() {
     let invalid = [
-        ("arity: sort_by without key", "fn bad(rows: [Int]) = sort_by(rows);"),
-        ("arity: every without predicate", "fn bad(rows: [Int]) = every(rows);"),
-        ("arity: take without count", "fn bad(rows: [Int]) = take(rows);"),
-        ("arity: sum with extra argument", "fn bad(rows: [Int]) = sum(rows, 1);"),
-        ("type: take with text count", "fn bad(rows: [Int]) = take(rows, \"x\");"),
+        (
+            "arity: sort_by without key",
+            "fn bad(rows: [Int]) = sort_by(rows);",
+        ),
+        (
+            "arity: every without predicate",
+            "fn bad(rows: [Int]) = every(rows);",
+        ),
+        (
+            "arity: take without count",
+            "fn bad(rows: [Int]) = take(rows);",
+        ),
+        (
+            "arity: sum with extra argument",
+            "fn bad(rows: [Int]) = sum(rows, 1);",
+        ),
+        (
+            "type: take with text count",
+            "fn bad(rows: [Int]) = take(rows, \"x\");",
+        ),
         ("type: sum over text", "fn bad(rows: [Text]) = sum(rows);"),
-        ("type: union with other element type", "fn bad(rows: [Int]) = union(rows, [\"x\"]);"),
-        ("callback arity: sort_by key", "fn bad(rows: [Int]) = sort_by(rows, (x, y) => x);"),
-        ("callback arity: every predicate", "fn bad(rows: [Int]) = every(rows, (x, y) => true);"),
-        ("callback return: every predicate", "fn bad(rows: [Int]) = every(rows, value => value);"),
-        ("callback return: filter predicate", "fn bad(rows: [Int]) = filter(rows, value => 1);"),
-        ("callback return: one predicate", "fn bad(rows: [Int]) = one(rows, value => 1);"),
+        (
+            "type: union with other element type",
+            "fn bad(rows: [Int]) = union(rows, [\"x\"]);",
+        ),
+        (
+            "callback arity: sort_by key",
+            "fn bad(rows: [Int]) = sort_by(rows, (x, y) => x);",
+        ),
+        (
+            "callback arity: every predicate",
+            "fn bad(rows: [Int]) = every(rows, (x, y) => true);",
+        ),
+        (
+            "callback return: every predicate",
+            "fn bad(rows: [Int]) = every(rows, value => value);",
+        ),
+        (
+            "callback return: filter predicate",
+            "fn bad(rows: [Int]) = filter(rows, value => 1);",
+        ),
+        (
+            "callback return: one predicate",
+            "fn bad(rows: [Int]) = one(rows, value => 1);",
+        ),
     ];
     for (label, source) in invalid {
         let result = analyze(&[ModuleInput::new("invalid.orna", source)]);
@@ -17561,7 +17851,9 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
         Type::Function {
             parameters: Vec::new(),
             parameter_names: Some(Vec::new()),
-            result: Box::new(Type::Optional(Box::new(Type::Named("relation-first.Reading".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named(
+                "relation-first.Reading".into()
+            )))),
             default_parameters: Default::default(),
         }
     );
@@ -17570,7 +17862,9 @@ fn finite_list_first_rejects_invalid_arity_names_and_types_without_changing_rela
         Type::Function {
             parameters: Vec::new(),
             parameter_names: Some(Vec::new()),
-            result: Box::new(Type::Optional(Box::new(Type::Named("relation-first.Reading".into())))),
+            result: Box::new(Type::Optional(Box::new(Type::Named(
+                "relation-first.Reading".into()
+            )))),
             default_parameters: Default::default(),
         }
     );
@@ -17830,7 +18124,11 @@ fn finite_list_every_and_exists_reject_invalid_signatures_without_changing_asser
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 
     let assertions = analyze(&[ModuleInput::new(
         "assertions.orna",
@@ -17938,7 +18236,11 @@ fn finite_list_sum_rejects_unsupported_kinds_and_arguments() {
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 }
 
 #[test]
@@ -18047,7 +18349,11 @@ fn finite_list_integer_min_max_reject_unsupported_shapes_and_preserve_relation_b
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 
     let relation = analyze(&[ModuleInput::new(
         "relation-min-max.orna",
@@ -18217,7 +18523,11 @@ fn finite_list_float_aggregates_reject_mixed_inputs() {
         )],
         &Catalogue::authoritative_core(),
     );
-    assert!(has(&qualified, DIAG_UNRESOLVED), "{:?}", qualified.diagnostics);
+    assert!(
+        has(&qualified, DIAG_UNRESOLVED),
+        "{:?}",
+        qualified.diagnostics
+    );
 
     let incompatible_source = include_str!("fixtures/inline-semantic_graph/e0b8483cc8bc.orna");
     let incompatible_profile = StandardDependencyProfile::from_sources(
@@ -18477,31 +18787,41 @@ fn contextual_empty_instant_ranges_are_rejected() {
 fn affine_collection_aggregates_keep_mean_and_admit_extrema() {
     let valid = analyze_corpus(&[ModuleInput::new(
         "average.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/3d83cc57ba3a.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/3d83cc57ba3a.orna"
+        )),
     )]);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
     let extrema = analyze_corpus(&[
         ModuleInput::new(
             "maximum.orna",
-            with_fixture_units(include_str!("fixtures/inline-semantic_graph/da1404c4638d.orna")),
+            with_fixture_units(include_str!(
+                "fixtures/inline-semantic_graph/da1404c4638d.orna"
+            )),
         ),
         ModuleInput::new(
             "minimum.orna",
-            with_fixture_units(include_str!("fixtures/inline-semantic_graph/a95ed1c30da6.orna")),
+            with_fixture_units(include_str!(
+                "fixtures/inline-semantic_graph/a95ed1c30da6.orna"
+            )),
         ),
     ]);
     assert!(extrema.is_ok(), "{:?}", extrema.diagnostics);
 
     let shadowed = analyze_corpus(&[ModuleInput::new(
         "shadowed-max.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/584bf3a8693a.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/584bf3a8693a.orna"
+        )),
     )]);
     assert!(has(&shadowed, DIAG_TYPE));
 
     let invalid = analyze_corpus(&[ModuleInput::new(
         "sum.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/35dcb5e92b6c.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/35dcb5e92b6c.orna"
+        )),
     )]);
     assert!(has(&invalid, DIAG_ABSOLUTE_QUANTITY_SUM));
     assert!(!has(&invalid, DIAG_UNSUPPORTED));
@@ -18517,7 +18837,9 @@ fn relation_sum_preserves_numeric_exactness_and_rejects_invalid_elements() {
 
     let absolute = analyze_corpus(&[ModuleInput::new(
         "temperatures.orna",
-        with_fixture_units(include_str!("fixtures/inline-semantic_graph/c64bb707dc52.orna")),
+        with_fixture_units(include_str!(
+            "fixtures/inline-semantic_graph/c64bb707dc52.orna"
+        )),
     )]);
     assert!(
         absolute
@@ -18767,7 +19089,12 @@ fn for_over_canonical_integer_ranges_binds_int_and_rejects_other_iterables() {
         Type::Function { result, .. } if result.as_ref() == &Type::Int
     ));
     let populate = &module.symbols["populate"];
-    assert!(populate.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
+    assert!(
+        populate
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
+    );
     assert!(populate.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -18809,7 +19136,11 @@ fn while_requires_a_boolean_condition_preserves_body_effects_and_validates_trans
         &poll.ty,
         Type::Function { result, .. } if result.as_ref() == &Type::Unit
     ));
-    assert!(poll.effects.effects.contains(&orna_semantic_v1::EffectKind::TableWrite));
+    assert!(
+        poll.effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableWrite)
+    );
     assert!(poll.effects.may_fail);
     assert!(valid.is_ok(), "{:?}", valid.diagnostics);
 
@@ -18950,10 +19281,13 @@ fn single_pair_sparse_pin_fold_chain_keeps_learned_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("single_pair_sparse_pin_fold_chain"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("single_pair_sparse_pin_fold_chain")
+        })
         .expect("single-pair sparse fold fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["single_pair_sparse_pin_fold_chain"].ty
+    let Type::Function { result, .. } = &module.symbols["single_pair_sparse_pin_fold_chain"].ty
     else {
         panic!("sparse pin fold proof must return computed values");
     };
@@ -19036,10 +19370,13 @@ fn paired_sparse_restoration_fold_chain_replays_saved_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_sparse_restoration_fold_chain"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_sparse_restoration_fold_chain")
+        })
         .expect("sparse restoration fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_sparse_restoration_fold_chain"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_sparse_restoration_fold_chain"].ty
     else {
         panic!("sparse restoration proof must return computed values");
     };
@@ -19095,8 +19432,12 @@ fn paired_sparse_restoration_fold_chain_replays_saved_identity() {
         "repeated restoration does not promote the omitted lane's decoy identity"
     );
     let mut witness_contexts = BTreeSet::new();
-    let Type::List(row) = replayed else { unreachable!() };
-    let Type::Record(fields) = row.as_ref() else { unreachable!() };
+    let Type::List(row) = replayed else {
+        unreachable!()
+    };
+    let Type::Record(fields) = row.as_ref() else {
+        unreachable!()
+    };
     collect_snapshot_contexts(
         fields.get("witness").expect("saved witness"),
         &mut witness_contexts,
@@ -19136,10 +19477,13 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     let module = result
         .modules
         .values()
-        .find(|module| module.symbols.contains_key("paired_sparse_compaction_fold_chain"))
+        .find(|module| {
+            module
+                .symbols
+                .contains_key("paired_sparse_compaction_fold_chain")
+        })
         .expect("paired sparse compaction fixture module");
-    let Type::Function { result, .. } =
-        &module.symbols["paired_sparse_compaction_fold_chain"].ty
+    let Type::Function { result, .. } = &module.symbols["paired_sparse_compaction_fold_chain"].ty
     else {
         panic!("sparse compaction proof must return its computed checkpoint values");
     };
@@ -19148,9 +19492,9 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     };
     assert_eq!(
         stages.get("window"),
-        Some(&Type::Relation(Box::new(Type::List(Box::new(Type::Named(
-            "historical-paired-sparse-compaction-fold-chain.WindowRow".into(),
-        )))))),
+        Some(&Type::Relation(Box::new(Type::List(Box::new(
+            Type::Named("historical-paired-sparse-compaction-fold-chain.WindowRow".into(),)
+        ))))),
         "the fold result preserves the concrete relation-window shape"
     );
     let checkpoint_maps = |stage: &str, lane: &str| {
@@ -19181,22 +19525,34 @@ fn paired_sparse_compaction_fold_chain_keeps_learned_omission_identity() {
     };
     assert_eq!(
         checkpoint_maps("saved", "left_checkpoint"),
-        [selectors(&["510", "520", "530"]), selectors(&["520", "530"])],
+        [
+            selectors(&["510", "520", "530"]),
+            selectors(&["520", "530"])
+        ],
         "the first compaction retains its recovered left identity after an omitted row"
     );
     assert_eq!(
         checkpoint_maps("saved", "right_checkpoint"),
-        [selectors(&["420", "430"]), selectors(&["410", "420", "430"])],
+        [
+            selectors(&["420", "430"]),
+            selectors(&["410", "420", "430"])
+        ],
         "the first compaction retains its independent right identity"
     );
     assert_eq!(
         checkpoint_maps("compacted", "left_checkpoint"),
-        [selectors(&["610", "620", "640"]), selectors(&["620", "640"])],
+        [
+            selectors(&["610", "620", "640"]),
+            selectors(&["620", "640"])
+        ],
         "a rejected split leaves the learned left map intact while later matching pins fold"
     );
     assert_eq!(
         checkpoint_maps("compacted", "right_checkpoint"),
-        [selectors(&["520", "540"]), selectors(&["510", "520", "540"])],
+        [
+            selectors(&["520", "540"]),
+            selectors(&["510", "520", "540"])
+        ],
         "rejecting the paired row is atomic, then the right map continues through the later row"
     );
 }
@@ -19271,12 +19627,18 @@ fn paired_rollback_identity_survives_repeated_sparse_compaction_rejections() {
     };
     assert_eq!(
         tuple_maps("left_checkpoint"),
-        [selectors(&["620", "650"]), selectors(&["610", "620", "650"])],
+        [
+            selectors(&["620", "650"]),
+            selectors(&["610", "620", "650"])
+        ],
         "later left pins grow only from rows accepted after both rollbacks"
     );
     assert_eq!(
         tuple_maps("right_checkpoint"),
-        [selectors(&["510", "520", "550"]), selectors(&["520", "550"])],
+        [
+            selectors(&["510", "520", "550"]),
+            selectors(&["520", "550"])
+        ],
         "neither rejected right split leaks into the recovered paired identity"
     );
     let mut witness = BTreeSet::new();

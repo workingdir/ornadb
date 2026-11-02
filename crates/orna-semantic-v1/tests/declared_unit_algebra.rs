@@ -64,7 +64,11 @@ fn assert_valid(source: &str) {
 
 fn assert_code(source: &str, code: &str) {
     let analysis = analysis(source);
-    assert!(codes(&analysis).contains(&code), "{source}\n{:?}", analysis.diagnostics);
+    assert!(
+        codes(&analysis).contains(&code),
+        "{source}\n{:?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]
@@ -105,7 +109,12 @@ fn incompatible_dimensions_are_rejected_with_e5001() {
         "{:?}",
         named.diagnostics
     );
-    assert!(!analysis(&format!("{LENGTH}pub fn bad(d: Float<m>, t: Float<sec>): Float<m> = d / t;\n")).is_ok());
+    assert!(
+        !analysis(&format!(
+            "{LENGTH}pub fn bad(d: Float<m>, t: Float<sec>): Float<m> = d / t;\n"
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
@@ -123,17 +132,28 @@ fn affine_units_follow_point_and_vector_algebra_whatever_their_name() {
         "pub fn bad(a: Float<C>, b: Float<C>) = a + b;",
         "pub fn bad() = 20.F + 5.F;",
     ] {
-        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_AFFINE_TEMPERATURE_ADD);
+        assert_code(
+            &format!("{TEMPERATURE}{body}\n"),
+            DIAG_AFFINE_TEMPERATURE_ADD,
+        );
     }
     for body in [
         "pub fn bad() = [20.C, 22.C] | sum();",
         "pub fn bad(values: [Float<C>]) = values | sum;",
         "pub fn bad(values: [Float<F>]) = values | sum;",
     ] {
-        assert_code(&format!("{TEMPERATURE}{body}\n"), DIAG_ABSOLUTE_QUANTITY_SUM);
+        assert_code(
+            &format!("{TEMPERATURE}{body}\n"),
+            DIAG_ABSOLUTE_QUANTITY_SUM,
+        );
     }
     assert!(!analysis(&format!("{TEMPERATURE}pub fn bad() = 2 * 20.C;\n")).is_ok());
-    assert!(!analysis(&format!("{TEMPERATURE}pub fn bad(): Int<C> = 30.C - 20.C;\n")).is_ok());
+    assert!(
+        !analysis(&format!(
+            "{TEMPERATURE}pub fn bad(): Int<C> = 30.C - 20.C;\n"
+        ))
+        .is_ok()
+    );
 }
 
 #[test]
@@ -142,7 +162,9 @@ fn money_rates_reduce_over_declared_units() {
         "{CURRENCY}pub table Tariff(effective_from: Date) {{\n    rate: Money<GBP> / kWh,\n}}\n\npub fn cost(energy: Decimal<kWh>, tariff: Tariff): Money<GBP> =\n    energy * tariff.rate;\n"
     ));
     assert_code(
-        &format!("{CURRENCY}pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;\n"),
+        &format!(
+            "{CURRENCY}pub fn bad(energy: Float<kWh>, rate: Money<GBP> / kWh) = energy * rate;\n"
+        ),
         DIAG_MONEY_BINARY_FLOAT,
     );
 }
@@ -162,12 +184,23 @@ fn undeclared_and_ambiguous_units_are_rejected() {
         ModuleInput::new("a.orna", "pub dim L;\npub unit m : L base;\n"),
         ModuleInput::new("b.orna", "pub dim L2;\npub unit m : L2 base;\n"),
     ]);
-    assert!(codes(&ambiguous).contains(&DIAG_AMBIGUOUS), "{:?}", ambiguous.diagnostics);
+    assert!(
+        codes(&ambiguous).contains(&DIAG_AMBIGUOUS),
+        "{:?}",
+        ambiguous.diagnostics
+    );
     let imported = analyze(&[
-        ModuleInput::new("main.orna", "use units;\nuse units.{m};\n\npub fn d(): Int<units.m> = 5.m;\n"),
+        ModuleInput::new(
+            "main.orna",
+            "use units;\nuse units.{m};\n\npub fn d(): Int<units.m> = 5.m;\n",
+        ),
         ModuleInput::new("units.orna", "pub dim L;\npub unit m : L base;\n"),
     ]);
-    assert!(!codes(&imported).contains(&DIAG_UNRESOLVED), "{:?}", imported.diagnostics);
+    assert!(
+        !codes(&imported).contains(&DIAG_UNRESOLVED),
+        "{:?}",
+        imported.diagnostics
+    );
 }
 
 #[test]
@@ -175,7 +208,10 @@ fn fixture_environment_supplies_the_corpus_units() {
     let catalogue = Catalogue::authoritative_fixture();
     let check = |source: &str| {
         analyze_with_catalogue(
-            &[ModuleInput::new("fixture.orna", format!("use fixture.units.*;\n{source}"))],
+            &[ModuleInput::new(
+                "fixture.orna",
+                format!("use fixture.units.*;\n{source}"),
+            )],
             &catalogue,
         )
     };
@@ -189,11 +225,19 @@ fn fixture_environment_supplies_the_corpus_units() {
     }
     let dimensions = check("pub fn bad() = 90.days + 4.kWh;\n");
     assert!(
-        dimensions.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_INCOMPATIBLE_DIMENSIONS
-            && diagnostic.message() == "cannot add Time and Energy"),
+        dimensions
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == DIAG_INCOMPATIBLE_DIMENSIONS
+                    && diagnostic.message() == "cannot add Time and Energy"
+            ),
         "{:?}",
         dimensions.diagnostics
     );
     assert!(codes(&check("pub fn bad() = 20.C + 5.C;\n")).contains(&DIAG_AFFINE_TEMPERATURE_ADD));
-    assert!(codes(&check("pub fn bad(values: [Float<C>]) = values | sum;\n")).contains(&DIAG_ABSOLUTE_QUANTITY_SUM));
+    assert!(
+        codes(&check("pub fn bad(values: [Float<C>]) = values | sum;\n"))
+            .contains(&DIAG_ABSOLUTE_QUANTITY_SUM)
+    );
 }

@@ -37,7 +37,10 @@ fn a_call_inside_a_for_loop_is_one_call() {
     client.open(uri, LOOP);
     assert!(client.diagnostics_at(uri, 1).is_empty());
 
-    let lenses = client.result("textDocument/codeLens", json!({"textDocument": {"uri": uri}}));
+    let lenses = client.result(
+        "textDocument/codeLens",
+        json!({"textDocument": {"uri": uri}}),
+    );
     let step = lenses
         .as_array()
         .unwrap()
@@ -62,7 +65,10 @@ fn a_call_inside_a_for_loop_is_one_call() {
         .iter()
         .filter(|hint| hint["kind"] == 2)
         .count();
-    assert_eq!(parameters, 1, "one parameter hint for the one call: {hints}");
+    assert_eq!(
+        parameters, 1,
+        "one parameter hint for the one call: {hints}"
+    );
     client.shutdown();
 }
 

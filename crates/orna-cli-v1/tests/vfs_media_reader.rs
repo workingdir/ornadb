@@ -308,7 +308,8 @@ async fn cwd_mount_64_mib_wav_blob_serves_media_reader_patterns_byte_exact() {
         entropy = next_entropy(entropy);
         let len = 1 + ((entropy >> 40) as usize % MIB);
         entropy = next_entropy(entropy);
-        let offset = usize::try_from(entropy % (BLOB_LEN as u64 - len as u64)).expect("bounded offset");
+        let offset =
+            usize::try_from(entropy % (BLOB_LEN as u64 - len as u64)).expect("bounded offset");
         assert_range(&mut file, &original, offset, len);
     }
 

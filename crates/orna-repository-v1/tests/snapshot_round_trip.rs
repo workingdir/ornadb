@@ -39,7 +39,10 @@ fn repository() -> (TempDir, Repository) {
     fs::write(directory.path().join("main.orna"), SNAPSHOT_SOURCE)
         .expect("write in-crate snapshot fixture");
     git(directory.path(), &["add", "main.orna"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "snapshot fixture"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "snapshot fixture"],
+    );
     let repository = Repository::discover(directory.path()).expect("discover fixture repository");
     (directory, repository)
 }

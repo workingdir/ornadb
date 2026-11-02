@@ -138,7 +138,8 @@ fn renaming_an_automatic_key_table_commits_its_allocator_summary() {
     commit_source(&root, "Rename Note to Memo");
 
     assert_eq!(
-        committed_watermarks(&root, &head(&root)).expect("the commit records an allocator summary")[&note],
+        committed_watermarks(&root, &head(&root)).expect("the commit records an allocator summary")
+            [&note],
         "2"
     );
 }

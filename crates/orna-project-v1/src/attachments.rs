@@ -14,9 +14,7 @@ use std::{
     sync::Arc,
 };
 
-use orna_repository_v1::{
-    CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError,
-};
+use orna_repository_v1::{CommittedTreeEntryKind, GitCommitRef, Repository, RepositoryError};
 use orna_semantic_v1::ModuleInput;
 use orna_syntax_v1::{Declaration, Keyword, TokenKind, lex, parse_module};
 
@@ -37,7 +35,10 @@ pub type CheckpointPinnedRound<'a> = (&'a ReboundPathCheckpoint, &'a [[PinnedDat
 pub type PositionedPinnedRound<'a> = (usize, usize, &'a [[PinnedDatabase; 2]]);
 
 /// The terminal route identity before and after a nested pair transition.
-pub type TerminalRouteTransition = (NestedPairTerminalRouteIdentity, NestedPairTerminalRouteIdentity);
+pub type TerminalRouteTransition = (
+    NestedPairTerminalRouteIdentity,
+    NestedPairTerminalRouteIdentity,
+);
 
 /// Three terminal route identities observed across one rebind chain.
 pub type TerminalRouteTransitionChain = (
@@ -118,10 +119,7 @@ impl PackagePinManifest {
     }
 
     /// Reads the manifest from the exact committed parent snapshot.
-    pub fn load(
-        repository: &Repository,
-        parent: &GitCommitRef,
-    ) -> Result<Self, AttachmentError> {
+    pub fn load(repository: &Repository, parent: &GitCommitRef) -> Result<Self, AttachmentError> {
         let entries = repository
             .list_committed_tree(parent, MAX_PACKAGE_PARENT_TREE_ENTRIES)
             .map_err(AttachmentError::Repository)?;
@@ -145,7 +143,11 @@ impl PackagePinManifest {
             return Ok(Self::default());
         }
         let bytes = repository
-            .read_committed_file(parent, PACKAGE_PIN_MANIFEST_PATH, MAX_PACKAGE_PIN_MANIFEST_BYTES)
+            .read_committed_file(
+                parent,
+                PACKAGE_PIN_MANIFEST_PATH,
+                MAX_PACKAGE_PIN_MANIFEST_BYTES,
+            )
             .map_err(AttachmentError::Repository)?;
         let source = std::str::from_utf8(&bytes).map_err(|_| AttachmentError::MalformedManifest)?;
         Self::parse(source)
@@ -458,8 +460,7 @@ impl PackageResolver {
         // is the explicit host attachment map. If both pin the `std` alias,
         // require one immutable snapshot so the package map cannot retarget
         // `use std.*` away from the program's captured Git module.
-        let standard_gitlink =
-            captured_standard_gitlink(&primary.repository, &primary.pin.commit)?;
+        let standard_gitlink = captured_standard_gitlink(&primary.repository, &primary.pin.commit)?;
         AttachedDatabaseSession::validate_primary_name(&primary.pin.name)?;
         let mut resolved_databases = Vec::with_capacity(manifest.pins().len());
         for spec in manifest.pins() {
@@ -604,8 +605,7 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         replacements: &[PinnedDatabase],
     ) -> Result<ReboundPathResolution, AttachmentError> {
-        let extension =
-            self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
+        let extension = self.resolve_nested_rebind_path(previous.final_session(), replacements)?;
         Ok(Self::append_rebound_extension(previous, extension))
     }
 
@@ -793,13 +793,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         folds: &[[NestedPairDepthLabel; 2]],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<TerminalRouteTransition>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         let mut route = previous.clone();
         let mut transitions = Vec::with_capacity(folds.len());
         for fold in folds {
@@ -823,13 +817,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         pages: &[&[[NestedPairDepthLabel; 2]]],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<Vec<TerminalRouteTransition>>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<Vec<TerminalRouteTransition>>), AttachmentError> {
         let mut route = previous.clone();
         let mut page_transitions = Vec::with_capacity(pages.len());
         for page in pages {
@@ -855,13 +843,7 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         labels: &[NestedPairDepthLabel; 2],
         folds_per_page: &[usize],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<Vec<TerminalRouteTransition>>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<Vec<TerminalRouteTransition>>), AttachmentError> {
         let mut route = previous.clone();
         let mut ordered_labels = [labels[0].clone(), labels[1].clone()];
         let mut page_transitions = Vec::with_capacity(folds_per_page.len());
@@ -892,13 +874,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<TerminalRouteTransition>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         let mut route = previous.clone();
         let mut transitions = Vec::with_capacity(checkpoint_folds.len());
         for checkpoints in checkpoint_folds {
@@ -940,13 +916,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         checkpoint_folds: &[[&ReboundPathCheckpoint; 2]],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<TerminalRouteTransition>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         self.compact_nested_terminal_pair_checkpoint_spill_stream_preserving_terminal_identity(
             previous,
             checkpoint_folds.iter().copied(),
@@ -965,13 +935,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         checkpoint_folds: impl IntoIterator<Item = [&'a ReboundPathCheckpoint; 2]>,
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<TerminalRouteTransition>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         let mut route = previous.clone();
         let mut transitions = Vec::new();
         for checkpoints in checkpoint_folds {
@@ -1073,10 +1037,8 @@ impl PackageResolver {
         if snapshot >= selected_wave.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
-        let retained_session = previous.retained_wave_lengths[..wave]
-            .iter()
-            .sum::<usize>()
-            + snapshot;
+        let retained_session =
+            previous.retained_wave_lengths[..wave].iter().sum::<usize>() + snapshot;
         self.extend_nested_terminal_pair_chain_from_retained(
             previous,
             retained_session,
@@ -1217,10 +1179,7 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         cascades: &[CheckpointPinnedRound<'_>],
         expected_transitions: &[TerminalRouteTransition],
-    ) -> Result<(
-        ReboundPathResolution,
-        Vec<TerminalRouteTransition>,
-    ), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         if cascades.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
@@ -1265,16 +1224,8 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         restoration_folds: &[[CheckpointPinnedRound<'_>; 2]],
-        expected_fold_transitions: &[
-            [TerminalRouteTransition; 2]
-        ],
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<[TerminalRouteTransition; 2]>,
-        ),
-        AttachmentError,
-    > {
+        expected_fold_transitions: &[[TerminalRouteTransition; 2]],
+    ) -> Result<(ReboundPathResolution, Vec<[TerminalRouteTransition; 2]>), AttachmentError> {
         if restoration_folds.len() != expected_fold_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
@@ -1295,7 +1246,9 @@ impl PackageResolver {
     /// every later fold. The reference does not specify streamed restore-fold
     /// semantics; v1 validates each yielded fold before requesting the next
     /// and returns no partial route if any edge or restoration is invalid.
-    pub fn extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions<'a>(
+    pub fn extend_nested_terminal_pair_checkpoint_restoration_stream_validating_terminal_identity_transitions<
+        'a,
+    >(
         &self,
         previous: &ReboundPathResolution,
         restoration_folds: impl IntoIterator<
@@ -1304,13 +1257,7 @@ impl PackageResolver {
                 [TerminalRouteTransition; 2],
             ),
         >,
-    ) -> Result<
-        (
-            ReboundPathResolution,
-            Vec<[TerminalRouteTransition; 2]>,
-        ),
-        AttachmentError,
-    > {
+    ) -> Result<(ReboundPathResolution, Vec<[TerminalRouteTransition; 2]>), AttachmentError> {
         let mut route = previous.clone();
         let mut retained_checkpoint_labels = Vec::new();
         let mut all_transitions = Vec::new();
@@ -1342,10 +1289,7 @@ impl PackageResolver {
             }
 
             route.validate_terminal_route_identity(&starting_identity)?;
-            let transitions: [
-                TerminalRouteTransition;
-                2
-            ] = transitions
+            let transitions: [TerminalRouteTransition; 2] = transitions
                 .try_into()
                 .map_err(|_| AttachmentError::RetainedSnapshotUnavailable)?;
             all_transitions.push(transitions);
@@ -1374,8 +1318,7 @@ impl PackageResolver {
             .len()
             .checked_add(1)
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
-        let extension =
-            self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
+        let extension = self.resolve_nested_rebind_path(&checkpoint.handoff, first.as_slice())?;
         let mut route = Self::append_retained_rebound_extension(previous, extension);
         let retained_checkpoint = route.retained_snapshot_at_depth(checkpoint_wave, 0)?;
         if !checkpoint.depth_label.matches_session(retained_checkpoint) {
@@ -1453,8 +1396,7 @@ impl PackageResolver {
                         std::slice::from_ref(replacements),
                         &retained_checkpoint_labels,
                     )?;
-                let label = checkpoint_label
-                    .ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
+                let label = checkpoint_label.ok_or(AttachmentError::RetainedSnapshotUnavailable)?;
                 retained_checkpoint_labels.push(label);
                 route = folded;
             }
@@ -1704,7 +1646,8 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
-    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError>
+    {
         let mut route = previous.clone();
         let mut terminal_identities = Vec::with_capacity(chains.len());
         for chain in chains {
@@ -1727,10 +1670,7 @@ impl PackageResolver {
         &self,
         previous: &ReboundPathResolution,
         chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
-    ) -> Result<(
-        ReboundPathResolution,
-        Vec<TerminalRouteTransition>,
-    ), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         let mut route = previous.clone();
         let mut transitions = Vec::with_capacity(chains.len());
         for chain in chains {
@@ -1762,9 +1702,7 @@ impl PackageResolver {
         }
 
         let mut route = previous.clone();
-        for (chain, (expected_before, expected_after)) in
-            chains.iter().zip(expected_transitions)
-        {
+        for (chain, (expected_before, expected_after)) in chains.iter().zip(expected_transitions) {
             route.validate_terminal_route_identity(expected_before)?;
             route = self
                 .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
@@ -1786,10 +1724,7 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         rebind_cascades: &[&[&[&[DepthOptionalPinnedRound<'_>]]]],
         expected_transitions: &[TerminalRouteTransition],
-    ) -> Result<(
-        ReboundPathResolution,
-        Vec<TerminalRouteTransition>,
-    ), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         if rebind_cascades.len() != expected_transitions.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
@@ -1803,8 +1738,7 @@ impl PackageResolver {
             route.validate_terminal_route_identity(expected_before)?;
             route = self
                 .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_from_depth_labels(
-                    &route,
-                    cascade,
+                    &route, cascade,
                 )?;
             route.validate_terminal_route_identity(expected_after)?;
             let after = route.terminal_route_identity();
@@ -1831,8 +1765,7 @@ impl PackageResolver {
 
         let mut route = previous.clone();
         let mut retained_labels: Vec<NestedPairDepthLabel> = Vec::new();
-        for (fold, (expected_before, expected_after)) in
-            pin_folds.iter().zip(expected_transitions)
+        for (fold, (expected_before, expected_after)) in pin_folds.iter().zip(expected_transitions)
         {
             route.validate_terminal_route_identity(expected_before)?;
             for (label, _) in *fold {
@@ -1866,7 +1799,8 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
-    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<NestedPairTerminalRouteIdentity>), AttachmentError>
+    {
         if rebind_chains.len() != omission_chains.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
@@ -1949,15 +1883,12 @@ impl PackageResolver {
         rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         expected_rebound_terminal_identity: &NestedPairTerminalRouteIdentity,
         omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
-    ) -> Result<(
-        ReboundPathResolution,
-        Vec<TerminalRouteTransition>,
-    ), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransition>), AttachmentError> {
         for chain in omission_chains {
             for round in *chain {
-                if round.iter().any(|(_, replacements)| {
-                    matches!(replacements, Some(waves) if !waves.is_empty())
-                }) {
+                if round.iter().any(
+                    |(_, replacements)| matches!(replacements, Some(waves) if !waves.is_empty()),
+                ) {
                     return Err(AttachmentError::RetainedSnapshotUnavailable);
                 }
             }
@@ -1997,18 +1928,15 @@ impl PackageResolver {
         previous: &ReboundPathResolution,
         rebind_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
         omission_chains: &[&[&[DepthOptionalPinnedRound<'_>]]],
-    ) -> Result<(
-        ReboundPathResolution,
-        Vec<TerminalRouteTransitionChain>,
-    ), AttachmentError> {
+    ) -> Result<(ReboundPathResolution, Vec<TerminalRouteTransitionChain>), AttachmentError> {
         if rebind_chains.len() != omission_chains.len() {
             return Err(AttachmentError::RetainedSnapshotUnavailable);
         }
         for chain in omission_chains {
             for round in *chain {
-                if round.iter().any(|(_, replacements)| {
-                    matches!(replacements, Some(waves) if !waves.is_empty())
-                }) {
+                if round.iter().any(
+                    |(_, replacements)| matches!(replacements, Some(waves) if !waves.is_empty()),
+                ) {
                     return Err(AttachmentError::RetainedSnapshotUnavailable);
                 }
             }
@@ -2060,20 +1988,22 @@ impl PackageResolver {
         }
         for chain in omission_chains {
             for round in *chain {
-                if round.iter().any(|(_, replacements)| {
-                    matches!(replacements, Some(waves) if !waves.is_empty())
-                }) {
+                if round.iter().any(
+                    |(_, replacements)| matches!(replacements, Some(waves) if !waves.is_empty()),
+                ) {
                     return Err(AttachmentError::RetainedSnapshotUnavailable);
                 }
             }
         }
 
         let mut route = previous.clone();
-        for ((rebind_chain, omission_chain), (expected_before, expected_rebound, expected_omitted)) in
-            rebind_chains
-                .iter()
-                .zip(omission_chains)
-                .zip(expected_transitions)
+        for (
+            (rebind_chain, omission_chain),
+            (expected_before, expected_rebound, expected_omitted),
+        ) in rebind_chains
+            .iter()
+            .zip(omission_chains)
+            .zip(expected_transitions)
         {
             route.validate_terminal_route_identity(expected_before)?;
             route = self
@@ -2102,10 +2032,7 @@ impl PackageResolver {
     /// returns no partial batch if any row or fold fails.
     pub fn extend_sibling_terminal_pair_checkpoint_storms(
         &self,
-        paths: &[(
-            &ReboundPathResolution,
-            &[CheckpointPinnedRound<'_>],
-        )],
+        paths: &[(&ReboundPathResolution, &[CheckpointPinnedRound<'_>])],
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let routes = paths
             .iter()
@@ -2263,9 +2190,8 @@ impl PackageResolver {
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let mut folded = previous.clone();
         for round in rounds {
-            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
-                &folded, round,
-            )?;
+            folded = self
+                .extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(&folded, round)?;
         }
         Ok(folded)
     }
@@ -2336,9 +2262,8 @@ impl PackageResolver {
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let mut folded = previous.clone();
         for round in rounds {
-            folded = self.extend_sibling_terminal_pair_checkpoint_storms_from_depths(
-                &folded, round,
-            )?;
+            folded =
+                self.extend_sibling_terminal_pair_checkpoint_storms_from_depths(&folded, round)?;
         }
         Ok(folded)
     }
@@ -2375,9 +2300,7 @@ impl PackageResolver {
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let routes = paths
             .iter()
-            .map(|(parent, replacements)| {
-                self.resolve_nested_rebind_path(parent, replacements)
-            })
+            .map(|(parent, replacements)| self.resolve_nested_rebind_path(parent, replacements))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }
@@ -2407,9 +2330,7 @@ impl PackageResolver {
     ) -> Result<SiblingRebindResolution, AttachmentError> {
         let routes = paths
             .iter()
-            .map(|(previous, replacements)| {
-                self.extend_nested_rebind_path(previous, replacements)
-            })
+            .map(|(previous, replacements)| self.extend_nested_rebind_path(previous, replacements))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }
@@ -2492,8 +2413,8 @@ impl PackageResolver {
                     *snapshot,
                     replacements.clone(),
                 )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(SiblingRebindResolution { routes })
     }
 
@@ -2679,11 +2600,7 @@ impl ReboundPathResolution {
             .ok_or(AttachmentError::RetainedSnapshotUnavailable)
     }
 
-    fn retained_snapshot_index(
-        &self,
-        wave: usize,
-        depth: usize,
-    ) -> Result<usize, AttachmentError> {
+    fn retained_snapshot_index(&self, wave: usize, depth: usize) -> Result<usize, AttachmentError> {
         let length = *self
             .retained_wave_lengths
             .get(wave)
@@ -2701,10 +2618,7 @@ impl ReboundPathResolution {
         Ok(index)
     }
 
-    fn validate_depth_label(
-        &self,
-        label: &NestedPairDepthLabel,
-    ) -> Result<(), AttachmentError> {
+    fn validate_depth_label(&self, label: &NestedPairDepthLabel) -> Result<(), AttachmentError> {
         self.retained_position_for_depth_label(label).map(|_| ())
     }
 
@@ -3052,10 +2966,7 @@ impl AttachedDatabaseSession {
 
     /// Adds a secondary snapshot. The source and rows remain read-only for the
     /// lifetime of the session; writes are admitted only against the primary.
-    pub fn attach_database(
-        &mut self,
-        database: PinnedDatabase,
-    ) -> Result<(), AttachmentError> {
+    pub fn attach_database(&mut self, database: PinnedDatabase) -> Result<(), AttachmentError> {
         let name = database.pin.name.clone();
         if name == "sys" {
             return Err(AttachmentError::SystemDatabaseCannotAttach);
@@ -3223,7 +3134,9 @@ impl AttachedDatabaseSession {
 
     /// Exact source snapshot used by an optional `std` package attachment.
     pub fn standard_snapshot(&self) -> Option<&GitCommitRef> {
-        self.attached.get("std").map(|database| database.pin.commit())
+        self.attached
+            .get("std")
+            .map(|database| database.pin.commit())
     }
 
     /// Returns every row source for a table path together with the exact
@@ -3236,10 +3149,7 @@ impl AttachedDatabaseSession {
     /// and commit with each row and decide how their query treats that overlap.
     /// Aliases are exact names, so prefix overlap never selects or replaces a
     /// different route; `app`, `app_copy`, and `app_copy_archive` stay distinct.
-    pub fn relation_sources<'a>(
-        &'a self,
-        table_path: &str,
-    ) -> Vec<AttachedRelationSource<'a>> {
+    pub fn relation_sources<'a>(&'a self, table_path: &str) -> Vec<AttachedRelationSource<'a>> {
         let mut sources = Vec::new();
         for database in std::iter::once(&self.primary).chain(self.attached.values()) {
             for row in database
@@ -3490,7 +3400,10 @@ fn unit_signature(project: &LoadedProject, requested_name: &str) -> Option<Strin
                 })
                 .collect::<Vec<_>>()
                 .join("\0");
-            if found.as_ref().is_some_and(|previous| previous != &signature) {
+            if found
+                .as_ref()
+                .is_some_and(|previous| previous != &signature)
+            {
                 return None;
             }
             found = Some(signature);
@@ -3543,7 +3456,10 @@ mod tests {
         fs::write(directory.path().join("main.orna"), source).unwrap();
         git(directory.path(), &["init", "--quiet"]);
         git(directory.path(), &["config", "user.name", "kierandrewett"]);
-        git(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
+        git(
+            directory.path(),
+            &["config", "user.email", "kieran@drewett.dev"],
+        );
         git(directory.path(), &["config", "commit.gpgsign", "false"]);
         git(directory.path(), &["add", "main.orna"]);
         git(directory.path(), &["commit", "--quiet", "-m", "snapshot"]);
@@ -3567,8 +3483,14 @@ mod tests {
     fn parent_snapshot_resolves_exact_package_commit_after_head_moves() {
         let package_dir = tempfile::tempdir().unwrap();
         git(package_dir.path(), &["init", "--quiet"]);
-        git(package_dir.path(), &["config", "user.name", "kierandrewett"]);
-        git(package_dir.path(), &["config", "user.email", "kieran@drewett.dev"]);
+        git(
+            package_dir.path(),
+            &["config", "user.name", "kierandrewett"],
+        );
+        git(
+            package_dir.path(),
+            &["config", "user.email", "kieran@drewett.dev"],
+        );
         git(package_dir.path(), &["config", "commit.gpgsign", "false"]);
         let package_commit = write_commit(
             package_dir.path(),
@@ -3579,8 +3501,14 @@ mod tests {
 
         let primary_dir = tempfile::tempdir().unwrap();
         git(primary_dir.path(), &["init", "--quiet"]);
-        git(primary_dir.path(), &["config", "user.name", "kierandrewett"]);
-        git(primary_dir.path(), &["config", "user.email", "kieran@drewett.dev"]);
+        git(
+            primary_dir.path(),
+            &["config", "user.name", "kierandrewett"],
+        );
+        git(
+            primary_dir.path(),
+            &["config", "user.email", "kieran@drewett.dev"],
+        );
         git(primary_dir.path(), &["config", "commit.gpgsign", "false"]);
         write_commit(
             primary_dir.path(),
@@ -3594,28 +3522,22 @@ mod tests {
         );
         let primary_repository = Repository::discover(primary_dir.path()).unwrap();
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &parent,
-            loader,
-        )
-        .unwrap();
-        let resolver = PackageResolver::new(
-            [("widgets".to_owned(), package_repository.clone())],
-            loader,
-        )
-        .unwrap();
+        let primary = PinnedDatabase::resolve("app", primary_repository, &parent, loader).unwrap();
+        let resolver =
+            PackageResolver::new([("widgets".to_owned(), package_repository.clone())], loader)
+                .unwrap();
 
         let session = resolver.resolve_for_parent(primary).unwrap();
         let pinned_widgets = session.database("widgets").unwrap();
         assert_eq!(pinned_widgets.pin().commit().as_str(), package_commit);
         assert!(session.is_writable_database("app"));
         assert!(!session.is_writable_database("widgets"));
-        assert!(session
-            .module_inputs()
-            .iter()
-            .any(|module| module.logical_path == "widgets.orna"));
+        assert!(
+            session
+                .module_inputs()
+                .iter()
+                .any(|module| module.logical_path == "widgets.orna")
+        );
 
         write_commit(
             package_dir.path(),
@@ -3623,29 +3545,28 @@ mod tests {
             &include_str!("fixtures/attached-package-main.orna").replace("42", "99"),
         );
         assert_eq!(
+            session.database("widgets").unwrap().pin().commit().as_str(),
+            package_commit
+        );
+        assert!(
             session
                 .database("widgets")
                 .unwrap()
-                .pin()
-                .commit()
-                .as_str(),
-            package_commit
+                .project()
+                .modules()
+                .iter()
+                .any(|module| module.source.contains("= 42"))
         );
-        assert!(session
-            .database("widgets")
-            .unwrap()
-            .project()
-            .modules()
-            .iter()
-            .any(|module| module.source.contains("= 42")));
     }
 
     #[test]
     fn nested_archive_keeps_its_child_pin_and_unit_identity_scoped() {
-        let (_source_dir, source_repository, source_commit) =
-            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
-        let (archive_dir, archive_repository, _) =
-            repository(include_str!("../tests/fixtures/attached-equivalent-main.orna"));
+        let (_source_dir, source_repository, source_commit) = repository(include_str!(
+            "../tests/fixtures/attached-incompatible-main.orna"
+        ));
+        let (archive_dir, archive_repository, _) = repository(include_str!(
+            "../tests/fixtures/attached-equivalent-main.orna"
+        ));
         let archive_commit = write_commit(
             archive_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
@@ -3662,13 +3583,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &parent_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("archive".to_owned(), archive_repository),
@@ -3689,9 +3605,7 @@ mod tests {
             archive_commit
         );
         assert!(root_session.database("source").is_none());
-        assert!(root_session.units_structurally_equivalent(
-            "app", "meter", "archive", "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("app", "meter", "archive", "meter"));
 
         // The reference pins attachments from the selected parent but does not
         // prescribe recursive namespace flattening. V1 reads an archive's own
@@ -3711,12 +3625,9 @@ mod tests {
                 .as_str(),
             source_commit
         );
-        assert!(!nested_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "source",
-            "meter"
-        ));
+        assert!(
+            !nested_session.units_structurally_equivalent("archive", "meter", "source", "meter")
+        );
 
         // Resolving the nested pin set does not retarget or flatten the root.
         assert_eq!(
@@ -3733,8 +3644,9 @@ mod tests {
 
     #[test]
     fn same_nested_alias_keeps_each_parent_snapshot_pin() {
-        let (source_dir, source_repository, child_commit) =
-            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
+        let (source_dir, source_repository, child_commit) = repository(include_str!(
+            "../tests/fixtures/attached-incompatible-main.orna"
+        ));
         let direct_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
         let direct_commit = write_commit(source_dir.path(), "main.orna", direct_source);
         assert_eq!(
@@ -3742,8 +3654,9 @@ mod tests {
             direct_commit
         );
 
-        let (archive_dir, archive_repository, _) =
-            repository(include_str!("../tests/fixtures/attached-equivalent-main.orna"));
+        let (archive_dir, archive_repository, _) = repository(include_str!(
+            "../tests/fixtures/attached-equivalent-main.orna"
+        ));
         let archive_commit = write_commit(
             archive_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
@@ -3759,13 +3672,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &parent_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("archive".to_owned(), archive_repository),
@@ -3785,9 +3693,7 @@ mod tests {
                 .as_str(),
             direct_commit
         );
-        assert!(root_session.units_structurally_equivalent(
-            "app", "meter", "source", "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("app", "meter", "source", "meter"));
 
         // The reference does not define a flattened namespace for nested
         // manifests. V1 resolves the same alias independently for each pinned
@@ -3804,12 +3710,9 @@ mod tests {
             child_commit
         );
         assert_ne!(direct_commit, child_commit);
-        assert!(!nested_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "source",
-            "meter"
-        ));
+        assert!(
+            !nested_session.units_structurally_equivalent("archive", "meter", "source", "meter")
+        );
 
         assert_eq!(
             root_session
@@ -3820,9 +3723,7 @@ mod tests {
                 .as_str(),
             direct_commit
         );
-        assert!(root_session.units_structurally_equivalent(
-            "app", "meter", "source", "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("app", "meter", "source", "meter"));
     }
 
     #[test]
@@ -3832,8 +3733,9 @@ mod tests {
         let (archive_dir, archive_repository, archive_later_commit) =
             repository(&archive_later_source);
 
-        let (source_dir, source_repository, _) =
-            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
+        let (source_dir, source_repository, _) = repository(include_str!(
+            "../tests/fixtures/attached-incompatible-main.orna"
+        ));
         let source_commit = write_commit(
             source_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
@@ -3856,13 +3758,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &parent_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &parent_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("archive".to_owned(), archive_repository),
@@ -3883,9 +3780,7 @@ mod tests {
             archive_parent_commit
         );
         assert!(root_session.database("source").is_none());
-        assert!(root_session.units_structurally_equivalent(
-            "app", "meter", "archive", "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("app", "meter", "archive", "meter"));
 
         // The reference fixes each selected parent's exact pins but is silent
         // on recursive pin closure. V1 follows one manifest edge per session;
@@ -3905,12 +3800,9 @@ mod tests {
                 .as_str(),
             source_commit
         );
-        assert!(!archive_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "source",
-            "meter"
-        ));
+        assert!(
+            !archive_session.units_structurally_equivalent("archive", "meter", "source", "meter")
+        );
 
         let source = archive_session.database("source").unwrap().clone();
         let source_session = resolver.resolve_for_parent(source).unwrap();
@@ -3928,12 +3820,9 @@ mod tests {
             archive_later_commit
         );
         assert_ne!(archive_parent_commit, archive_later_commit);
-        assert!(!source_session.units_structurally_equivalent(
-            "source",
-            "meter",
-            "archive",
-            "meter"
-        ));
+        assert!(
+            !source_session.units_structurally_equivalent("source", "meter", "archive", "meter")
+        );
 
         assert_eq!(
             root_session
@@ -3953,8 +3842,9 @@ mod tests {
         let current_app_source = app_source.replace("42", "7");
         write_commit(app_dir.path(), "main.orna", &current_app_source);
 
-        let (archive_dir, archive_repository, _) =
-            repository(include_str!("../tests/fixtures/attached-incompatible-main.orna"));
+        let (archive_dir, archive_repository, _) = repository(include_str!(
+            "../tests/fixtures/attached-incompatible-main.orna"
+        ));
         let archive_commit = write_commit(
             archive_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
@@ -3967,13 +3857,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &current_app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &current_app_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -3997,12 +3883,7 @@ mod tests {
                 .as_str(),
             archive_commit
         );
-        assert!(!root_session.units_structurally_equivalent(
-            "app",
-            "meter",
-            "archive",
-            "meter"
-        ));
+        assert!(!root_session.units_structurally_equivalent("app", "meter", "archive", "meter"));
 
         // The reference fixes each selected parent's exact pins but leaves
         // recursive closure unspecified. V1 advances one parent manifest at
@@ -4022,12 +3903,7 @@ mod tests {
                 .as_str(),
             app_historical_commit
         );
-        assert!(!archive_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "app",
-            "meter"
-        ));
+        assert!(!archive_session.units_structurally_equivalent("archive", "meter", "app", "meter"));
 
         let historical_app = archive_session.database("app").unwrap().clone();
         let closed_session = resolver.resolve_for_parent(historical_app).unwrap();
@@ -4051,8 +3927,7 @@ mod tests {
     fn nested_pin_cycle_keeps_repeated_aliases_distinct_to_the_terminal_edge() {
         let equivalent_source = include_str!("../tests/fixtures/attached-equivalent-main.orna");
         let archive_historical_source = equivalent_source.replace("42", "99");
-        let (archive_dir, archive_repository, _) =
-            repository(&archive_historical_source);
+        let (archive_dir, archive_repository, _) = repository(&archive_historical_source);
 
         let (app_dir, app_repository, app_base_commit) = repository(equivalent_source);
         let archive_historical_commit = write_commit(
@@ -4086,13 +3961,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4116,12 +3987,7 @@ mod tests {
                 .as_str(),
             archive_current_commit
         );
-        assert!(!root_session.units_structurally_equivalent(
-            "app",
-            "meter",
-            "archive",
-            "meter"
-        ));
+        assert!(!root_session.units_structurally_equivalent("app", "meter", "archive", "meter"));
 
         // The reference fixes exact pins per selected parent but leaves
         // recursive cycle handling unspecified. V1 opens one manifest edge
@@ -4141,12 +4007,7 @@ mod tests {
                 .as_str(),
             app_historical_commit
         );
-        assert!(!archive_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "app",
-            "meter"
-        ));
+        assert!(!archive_session.units_structurally_equivalent("archive", "meter", "app", "meter"));
 
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
@@ -4163,17 +4024,12 @@ mod tests {
                 .as_str(),
             archive_historical_commit
         );
-        assert!(historical_app_session.units_structurally_equivalent(
-            "app",
-            "meter",
-            "archive",
-            "meter"
-        ));
+        assert!(
+            historical_app_session
+                .units_structurally_equivalent("app", "meter", "archive", "meter")
+        );
 
-        let historical_archive = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let historical_archive = historical_app_session.database("archive").unwrap().clone();
         let closure_session = resolver.resolve_for_parent(historical_archive).unwrap();
         assert_eq!(
             closure_session.primary().pin().commit().as_str(),
@@ -4188,12 +4044,7 @@ mod tests {
                 .as_str(),
             app_base_commit
         );
-        assert!(closure_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "app",
-            "meter"
-        ));
+        assert!(closure_session.units_structurally_equivalent("archive", "meter", "app", "meter"));
 
         let base_app = closure_session.database("app").unwrap().clone();
         let terminal_session = resolver.resolve_for_parent(base_app).unwrap();
@@ -4246,13 +4097,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4267,10 +4114,7 @@ mod tests {
         let archive_session = resolver.resolve_for_parent(archive).unwrap();
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
-        let archive_closure = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let archive_closure = historical_app_session.database("archive").unwrap().clone();
 
         // The reference requires the exact historical pin but leaves nested
         // closure diagnostics unspecified. V1 resolves each edge only in the
@@ -4338,17 +4182,15 @@ mod tests {
             &format!("archive {archive_current_commit}\n"),
         );
 
-        assert!(archive_repository
-            .resolve_snapshot(&archive_base_commit)
-            .is_ok());
+        assert!(
+            archive_repository
+                .resolve_snapshot(&archive_base_commit)
+                .is_ok()
+        );
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4363,10 +4205,7 @@ mod tests {
         let archive_session = resolver.resolve_for_parent(archive).unwrap();
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
-        let archive_terminal = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let archive_terminal = historical_app_session.database("archive").unwrap().clone();
 
         // The reference requires exact pins per selected parent but leaves
         // recursive closure diagnostics unspecified. V1 requires an explicit
@@ -4435,13 +4274,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4457,19 +4292,13 @@ mod tests {
         let archive_session = resolver.resolve_for_parent(archive).unwrap();
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
-        let archive_terminal = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let archive_terminal = historical_app_session.database("archive").unwrap().clone();
         let terminal_session = resolver.resolve_for_parent(archive_terminal).unwrap();
 
         // The reference fixes exact pins but does not specify aliases sharing
         // one repository. V1 preserves the manifest alias and resolves its OID
         // in that alias's configured repository, even when another alias uses it.
-        assert_eq!(
-            terminal_session.primary().pin().name(),
-            "archive"
-        );
+        assert_eq!(terminal_session.primary().pin().name(), "archive");
         assert_eq!(
             terminal_session.primary().pin().commit().as_str(),
             archive_terminal_commit
@@ -4484,12 +4313,9 @@ mod tests {
             archive_base_commit
         );
         assert_ne!(archive_terminal_commit, archive_base_commit);
-        assert!(terminal_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(
+            terminal_session.units_structurally_equivalent("archive", "meter", "mirror", "meter")
+        );
         assert_eq!(
             root_session
                 .database("archive")
@@ -4536,13 +4362,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4559,10 +4381,7 @@ mod tests {
         let archive_session = resolver.resolve_for_parent(archive).unwrap();
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
-        let archive_terminal = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let archive_terminal = historical_app_session.database("archive").unwrap().clone();
         let terminal_session = resolver.resolve_for_parent(archive_terminal).unwrap();
 
         // The reference fixes exact pins but does not define aliases sharing
@@ -4587,18 +4406,12 @@ mod tests {
             mirror_commit
         );
         assert_ne!(archive_base_commit, mirror_commit);
-        assert!(!terminal_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "mirror",
-            "meter"
-        ));
-        assert!(terminal_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "backup",
-            "meter"
-        ));
+        assert!(
+            !terminal_session.units_structurally_equivalent("archive", "meter", "mirror", "meter")
+        );
+        assert!(
+            terminal_session.units_structurally_equivalent("archive", "meter", "backup", "meter")
+        );
         assert_eq!(
             root_session
                 .database("archive")
@@ -4640,13 +4453,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4663,10 +4472,7 @@ mod tests {
         let archive_session = resolver.resolve_for_parent(archive).unwrap();
         let historical_app = archive_session.database("app").unwrap().clone();
         let historical_app_session = resolver.resolve_for_parent(historical_app).unwrap();
-        let archive_terminal = historical_app_session
-            .database("archive")
-            .unwrap()
-            .clone();
+        let archive_terminal = historical_app_session.database("archive").unwrap().clone();
         let terminal_session = resolver.resolve_for_parent(archive_terminal).unwrap();
 
         // The reference does not define aliases sharing a repository or an
@@ -4680,12 +4486,9 @@ mod tests {
         assert_eq!(backup.pin().commit().as_str(), archive_base_commit);
         assert_eq!(mirror.pin().commit().as_str(), archive_base_commit);
         assert_ne!(backup.pin(), mirror.pin());
-        assert!(terminal_session.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(
+            terminal_session.units_structurally_equivalent("backup", "meter", "mirror", "meter")
+        );
         assert_eq!(
             root_session
                 .database("archive")
@@ -4716,13 +4519,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4743,12 +4541,7 @@ mod tests {
         // ORNA-UNIT-002 requires structural checks across database boundaries
         // but does not define alias-specific outcomes. V1 compares the pinned
         // unit structures, so equal snapshots stay compatible under each name.
-        assert!(root_session.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("backup", "meter", "mirror", "meter"));
 
         let backup_closure = resolver.resolve_for_parent(backup).unwrap();
         let mirror_closure = resolver.resolve_for_parent(mirror).unwrap();
@@ -4768,24 +4561,10 @@ mod tests {
         let mirror_leaf = mirror_closure.database("leaf").unwrap();
         assert_eq!(backup_leaf.pin(), mirror_leaf.pin());
         assert_eq!(backup_leaf.pin().commit().as_str(), leaf_commit);
-        assert!(backup_closure.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "leaf",
-            "meter"
-        ));
-        assert!(mirror_closure.units_structurally_equivalent(
-            "mirror",
-            "meter",
-            "leaf",
-            "meter"
-        ));
+        assert!(backup_closure.units_structurally_equivalent("backup", "meter", "leaf", "meter"));
+        assert!(mirror_closure.units_structurally_equivalent("mirror", "meter", "leaf", "meter"));
         assert_eq!(
-            root_session
-                .database("backup")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("backup").unwrap().pin().commit(),
             root_session.database("mirror").unwrap().pin().commit()
         );
     }
@@ -4816,13 +4595,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4877,18 +4651,8 @@ mod tests {
         let terminal_end = terminal_tail.database("end").unwrap();
         assert_eq!(archive_end.pin(), terminal_end.pin());
         assert_eq!(archive_end.pin().commit().as_str(), end_commit);
-        assert!(archive_tail.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "end",
-            "meter"
-        ));
-        assert!(terminal_tail.units_structurally_equivalent(
-            "terminal",
-            "meter",
-            "end",
-            "meter"
-        ));
+        assert!(archive_tail.units_structurally_equivalent("archive", "meter", "end", "meter"));
+        assert!(terminal_tail.units_structurally_equivalent("terminal", "meter", "end", "meter"));
         assert_eq!(
             root_session
                 .database("backup")
@@ -4935,13 +4699,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -4994,12 +4753,7 @@ mod tests {
                 } else {
                     expected_end_pin = Some(end.pin().clone());
                 }
-                assert!(tail.units_structurally_equivalent(
-                    child_alias,
-                    "meter",
-                    "end",
-                    "meter"
-                ));
+                assert!(tail.units_structurally_equivalent(child_alias, "meter", "end", "meter"));
                 route_pins.push(tail.primary().pin().clone());
             }
         }
@@ -5009,11 +4763,7 @@ mod tests {
         assert_ne!(route_pins[0], route_pins[1]);
         assert_eq!(route_pins[0].commit(), route_pins[1].commit());
         assert_eq!(
-            root_session
-                .database("backup")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("backup").unwrap().pin().commit(),
             root_session.database("mirror").unwrap().pin().commit()
         );
     }
@@ -5048,13 +4798,9 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_current_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_current_commit, loader)
+                .unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5072,12 +4818,7 @@ mod tests {
         let mirror = root_session.database("mirror").unwrap();
         assert_eq!(backup.pin().commit(), mirror.pin().commit());
         assert_ne!(backup.pin(), mirror.pin());
-        assert!(root_session.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("backup", "meter", "mirror", "meter"));
 
         // The reference fixes each parent's exact pins but does not specify
         // recursive equal-alias cycle behavior. V1 follows one manifest edge
@@ -5110,16 +4851,17 @@ mod tests {
 
             let leaf_closure = resolver.resolve_for_parent(child.clone()).unwrap();
             assert_eq!(leaf_closure.primary().pin().name(), child_alias);
-            assert_eq!(leaf_closure.primary().pin().commit().as_str(), leaf_current_commit);
+            assert_eq!(
+                leaf_closure.primary().pin().commit().as_str(),
+                leaf_current_commit
+            );
             let historical_shared = leaf_closure.database(repeated_alias).unwrap();
             let repeated_sibling_alias = if repeated_alias == "backup" {
                 "mirror"
             } else {
                 "backup"
             };
-            let repeated_sibling = leaf_closure
-                .database(repeated_sibling_alias)
-                .unwrap();
+            let repeated_sibling = leaf_closure.database(repeated_sibling_alias).unwrap();
             assert_eq!(
                 historical_shared.pin().commit().as_str(),
                 shared_historical_commit
@@ -5129,41 +4871,32 @@ mod tests {
                 historical_shared.pin().commit()
             );
             assert_ne!(historical_shared.pin(), repeated_sibling.pin());
-            assert!(leaf_closure.units_structurally_equivalent(
-                "backup",
-                "meter",
-                "mirror",
-                "meter"
-            ));
+            assert!(
+                leaf_closure.units_structurally_equivalent("backup", "meter", "mirror", "meter")
+            );
 
-            let historical_closure =
-                resolver.resolve_for_parent(historical_shared.clone()).unwrap();
+            let historical_closure = resolver
+                .resolve_for_parent(historical_shared.clone())
+                .unwrap();
             assert_eq!(historical_closure.primary().pin().name(), repeated_alias);
             assert_eq!(
                 historical_closure.primary().pin().commit().as_str(),
                 shared_historical_commit
             );
-            let terminal = historical_closure
-                .database(terminal_alias)
-                .unwrap()
-                .clone();
+            let terminal = historical_closure.database(terminal_alias).unwrap().clone();
             let terminal_sibling_alias = if terminal_alias == "archive" {
                 "terminal"
             } else {
                 "archive"
             };
-            let terminal_sibling = historical_closure
-                .database(terminal_sibling_alias)
-                .unwrap();
+            let terminal_sibling = historical_closure.database(terminal_sibling_alias).unwrap();
             assert_eq!(terminal.pin().commit().as_str(), leaf_base_commit);
             assert_eq!(terminal_sibling.pin().commit(), terminal.pin().commit());
             assert_ne!(terminal_sibling.pin(), terminal.pin());
-            assert!(historical_closure.units_structurally_equivalent(
-                "archive",
-                "meter",
-                "terminal",
-                "meter"
-            ));
+            assert!(
+                historical_closure
+                    .units_structurally_equivalent("archive", "meter", "terminal", "meter")
+            );
 
             let closed = resolver.resolve_for_parent(terminal).unwrap();
             assert_eq!(closed.primary().pin().name(), terminal_alias);
@@ -5219,13 +4952,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5245,12 +4973,7 @@ mod tests {
         // The reference requires exact package pins and structural unit
         // checks, but does not define alias interaction across revisions. V1
         // compares loaded unit structures independently of alias and commit.
-        assert!(root_session.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(root_session.units_structurally_equivalent("backup", "meter", "mirror", "meter"));
 
         let backup_closure = resolver.resolve_for_parent(backup.clone()).unwrap();
         let mirror_closure = resolver.resolve_for_parent(mirror.clone()).unwrap();
@@ -5264,32 +4987,14 @@ mod tests {
         let mirror_leaf = mirror_closure.database("leaf").unwrap();
         assert_eq!(backup_leaf.pin(), mirror_leaf.pin());
         assert_eq!(backup_leaf.pin().commit().as_str(), leaf_commit);
-        assert!(backup_closure.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "leaf",
-            "meter"
-        ));
-        assert!(mirror_closure.units_structurally_equivalent(
-            "mirror",
-            "meter",
-            "leaf",
-            "meter"
-        ));
+        assert!(backup_closure.units_structurally_equivalent("backup", "meter", "leaf", "meter"));
+        assert!(mirror_closure.units_structurally_equivalent("mirror", "meter", "leaf", "meter"));
         assert_eq!(
-            root_session
-                .database("backup")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("backup").unwrap().pin().commit(),
             backup.pin().commit()
         );
         assert_eq!(
-            root_session
-                .database("mirror")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("mirror").unwrap().pin().commit(),
             mirror.pin().commit()
         );
     }
@@ -5322,13 +5027,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5346,12 +5046,7 @@ mod tests {
         assert_eq!(backup.pin().commit().as_str(), backup_commit);
         assert_eq!(mirror.pin().commit().as_str(), mirror_commit);
         assert_ne!(backup.pin().commit(), mirror.pin().commit());
-        assert!(!root_session.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(!root_session.units_structurally_equivalent("backup", "meter", "mirror", "meter"));
 
         // ORNA-PACKAGE-002 fixes each selected revision, and ORNA-UNIT-002
         // checks structural compatibility. The reference does not specify
@@ -5373,32 +5068,14 @@ mod tests {
         let mirror_leaf = mirror_closure.database("leaf").unwrap();
         assert_eq!(backup_leaf.pin(), mirror_leaf.pin());
         assert_eq!(backup_leaf.pin().commit().as_str(), leaf_commit);
-        assert!(backup_closure.units_structurally_equivalent(
-            "backup",
-            "meter",
-            "leaf",
-            "meter"
-        ));
-        assert!(!mirror_closure.units_structurally_equivalent(
-            "mirror",
-            "meter",
-            "leaf",
-            "meter"
-        ));
+        assert!(backup_closure.units_structurally_equivalent("backup", "meter", "leaf", "meter"));
+        assert!(!mirror_closure.units_structurally_equivalent("mirror", "meter", "leaf", "meter"));
         assert_eq!(
-            root_session
-                .database("backup")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("backup").unwrap().pin().commit(),
             backup.pin().commit()
         );
         assert_eq!(
-            root_session
-                .database("mirror")
-                .unwrap()
-                .pin()
-                .commit(),
+            root_session.database("mirror").unwrap().pin().commit(),
             mirror.pin().commit()
         );
     }
@@ -5433,13 +5110,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5471,12 +5143,7 @@ mod tests {
                 .as_str(),
             package_historical_commit
         );
-        assert!(!root_session.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "mirror",
-            "meter"
-        ));
+        assert!(!root_session.units_structurally_equivalent("archive", "meter", "mirror", "meter"));
 
         // The reference fixes exact parent pins but does not define aliases
         // sharing one repository. V1 resolves each nested OID from its
@@ -5490,27 +5157,14 @@ mod tests {
         let archive_leaf = archive_closure.database("leaf").unwrap();
         let mirror_leaf = mirror_closure.database("leaf").unwrap();
         assert_eq!(archive_leaf.pin().commit().as_str(), leaf_current_commit);
-        assert_eq!(
-            mirror_leaf.pin().commit().as_str(),
-            leaf_historical_commit
-        );
+        assert_eq!(mirror_leaf.pin().commit().as_str(), leaf_historical_commit);
         assert_ne!(archive_leaf.pin().commit(), mirror_leaf.pin().commit());
         assert_eq!(
             git(leaf_dir.path(), &["rev-parse", "HEAD"]),
             leaf_historical_commit
         );
-        assert!(archive_closure.units_structurally_equivalent(
-            "archive",
-            "meter",
-            "leaf",
-            "meter"
-        ));
-        assert!(mirror_closure.units_structurally_equivalent(
-            "mirror",
-            "meter",
-            "leaf",
-            "meter"
-        ));
+        assert!(archive_closure.units_structurally_equivalent("archive", "meter", "leaf", "meter"));
+        assert!(mirror_closure.units_structurally_equivalent("mirror", "meter", "leaf", "meter"));
         assert_eq!(
             root_session
                 .database("archive")
@@ -5572,13 +5226,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5605,11 +5254,21 @@ mod tests {
         // shared repositories is not. V1 follows each selected snapshot's
         // manifest independently at every depth, including the terminal edge.
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_current_commit
         );
         assert_eq!(
-            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_historical_commit
         );
         assert_eq!(archive_leaf.pin().commit().as_str(), leaf_current_commit);
@@ -5644,29 +5303,40 @@ mod tests {
             mirror_terminal.pin().commit().as_str(),
             terminal_historical_commit
         );
-        assert_ne!(archive_terminal.pin().commit(), mirror_terminal.pin().commit());
+        assert_ne!(
+            archive_terminal.pin().commit(),
+            mirror_terminal.pin().commit()
+        );
         assert_eq!(
             git(terminal_dir.path(), &["rev-parse", "HEAD"]),
             terminal_historical_commit
         );
-        assert!(archive_closure.units_structurally_equivalent(
-            "archive", "meter", "leaf", "meter"
-        ));
-        assert!(mirror_closure.units_structurally_equivalent(
-            "mirror", "meter", "leaf", "meter"
-        ));
-        assert!(archive_terminal_closure.units_structurally_equivalent(
-            "leaf", "meter", "terminal", "meter"
-        ));
-        assert!(mirror_terminal_closure.units_structurally_equivalent(
-            "leaf", "meter", "terminal", "meter"
-        ));
+        assert!(archive_closure.units_structurally_equivalent("archive", "meter", "leaf", "meter"));
+        assert!(mirror_closure.units_structurally_equivalent("mirror", "meter", "leaf", "meter"));
+        assert!(
+            archive_terminal_closure
+                .units_structurally_equivalent("leaf", "meter", "terminal", "meter")
+        );
+        assert!(
+            mirror_terminal_closure
+                .units_structurally_equivalent("leaf", "meter", "terminal", "meter")
+        );
         assert_eq!(
-            archive_closure.database("leaf").unwrap().pin().commit().as_str(),
+            archive_closure
+                .database("leaf")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             leaf_current_commit
         );
         assert_eq!(
-            mirror_closure.database("leaf").unwrap().pin().commit().as_str(),
+            mirror_closure
+                .database("leaf")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             leaf_historical_commit
         );
     }
@@ -5710,13 +5380,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5754,7 +5419,10 @@ mod tests {
             package_historical_commit
         );
         assert_eq!(archive_leaf.pin().commit().as_str(), leaf_current_commit);
-        assert_eq!(archive_terminal.pin().commit().as_str(), leaf_historical_commit);
+        assert_eq!(
+            archive_terminal.pin().commit().as_str(),
+            leaf_historical_commit
+        );
         assert_eq!(mirror_leaf.pin().commit().as_str(), leaf_historical_commit);
         assert_eq!(mirror_terminal.pin().commit().as_str(), leaf_current_commit);
         assert_eq!(archive_leaf.pin().commit(), mirror_terminal.pin().commit());
@@ -5793,19 +5461,41 @@ mod tests {
                 .unwrap();
             assert_eq!(tail.primary().pin().name(), alias);
             assert_eq!(tail.primary().pin().commit().as_str(), expected_leaf);
-            assert_eq!(tail.database("end").unwrap().pin().commit().as_str(), expected_end);
+            assert_eq!(
+                tail.database("end").unwrap().pin().commit().as_str(),
+                expected_end
+            );
             assert!(tail.units_structurally_equivalent(alias, "meter", "end", "meter"));
         }
 
-        assert_eq!(git(package_dir.path(), &["rev-parse", "HEAD"]), package_historical_commit);
-        assert_eq!(git(leaf_dir.path(), &["rev-parse", "HEAD"]), leaf_historical_commit);
-        assert_eq!(git(end_dir.path(), &["rev-parse", "HEAD"]), end_historical_commit);
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            git(package_dir.path(), &["rev-parse", "HEAD"]),
+            package_historical_commit
+        );
+        assert_eq!(
+            git(leaf_dir.path(), &["rev-parse", "HEAD"]),
+            leaf_historical_commit
+        );
+        assert_eq!(
+            git(end_dir.path(), &["rev-parse", "HEAD"]),
+            end_historical_commit
+        );
+        assert_eq!(
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_current_commit
         );
         assert_eq!(
-            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_historical_commit
         );
     }
@@ -5849,13 +5539,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -5890,7 +5575,12 @@ mod tests {
             package_historical_commit
         );
         assert_eq!(
-            archive_closure.database("leaf").unwrap().pin().commit().as_str(),
+            archive_closure
+                .database("leaf")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             leaf_current_commit
         );
         assert_eq!(
@@ -5903,7 +5593,12 @@ mod tests {
             leaf_historical_commit
         );
         assert_eq!(
-            mirror_closure.database("leaf").unwrap().pin().commit().as_str(),
+            mirror_closure
+                .database("leaf")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             leaf_historical_commit
         );
         assert_eq!(
@@ -5917,11 +5612,7 @@ mod tests {
         );
         assert_eq!(
             archive_closure.database("leaf").unwrap().pin().commit(),
-            mirror_closure
-                .database("terminal")
-                .unwrap()
-                .pin()
-                .commit()
+            mirror_closure.database("terminal").unwrap().pin().commit()
         );
         assert_ne!(
             archive_closure.database("leaf").unwrap().pin(),
@@ -5990,15 +5681,34 @@ mod tests {
             assert_eq!(terminal.attached().count(), 0);
         }
 
-        assert_eq!(git(package_dir.path(), &["rev-parse", "HEAD"]), package_historical_commit);
-        assert_eq!(git(leaf_dir.path(), &["rev-parse", "HEAD"]), leaf_historical_commit);
-        assert_eq!(git(end_dir.path(), &["rev-parse", "HEAD"]), end_historical_commit);
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            git(package_dir.path(), &["rev-parse", "HEAD"]),
+            package_historical_commit
+        );
+        assert_eq!(
+            git(leaf_dir.path(), &["rev-parse", "HEAD"]),
+            leaf_historical_commit
+        );
+        assert_eq!(
+            git(end_dir.path(), &["rev-parse", "HEAD"]),
+            end_historical_commit
+        );
+        assert_eq!(
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_current_commit
         );
         assert_eq!(
-            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             package_historical_commit
         );
     }
@@ -6020,18 +5730,15 @@ mod tests {
             PACKAGE_PIN_MANIFEST_PATH,
             &format!("archive {archive_terminal_commit}\n"),
         );
-        assert!(archive_repository
-            .resolve_snapshot(&archive_base_commit)
-            .is_ok());
+        assert!(
+            archive_repository
+                .resolve_snapshot(&archive_base_commit)
+                .is_ok()
+        );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6053,7 +5760,12 @@ mod tests {
             Err(AttachmentError::DuplicateAttachment)
         ));
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             archive_terminal_commit
         );
     }
@@ -6077,19 +5789,16 @@ mod tests {
             PACKAGE_PIN_MANIFEST_PATH,
             &format!("archive {archive_closure_commit}\nmirror {mirror_commit}\n"),
         );
-        assert!(archive_repository
-            .resolve_snapshot(&archive_base_commit)
-            .is_ok());
+        assert!(
+            archive_repository
+                .resolve_snapshot(&archive_base_commit)
+                .is_ok()
+        );
         assert!(mirror_repository.resolve_snapshot(&mirror_commit).is_ok());
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6116,14 +5825,27 @@ mod tests {
         ));
         let mirror_closure = resolver.resolve_for_parent(mirror).unwrap();
         assert_eq!(mirror_closure.primary().pin().name(), "mirror");
-        assert_eq!(mirror_closure.primary().pin().commit().as_str(), mirror_commit);
+        assert_eq!(
+            mirror_closure.primary().pin().commit().as_str(),
+            mirror_commit
+        );
         assert_eq!(mirror_closure.attached().count(), 0);
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             archive_closure_commit
         );
         assert_eq!(
-            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             mirror_commit
         );
     }
@@ -6147,13 +5869,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6188,15 +5905,25 @@ mod tests {
         let archive_child = mirror_closure.database("archive").unwrap();
         assert_eq!(archive_child.pin().commit().as_str(), shared_base_commit);
         assert_ne!(archive_child.pin(), mirror_closure.primary().pin());
-        assert!(mirror_closure.units_structurally_equivalent(
-            "mirror", "meter", "archive", "meter"
-        ));
+        assert!(
+            mirror_closure.units_structurally_equivalent("mirror", "meter", "archive", "meter")
+        );
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             shared_closure_commit
         );
         assert_eq!(
-            root_session.database("mirror").unwrap().pin().commit().as_str(),
+            root_session
+                .database("mirror")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             shared_closure_commit
         );
     }
@@ -6220,13 +5947,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6262,10 +5984,18 @@ mod tests {
         assert_eq!(archive_child.pin().commit().as_str(), shared_base_commit);
         assert_ne!(archive_child.pin(), copy_closure.primary().pin());
         assert!(copy_closure.units_structurally_equivalent(
-            "archive_copy", "meter", "archive", "meter"
+            "archive_copy",
+            "meter",
+            "archive",
+            "meter"
         ));
         assert_eq!(
-            root_session.database("archive").unwrap().pin().commit().as_str(),
+            root_session
+                .database("archive")
+                .unwrap()
+                .pin()
+                .commit()
+                .as_str(),
             shared_closure_commit
         );
         assert_eq!(
@@ -6300,13 +6030,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6352,7 +6077,10 @@ mod tests {
         let archive_child = longest_closure.database("archive").unwrap();
         let archive_copy_child = longest_closure.database("archive_copy").unwrap();
         assert_eq!(archive_child.pin().commit().as_str(), shared_base_commit);
-        assert_eq!(archive_copy_child.pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            archive_copy_child.pin().commit().as_str(),
+            shared_base_commit
+        );
         assert_ne!(archive_child.pin(), archive_copy_child.pin());
         assert!(longest_closure.units_structurally_equivalent(
             "archive_copy_archive",
@@ -6402,9 +6130,7 @@ mod tests {
         let archive_copy_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"),
         );
         let longest_commit = write_commit(
             shared_dir.path(),
@@ -6420,13 +6146,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6463,7 +6184,12 @@ mod tests {
             assert_eq!(closure.attached().count(), children.len());
             for child_name in children {
                 assert_eq!(
-                    closure.database(child_name).unwrap().pin().commit().as_str(),
+                    closure
+                        .database(child_name)
+                        .unwrap()
+                        .pin()
+                        .commit()
+                        .as_str(),
                     shared_base_commit
                 );
             }
@@ -6509,9 +6235,7 @@ mod tests {
         let archive_copy_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"),
         );
         let app_commit = write_commit(
             app_dir.path(),
@@ -6522,13 +6246,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6548,12 +6267,7 @@ mod tests {
             assert_eq!(closure.primary().pin().name(), "archive_copy");
             assert_eq!(closure.attached().count(), 2);
             assert_eq!(
-                closure
-                    .database("archive")
-                    .unwrap()
-                    .pin()
-                    .commit()
-                    .as_str(),
+                closure.database("archive").unwrap().pin().commit().as_str(),
                 shared_base_commit
             );
             assert_eq!(
@@ -6627,13 +6341,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6742,13 +6451,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6772,21 +6476,34 @@ mod tests {
         let mut middle_closure = resolver
             .resolve_for_parent(archive_copy_parent.clone())
             .unwrap();
-        let middle_sibling_closure = resolver
-            .resolve_for_parent(archive_copy_parent)
-            .unwrap();
+        let middle_sibling_closure = resolver.resolve_for_parent(archive_copy_parent).unwrap();
 
-        assert_eq!(longest_closure.primary().pin().name(), "archive_copy_archive");
-        assert_eq!(longest_closure.primary().pin().commit().as_str(), longest_commit);
+        assert_eq!(
+            longest_closure.primary().pin().name(),
+            "archive_copy_archive"
+        );
+        assert_eq!(
+            longest_closure.primary().pin().commit().as_str(),
+            longest_commit
+        );
         assert_eq!(archive_closure.primary().pin().name(), "archive");
-        assert_eq!(archive_closure.primary().pin().commit().as_str(), archive_commit);
+        assert_eq!(
+            archive_closure.primary().pin().commit().as_str(),
+            archive_commit
+        );
         assert_eq!(middle_closure.primary().pin().name(), "archive_copy");
-        assert_eq!(middle_closure.primary().pin().commit().as_str(), archive_copy_commit);
+        assert_eq!(
+            middle_closure.primary().pin().commit().as_str(),
+            archive_copy_commit
+        );
         let historical_longest = middle_closure
             .database("archive_copy_archive")
             .unwrap()
             .clone();
-        assert_eq!(historical_longest.pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            historical_longest.pin().commit().as_str(),
+            shared_base_commit
+        );
 
         // The reference fixes each edge's exact OID but is silent on reverse
         // prefix routes that revisit an alias at an older revision. V1 follows
@@ -6810,7 +6527,10 @@ mod tests {
             terminal_closure.primary().pin().name(),
             "archive_copy_archive"
         );
-        assert_eq!(terminal_closure.primary().pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            terminal_closure.primary().pin().commit().as_str(),
+            shared_base_commit
+        );
         assert_eq!(terminal_closure.attached().count(), 0);
         for (name, expected_commit) in [
             ("archive", archive_commit.as_str()),
@@ -6844,9 +6564,7 @@ mod tests {
         let longest_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {archive_commit}\narchive_copy {archive_copy_commit}\n"
-            ),
+            &format!("archive {archive_commit}\narchive_copy {archive_copy_commit}\n"),
         );
         let app_commit = write_commit(
             app_dir.path(),
@@ -6857,13 +6575,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -6882,14 +6595,9 @@ mod tests {
             .clone();
         let longest_closure = resolver.resolve_for_parent(longest_parent).unwrap();
         let archive_parent = longest_closure.database("archive").unwrap().clone();
-        let archive_copy_parent = longest_closure
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let archive_copy_parent = longest_closure.database("archive_copy").unwrap().clone();
         let mut archive_terminal = resolver.resolve_for_parent(archive_parent).unwrap();
-        let archive_copy_terminal = resolver
-            .resolve_for_parent(archive_copy_parent)
-            .unwrap();
+        let archive_copy_terminal = resolver.resolve_for_parent(archive_copy_parent).unwrap();
 
         assert_eq!(archive_terminal.primary().pin().name(), "archive");
         assert_eq!(archive_copy_terminal.primary().pin().name(), "archive_copy");
@@ -6913,9 +6621,7 @@ mod tests {
         archive_terminal
             .detach_database("archive_copy_archive")
             .unwrap();
-        assert!(archive_terminal
-            .database("archive_copy_archive")
-            .is_none());
+        assert!(archive_terminal.database("archive_copy_archive").is_none());
         assert_eq!(
             archive_copy_terminal
                 .database("archive_copy_archive")
@@ -6923,9 +6629,7 @@ mod tests {
                 .pin(),
             archive_terminal_pin.pin()
         );
-        let terminal_session = resolver
-            .resolve_for_parent(archive_terminal_pin)
-            .unwrap();
+        let terminal_session = resolver.resolve_for_parent(archive_terminal_pin).unwrap();
         assert_eq!(
             terminal_session.primary().pin().name(),
             "archive_copy_archive"
@@ -6974,13 +6678,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7014,7 +6713,10 @@ mod tests {
 
         assert_eq!(short_alias_pin.pin().name(), "archive_copy");
         assert_eq!(long_alias_pin.pin().name(), "archive_copy_archive");
-        assert_eq!(short_alias_pin.pin().commit(), long_alias_pin.pin().commit());
+        assert_eq!(
+            short_alias_pin.pin().commit(),
+            long_alias_pin.pin().commit()
+        );
         assert_eq!(short_alias_pin.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias_pin.pin(), long_alias_pin.pin());
 
@@ -7032,7 +6734,10 @@ mod tests {
         );
         let short_terminal_session = resolver.resolve_for_parent(short_alias_pin).unwrap();
         let long_terminal_session = resolver.resolve_for_parent(long_alias_pin).unwrap();
-        assert_eq!(short_terminal_session.primary().pin().name(), "archive_copy");
+        assert_eq!(
+            short_terminal_session.primary().pin().name(),
+            "archive_copy"
+        );
         assert_eq!(
             long_terminal_session.primary().pin().name(),
             "archive_copy_archive"
@@ -7087,13 +6792,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7144,9 +6844,7 @@ mod tests {
         archive_terminal
             .detach_database("archive_copy_archive")
             .unwrap();
-        assert!(archive_terminal
-            .database("archive_copy_archive")
-            .is_none());
+        assert!(archive_terminal.database("archive_copy_archive").is_none());
         assert_eq!(
             archive_copy_terminal
                 .database("archive_copy_archive")
@@ -7213,13 +6911,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7255,14 +6948,15 @@ mod tests {
         let mut terminal_closure = resolver
             .resolve_for_parent(historical_longest.clone())
             .unwrap();
-        let terminal_sibling_closure = resolver
-            .resolve_for_parent(historical_longest)
-            .unwrap();
+        let terminal_sibling_closure = resolver.resolve_for_parent(historical_longest).unwrap();
         assert_eq!(
             terminal_closure.primary().pin().name(),
             "archive_copy_archive"
         );
-        assert_eq!(terminal_closure.primary().pin().commit().as_str(), terminal_commit);
+        assert_eq!(
+            terminal_closure.primary().pin().commit().as_str(),
+            terminal_commit
+        );
         assert_eq!(terminal_closure.attached().count(), 1);
         assert_eq!(
             terminal_closure
@@ -7297,7 +6991,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(tail_session.primary().pin().name(), "archive_copy");
-        assert_eq!(tail_session.primary().pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            tail_session.primary().pin().commit().as_str(),
+            shared_base_commit
+        );
         assert_eq!(tail_session.attached().count(), 0);
         assert_eq!(
             root_session
@@ -7351,13 +7048,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7390,13 +7082,8 @@ mod tests {
         let mut terminal_closure = resolver
             .resolve_for_parent(historical_longest.clone())
             .unwrap();
-        let terminal_sibling = resolver
-            .resolve_for_parent(historical_longest)
-            .unwrap();
-        let historical_copy = terminal_closure
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let terminal_sibling = resolver.resolve_for_parent(historical_longest).unwrap();
+        let historical_copy = terminal_closure.database("archive_copy").unwrap().clone();
 
         assert_eq!(current_copy.pin().name(), "archive_copy");
         assert_eq!(current_copy.pin().commit().as_str(), current_copy_commit);
@@ -7413,10 +7100,7 @@ mod tests {
         terminal_closure.detach_database("archive_copy").unwrap();
         assert!(terminal_closure.database("archive_copy").is_none());
         assert_eq!(
-            terminal_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            terminal_sibling.database("archive_copy").unwrap().pin(),
             historical_copy.pin()
         );
         let historical_copy_session = resolver.resolve_for_parent(historical_copy).unwrap();
@@ -7482,13 +7166,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7521,43 +7200,39 @@ mod tests {
             .clone();
         let mut terminal_closure = resolver.resolve_for_parent(terminal_pin.clone()).unwrap();
         let sibling_terminal = resolver.resolve_for_parent(terminal_pin).unwrap();
-        let historical_copy = terminal_closure
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let historical_copy = terminal_closure.database("archive_copy").unwrap().clone();
         let alternate_copy = root_session.database("archive_copy").unwrap().clone();
         assert_eq!(historical_copy.pin().commit().as_str(), shared_base_commit);
-        assert_eq!(alternate_copy.pin().commit().as_str(), alternate_copy_commit);
+        assert_eq!(
+            alternate_copy.pin().commit().as_str(),
+            alternate_copy_commit
+        );
         assert_ne!(historical_copy.pin(), alternate_copy.pin());
 
         // The reference fixes the terminal's selected pins but is silent on
         // detaching and rebinding its shorter-prefix tail. V1 replaces only
         // that closure's exact alias; a sibling closure keeps the old revision.
         terminal_closure.detach_database("archive_copy").unwrap();
-        terminal_closure.attach_database(alternate_copy.clone()).unwrap();
+        terminal_closure
+            .attach_database(alternate_copy.clone())
+            .unwrap();
         assert_eq!(
-            terminal_closure
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            terminal_closure.database("archive_copy").unwrap().pin(),
             alternate_copy.pin()
         );
         assert_eq!(
-            sibling_terminal
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            sibling_terminal.database("archive_copy").unwrap().pin(),
             historical_copy.pin()
         );
         assert_eq!(
-            root_session
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            root_session.database("archive_copy").unwrap().pin(),
             alternate_copy.pin()
         );
         let rebound_tail = resolver.resolve_for_parent(alternate_copy).unwrap();
-        assert_eq!(rebound_tail.primary().pin().commit().as_str(), alternate_copy_commit);
+        assert_eq!(
+            rebound_tail.primary().pin().commit().as_str(),
+            alternate_copy_commit
+        );
         assert_eq!(rebound_tail.attached().count(), 0);
         assert_eq!(
             root_session
@@ -7580,9 +7255,7 @@ mod tests {
         let terminal_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy {shared_base_commit}\n"),
         );
         let middle_commit = write_commit(
             shared_dir.path(),
@@ -7608,13 +7281,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7647,13 +7315,22 @@ mod tests {
             .clone();
         let mut terminal_closure = resolver.resolve_for_parent(terminal_pin.clone()).unwrap();
         let terminal_sibling = resolver.resolve_for_parent(terminal_pin).unwrap();
-        assert_eq!(terminal_closure.primary().pin().name(), "archive_copy_archive");
-        assert_eq!(terminal_closure.primary().pin().commit().as_str(), terminal_commit);
+        assert_eq!(
+            terminal_closure.primary().pin().name(),
+            "archive_copy_archive"
+        );
+        assert_eq!(
+            terminal_closure.primary().pin().commit().as_str(),
+            terminal_commit
+        );
 
         let archive_edge = terminal_closure.database("archive").unwrap().clone();
         let archive_copy_edge = terminal_closure.database("archive_copy").unwrap().clone();
         assert_eq!(archive_edge.pin().commit().as_str(), shared_base_commit);
-        assert_eq!(archive_copy_edge.pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            archive_copy_edge.pin().commit().as_str(),
+            shared_base_commit
+        );
         assert_ne!(archive_edge.pin(), archive_copy_edge.pin());
 
         // The reference fixes the terminal OID but is silent on its pair of
@@ -7662,10 +7339,7 @@ mod tests {
         terminal_closure.detach_database("archive").unwrap();
         assert!(terminal_closure.database("archive").is_none());
         assert_eq!(
-            terminal_closure
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            terminal_closure.database("archive_copy").unwrap().pin(),
             archive_copy_edge.pin()
         );
         assert_eq!(
@@ -7673,10 +7347,7 @@ mod tests {
             archive_edge.pin()
         );
         assert_eq!(
-            terminal_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            terminal_sibling.database("archive_copy").unwrap().pin(),
             archive_copy_edge.pin()
         );
         assert_eq!(
@@ -7754,13 +7425,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7802,43 +7468,61 @@ mod tests {
         let mut historical_copy_closure = resolver
             .resolve_for_parent(historical_copy.clone())
             .unwrap();
-        let historical_copy_sibling = resolver
-            .resolve_for_parent(historical_copy)
-            .unwrap();
-        let historical_archive = historical_copy_closure
-            .database("archive")
-            .unwrap()
-            .clone();
+        let historical_copy_sibling = resolver.resolve_for_parent(historical_copy).unwrap();
+        let historical_archive = historical_copy_closure.database("archive").unwrap().clone();
 
-        assert_eq!(current_longest.primary().pin().name(), "archive_copy_archive");
-        assert_eq!(current_longest.primary().pin().commit().as_str(), longest_current_commit);
-        assert_eq!(current_archive_closure.primary().pin().commit().as_str(), archive_current_commit);
-        assert_eq!(current_copy_closure.primary().pin().commit().as_str(), archive_copy_current_commit);
-        assert_eq!(historical_longest_closure.primary().pin().commit().as_str(), longest_historical_commit);
-        assert_eq!(historical_copy_closure.primary().pin().commit().as_str(), archive_copy_historical_commit);
-        assert_eq!(historical_archive.pin().commit().as_str(), archive_historical_commit);
-        assert_ne!(current_copy_closure.primary().pin(), historical_copy_closure.primary().pin());
-        assert_ne!(current_archive_closure.primary().pin(), historical_archive.pin());
+        assert_eq!(
+            current_longest.primary().pin().name(),
+            "archive_copy_archive"
+        );
+        assert_eq!(
+            current_longest.primary().pin().commit().as_str(),
+            longest_current_commit
+        );
+        assert_eq!(
+            current_archive_closure.primary().pin().commit().as_str(),
+            archive_current_commit
+        );
+        assert_eq!(
+            current_copy_closure.primary().pin().commit().as_str(),
+            archive_copy_current_commit
+        );
+        assert_eq!(
+            historical_longest_closure.primary().pin().commit().as_str(),
+            longest_historical_commit
+        );
+        assert_eq!(
+            historical_copy_closure.primary().pin().commit().as_str(),
+            archive_copy_historical_commit
+        );
+        assert_eq!(
+            historical_archive.pin().commit().as_str(),
+            archive_historical_commit
+        );
+        assert_ne!(
+            current_copy_closure.primary().pin(),
+            historical_copy_closure.primary().pin()
+        );
+        assert_ne!(
+            current_archive_closure.primary().pin(),
+            historical_archive.pin()
+        );
 
         // The reference fixes each exact OID but is silent on nested reverse
         // prefix edges that revisit aliases at older revisions. V1 follows one
         // edge per parent and keeps the historical tail local to its session.
-        historical_copy_closure
-            .detach_database("archive")
-            .unwrap();
+        historical_copy_closure.detach_database("archive").unwrap();
         assert!(historical_copy_closure.database("archive").is_none());
         assert_eq!(
-            historical_copy_sibling
-                .database("archive")
-                .unwrap()
-                .pin(),
+            historical_copy_sibling.database("archive").unwrap().pin(),
             historical_archive.pin()
         );
-        let historical_archive_closure = resolver
-            .resolve_for_parent(historical_archive)
-            .unwrap();
+        let historical_archive_closure = resolver.resolve_for_parent(historical_archive).unwrap();
         assert_eq!(historical_archive_closure.primary().pin().name(), "archive");
-        assert_eq!(historical_archive_closure.primary().pin().commit().as_str(), archive_historical_commit);
+        assert_eq!(
+            historical_archive_closure.primary().pin().commit().as_str(),
+            archive_historical_commit
+        );
         assert_eq!(historical_archive_closure.attached().count(), 0);
         for (name, expected_commit) in [
             ("archive", archive_current_commit.as_str()),
@@ -7903,13 +7587,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -7951,20 +7630,34 @@ mod tests {
         let mut archive_historical = resolver
             .resolve_for_parent(archive_historical_pin.clone())
             .unwrap();
-        let archive_historical_sibling = resolver
-            .resolve_for_parent(archive_historical_pin)
-            .unwrap();
-        let oldest_copy = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let archive_historical_sibling =
+            resolver.resolve_for_parent(archive_historical_pin).unwrap();
+        let oldest_copy = archive_historical.database("archive_copy").unwrap().clone();
 
-        assert_eq!(longest_current.primary().pin().commit().as_str(), longest_current_commit);
-        assert_eq!(archive_current.primary().pin().commit().as_str(), archive_current_commit);
-        assert_eq!(copy_current.primary().pin().commit().as_str(), archive_copy_current_commit);
-        assert_eq!(longest_historical.primary().pin().commit().as_str(), longest_historical_commit);
-        assert_eq!(copy_historical.primary().pin().commit().as_str(), archive_copy_historical_commit);
-        assert_eq!(archive_historical.primary().pin().commit().as_str(), archive_historical_commit);
+        assert_eq!(
+            longest_current.primary().pin().commit().as_str(),
+            longest_current_commit
+        );
+        assert_eq!(
+            archive_current.primary().pin().commit().as_str(),
+            archive_current_commit
+        );
+        assert_eq!(
+            copy_current.primary().pin().commit().as_str(),
+            archive_copy_current_commit
+        );
+        assert_eq!(
+            longest_historical.primary().pin().commit().as_str(),
+            longest_historical_commit
+        );
+        assert_eq!(
+            copy_historical.primary().pin().commit().as_str(),
+            archive_copy_historical_commit
+        );
+        assert_eq!(
+            archive_historical.primary().pin().commit().as_str(),
+            archive_historical_commit
+        );
         assert_eq!(oldest_copy.pin().name(), "archive_copy");
         assert_eq!(oldest_copy.pin().commit().as_str(), oldest_copy_commit);
         assert_ne!(
@@ -7986,7 +7679,10 @@ mod tests {
         );
         let oldest_copy_session = resolver.resolve_for_parent(oldest_copy).unwrap();
         assert_eq!(oldest_copy_session.primary().pin().name(), "archive_copy");
-        assert_eq!(oldest_copy_session.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            oldest_copy_session.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(oldest_copy_session.attached().count(), 0);
         for (name, expected_commit) in [
             ("archive", archive_current_commit.as_str()),
@@ -8056,13 +7752,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -8103,23 +7794,18 @@ mod tests {
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
-        let oldest_copy_pin = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let oldest_copy_pin = archive_historical.database("archive_copy").unwrap().clone();
         let mut oldest_copy_closure = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
-        let oldest_copy_sibling = resolver
-            .resolve_for_parent(oldest_copy_pin)
-            .unwrap();
-        let older_archive = oldest_copy_closure
-            .database("archive")
-            .unwrap()
-            .clone();
+        let oldest_copy_sibling = resolver.resolve_for_parent(oldest_copy_pin).unwrap();
+        let older_archive = oldest_copy_closure.database("archive").unwrap().clone();
 
         assert_eq!(oldest_copy_closure.primary().pin().name(), "archive_copy");
-        assert_eq!(oldest_copy_closure.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            oldest_copy_closure.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(older_archive.pin().name(), "archive");
         assert_eq!(older_archive.pin().commit().as_str(), older_archive_commit);
         assert_ne!(
@@ -8142,7 +7828,10 @@ mod tests {
         );
         let older_archive_closure = resolver.resolve_for_parent(older_archive).unwrap();
         assert_eq!(older_archive_closure.primary().pin().name(), "archive");
-        assert_eq!(older_archive_closure.primary().pin().commit().as_str(), older_archive_commit);
+        assert_eq!(
+            older_archive_closure.primary().pin().commit().as_str(),
+            older_archive_commit
+        );
         assert_eq!(older_archive_closure.attached().count(), 0);
         for (name, expected_commit) in [
             ("archive", archive_current_commit.as_str()),
@@ -8409,13 +8098,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -8451,39 +8135,33 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
         let oldest_copy = resolver
-            .resolve_for_parent(
-                archive_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(archive_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let older_archive_pin = oldest_copy.database("archive").unwrap().clone();
         let mut older_archive = resolver
             .resolve_for_parent(older_archive_pin.clone())
             .unwrap();
-        let older_archive_sibling = resolver
-            .resolve_for_parent(older_archive_pin)
-            .unwrap();
+        let older_archive_sibling = resolver.resolve_for_parent(older_archive_pin).unwrap();
         let short_alias = older_archive.database("archive_copy").unwrap().clone();
         let long_alias = older_archive
             .database("archive_copy_archive")
             .unwrap()
             .clone();
 
-        assert_eq!(oldest_copy.primary().pin().commit().as_str(), oldest_copy_commit);
-        assert_eq!(older_archive.primary().pin().commit().as_str(), older_archive_commit);
+        assert_eq!(
+            oldest_copy.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
+        assert_eq!(
+            older_archive.primary().pin().commit().as_str(),
+            older_archive_commit
+        );
         assert_eq!(short_alias.pin().commit().as_str(), shared_base_commit);
         assert_eq!(long_alias.pin().commit().as_str(), shared_base_commit);
         assert_eq!(short_alias.pin().commit(), long_alias.pin().commit());
@@ -8592,13 +8270,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -8634,39 +8307,33 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
         let oldest_copy = resolver
-            .resolve_for_parent(
-                archive_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(archive_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let older_archive_pin = oldest_copy.database("archive").unwrap().clone();
         let mut older_archive = resolver
             .resolve_for_parent(older_archive_pin.clone())
             .unwrap();
-        let older_archive_sibling = resolver
-            .resolve_for_parent(older_archive_pin)
-            .unwrap();
+        let older_archive_sibling = resolver.resolve_for_parent(older_archive_pin).unwrap();
         let short_alias = older_archive.database("archive_copy").unwrap().clone();
         let long_alias = older_archive
             .database("archive_copy_archive")
             .unwrap()
             .clone();
 
-        assert_eq!(oldest_copy.primary().pin().commit().as_str(), oldest_copy_commit);
-        assert_eq!(older_archive.primary().pin().commit().as_str(), older_archive_commit);
+        assert_eq!(
+            oldest_copy.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
+        assert_eq!(
+            older_archive.primary().pin().commit().as_str(),
+            older_archive_commit
+        );
         assert_eq!(short_alias.pin().commit(), long_alias.pin().commit());
         assert_eq!(short_alias.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias.pin(), long_alias.pin());
@@ -8679,10 +8346,7 @@ mod tests {
             .unwrap();
         assert!(older_archive.database("archive_copy_archive").is_none());
         assert_eq!(
-            older_archive
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            older_archive.database("archive_copy").unwrap().pin(),
             short_alias.pin()
         );
         assert_eq!(
@@ -8727,9 +8391,7 @@ mod tests {
         let oldest_copy_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"),
         );
         let archive_historical_commit = write_commit(
             shared_dir.path(),
@@ -8768,13 +8430,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -8810,26 +8467,16 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
-        let oldest_copy_pin = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let oldest_copy_pin = archive_historical.database("archive_copy").unwrap().clone();
         let mut oldest_copy = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
-        let oldest_copy_sibling = resolver
-            .resolve_for_parent(oldest_copy_pin)
-            .unwrap();
+        let oldest_copy_sibling = resolver.resolve_for_parent(oldest_copy_pin).unwrap();
         let short_alias = oldest_copy.database("archive").unwrap().clone();
         let long_alias = oldest_copy
             .database("archive_copy_archive")
@@ -8837,7 +8484,10 @@ mod tests {
             .clone();
 
         assert_eq!(oldest_copy.primary().pin().name(), "archive_copy");
-        assert_eq!(oldest_copy.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            oldest_copy.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(short_alias.pin().commit(), long_alias.pin().commit());
         assert_eq!(short_alias.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias.pin(), long_alias.pin());
@@ -8845,9 +8495,7 @@ mod tests {
         // The reference does not specify this older pair with a skipped
         // prefix alias. V1 compares full names: detaching the longer route
         // keeps archive, including in its independently resolved sibling.
-        oldest_copy
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        oldest_copy.detach_database("archive_copy_archive").unwrap();
         assert!(oldest_copy.database("archive_copy_archive").is_none());
         assert_eq!(
             oldest_copy.database("archive").unwrap().pin(),
@@ -8892,9 +8540,7 @@ mod tests {
         let oldest_copy_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"),
         );
         let archive_historical_commit = write_commit(
             shared_dir.path(),
@@ -8933,13 +8579,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -8975,26 +8616,16 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
-        let oldest_copy_pin = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let oldest_copy_pin = archive_historical.database("archive_copy").unwrap().clone();
         let mut oldest_copy = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
-        let oldest_copy_sibling = resolver
-            .resolve_for_parent(oldest_copy_pin)
-            .unwrap();
+        let oldest_copy_sibling = resolver.resolve_for_parent(oldest_copy_pin).unwrap();
         let short_alias = oldest_copy.database("archive").unwrap().clone();
         let long_alias = oldest_copy
             .database("archive_copy_archive")
@@ -9002,7 +8633,10 @@ mod tests {
             .clone();
 
         assert_eq!(oldest_copy.primary().pin().name(), "archive_copy");
-        assert_eq!(oldest_copy.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            oldest_copy.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(short_alias.pin().commit(), long_alias.pin().commit());
         assert_eq!(short_alias.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias.pin(), long_alias.pin());
@@ -9013,10 +8647,7 @@ mod tests {
         oldest_copy.detach_database("archive").unwrap();
         assert!(oldest_copy.database("archive").is_none());
         assert_eq!(
-            oldest_copy
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            oldest_copy.database("archive_copy_archive").unwrap().pin(),
             long_alias.pin()
         );
         assert_eq!(
@@ -9061,9 +8692,7 @@ mod tests {
         let oldest_copy_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"
-            ),
+            &format!("archive {shared_base_commit}\narchive_copy_archive {shared_base_commit}\n"),
         );
         let archive_historical_commit = write_commit(
             shared_dir.path(),
@@ -9102,13 +8731,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -9144,46 +8768,34 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
-        let oldest_copy_pin = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let oldest_copy_pin = archive_historical.database("archive_copy").unwrap().clone();
         let mut long_first = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
         let mut short_first = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
-        let untouched_sibling = resolver
-            .resolve_for_parent(oldest_copy_pin)
-            .unwrap();
+        let untouched_sibling = resolver.resolve_for_parent(oldest_copy_pin).unwrap();
         let short_alias = long_first.database("archive").unwrap().clone();
-        let long_alias = long_first
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_alias = long_first.database("archive_copy_archive").unwrap().clone();
 
         assert_eq!(long_first.primary().pin().name(), "archive_copy");
-        assert_eq!(long_first.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            long_first.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(short_alias.pin().commit(), long_alias.pin().commit());
         assert_eq!(short_alias.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias.pin(), long_alias.pin());
 
         // The reference fixes these OIDs but is silent on detach ordering
         // across cloned closures. V1 removes exact aliases per closure.
-        long_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        long_first.detach_database("archive_copy_archive").unwrap();
         assert!(long_first.database("archive_copy_archive").is_none());
         assert_eq!(
             long_first.database("archive").unwrap().pin(),
@@ -9195,15 +8807,10 @@ mod tests {
         short_first.detach_database("archive").unwrap();
         assert!(short_first.database("archive").is_none());
         assert_eq!(
-            short_first
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            short_first.database("archive_copy_archive").unwrap().pin(),
             long_alias.pin()
         );
-        short_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        short_first.detach_database("archive_copy_archive").unwrap();
         assert!(short_first.database("archive_copy_archive").is_none());
 
         assert_eq!(
@@ -9225,8 +8832,14 @@ mod tests {
             long_alias_session.primary().pin().name(),
             "archive_copy_archive"
         );
-        assert_eq!(short_alias_session.primary().pin().commit().as_str(), shared_base_commit);
-        assert_eq!(long_alias_session.primary().pin().commit().as_str(), shared_base_commit);
+        assert_eq!(
+            short_alias_session.primary().pin().commit().as_str(),
+            shared_base_commit
+        );
+        assert_eq!(
+            long_alias_session.primary().pin().commit().as_str(),
+            shared_base_commit
+        );
         assert_eq!(short_alias_session.attached().count(), 0);
         assert_eq!(long_alias_session.attached().count(), 0);
         assert_eq!(
@@ -9296,13 +8909,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -9338,37 +8946,27 @@ mod tests {
             )
             .unwrap();
         let copy_historical = resolver
-            .resolve_for_parent(
-                longest_historical
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(longest_historical.database("archive_copy").unwrap().clone())
             .unwrap();
         let archive_historical = resolver
             .resolve_for_parent(copy_historical.database("archive").unwrap().clone())
             .unwrap();
-        let oldest_copy_pin = archive_historical
-            .database("archive_copy")
-            .unwrap()
-            .clone();
+        let oldest_copy_pin = archive_historical.database("archive_copy").unwrap().clone();
         let mut long_first = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
         let mut short_first = resolver
             .resolve_for_parent(oldest_copy_pin.clone())
             .unwrap();
-        let untouched_sibling = resolver
-            .resolve_for_parent(oldest_copy_pin)
-            .unwrap();
+        let untouched_sibling = resolver.resolve_for_parent(oldest_copy_pin).unwrap();
         let short_alias = long_first.database("archive").unwrap().clone();
-        let long_alias = long_first
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_alias = long_first.database("archive_copy_archive").unwrap().clone();
 
         assert_eq!(long_first.primary().pin().name(), "archive_copy");
-        assert_eq!(long_first.primary().pin().commit().as_str(), oldest_copy_commit);
+        assert_eq!(
+            long_first.primary().pin().commit().as_str(),
+            oldest_copy_commit
+        );
         assert_eq!(short_alias.pin().commit().as_str(), short_revision_commit);
         assert_eq!(long_alias.pin().commit().as_str(), shared_base_commit);
         assert_ne!(short_alias.pin().commit(), long_alias.pin().commit());
@@ -9377,9 +8975,7 @@ mod tests {
         // The reference fixes the individual revisions but is silent on
         // dissolving this skipped-prefix pair across cloned closures. V1
         // removes each full alias independently in either detach order.
-        long_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        long_first.detach_database("archive_copy_archive").unwrap();
         assert!(long_first.database("archive_copy_archive").is_none());
         assert_eq!(
             long_first.database("archive").unwrap().pin(),
@@ -9391,15 +8987,10 @@ mod tests {
         short_first.detach_database("archive").unwrap();
         assert!(short_first.database("archive").is_none());
         assert_eq!(
-            short_first
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            short_first.database("archive_copy_archive").unwrap().pin(),
             long_alias.pin()
         );
-        short_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        short_first.detach_database("archive_copy_archive").unwrap();
         assert!(short_first.database("archive_copy_archive").is_none());
 
         assert_eq!(
@@ -9483,23 +9074,15 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
                 ("archive".to_owned(), shared_repository.clone()),
                 ("archive_copy".to_owned(), shared_repository.clone()),
                 ("archive_copy_archive".to_owned(), shared_repository.clone()),
-                (
-                    "archive_copy_archive_archive".to_owned(),
-                    shared_repository,
-                ),
+                ("archive_copy_archive_archive".to_owned(), shared_repository),
             ],
             loader,
         )
@@ -9519,15 +9102,9 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut short_first = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let mut long_first = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let untouched_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut short_first = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let mut long_first = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let untouched_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_alias = short_first.database("archive").unwrap().clone();
         let middle_alias = short_first.database("archive_copy").unwrap().clone();
         let long_alias = short_first
@@ -9560,15 +9137,10 @@ mod tests {
             middle_alias.pin()
         );
         assert_eq!(
-            short_first
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            short_first.database("archive_copy_archive").unwrap().pin(),
             long_alias.pin()
         );
-        short_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        short_first.detach_database("archive_copy_archive").unwrap();
         assert!(short_first.database("archive_copy_archive").is_none());
         assert_eq!(
             short_first.database("archive_copy").unwrap().pin(),
@@ -9577,9 +9149,7 @@ mod tests {
         short_first.detach_database("archive_copy").unwrap();
         assert!(short_first.database("archive_copy").is_none());
 
-        long_first
-            .detach_database("archive_copy_archive")
-            .unwrap();
+        long_first.detach_database("archive_copy_archive").unwrap();
         assert!(long_first.database("archive_copy_archive").is_none());
         assert_eq!(
             long_first.database("archive").unwrap().pin(),
@@ -9616,8 +9186,16 @@ mod tests {
         );
         for (pin, expected_name, expected_commit) in [
             (&short_alias, "archive", short_revision_commit.as_str()),
-            (&middle_alias, "archive_copy", middle_revision_commit.as_str()),
-            (&long_alias, "archive_copy_archive", long_revision_commit.as_str()),
+            (
+                &middle_alias,
+                "archive_copy",
+                middle_revision_commit.as_str(),
+            ),
+            (
+                &long_alias,
+                "archive_copy_archive",
+                long_revision_commit.as_str(),
+            ),
         ] {
             let terminal = resolver.resolve_for_parent(pin.clone()).unwrap();
             assert_eq!(terminal.primary().pin().name(), expected_name);
@@ -9676,23 +9254,15 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
                 ("archive".to_owned(), shared_repository.clone()),
                 ("archive_copy".to_owned(), shared_repository.clone()),
                 ("archive_copy_archive".to_owned(), shared_repository.clone()),
-                (
-                    "archive_copy_archive_archive".to_owned(),
-                    shared_repository,
-                ),
+                ("archive_copy_archive_archive".to_owned(), shared_repository),
             ],
             loader,
         )
@@ -9711,15 +9281,9 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut middle_first = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let mut endpoints_first = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let untouched_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut middle_first = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let mut endpoints_first = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let untouched_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_alias = middle_first.database("archive").unwrap().clone();
         let middle_alias = middle_first.database("archive_copy").unwrap().clone();
         let long_alias = middle_first
@@ -9752,10 +9316,7 @@ mod tests {
             short_alias.pin()
         );
         assert_eq!(
-            middle_first
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            middle_first.database("archive_copy_archive").unwrap().pin(),
             long_alias.pin()
         );
         middle_first.detach_database("archive").unwrap();
@@ -9783,9 +9344,7 @@ mod tests {
             endpoints_first.database("archive_copy").unwrap().pin(),
             middle_alias.pin()
         );
-        endpoints_first
-            .detach_database("archive_copy")
-            .unwrap();
+        endpoints_first.detach_database("archive_copy").unwrap();
         assert_eq!(endpoints_first.attached().count(), 0);
 
         assert_eq!(untouched_sibling.attached().count(), 3);
@@ -9806,8 +9365,16 @@ mod tests {
         );
         for (pin, expected_name, expected_commit) in [
             (&short_alias, "archive", short_revision_commit.as_str()),
-            (&middle_alias, "archive_copy", middle_revision_commit.as_str()),
-            (&long_alias, "archive_copy_archive", long_revision_commit.as_str()),
+            (
+                &middle_alias,
+                "archive_copy",
+                middle_revision_commit.as_str(),
+            ),
+            (
+                &long_alias,
+                "archive_copy_archive",
+                long_revision_commit.as_str(),
+            ),
         ] {
             let terminal = resolver.resolve_for_parent(pin.clone()).unwrap();
             assert_eq!(terminal.primary().pin().name(), expected_name);
@@ -9876,13 +9443,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -9911,18 +9473,11 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut historical = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let historical_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut historical = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let historical_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
-        let long_pin = historical
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_short = PinnedDatabase::resolve(
             "archive",
             shared_repository.clone(),
@@ -9938,8 +9493,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
-        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(
+            historical.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            historical.primary().pin().commit().as_str(),
+            historical_commit
+        );
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
@@ -9950,7 +9511,9 @@ mod tests {
         // reattaching endpoint aliases around a retained middle prefix. V1
         // replaces each full alias only in the selected closure.
         historical.detach_database("archive").unwrap();
-        historical.attach_database(replacement_short.clone()).unwrap();
+        historical
+            .attach_database(replacement_short.clone())
+            .unwrap();
         assert_eq!(
             historical.database("archive").unwrap().pin(),
             replacement_short.pin()
@@ -9960,22 +9523,16 @@ mod tests {
             middle_pin.pin()
         );
         assert_eq!(
-            historical
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            historical.database("archive_copy_archive").unwrap().pin(),
             long_pin.pin()
         );
 
+        historical.detach_database("archive_copy_archive").unwrap();
         historical
-            .detach_database("archive_copy_archive")
+            .attach_database(replacement_long.clone())
             .unwrap();
-        historical.attach_database(replacement_long.clone()).unwrap();
         assert_eq!(
-            historical
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            historical.database("archive_copy_archive").unwrap().pin(),
             replacement_long.pin()
         );
         assert_eq!(
@@ -9987,10 +9544,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         assert_eq!(
@@ -10000,12 +9554,16 @@ mod tests {
                 .pin(),
             long_pin.pin()
         );
-        let short_session = resolver
-            .resolve_for_parent(replacement_short)
-            .unwrap();
+        let short_session = resolver.resolve_for_parent(replacement_short).unwrap();
         let long_session = resolver.resolve_for_parent(replacement_long).unwrap();
-        assert_eq!(short_session.primary().pin().commit().as_str(), replacement_short_commit);
-        assert_eq!(long_session.primary().pin().commit().as_str(), replacement_long_commit);
+        assert_eq!(
+            short_session.primary().pin().commit().as_str(),
+            replacement_short_commit
+        );
+        assert_eq!(
+            long_session.primary().pin().commit().as_str(),
+            replacement_long_commit
+        );
         assert_eq!(short_session.attached().count(), 0);
         assert_eq!(long_session.attached().count(), 0);
         assert_eq!(
@@ -10065,13 +9623,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -10100,18 +9653,11 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut historical = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let historical_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut historical = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let historical_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
-        let long_pin = historical
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_middle = PinnedDatabase::resolve(
             "archive_copy",
             shared_repository,
@@ -10120,8 +9666,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
-        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(
+            historical.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            historical.primary().pin().commit().as_str(),
+            historical_commit
+        );
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
@@ -10132,7 +9684,9 @@ mod tests {
         // replacing the middle alias. V1 updates only that exact alias in
         // the selected closure and preserves both skipped-prefix endpoints.
         historical.detach_database("archive_copy").unwrap();
-        historical.attach_database(replacement_middle.clone()).unwrap();
+        historical
+            .attach_database(replacement_middle.clone())
+            .unwrap();
         assert_eq!(
             historical.database("archive").unwrap().pin(),
             short_pin.pin()
@@ -10142,10 +9696,7 @@ mod tests {
             replacement_middle.pin()
         );
         assert_eq!(
-            historical
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            historical.database("archive_copy_archive").unwrap().pin(),
             long_pin.pin()
         );
         assert_eq!(
@@ -10153,10 +9704,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         assert_eq!(
@@ -10166,13 +9714,8 @@ mod tests {
                 .pin(),
             long_pin.pin()
         );
-        let replacement_session = resolver
-            .resolve_for_parent(replacement_middle)
-            .unwrap();
-        assert_eq!(
-            replacement_session.primary().pin().name(),
-            "archive_copy"
-        );
+        let replacement_session = resolver.resolve_for_parent(replacement_middle).unwrap();
+        assert_eq!(replacement_session.primary().pin().name(), "archive_copy");
         assert_eq!(
             replacement_session.primary().pin().commit().as_str(),
             replacement_middle_commit
@@ -10230,13 +9773,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -10265,18 +9803,11 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut historical = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let historical_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut historical = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let historical_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
-        let long_pin = historical
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_middle = PinnedDatabase::resolve(
             "archive_copy",
             shared_repository,
@@ -10285,8 +9816,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
-        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(
+            historical.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            historical.primary().pin().commit().as_str(),
+            historical_commit
+        );
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
@@ -10296,7 +9833,9 @@ mod tests {
         // endpoint's exact OID. V1 preserves full alias identity and changes
         // only the selected closure's middle pin.
         historical.detach_database("archive_copy").unwrap();
-        historical.attach_database(replacement_middle.clone()).unwrap();
+        historical
+            .attach_database(replacement_middle.clone())
+            .unwrap();
         let replaced_middle = historical.database("archive_copy").unwrap();
         assert_eq!(replaced_middle.pin().commit(), short_pin.pin().commit());
         assert_ne!(replaced_middle.pin(), short_pin.pin());
@@ -10309,10 +9848,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical
-                .database("archive_copy_archive")
-                .unwrap()
-                .pin(),
+            historical.database("archive_copy_archive").unwrap().pin(),
             long_pin.pin()
         );
         assert_eq!(
@@ -10320,10 +9856,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         assert_eq!(
@@ -10333,13 +9866,8 @@ mod tests {
                 .pin(),
             long_pin.pin()
         );
-        let replacement_session = resolver
-            .resolve_for_parent(replacement_middle)
-            .unwrap();
-        assert_eq!(
-            replacement_session.primary().pin().name(),
-            "archive_copy"
-        );
+        let replacement_session = resolver.resolve_for_parent(replacement_middle).unwrap();
+        assert_eq!(replacement_session.primary().pin().name(), "archive_copy");
         assert_eq!(
             replacement_session.primary().pin().commit().as_str(),
             short_revision_commit
@@ -10397,13 +9925,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -10432,18 +9955,11 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut historical = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let historical_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut historical = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let historical_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
-        let long_pin = historical
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_middle = PinnedDatabase::resolve(
             "archive_copy",
             shared_repository,
@@ -10452,8 +9968,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
-        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(
+            historical.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            historical.primary().pin().commit().as_str(),
+            historical_commit
+        );
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
@@ -10463,7 +9985,9 @@ mod tests {
         // endpoint's OID. V1 preserves the endpoint distinction by exact alias
         // even when middle and long now share one immutable revision.
         historical.detach_database("archive_copy").unwrap();
-        historical.attach_database(replacement_middle.clone()).unwrap();
+        historical
+            .attach_database(replacement_middle.clone())
+            .unwrap();
         let replaced_middle = historical.database("archive_copy").unwrap();
         let unchanged_short = historical.database("archive").unwrap();
         let unchanged_long = historical.database("archive_copy_archive").unwrap();
@@ -10474,7 +9998,10 @@ mod tests {
         assert_ne!(replaced_middle.pin(), unchanged_long.pin());
         assert_eq!(unchanged_short.pin(), short_pin.pin());
         assert_eq!(unchanged_long.pin(), long_pin.pin());
-        assert_ne!(unchanged_short.pin().commit(), unchanged_long.pin().commit());
+        assert_ne!(
+            unchanged_short.pin().commit(),
+            unchanged_long.pin().commit()
+        );
         assert_eq!(
             replaced_middle.pin().commit().as_str(),
             long_revision_commit
@@ -10484,10 +10011,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         assert_eq!(
@@ -10497,13 +10021,8 @@ mod tests {
                 .pin(),
             long_pin.pin()
         );
-        let replacement_session = resolver
-            .resolve_for_parent(replacement_middle)
-            .unwrap();
-        assert_eq!(
-            replacement_session.primary().pin().name(),
-            "archive_copy"
-        );
+        let replacement_session = resolver.resolve_for_parent(replacement_middle).unwrap();
+        assert_eq!(replacement_session.primary().pin().name(), "archive_copy");
         assert_eq!(
             replacement_session.primary().pin().commit().as_str(),
             long_revision_commit
@@ -10561,13 +10080,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve(
-            "app",
-            app_repository.clone(),
-            &app_commit,
-            loader,
-        )
-        .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -10596,18 +10110,11 @@ mod tests {
             .database("archive_copy_archive_archive")
             .unwrap()
             .clone();
-        let mut historical = resolver
-            .resolve_for_parent(historical_pin.clone())
-            .unwrap();
-        let historical_sibling = resolver
-            .resolve_for_parent(historical_pin)
-            .unwrap();
+        let mut historical = resolver.resolve_for_parent(historical_pin.clone()).unwrap();
+        let historical_sibling = resolver.resolve_for_parent(historical_pin).unwrap();
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
-        let long_pin = historical
-            .database("archive_copy_archive")
-            .unwrap()
-            .clone();
+        let long_pin = historical.database("archive_copy_archive").unwrap().clone();
         let replacement_long = PinnedDatabase::resolve(
             "archive_copy_archive",
             shared_repository,
@@ -10616,8 +10123,14 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(historical.primary().pin().name(), "archive_copy_archive_archive");
-        assert_eq!(historical.primary().pin().commit().as_str(), historical_commit);
+        assert_eq!(
+            historical.primary().pin().name(),
+            "archive_copy_archive_archive"
+        );
+        assert_eq!(
+            historical.primary().pin().commit().as_str(),
+            historical_commit
+        );
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
@@ -10625,14 +10138,12 @@ mod tests {
         // The reference fixes the historical pins but is silent on rebinding
         // the longer alias to the middle alias's revision. V1 keys both by
         // their full names, even when they now select the same commit.
+        historical.detach_database("archive_copy_archive").unwrap();
         historical
-            .detach_database("archive_copy_archive")
+            .attach_database(replacement_long.clone())
             .unwrap();
-        historical.attach_database(replacement_long.clone()).unwrap();
         let retained_middle = historical.database("archive_copy").unwrap();
-        let rebound_long = historical
-            .database("archive_copy_archive")
-            .unwrap();
+        let rebound_long = historical.database("archive_copy_archive").unwrap();
         assert_eq!(retained_middle.pin().commit(), rebound_long.pin().commit());
         assert_ne!(retained_middle.pin(), rebound_long.pin());
         assert_eq!(
@@ -10648,8 +10159,7 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy").unwrap().pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         assert_eq!(
@@ -10860,8 +10370,8 @@ mod tests {
         );
 
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader)
-            .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -10895,13 +10405,9 @@ mod tests {
         let short_pin = historical.database("archive").unwrap().clone();
         let middle_pin = historical.database("archive_copy").unwrap().clone();
         let long_pin = historical.database("archive_copy_archive").unwrap().clone();
-        let replacement_short = PinnedDatabase::resolve(
-            "archive",
-            shared_repository,
-            &long_revision_commit,
-            loader,
-        )
-        .unwrap();
+        let replacement_short =
+            PinnedDatabase::resolve("archive", shared_repository, &long_revision_commit, loader)
+                .unwrap();
 
         assert_eq!(short_pin.pin().commit().as_str(), short_revision_commit);
         assert_eq!(middle_pin.pin().commit().as_str(), middle_revision_commit);
@@ -10910,7 +10416,9 @@ mod tests {
         // The reference fixes historical pins but is silent on rebinding the
         // short alias to a longer alias's revision. V1 preserves each name.
         historical.detach_database("archive").unwrap();
-        historical.attach_database(replacement_short.clone()).unwrap();
+        historical
+            .attach_database(replacement_short.clone())
+            .unwrap();
         let rebound_short = historical.database("archive").unwrap();
         let retained_long = historical.database("archive_copy_archive").unwrap();
         assert_eq!(rebound_short.pin().commit(), retained_long.pin().commit());
@@ -11032,8 +10540,8 @@ mod tests {
         let nested_archive_tail_29_closure_alias =
             format!("{nested_archive_tail_28_closure_alias}_archive");
         let loader = ProjectLoader::default();
-        let app = PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader)
-            .unwrap();
+        let app =
+            PinnedDatabase::resolve("app", app_repository.clone(), &app_commit, loader).unwrap();
         let resolver = PackageResolver::new(
             [
                 ("app".to_owned(), app_repository),
@@ -11214,18 +10722,10 @@ mod tests {
         assert_eq!(long_pin.pin().commit().as_str(), long_revision_commit);
 
         let mut equal_pin_nested_session = resolver
-            .resolve_for_parent(
-                historical_sibling
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(historical_sibling.database("archive_copy").unwrap().clone())
             .unwrap();
         assert_eq!(
-            equal_pin_nested_session
-                .database("archive")
-                .unwrap()
-                .pin(),
+            equal_pin_nested_session.database("archive").unwrap().pin(),
             historical_sibling.database("archive").unwrap().pin()
         );
 
@@ -11239,16 +10739,11 @@ mod tests {
             loader,
         )
         .unwrap();
-        equal_pin_nested_session
-            .detach_database("archive")
-            .unwrap();
+        equal_pin_nested_session.detach_database("archive").unwrap();
         equal_pin_nested_session
             .attach_database(equal_pin_replacement.clone())
             .unwrap();
-        assert_eq!(
-            equal_pin_nested_session.primary().pin(),
-            middle_pin.pin()
-        );
+        assert_eq!(equal_pin_nested_session.primary().pin(), middle_pin.pin());
         assert_eq!(
             equal_pin_nested_session
                 .database("archive")
@@ -11263,19 +10758,11 @@ mod tests {
             short_pin.pin()
         );
         assert_eq!(
-            historical_sibling
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            historical_sibling.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
-        let equal_pin_rebound_session = resolver
-            .resolve_for_parent(equal_pin_replacement)
-            .unwrap();
-        assert_eq!(
-            equal_pin_rebound_session.primary().pin().name(),
-            "archive"
-        );
+        let equal_pin_rebound_session = resolver.resolve_for_parent(equal_pin_replacement).unwrap();
+        assert_eq!(equal_pin_rebound_session.primary().pin().name(), "archive");
         assert_eq!(
             equal_pin_rebound_session
                 .database("archive_copy")
@@ -11292,10 +10779,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            equal_pin_rebound_child
-                .database("archive")
-                .unwrap()
-                .pin(),
+            equal_pin_rebound_child.database("archive").unwrap().pin(),
             short_pin.pin()
         );
 
@@ -11338,7 +10822,9 @@ mod tests {
         );
 
         historical.detach_database("archive").unwrap();
-        historical.attach_database(replacement_short.clone()).unwrap();
+        historical
+            .attach_database(replacement_short.clone())
+            .unwrap();
         let rebound_short = historical.database("archive").unwrap();
         let retained_long = historical.database("archive_copy_archive").unwrap();
         assert_eq!(rebound_short.pin().commit(), retained_long.pin().commit());
@@ -11381,21 +10867,16 @@ mod tests {
             middle_revision_commit
         );
         assert_eq!(
-            long_endpoint_session.database("archive_copy").unwrap().pin(),
+            long_endpoint_session
+                .database("archive_copy")
+                .unwrap()
+                .pin(),
             rebound_session.database("archive_copy").unwrap().pin()
         );
         let mut rebound_child_session = resolver
-            .resolve_for_parent(
-                rebound_session
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(rebound_session.database("archive_copy").unwrap().clone())
             .unwrap();
-        assert_eq!(
-            rebound_child_session.primary().pin().name(),
-            "archive_copy"
-        );
+        assert_eq!(rebound_child_session.primary().pin().name(), "archive_copy");
         assert_eq!(
             rebound_child_session
                 .database("archive")
@@ -11414,12 +10895,7 @@ mod tests {
         );
 
         let nested_child_sibling = resolver
-            .resolve_for_parent(
-                rebound_session
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(rebound_session.database("archive_copy").unwrap().clone())
             .unwrap();
         let nested_replacement_short = PinnedDatabase::resolve(
             "archive",
@@ -11489,47 +10965,31 @@ mod tests {
         );
 
         let mut expanded_nested_child = resolver
-            .resolve_for_parent(
-                historical_sibling
-                    .database("archive_copy")
-                    .unwrap()
-                    .clone(),
-            )
+            .resolve_for_parent(historical_sibling.database("archive_copy").unwrap().clone())
             .unwrap();
         assert_eq!(
-            expanded_nested_child
-                .database("archive")
-                .unwrap()
-                .pin(),
+            expanded_nested_child.database("archive").unwrap().pin(),
             short_pin.pin()
         );
         let expanded_deep_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "nested_archive_copy_archive {long_revision_commit}\n"
-            ),
+            &format!("nested_archive_copy_archive {long_revision_commit}\n"),
         );
         let expanded_deeper_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "nested_archive_copy_archive_copy {expanded_deep_commit}\n"
-            ),
+            &format!("nested_archive_copy_archive_copy {expanded_deep_commit}\n"),
         );
         let expanded_deepest_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "nested_archive_copy_archive_copy_archive {expanded_deeper_commit}\n"
-            ),
+            &format!("nested_archive_copy_archive_copy_archive {expanded_deeper_commit}\n"),
         );
         let expanded_deeper_deepest_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "nested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\n"
-            ),
+            &format!("nested_archive_copy_archive_copy_archive_copy {expanded_deepest_commit}\n"),
         );
         let expanded_final_commit = write_commit(
             shared_dir.path(),
@@ -11681,51 +11141,37 @@ mod tests {
         let expanded_tail_23_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_22_closure_alias} {expanded_tail_22_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_22_closure_alias} {expanded_tail_22_closure_commit}\n"),
         );
         let expanded_tail_24_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_23_closure_alias} {expanded_tail_23_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_23_closure_alias} {expanded_tail_23_closure_commit}\n"),
         );
         let expanded_tail_25_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_24_closure_alias} {expanded_tail_24_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_24_closure_alias} {expanded_tail_24_closure_commit}\n"),
         );
         let expanded_tail_26_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_25_closure_alias} {expanded_tail_25_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_25_closure_alias} {expanded_tail_25_closure_commit}\n"),
         );
         let expanded_tail_27_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_26_closure_alias} {expanded_tail_26_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_26_closure_alias} {expanded_tail_26_closure_commit}\n"),
         );
         let expanded_tail_28_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_27_closure_alias} {expanded_tail_27_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_27_closure_alias} {expanded_tail_27_closure_commit}\n"),
         );
         let expanded_tail_29_closure_commit = write_commit(
             shared_dir.path(),
             PACKAGE_PIN_MANIFEST_PATH,
-            &format!(
-                "{nested_archive_tail_28_closure_alias} {expanded_tail_28_closure_commit}\n"
-            ),
+            &format!("{nested_archive_tail_28_closure_alias} {expanded_tail_28_closure_commit}\n"),
         );
         let expanded_short_commit = write_commit(
             shared_dir.path(),
@@ -11749,10 +11195,7 @@ mod tests {
         expanded_nested_child
             .attach_database(expanded_short_replacement.clone())
             .unwrap();
-        assert_eq!(
-            expanded_nested_child.primary().pin(),
-            middle_pin.pin()
-        );
+        assert_eq!(expanded_nested_child.primary().pin(), middle_pin.pin());
         assert_eq!(
             expanded_nested_child
                 .database("archive")
@@ -11810,10 +11253,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_short_child
-                .database("archive")
-                .unwrap()
-                .pin(),
+            expanded_short_child.database("archive").unwrap().pin(),
             short_pin.pin()
         );
         let nested_archive_long_pin = expanded_short_session
@@ -11842,10 +11282,7 @@ mod tests {
             "nested_archive_copy_archive"
         );
         assert_eq!(
-            expanded_long_child
-                .database("archive_copy")
-                .unwrap()
-                .pin(),
+            expanded_long_child.database("archive_copy").unwrap().pin(),
             middle_pin.pin()
         );
         let expanded_long_grandchild = resolver
@@ -11857,10 +11294,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_long_grandchild
-                .database("archive")
-                .unwrap()
-                .pin(),
+            expanded_long_grandchild.database("archive").unwrap().pin(),
             short_pin.pin()
         );
         // The reference is silent on continuing an expanded alias route
@@ -12109,7 +11543,9 @@ mod tests {
         let expanded_tail_child = resolver
             .resolve_for_parent(
                 expanded_short_session
-                    .database("nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy")
+                    .database(
+                        "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy",
+                    )
                     .unwrap()
                     .clone(),
             )
@@ -12128,7 +11564,9 @@ mod tests {
         // The reference is silent on this additional repeated suffix; v1
         // keeps the alias distinct and retains the preceding terminal pin.
         let nested_archive_next_tail_pin = expanded_short_session
-            .database("nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive")
+            .database(
+                "nested_archive_copy_archive_copy_archive_copy_archive_copy_archive_copy_archive",
+            )
             .unwrap()
             .pin();
         assert_eq!(
@@ -12565,7 +12003,9 @@ mod tests {
             nested_archive_final_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
-            nested_archive_final_extended_closure_tail_pin.commit().as_str(),
+            nested_archive_final_extended_closure_tail_pin
+                .commit()
+                .as_str(),
             expanded_final_extended_closure_tail_commit
         );
         let expanded_final_extended_closure_tail_child = resolver
@@ -12577,7 +12017,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_final_extended_closure_tail_child.primary().pin().name(),
+            expanded_final_extended_closure_tail_child
+                .primary()
+                .pin()
+                .name(),
             nested_archive_final_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
@@ -12598,7 +12041,9 @@ mod tests {
             nested_archive_next_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
-            nested_archive_next_extended_closure_tail_pin.commit().as_str(),
+            nested_archive_next_extended_closure_tail_pin
+                .commit()
+                .as_str(),
             expanded_next_extended_closure_tail_commit
         );
         let expanded_next_extended_closure_tail_child = resolver
@@ -12610,7 +12055,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_next_extended_closure_tail_child.primary().pin().name(),
+            expanded_next_extended_closure_tail_child
+                .primary()
+                .pin()
+                .name(),
             nested_archive_next_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
@@ -12631,7 +12079,9 @@ mod tests {
             nested_archive_terminal_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
-            nested_archive_terminal_extended_closure_tail_pin.commit().as_str(),
+            nested_archive_terminal_extended_closure_tail_pin
+                .commit()
+                .as_str(),
             expanded_terminal_extended_closure_tail_commit
         );
         let expanded_terminal_extended_closure_tail_child = resolver
@@ -12643,7 +12093,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_terminal_extended_closure_tail_child.primary().pin().name(),
+            expanded_terminal_extended_closure_tail_child
+                .primary()
+                .pin()
+                .name(),
             nested_archive_terminal_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
@@ -12664,7 +12117,9 @@ mod tests {
             nested_archive_ultimate_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
-            nested_archive_ultimate_extended_closure_tail_pin.commit().as_str(),
+            nested_archive_ultimate_extended_closure_tail_pin
+                .commit()
+                .as_str(),
             expanded_ultimate_extended_closure_tail_commit
         );
         let expanded_ultimate_extended_closure_tail_child = resolver
@@ -12676,7 +12131,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            expanded_ultimate_extended_closure_tail_child.primary().pin().name(),
+            expanded_ultimate_extended_closure_tail_child
+                .primary()
+                .pin()
+                .name(),
             nested_archive_ultimate_extended_closure_tail_alias.as_str()
         );
         assert_eq!(
@@ -12976,43 +12434,19 @@ mod tests {
                 .replace("meter: Length", "meter: Time"),
         );
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &primary_commit,
-            loader,
-        )
-        .unwrap();
-        let same = PinnedDatabase::resolve(
-            "measurements",
-            same_repository,
-            &same_commit,
-            loader,
-        )
-        .unwrap();
-        let different = PinnedDatabase::resolve(
-            "archive",
-            different_repository,
-            &different_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
+        let same =
+            PinnedDatabase::resolve("measurements", same_repository, &same_commit, loader).unwrap();
+        let different =
+            PinnedDatabase::resolve("archive", different_repository, &different_commit, loader)
+                .unwrap();
         let mut session = AttachedDatabaseSession::new(primary).unwrap();
         session.attach_database(same).unwrap();
         session.attach_database(different).unwrap();
 
-        assert!(session.units_structurally_equivalent(
-            "app",
-            "meter",
-            "measurements",
-            "meter"
-        ));
-        assert!(!session.units_structurally_equivalent(
-            "app",
-            "meter",
-            "archive",
-            "meter"
-        ));
+        assert!(session.units_structurally_equivalent("app", "meter", "measurements", "meter"));
+        assert!(!session.units_structurally_equivalent("app", "meter", "archive", "meter"));
     }
 
     /// ORNA-PACKAGE-001: package pins reject moving selectors in favor of exact commits.
@@ -13030,21 +12464,24 @@ mod tests {
     fn std_package_pin_must_match_the_gitlink_when_both_are_committed() {
         let (std_directory, std_repository, first_std_commit) =
             repository(include_str!("fixtures/attached-package-main.orna"));
-        let second_std_source = include_str!("fixtures/attached-package-main.orna").replace("42", "43");
-        let second_std_commit = write_commit(
-            std_directory.path(),
-            "main.orna",
-            &second_std_source,
-        );
+        let second_std_source =
+            include_str!("fixtures/attached-package-main.orna").replace("42", "43");
+        let second_std_commit = write_commit(std_directory.path(), "main.orna", &second_std_source);
 
         let primary_directory = tempfile::tempdir().unwrap();
         git(primary_directory.path(), &["init", "--quiet"]);
-        git(primary_directory.path(), &["config", "user.name", "kierandrewett"]);
+        git(
+            primary_directory.path(),
+            &["config", "user.name", "kierandrewett"],
+        );
         git(
             primary_directory.path(),
             &["config", "user.email", "kieran@drewett.dev"],
         );
-        git(primary_directory.path(), &["config", "commit.gpgsign", "false"]);
+        git(
+            primary_directory.path(),
+            &["config", "commit.gpgsign", "false"],
+        );
         fs::write(
             primary_directory.path().join("main.orna"),
             include_str!("fixtures/attached-primary-main.orna"),
@@ -13056,7 +12493,10 @@ mod tests {
             format!("std {first_std_commit}\n"),
         )
         .unwrap();
-        git(primary_directory.path(), &["add", "main.orna", ".orna/packages"]);
+        git(
+            primary_directory.path(),
+            &["add", "main.orna", ".orna/packages"],
+        );
         let link = format!("160000,{second_std_commit},stdlib/std");
         git(
             primary_directory.path(),
@@ -13069,18 +12509,10 @@ mod tests {
         let primary_repository = Repository::discover(primary_directory.path()).unwrap();
         let parent = git(primary_directory.path(), &["rev-parse", "HEAD"]);
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository.clone(),
-            &parent,
-            loader,
-        )
-        .unwrap();
-        let resolver = PackageResolver::new(
-            [("std".to_owned(), std_repository.clone())],
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository.clone(), &parent, loader).unwrap();
+        let resolver =
+            PackageResolver::new([("std".to_owned(), std_repository.clone())], loader).unwrap();
         assert!(matches!(
             resolver.resolve_for_parent(primary),
             Err(AttachmentError::PinUnavailable)
@@ -13092,13 +12524,8 @@ mod tests {
             &format!("std {second_std_commit}\n"),
         );
         let matching_parent = git(primary_directory.path(), &["rev-parse", "HEAD"]);
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &matching_parent,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &matching_parent, loader).unwrap();
         let session = resolver.resolve_for_parent(primary).unwrap();
         assert_eq!(
             session.standard_snapshot().unwrap().as_str(),
@@ -13138,20 +12565,11 @@ mod tests {
             include_str!("fixtures/attached-read-package-row.orna"),
         );
         let loader = ProjectLoader::default();
-        let primary = PinnedDatabase::resolve(
-            "app",
-            primary_repository,
-            &primary_commit,
-            loader,
-        )
-        .unwrap();
-        let archive = PinnedDatabase::resolve(
-            "archive",
-            archive_repository,
-            &archive_commit,
-            loader,
-        )
-        .unwrap();
+        let primary =
+            PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
+        let archive =
+            PinnedDatabase::resolve("archive", archive_repository, &archive_commit, loader)
+                .unwrap();
         let mut session = AttachedDatabaseSession::new(primary).unwrap();
         session.attach_database(archive).unwrap();
 

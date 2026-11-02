@@ -334,7 +334,11 @@ fn semantic_legend_table_aligns_every_row_to_the_same_columns() {
         let line = lines[index + 1];
         assert!(line.starts_with(&format!("{index} ")), "{line}");
         assert!(line.contains(token_type), "{line}");
-        assert_eq!(line.find(editor::token_type_sample(token_type).unwrap()), Some(sample_column), "{line}");
+        assert_eq!(
+            line.find(editor::token_type_sample(token_type).unwrap()),
+            Some(sample_column),
+            "{line}"
+        );
     }
 }
 

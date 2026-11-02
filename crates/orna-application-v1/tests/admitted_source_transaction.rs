@@ -6,10 +6,9 @@ use orna_live_v1::{LiveApplication, LiveApplicationWorkSupervisor, LiveEvalRespo
 use orna_protocol_v1::{Envelope, Message, PresentationContext, ResultStatus};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ActivationEffectReport, DeclaredEffectSet,
-    Component, ConsumerIdentity, FaultInjector, FaultPoint, RequestIdentity, RequestState,
-    RunObservationRegistration, RuntimeError, RuntimeIdentity, RuntimeState, StagedTableActivation,
-    TerminalOutcome, WriterLease,
+    ActivationEffectReport, Component, ConsumerIdentity, DeclaredEffectSet, FaultInjector,
+    FaultPoint, RequestIdentity, RequestState, RunObservationRegistration, RuntimeError,
+    RuntimeIdentity, RuntimeState, StagedTableActivation, TerminalOutcome, WriterLease,
 };
 use orna_semantic_v1::Catalogue;
 use std::{
@@ -430,8 +429,8 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
     );
     assert_eq!(
         CanonicalValue::decode(committed_mutation.value().unwrap())
-        .unwrap()
-        .raw(),
+            .unwrap()
+            .raw(),
         &OvbRaw::Map(vec![
             (OvbRaw::Text("id".to_owned()), OvbRaw::Int(12.into()),),
             (OvbRaw::Text("doubled".to_owned()), OvbRaw::Int(17.into()),),

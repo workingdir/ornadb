@@ -19,7 +19,8 @@ fn nested_block_recovery_keeps_a_guarded_list_pattern_suffix() {
         panic!("expected the nested-form function");
     };
     let Expr::Block {
-        tail: Some(root_tail), ..
+        tail: Some(root_tail),
+        ..
     } = body
     else {
         panic!("expected a string expression at the block tail: {body:?}");
@@ -50,7 +51,8 @@ fn nested_block_recovery_keeps_a_guarded_list_pattern_suffix() {
     assert!(matches!(&outer_arms[1].body, Expr::Literal { text, .. } if text == "\"fallback\""));
 
     let Expr::Block {
-        tail: Some(inner_tail), ..
+        tail: Some(inner_tail),
+        ..
     } = &outer_arms[0].body
     else {
         panic!("outer case lost its nested block: {:?}", outer_arms[0].body);

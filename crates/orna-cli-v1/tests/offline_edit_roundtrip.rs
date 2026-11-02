@@ -57,7 +57,11 @@ fn edited_catalogue_exports_offline_and_reimports_identically() {
     write_offline_copy(&bundle, std::slice::from_ref(&row), &[]).unwrap();
 
     let plan = OfflineCopy::open(&bundle).unwrap().import_plan().unwrap();
-    assert_eq!(plan.rows.len(), 1, "the export holds exactly the edited row");
+    assert_eq!(
+        plan.rows.len(),
+        1,
+        "the export holds exactly the edited row"
+    );
     let reimported = &plan.rows[0];
     assert_eq!(reimported.key, row.key);
     assert_eq!(reimported.media_type, row.media_type);

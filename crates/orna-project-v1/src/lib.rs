@@ -21,46 +21,45 @@ use orna_repository_v1::{
 use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
-    Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput, StandardCatalogueError,
-    StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
+    Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput,
+    StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
     lower_data_expression, lower_row_unit_with_key_spelling,
 };
 use orna_syntax_v1::{
-    Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file, parse_row,
-    parse_row_with_file,
+    Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
+    parse_row, parse_row_with_file,
 };
 
 use orna_value_v1::{
-    ContextValue, Format3Context, Raw, SchemaDescriptor, Snapshot, Value, ValueFormat, ROV3_BLOB_TAG,
+    ContextValue, Format3Context, ROV3_BLOB_TAG, Raw, SchemaDescriptor, Snapshot, Value,
+    ValueFormat,
 };
 use unicode_normalization::UnicodeNormalization;
 
 mod attachments;
-mod unicode16;
 mod object_identity;
-mod typed_row;
 mod table_storage;
+mod typed_row;
+mod unicode16;
 
 pub use object_identity::{
-    ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest, ObjectIdentityRename,
-    ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
-    OBJECT_IDENTITY_MANIFEST_PATH,
+    OBJECT_IDENTITY_MANIFEST_PATH, ObjectIdentity, ObjectIdentityError, ObjectIdentityManifest,
+    ObjectIdentityRename, ObjectKind, SourceTableSchemaArtifact, SourceTableSchemaError,
 };
-pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 pub use table_storage::{
     CommittedReadError, CommittedReadLimits, CommittedTable, TableStorageError,
-    admitted_table_schemas, blob_placeholder, committed_tables, private_candidate_tables,
-    evaluator_rows, evaluator_rows_from_stored, has_text_primary_key, holds_blob,
+    admitted_table_schemas, blob_placeholder, committed_tables, evaluator_rows,
+    evaluator_rows_from_stored, has_text_primary_key, holds_blob, private_candidate_tables,
     restore_stored_blobs, runtime_key_from_evaluator, storage_row_from_record, stored_field_names,
     stored_rows_hold_blob,
 };
+pub use typed_row::{DescriptorField, StoredSchema, TypedRowError};
 
 pub use attachments::{
-    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, PACKAGE_PIN_MANIFEST_PATH,
-    NestedPairDepthLabel, PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver,
+    AttachedDatabaseSession, AttachedRelationSource, AttachmentError, NestedPairDepthLabel,
+    PACKAGE_PIN_MANIFEST_PATH, PackagePin, PackagePinManifest, PackagePinSpec, PackageResolver,
     PinnedDatabase, ReboundPathCheckpoint, ReboundPathResolution, SiblingRebindResolution,
 };
-
 
 /// Bounded resource limits applied before source contents are read.
 ///
@@ -341,11 +340,9 @@ impl LoadedProject {
         &self.loose_rows
     }
 
-
     pub fn into_loose_rows(self) -> Vec<LooseRowCandidate> {
         self.loose_rows
     }
-
 
     pub fn into_modules(self) -> Vec<ModuleInput> {
         self.modules
@@ -564,14 +561,13 @@ pub fn admit_format3_row(
             .is_some_and(|value| *value == typed_key.raw())
     } else {
         match typed_key.raw() {
-            Raw::Array(components) if components.len() == key_fields.len() => key_fields
-                .iter()
-                .zip(components)
-                .all(|(field, component)| {
+            Raw::Array(components) if components.len() == key_fields.len() => {
+                key_fields.iter().zip(components).all(|(field, component)| {
                     row_fields
                         .get(field.name.as_str())
                         .is_some_and(|value| *value == component)
-                }),
+                })
+            }
             _ => false,
         }
     };
@@ -587,9 +583,10 @@ pub fn admit_format3_row(
         .filter(|field| field.role == 1)
         .map(|field| field.name.as_str())
         .collect::<BTreeSet<_>>();
-    if row_fields.keys().any(|name| {
-        !key_field_names.contains(*name) && !stored_names.contains(*name)
-    }) {
+    if row_fields
+        .keys()
+        .any(|name| !key_field_names.contains(*name) && !stored_names.contains(*name))
+    {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     let stored_row_fields = fields
@@ -747,13 +744,17 @@ fn admit_source_row_with_owner_fields_inner(
     {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
-    let owner_field_names = owner_field_values.iter().map(|(name, _)| name.clone()).collect::<Vec<_>>();
+    let owner_field_names = owner_field_values
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
     let parsed_row = parse_row(source);
     if !parsed_row.diagnostics.is_empty() {
         return Err(ProjectLoadError::InvalidSourceRow);
     }
     let Expr::Record {
-        fields: parsed_fields, ..
+        fields: parsed_fields,
+        ..
     } = parsed_row.value
     else {
         return Err(ProjectLoadError::InvalidSourceRow);
@@ -916,8 +917,7 @@ fn admit_stored_source_row(
         _ => false,
     };
     let mutation_key = if is_text_primary_key {
-        let key = Value::decode(&canonical_key)
-            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+        let key = Value::decode(&canonical_key).map_err(|_| ProjectLoadError::InvalidSourceRow)?;
         let Raw::Text(key) = key.raw() else {
             return Err(ProjectLoadError::InvalidSourceRow);
         };
@@ -962,7 +962,10 @@ fn admit_stored_source_row(
                         .get(field.name.as_str())
                         .is_some_and(|value| **value == Raw::Null)
                 {
-                    stored_fields.push(Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(0.into())]))));
+                    stored_fields.push(Raw::Tag(
+                        60013,
+                        Box::new(Raw::Array(vec![Raw::Int(0.into())])),
+                    ));
                     continue;
                 }
                 return Err(ProjectLoadError::InvalidSourceRow);
@@ -971,14 +974,18 @@ fn admit_stored_source_row(
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let encoded_value = binding.encoded_value().to_vec();
-            let decoded = ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
-                .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+            let decoded =
+                ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, context)
+                    .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
             if !matches!(decoded.raw(), Raw::Tag(ROV3_BLOB_TAG, _)) {
                 return Err(ProjectLoadError::InvalidSourceRow);
             }
             let encoded_blob = decoded.into_raw();
             stored_fields.push(if field.is_optional_blob {
-                Raw::Tag(60013, Box::new(Raw::Array(vec![Raw::Int(1.into()), encoded_blob])))
+                Raw::Tag(
+                    60013,
+                    Box::new(Raw::Array(vec![Raw::Int(1.into()), encoded_blob])),
+                )
             } else {
                 encoded_blob
             });
@@ -1073,7 +1080,9 @@ struct SourceSchemaField {
 }
 
 fn source_schema_blob_optional(ty: &Raw) -> Option<bool> {
-    let Raw::Array(parts) = ty else { return None; };
+    let Raw::Array(parts) = ty else {
+        return None;
+    };
     match parts.as_slice() {
         [Raw::Int(kind), Raw::Text(name)]
             if kind.to_string() == "0"
@@ -1094,8 +1103,8 @@ fn source_schema_fields(
     let table_id = raw_map_value(descriptor.raw(), "1")
         .and_then(committed_uuid)
         .ok_or(ProjectLoadError::InvalidSourceRow)?;
-    let Raw::Array(entries) = raw_map_value(descriptor.raw(), "3")
-        .ok_or(ProjectLoadError::InvalidSourceRow)?
+    let Raw::Array(entries) =
+        raw_map_value(descriptor.raw(), "3").ok_or(ProjectLoadError::InvalidSourceRow)?
     else {
         return Err(ProjectLoadError::InvalidSourceRow);
     };
@@ -1103,7 +1112,9 @@ fn source_schema_fields(
     let mut names = BTreeSet::new();
     let mut fields = Vec::with_capacity(entries.len());
     for entry in entries {
-        let Raw::Array(parts) = entry else { return Err(ProjectLoadError::InvalidSourceRow); };
+        let Raw::Array(parts) = entry else {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        };
         let [id, Raw::Text(name), ty, Raw::Int(role), _] = parts.as_slice() else {
             return Err(ProjectLoadError::InvalidSourceRow);
         };
@@ -1112,9 +1123,14 @@ fn source_schema_fields(
             return Err(ProjectLoadError::InvalidSourceRow);
         }
         let blob_optional = source_schema_blob_optional(ty);
-        let role = role.to_string().parse::<u64>().map_err(|_| ProjectLoadError::InvalidSourceRow)?;
+        let role = role
+            .to_string()
+            .parse::<u64>()
+            .map_err(|_| ProjectLoadError::InvalidSourceRow)?;
         // Role 2 is a computed selector: never a stored column (ORNA-FIELD-006).
-        if role > 2 { return Err(ProjectLoadError::InvalidSourceRow); }
+        if role > 2 {
+            return Err(ProjectLoadError::InvalidSourceRow);
+        }
         fields.push(SourceSchemaField {
             id,
             name: name.clone(),
@@ -1137,7 +1153,8 @@ fn format_context_matches_source_schema(
     expected_database_id: &[u8; 16],
     commit: &str,
 ) -> bool {
-    context.database_uuid() == *expected_database_id && format_context_matches_commit(context, commit)
+    context.database_uuid() == *expected_database_id
+        && format_context_matches_commit(context, commit)
 }
 
 fn format_context_matches_commit(context: &Format3Context, commit: &str) -> bool {
@@ -1146,7 +1163,9 @@ fn format_context_matches_commit(context: &Format3Context, commit: &str) -> bool
         64 => (orna_value_v1::GitHash::Sha256, decode_source_oid(commit)),
         _ => return false,
     };
-    let Some(oid) = oid else { return false; };
+    let Some(oid) = oid else {
+        return false;
+    };
     matches!(context.pin(), Snapshot::Commit { database, algorithm: actual_algorithm, oid: actual_oid }
         if *database == context.database_uuid()
             && *actual_algorithm == algorithm
@@ -1154,12 +1173,18 @@ fn format_context_matches_commit(context: &Format3Context, commit: &str) -> bool
 }
 
 fn decode_source_oid(value: &str) -> Option<Vec<u8>> {
-    if !value.is_ascii() || !value.len().is_multiple_of(2) { return None; }
-    value.as_bytes().chunks_exact(2).map(|pair| {
-        let high = (pair[0] as char).to_digit(16)?;
-        let low = (pair[1] as char).to_digit(16)?;
-        Some(((high << 4) | low) as u8)
-    }).collect()
+    if !value.is_ascii() || !value.len().is_multiple_of(2) {
+        return None;
+    }
+    value
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = (pair[0] as char).to_digit(16)?;
+            let low = (pair[1] as char).to_digit(16)?;
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 /// Loads the root module and its reachable ordinary source imports.
@@ -1238,7 +1263,8 @@ impl ProjectLoader {
         repository: &Repository,
         commit: &GitCommitRef,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let project = self.load_committed_snapshot_with_standard_profile(repository, commit, None)?;
+        let project =
+            self.load_committed_snapshot_with_standard_profile(repository, commit, None)?;
         self.bind_attached_standard_module(repository, Some(commit), project)
     }
 
@@ -1401,7 +1427,8 @@ impl ProjectLoader {
         repository: &Repository,
         candidate: &PrivateCommit,
     ) -> Result<LoadedProject, ProjectLoadError> {
-        let project = self.load_private_candidate_with_standard_profile(repository, candidate, None)?;
+        let project =
+            self.load_private_candidate_with_standard_profile(repository, candidate, None)?;
         self.bind_private_standard_module(repository, candidate, project)
     }
 
@@ -1561,13 +1588,9 @@ impl ProjectLoader {
         if available.contains("std/main.orna") {
             roots.push(String::from("main.orna"));
         }
-        let Ok(module_project) = self.load_committed_project(
-            &module_repository,
-            &module_commit,
-            None,
-            roots,
-            true,
-        ) else {
+        let Ok(module_project) =
+            self.load_committed_project(&module_repository, &module_commit, None, roots, true)
+        else {
             return;
         };
         let sources = module_project
@@ -1720,15 +1743,16 @@ fn source_table_module_name(
     resolved.ok_or(ProjectLoadError::InvalidTableSchema)
 }
 
-
 fn raw_map_value<'a>(raw: &'a Raw, key: &str) -> Option<&'a Raw> {
     let Raw::Map(entries) = raw else {
         return None;
     };
-    entries.iter().find_map(|(candidate, value)| match candidate {
-        Raw::Int(integer) if integer.to_string() == key => Some(value),
-        _ => None,
-    })
+    entries
+        .iter()
+        .find_map(|(candidate, value)| match candidate {
+            Raw::Int(integer) if integer.to_string() == key => Some(value),
+            _ => None,
+        })
 }
 
 fn committed_uuid(raw: &Raw) -> Option<[u8; 16]> {
@@ -2010,7 +2034,9 @@ impl fmt::Display for ProjectLoadError {
             Self::InvalidTableSchema => {
                 "committed table schema could not be resolved from source and identity metadata"
             }
-            Self::InvalidSourceRow => "source row could not be admitted against its committed schema",
+            Self::InvalidSourceRow => {
+                "source row could not be admitted against its committed schema"
+            }
         })
     }
 }
@@ -2259,13 +2285,11 @@ fn validate_committed_tree_entry(
 }
 
 fn is_committed_metadata_path(root: &Path, path: &Path) -> bool {
-    path.strip_prefix(root)
-        .ok()
-        .is_some_and(|relative| {
-            relative
-                .components()
-                .any(|component| component.as_os_str() == ".orna")
-        })
+    path.strip_prefix(root).ok().is_some_and(|relative| {
+        relative
+            .components()
+            .any(|component| component.as_os_str() == ".orna")
+    })
 }
 
 fn is_module_source_path(root: &Path, path: &Path) -> bool {
@@ -2351,10 +2375,7 @@ fn resolve_std_snapshot_import(
 
 /// Maps a requested `std/<path>.orna` onto the module file that exists:
 /// either the file itself or its directory `main.orna`, never both.
-fn canonical_standard_module(
-    requested: &str,
-    available: impl Fn(&str) -> bool,
-) -> Option<String> {
+fn canonical_standard_module(requested: &str, available: impl Fn(&str) -> bool) -> Option<String> {
     let base = requested.strip_suffix(".orna")?;
     let directory = format!("{base}/main.orna");
     match (available(requested), available(&directory)) {
@@ -2415,8 +2436,8 @@ fn discover_worktree_rows(
     paths
         .into_iter()
         .map(|logical_path| {
-            let (table_path, key_path) =
-                table_owner_and_key(&logical_path, table_paths).ok_or(ProjectLoadError::UnsafePath)?;
+            let (table_path, key_path) = table_owner_and_key(&logical_path, table_paths)
+                .ok_or(ProjectLoadError::UnsafePath)?;
             let source = read_module(root, &logical_path, total_bytes, limits)?;
             Ok(LooseRowCandidate {
                 logical_path,
@@ -2675,9 +2696,7 @@ fn logical_path(root: &Path, path: &Path) -> Result<String, ProjectLoadError> {
         components.push(component);
     }
     let logical_path = components.join("/");
-    if !logical_path.ends_with(".orna")
-        || components.iter().any(|part| !portable_component(part))
-    {
+    if !logical_path.ends_with(".orna") || components.iter().any(|part| !portable_component(part)) {
         return Err(ProjectLoadError::UnsafePath);
     }
     Ok(logical_path)
@@ -2745,12 +2764,14 @@ fn unicode_sibling_key(component: &str) -> String {
 
 #[cfg(test)]
 mod source_row_admission_tests {
-    use super::{Format3Context, format_context_matches_commit, format_context_matches_source_schema};
-    use std::sync::Arc;
+    use super::{
+        Format3Context, format_context_matches_commit, format_context_matches_source_schema,
+    };
     use orna_value_v1::{
         AvailabilityState, BlobResolver, ContentReference, Error as ValueError, Format3Quota,
         GitHash, NativeOid, OwnerLifetime, Snapshot,
     };
+    use std::sync::Arc;
 
     struct UnusedResolver;
 

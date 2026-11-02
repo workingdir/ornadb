@@ -1,5 +1,6 @@
 use orna_semantic_v1::{
-    DIAG_PRIMARY_KEY_FLOAT, DIAG_PRIMARY_KEY_RANGE, ModuleInput, RowUnitInput, admit_row_unit, analyze,
+    DIAG_PRIMARY_KEY_FLOAT, DIAG_PRIMARY_KEY_RANGE, ModuleInput, RowUnitInput, admit_row_unit,
+    analyze,
 };
 
 fn analysis() -> orna_semantic_v1::Analysis {
@@ -64,10 +65,12 @@ fn float_and_range_are_rejected_as_keys_while_ranges_remain_stored_data() {
     let valid = analysis();
     assert!(valid.is_ok(), "{:#?}", valid.diagnostics);
 
-    assert!(valid
-        .modules
-        .values()
-        .any(|module| module.symbols.contains_key("RangeData")));
+    assert!(
+        valid
+            .modules
+            .values()
+            .any(|module| module.symbols.contains_key("RangeData"))
+    );
 
     let invalid = analyze(&[ModuleInput::new(
         "library/main.orna",

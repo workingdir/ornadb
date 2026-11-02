@@ -81,7 +81,10 @@ fn a_schema_change_publishes_and_keeps_old_and_new_rows_readable() {
         "{message}"
     );
     assert_eq!(head(&root), before);
-    assert_eq!(git(&root, &["ls-files", "--stage", ".orna/store"]), index_before);
+    assert_eq!(
+        git(&root, &["ls-files", "--stage", ".orna/store"]),
+        index_before
+    );
     git(&root, &["checkout", "HEAD", "--", "main.orna"]);
 
     // `orna mv` keeps the field's ObjectId: it renames the declaration and
@@ -155,7 +158,10 @@ fn a_schema_change_publishes_and_keeps_old_and_new_rows_readable() {
         ),
     );
     let report = publish(&root, "Add Tokyo");
-    assert!(report.contains("Music  1 rows") && report.contains("Venue  1 rows"), "{report}");
+    assert!(
+        report.contains("Music  1 rows") && report.contains("Venue  1 rows"),
+        "{report}"
+    );
     let rows = stored_rows(&root, &head(&root), relation_bytes(&music));
     assert_eq!(rows.len(), 3);
     assert_eq!(
@@ -170,7 +176,10 @@ fn a_schema_change_publishes_and_keeps_old_and_new_rows_readable() {
     assert_eq!(row(&rows, "london").fields["name"], text("Live in London"));
     assert_eq!(query_rows(&root, &["query", &music, "--format", "json"]), 3);
     assert_eq!(
-        query_rows(&root, &["query", &music, "--key", "london", "--format", "json"]),
+        query_rows(
+            &root,
+            &["query", &music, "--key", "london", "--format", "json"]
+        ),
         1
     );
     assert_eq!(query_rows(&root, &["query", &venue, "--format", "json"]), 1);
@@ -189,7 +198,9 @@ fn a_schema_change_publishes_and_keeps_old_and_new_rows_readable() {
     );
     let history = orna(
         &root,
-        &["history", &music, "--diff", &before, "HEAD", "--format", "json"],
+        &[
+            "history", &music, "--diff", &before, "HEAD", "--format", "json",
+        ],
     );
     assert_success(&history, "orna history --diff");
     let diff: serde_json::Value =
@@ -206,7 +217,10 @@ fn schema_changes_wait_for_unpublished_rows_and_refuse_rows_that_do_not_fit() {
     let directory = TempDir::new().expect("create the test directory");
     let root = initialized_database(&directory, TASKS);
     let task = admitted_relations(&commit_source(&root, "Declare Task"))["Task"].clone();
-    repl_writes(&root, "main.Task.insert({ id: \"write\", title: \"Write the report\" })");
+    repl_writes(
+        &root,
+        "main.Task.insert({ id: \"write\", title: \"Write the report\" })",
+    );
 
     // The row waits in the runtime tail, encoded under the committed schema,
     // so the schema may not change under it.
@@ -237,7 +251,11 @@ fn schema_changes_wait_for_unpublished_rows_and_refuse_rows_that_do_not_fit() {
     );
 
     // Making the field required has no value for the committed row.
-    fs::write(root.join("main.orna"), OPTIONAL_DONE.replace("Bool?", "Bool")).unwrap();
+    fs::write(
+        root.join("main.orna"),
+        OPTIONAL_DONE.replace("Bool?", "Bool"),
+    )
+    .unwrap();
     git(&root, &["add", "main.orna"]);
     let committed = head(&root);
     let unfit = orna(&root, &["commit", "-m", "Require done"]);
@@ -253,7 +271,11 @@ fn schema_changes_wait_for_unpublished_rows_and_refuse_rows_that_do_not_fit() {
 
     // Removing the declaration removes the relation and its rows from the
     // committed store; history keeps them.
-    fs::write(root.join("main.orna"), "pub table Other(id: Str) {\n    note: Str,\n}\n").unwrap();
+    fs::write(
+        root.join("main.orna"),
+        "pub table Other(id: Str) {\n    note: Str,\n}\n",
+    )
+    .unwrap();
     let removed = commit_source(&root, "Replace Task");
     assert!(
         removed.contains("removed table Task with 1 rows"),
@@ -261,7 +283,10 @@ fn schema_changes_wait_for_unpublished_rows_and_refuse_rows_that_do_not_fit() {
     );
     let listed = orna(&root, &["query", &task, "--format", "json"]);
     assert_ne!(listed.status.code(), Some(0), "{}", transcript(&listed));
-    assert_eq!(stored_rows(&root, &committed, relation_bytes(&task)).len(), 1);
+    assert_eq!(
+        stored_rows(&root, &committed, relation_bytes(&task)).len(),
+        1
+    );
 }
 
 /// A second clone of the library stands in for the schema owner. Its
@@ -279,7 +304,10 @@ fn clone_schema_owner(directory: &TempDir, root: &Path) -> PathBuf {
         ],
     );
     git(&owner, &["config", "user.name", "Orna Test"]);
-    git(&owner, &["config", "user.email", "orna-test@example.invalid"]);
+    git(
+        &owner,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     git(&owner, &["config", "commit.gpgsign", "false"]);
     owner
 }
@@ -287,7 +315,12 @@ fn clone_schema_owner(directory: &TempDir, root: &Path) -> PathBuf {
 /// The owner commits `source` with `orna commit`, and the commit reaches this
 /// worktree's HEAD by fast-forward, as a pulled schema change does. Returns the
 /// new HEAD.
-fn schema_commit_lands_from_owner(owner: &Path, root: &Path, source: &str, message: &str) -> String {
+fn schema_commit_lands_from_owner(
+    owner: &Path,
+    root: &Path,
+    source: &str,
+    message: &str,
+) -> String {
     fs::write(owner.join("main.orna"), source).expect("write the owner's main.orna");
     commit_source(owner, message);
     git(

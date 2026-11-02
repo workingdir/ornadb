@@ -147,8 +147,9 @@ pub fn semantic_legend_json() -> String {
 /// Renders the semantic-token legend as Markdown tables: token types by index,
 /// and modifiers by the protocol bit each one sets.
 pub fn semantic_legend_markdown() -> String {
-    let mut out =
-        String::from("### Token types\n\n| Index | Token type | Hover sample |\n| --- | --- | --- |\n");
+    let mut out = String::from(
+        "### Token types\n\n| Index | Token type | Hover sample |\n| --- | --- | --- |\n",
+    );
     for (index, token_type) in legend_token_types().enumerate() {
         let sample = token_type_sample(token_type).unwrap_or("");
         out.push_str(&format!("| {index} | {token_type} | `{sample}` |\n"));
@@ -178,8 +179,18 @@ pub fn semantic_legend_table() -> String {
             )
         })
         .collect::<Vec<_>>();
-    let index_width = rows.iter().map(|row| row.0.len()).max().unwrap_or(0).max("Index".len());
-    let type_width = rows.iter().map(|row| row.1.len()).max().unwrap_or(0).max("Token type".len());
+    let index_width = rows
+        .iter()
+        .map(|row| row.0.len())
+        .max()
+        .unwrap_or(0)
+        .max("Index".len());
+    let type_width = rows
+        .iter()
+        .map(|row| row.1.len())
+        .max()
+        .unwrap_or(0)
+        .max("Token type".len());
     let mut out = format!(
         "{:<index_width$}  {:<type_width$}  {}\n",
         "Index", "Token type", "Hover sample"
@@ -211,7 +222,10 @@ pub fn semantic_legend_csv() -> String {
         ));
     }
     for (index, modifier) in TOKEN_MODIFIERS.iter().enumerate() {
-        out.push_str(&format!("token_modifier,{index},{},\n", csv_field(modifier)));
+        out.push_str(&format!(
+            "token_modifier,{index},{},\n",
+            csv_field(modifier)
+        ));
     }
     out
 }

@@ -23,5 +23,9 @@ fn session() -> AdmittedReplSession {
 fn recursive_cte_self_edge_returns_the_anchor_once() {
     let mut session = session();
     let source = include_str!("fixtures/stdlib-query-recursive-cte-self-edge-ln4y7.orna");
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

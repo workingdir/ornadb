@@ -3,8 +3,7 @@ use orna_application_v1::{ApplicationAuthority, CommittedTableIdentity};
 use orna_evaluator_v1::Limits;
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TableObjectId,
-    WriterLease,
+    NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation, TableObjectId, WriterLease,
 };
 use orna_semantic_v1::Catalogue;
 use std::{
@@ -64,8 +63,7 @@ fn runtime() -> TestRuntime {
 }
 
 fn admitted_identities() -> Vec<orna_runtime_v1::RuntimeTableIdentity> {
-    let authority =
-        ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+    let authority = ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
     let admitted = authority
         .admit_module_with_committed_table_metadata(
             "main.orna",
@@ -81,8 +79,12 @@ fn admitted_identities() -> Vec<orna_runtime_v1::RuntimeTableIdentity> {
 }
 
 fn note_row(runtime: &TestRuntime) -> Vec<(Vec<u8>, Vec<u8>)> {
-    let snapshot = block_on(runtime.state.begin_admitted_table_activation(&admitted_identities()))
-        .unwrap();
+    let snapshot = block_on(
+        runtime
+            .state
+            .begin_admitted_table_activation(&admitted_identities()),
+    )
+    .unwrap();
     snapshot
         .table_rows()
         .get("Note")
@@ -117,7 +119,11 @@ fn admitted_identity_binds_row_and_relation_op_in_one_commit() {
 
     assert_eq!(note_row(&runtime), vec![(vec![7], vec![1])]);
     let retained = block_on(runtime.state.pending()).unwrap();
-    assert_eq!(retained.len(), 1, "the relation op is retained with the row");
+    assert_eq!(
+        retained.len(),
+        1,
+        "the relation op is retained with the row"
+    );
     runtime.cleanup();
 }
 

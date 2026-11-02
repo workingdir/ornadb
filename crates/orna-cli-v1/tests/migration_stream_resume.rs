@@ -12,8 +12,8 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CheckpointKey, Component, ConsumerIdentity, ListStreamSource, RuntimeError, RuntimeIdentity,
     RuntimeState, StreamCheckpoint, StreamHandler, StreamHandlerResult, StreamItem,
-    StreamMutationBatch, WriterLease, import_stream_carry, read_stream_carry,
-    migration_copy_runtime_identity, runtime_identity_for_database_id,
+    StreamMutationBatch, WriterLease, import_stream_carry, migration_copy_runtime_identity,
+    read_stream_carry, runtime_identity_for_database_id,
 };
 use tempfile::TempDir;
 
@@ -411,7 +411,9 @@ fn stream_carry_import_is_idempotent_and_refuses_rows_that_differ() {
         let carry = read_stream_carry(&source_repository)
             .await
             .expect("source stream state is carriable");
-        let recorded = carry.continuity_record().expect("carry continuity is recorded");
+        let recorded = carry
+            .continuity_record()
+            .expect("carry continuity is recorded");
         let destination_repository = Repository::discover(&destination).unwrap();
         import_stream_carry(&destination_repository, &carry, Some(&recorded))
             .await

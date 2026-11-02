@@ -102,7 +102,10 @@ fn refs(directory: &Path, prefix: &str) -> Vec<String> {
 
 /// Every ref with the object it names, so a test can prove nothing moved.
 fn ref_state(directory: &Path) -> String {
-    git(directory, &["for-each-ref", "--format=%(objectname) %(refname)"])
+    git(
+        directory,
+        &["for-each-ref", "--format=%(objectname) %(refname)"],
+    )
 }
 
 /// Every commit object in the repository, reachable or not.
@@ -140,7 +143,11 @@ fn stage_source_change(directory: &Path, line: &str) {
 /// the product path that leaves an owner-scoped pending pin under
 /// `refs/orna/pins/` (CAPTURE-3).
 fn capture_blob_row(root: &Path, home: &Path, key: &str) {
-    fs::write(root.join("recording.mp3"), format!("synthetic audio for {key}")).unwrap();
+    fs::write(
+        root.join("recording.mp3"),
+        format!("synthetic audio for {key}"),
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
         .args(["--db", root.to_str().expect("UTF-8 path"), "repl"])
@@ -168,7 +175,12 @@ fn capture_blob_row(root: &Path, home: &Path, key: &str) {
         .expect("write trusted REPL submission");
     let output = child.wait_with_output().expect("wait for Orna REPL");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}\n{}", stderr(&output));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{}",
+        stderr(&output)
+    );
     assert!(
         !stdout.contains("ORNA-"),
         "the trusted REPL must capture and insert the row: {stdout}"
@@ -183,24 +195,52 @@ fn reviewed_commits_push_repeatedly_and_keep_private_refs_local() {
     let home = TempDir::new().unwrap();
     let remote_root = TempDir::new().unwrap();
     let remote = remote_root.path().join("remote.git");
-    git(remote_root.path(), &["init", "--bare", "--quiet", remote.to_str().unwrap()]);
+    git(
+        remote_root.path(),
+        &["init", "--bare", "--quiet", remote.to_str().unwrap()],
+    );
     git(root, &["remote", "add", "origin", remote.to_str().unwrap()]);
     let branch = current_branch(root);
     let remote_branch = format!("refs/heads/{branch}");
 
     stage_source_change(root, "// first reviewed change");
-    let committed = orna(root, home.path(), &["commit", "-m", "first reviewed change"], &[]);
-    assert_eq!(committed.status.code(), Some(0), "first commit: {}", stderr(&committed));
+    let committed = orna(
+        root,
+        home.path(),
+        &["commit", "-m", "first reviewed change"],
+        &[],
+    );
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "first commit: {}",
+        stderr(&committed)
+    );
     let pushed = orna(root, home.path(), &["push"], &[]);
-    assert_eq!(pushed.status.code(), Some(0), "first push: {}", stderr(&pushed));
+    assert_eq!(
+        pushed.status.code(),
+        Some(0),
+        "first push: {}",
+        stderr(&pushed)
+    );
     assert_eq!(
         git(&remote, &["rev-parse", &remote_branch]),
         git(root, &["rev-parse", "HEAD"])
     );
 
     stage_source_change(root, "// second reviewed change");
-    let committed = orna(root, home.path(), &["commit", "-m", "second reviewed change"], &[]);
-    assert_eq!(committed.status.code(), Some(0), "second commit: {}", stderr(&committed));
+    let committed = orna(
+        root,
+        home.path(),
+        &["commit", "-m", "second reviewed change"],
+        &[],
+    );
+    assert_eq!(
+        committed.status.code(),
+        Some(0),
+        "second commit: {}",
+        stderr(&committed)
+    );
     let pushed = orna(root, home.path(), &["push"], &[]);
     assert_eq!(
         pushed.status.code(),
@@ -239,17 +279,29 @@ fn fetch_with_capture_pins_succeeds_without_importing_a_peers_pins() {
     let local = local_root.path().join("local");
     git(
         local_root.path(),
-        &["clone", "--quiet", peer.to_str().unwrap(), local.to_str().unwrap()],
+        &[
+            "clone",
+            "--quiet",
+            peer.to_str().unwrap(),
+            local.to_str().unwrap(),
+        ],
     );
     capture_blob_row(&local, home.path(), "local");
     let local_pins = refs(&local, "refs/orna/pins/");
-    assert_eq!(local_pins.len(), 1, "the local repository holds its own capture pin");
+    assert_eq!(
+        local_pins.len(),
+        1,
+        "the local repository holds its own capture pin"
+    );
     assert!(
         local_pins.iter().all(|pin| !peer_pins.contains(pin)),
         "each repository's capture runtime owns its own pins"
     );
 
-    git(peer, &["commit", "--quiet", "--allow-empty", "-m", "peer advances"]);
+    git(
+        peer,
+        &["commit", "--quiet", "--allow-empty", "-m", "peer advances"],
+    );
     let branch = current_branch(peer);
     let fetched = orna(&local, home.path(), &["fetch", "origin", &branch], &[]);
 
@@ -261,7 +313,10 @@ fn fetch_with_capture_pins_succeeds_without_importing_a_peers_pins() {
         stderr(&fetched)
     );
     assert_eq!(
-        git(&local, &["rev-parse", &format!("refs/remotes/origin/{branch}")]),
+        git(
+            &local,
+            &["rev-parse", &format!("refs/remotes/origin/{branch}")]
+        ),
         git(peer, &["rev-parse", "HEAD"]),
         "the requested branch is fetched"
     );
@@ -326,7 +381,12 @@ fn invalid_candidate_is_refused_before_any_commit_object_exists() {
     let commits_before = commit_objects(root);
     let refs_before = ref_state(root);
 
-    let refused = orna(root, home.path(), &["commit", "-m", "drop the store root"], &[]);
+    let refused = orna(
+        root,
+        home.path(),
+        &["commit", "-m", "drop the store root"],
+        &[],
+    );
 
     assert_eq!(
         commit_objects(root),

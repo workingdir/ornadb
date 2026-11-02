@@ -90,8 +90,7 @@ impl FileAnalysis {
         let start = self
             .tokens
             .partition_point(|token| token.span.start < span.start);
-        let end = start
-            + self.tokens[start..].partition_point(|token| token.span.end <= span.end);
+        let end = start + self.tokens[start..].partition_point(|token| token.span.end <= span.end);
         &self.tokens[start..end]
     }
 
@@ -242,14 +241,19 @@ impl Workspace {
         let mut by_namespace = HashMap::new();
         for (index, module) in modules.iter().enumerate() {
             if !shared_scope {
-                by_namespace.entry(module.namespace.clone()).or_insert(index);
+                by_namespace
+                    .entry(module.namespace.clone())
+                    .or_insert(index);
             }
             imports.push(module_imports(&module.file));
             let mut tops = HashMap::<Key, Vec<usize>>::new();
             let mut owned = HashMap::<(usize, Key), Vec<usize>>::new();
             for (declaration, declared) in module.file.names.declarations().iter().enumerate() {
                 match declared.owner {
-                    None => tops.entry(declared.key.clone()).or_default().push(declaration),
+                    None => tops
+                        .entry(declared.key.clone())
+                        .or_default()
+                        .push(declaration),
                     Some(owner) => owned
                         .entry((owner, declared.key.clone()))
                         .or_default()
@@ -333,7 +337,9 @@ impl Workspace {
         let imports = &self.imports[module];
         let mut declared = Vec::new();
         for (key, path) in &imports.names {
-            if let Resolved::Target(Target::Declared { module, index }) = self.module_member(path, key) {
+            if let Resolved::Target(Target::Declared { module, index }) =
+                self.module_member(path, key)
+            {
                 declared.push((module, index));
             }
         }
@@ -486,14 +492,18 @@ impl Workspace {
             // Same-name declarations of one module are one overload group,
             // resolved to its first declaration as in a project; only the
             // same name declared by two modules is ambiguous.
-            let mut found = self.top_level.iter().enumerate().filter_map(|(index, tops)| {
-                tops.get(key).and_then(|declarations| declarations.first()).map(|declaration| {
-                    Target::Declared {
-                        module: index,
-                        index: *declaration,
-                    }
-                })
-            });
+            let mut found = self
+                .top_level
+                .iter()
+                .enumerate()
+                .filter_map(|(index, tops)| {
+                    tops.get(key)
+                        .and_then(|declarations| declarations.first())
+                        .map(|declaration| Target::Declared {
+                            module: index,
+                            index: *declaration,
+                        })
+                });
             return match (found.next(), found.next()) {
                 (Some(target), None) => Resolved::Target(target),
                 (Some(_), Some(_)) => Resolved::Ambiguous,
@@ -617,7 +627,9 @@ impl Workspace {
             Hint::Unknown => Value::Unknown,
             Hint::Name { key, span } => {
                 let names = &self.modules[module].file.names;
-                if let Some(binding) = names.occurrence(span).and_then(|occurrence| occurrence.binding)
+                if let Some(binding) = names
+                    .occurrence(span)
+                    .and_then(|occurrence| occurrence.binding)
                 {
                     return self.value_of(module, &names.binding(binding).hint, depth + 1);
                 }
@@ -728,7 +740,10 @@ impl Workspace {
         }
         match ty {
             TypeExpr::Name { path, .. } => {
-                let keys = path.iter().map(|segment| key_of(segment)).collect::<Vec<_>>();
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(segment))
+                    .collect::<Vec<_>>();
                 match self.lookup_path(module, &keys) {
                     Resolved::Target(Target::Declared {
                         module: declared_module,
@@ -750,9 +765,12 @@ impl Workspace {
     /// The name a target is declared with.
     pub(crate) fn target_key(&self, target: &Target) -> Key {
         match target {
-            Target::Local { module, binding } => {
-                self.modules[*module].file.names.binding(*binding).key.clone()
-            }
+            Target::Local { module, binding } => self.modules[*module]
+                .file
+                .names
+                .binding(*binding)
+                .key
+                .clone(),
             Target::Declared { module, index } => self.declaration(*module, *index).key.clone(),
             Target::Module(path) => path.last().cloned().unwrap_or_default(),
             Target::Standard { name, .. } => name.clone(),
@@ -799,9 +817,9 @@ impl Workspace {
                     Resolved::Ambiguous => search.uncertain.push((module, occurrence.span.clone())),
                     Resolved::Unknown => {
                         let possible = match &occurrence.role {
-                            Role::Member { .. } | Role::RecordLabel { .. } | Role::PatternField { .. } => {
-                                member
-                            }
+                            Role::Member { .. }
+                            | Role::RecordLabel { .. }
+                            | Role::PatternField { .. } => member,
                             Role::ArgumentLabel { .. } => parameter,
                             _ => false,
                         };
@@ -812,7 +830,9 @@ impl Workspace {
                 }
             }
         }
-        search.found.sort_by_key(|(module, span)| (*module, span.start, span.end));
+        search
+            .found
+            .sort_by_key(|(module, span)| (*module, span.start, span.end));
         search
             .found
             .dedup_by(|right, left| left.0 == right.0 && left.1.start == right.1.start);
@@ -1043,7 +1063,11 @@ mod tests {
             ]
         );
         let (_, hidden) = workspace.resolve_at(0, at(main, "hidden", 0)).unwrap();
-        assert_eq!(hidden, Resolved::Unknown, "private functions are not imported");
+        assert_eq!(
+            hidden,
+            Resolved::Unknown,
+            "private functions are not imported"
+        );
     }
 
     #[test]
@@ -1065,6 +1089,9 @@ mod tests {
     fn module_namespaces_follow_logical_paths() {
         assert!(module_namespace("main.orna").is_empty());
         assert_eq!(module_namespace("util.orna"), ["util"]);
-        assert_eq!(module_namespace("sensors/greenhouse/main.orna"), ["sensors", "greenhouse"]);
+        assert_eq!(
+            module_namespace("sensors/greenhouse/main.orna"),
+            ["sensors", "greenhouse"]
+        );
     }
 }

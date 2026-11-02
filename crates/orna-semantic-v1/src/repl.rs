@@ -64,13 +64,14 @@ impl ReplContext {
         let mut modules = analysis.modules.clone();
         let main_namespace = Namespace(vec!["main".into()]);
         if !modules.contains_key(&main_namespace)
-            && let Some(mut root) = modules.get(&Namespace(Vec::new())).cloned() {
-                // The trusted REPL walkthrough addresses root functions as `main.add`.
-                // A source module named `main` remains authoritative when present.
-                root.namespace = main_namespace.clone();
-                root.implicit = true;
-                modules.insert(main_namespace, root);
-            }
+            && let Some(mut root) = modules.get(&Namespace(Vec::new())).cloned()
+        {
+            // The trusted REPL walkthrough addresses root functions as `main.add`.
+            // A source module named `main` remains authoritative when present.
+            root.namespace = main_namespace.clone();
+            root.implicit = true;
+            modules.insert(main_namespace, root);
+        }
         Ok(Self {
             identity: Arc::new(()),
             revision: 0,
@@ -441,7 +442,9 @@ mod tests {
         let mut main_context =
             ReplContext::from_analysis(&main_analysis).expect("valid project main module");
         let import = staged(&main_context, "use main;");
-        main_context.commit(import).expect("user module import commits");
+        main_context
+            .commit(import)
+            .expect("user module import commits");
         assert_eq!(staged(&main_context, "main.add(1)").ty, Some(Type::Int));
     }
 

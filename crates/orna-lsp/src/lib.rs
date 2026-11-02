@@ -28,8 +28,8 @@ mod project;
 mod rename;
 mod requests;
 mod semantic;
-mod standard;
 mod server;
+mod standard;
 mod views;
 mod workspace;
 

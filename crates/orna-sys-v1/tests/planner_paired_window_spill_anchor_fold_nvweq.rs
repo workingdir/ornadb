@@ -263,9 +263,7 @@ fn joins_by_pair(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode>
         .collect()
 }
 
-fn aggregates_by_identity(
-    plan: &orna_sys_v1::ExplainedPlan,
-) -> BTreeMap<&str, &PlanNode> {
+fn aggregates_by_identity(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| {

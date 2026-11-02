@@ -42,18 +42,33 @@ pub struct RatchetFailure {
 
 impl std::fmt::Display for RatchetFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "citation ratchet failed: {} uncited IDs exceed baseline {}; {} previously cited IDs dropped", self.uncited, self.max_uncited, self.dropped_ids.len())
+        write!(
+            f,
+            "citation ratchet failed: {} uncited IDs exceed baseline {}; {} previously cited IDs dropped",
+            self.uncited,
+            self.max_uncited,
+            self.dropped_ids.len()
+        )
     }
 }
 impl std::error::Error for RatchetFailure {}
 
 /// Count requirement-ID citations in Rust test code of the scanned crates. This measures citations, not proof of conformance.
-pub fn cite_requirements(catalogue: &Path, workspace_root: &Path, scanned_crates: &BTreeSet<String>) -> Result<CitationReport, String> {
-    let requirements: Vec<Requirement> = serde_json::from_slice(&fs::read(catalogue).map_err(|e| format!("read {}: {e}", catalogue.display()))?)
-        .map_err(|e| format!("parse {}: {e}", catalogue.display()))?;
+pub fn cite_requirements(
+    catalogue: &Path,
+    workspace_root: &Path,
+    scanned_crates: &BTreeSet<String>,
+) -> Result<CitationReport, String> {
+    let requirements: Vec<Requirement> = serde_json::from_slice(
+        &fs::read(catalogue).map_err(|e| format!("read {}: {e}", catalogue.display()))?,
+    )
+    .map_err(|e| format!("parse {}: {e}", catalogue.display()))?;
     let mut all = BTreeMap::new();
     for requirement in requirements {
-        if all.insert(requirement.id.clone(), requirement.chapter).is_some() {
+        if all
+            .insert(requirement.id.clone(), requirement.chapter)
+            .is_some()
+        {
             return Err(format!("duplicate requirement ID {}", requirement.id));
         }
     }
@@ -62,55 +77,114 @@ pub fn cite_requirements(catalogue: &Path, workspace_root: &Path, scanned_crates
     let mut files = Vec::new();
     for name in scanned_crates {
         let crate_root = workspace_root.join("crates").join(name);
-        if !crate_root.is_dir() { return Err(format!("scanned crate {} is not a directory", crate_root.display())); }
+        if !crate_root.is_dir() {
+            return Err(format!(
+                "scanned crate {} is not a directory",
+                crate_root.display()
+            ));
+        }
         files.extend(rust_files(&crate_root)?);
     }
     files.sort();
     for file in files {
-        let source = fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
-        let relative_file = file.strip_prefix(workspace_root).unwrap_or(&file).to_string_lossy().into_owned();
+        let source =
+            fs::read_to_string(&file).map_err(|e| format!("read {}: {e}", file.display()))?;
+        let relative_file = file
+            .strip_prefix(workspace_root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .into_owned();
         for code in test_code(&file, &source) {
             let bytes = code.as_bytes();
             let mut cursor = 0;
             while cursor < bytes.len() {
-                if !bytes[cursor].is_ascii_alphanumeric() ||
-                    (cursor > 0 && (bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'-'))
-                { cursor += 1; continue; }
+                if !bytes[cursor].is_ascii_alphanumeric()
+                    || (cursor > 0
+                        && (bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'-'))
+                {
+                    cursor += 1;
+                    continue;
+                }
                 let start = cursor;
-                while cursor < bytes.len() && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'-') { cursor += 1; }
+                while cursor < bytes.len()
+                    && (bytes[cursor].is_ascii_alphanumeric() || bytes[cursor] == b'-')
+                {
+                    cursor += 1;
+                }
                 let id = &code[start..cursor];
                 if id.contains('-') && all.contains_key(id) && contains_id(code, id) {
                     cited.insert(id.to_owned());
                     let source_offset = code.as_ptr() as usize - source.as_ptr() as usize;
                     for (offset, _) in code.match_indices(id) {
                         let absolute_offset = source_offset + offset;
-                        let line = source.as_bytes()[..absolute_offset].iter().filter(|byte| **byte == b'\n').count() + 1;
-                        locations.entry(id.to_owned()).or_default().insert(CitationLocation {
-                            file: relative_file.clone(),
-                            line,
-                        });
+                        let line = source.as_bytes()[..absolute_offset]
+                            .iter()
+                            .filter(|byte| **byte == b'\n')
+                            .count()
+                            + 1;
+                        locations
+                            .entry(id.to_owned())
+                            .or_default()
+                            .insert(CitationLocation {
+                                file: relative_file.clone(),
+                                line,
+                            });
                     }
                 }
             }
         }
     }
-    let uncited: BTreeSet<_> = all.keys().filter(|id| !cited.contains(*id)).cloned().collect();
+    let uncited: BTreeSet<_> = all
+        .keys()
+        .filter(|id| !cited.contains(*id))
+        .cloned()
+        .collect();
     let mut chapters = BTreeMap::<String, ChapterCounts>::new();
     for (id, chapter) in all {
-        let entry = chapters.entry(chapter).or_insert(ChapterCounts { cited: 0, uncited: 0 });
-        if cited.contains(&id) { entry.cited += 1; } else { entry.uncited += 1; }
+        let entry = chapters.entry(chapter).or_insert(ChapterCounts {
+            cited: 0,
+            uncited: 0,
+        });
+        if cited.contains(&id) {
+            entry.cited += 1;
+        } else {
+            entry.uncited += 1;
+        }
     }
-    Ok(CitationReport { cited_ids: cited, uncited_ids: uncited, chapters, locations })
+    Ok(CitationReport {
+        cited_ids: cited,
+        uncited_ids: uncited,
+        chapters,
+        locations,
+    })
 }
 
-pub fn check_ratchet(report: &CitationReport, baseline: &CitationBaseline) -> Result<(), RatchetFailure> {
-    let dropped_ids = baseline.cited_ids.difference(&report.cited_ids).cloned().collect();
-    let failure = RatchetFailure { uncited: report.uncited_ids.len(), max_uncited: baseline.max_uncited, dropped_ids };
-    if failure.uncited > baseline.max_uncited || !failure.dropped_ids.is_empty() { Err(failure) } else { Ok(()) }
+pub fn check_ratchet(
+    report: &CitationReport,
+    baseline: &CitationBaseline,
+) -> Result<(), RatchetFailure> {
+    let dropped_ids = baseline
+        .cited_ids
+        .difference(&report.cited_ids)
+        .cloned()
+        .collect();
+    let failure = RatchetFailure {
+        uncited: report.uncited_ids.len(),
+        max_uncited: baseline.max_uncited,
+        dropped_ids,
+    };
+    if failure.uncited > baseline.max_uncited || !failure.dropped_ids.is_empty() {
+        Err(failure)
+    } else {
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
-struct Requirement { id: String, chapter: String }
+struct Requirement {
+    id: String,
+    chapter: String,
+}
 
 fn rust_files(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
@@ -121,9 +195,17 @@ fn rust_files(root: &Path) -> Result<Vec<PathBuf>, String> {
             let entry = entry.map_err(|e| format!("read directory entry: {e}"))?;
             let path = entry.path();
             let rel = path.strip_prefix(root).unwrap_or(&path);
-            if rel.components().any(|part| matches!(part.as_os_str().to_str(), Some("target" | "fixtures"))) { continue; }
-            if path.is_dir() { dirs.push(path); }
-            else if path.extension().is_some_and(|ext| ext == "rs") { files.push(path); }
+            if rel
+                .components()
+                .any(|part| matches!(part.as_os_str().to_str(), Some("target" | "fixtures")))
+            {
+                continue;
+            }
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                files.push(path);
+            }
         }
     }
     files.sort();
@@ -136,7 +218,9 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
     let mut test_function_names = BTreeSet::new();
     let mut cursor = 0;
     while let Some(start) = find_code_pattern(source, cursor, b"#[cfg(test)]") {
-        let Some(open) = find_code_byte(source, start, b'{') else { break; };
+        let Some(open) = find_code_byte(source, start, b'{') else {
+            break;
+        };
         if let Some(end) = matching_brace(source, open) {
             code.push(&source[start..=end]);
             append_test_comments(source, open + 1, end, &mut code);
@@ -149,11 +233,19 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
     if is_test_file {
         cursor = 0;
         while let Some(start) = find_code_pattern(source, cursor, b"#[") {
-            let Some(attribute_end) = matching_attribute(source, start) else { break; };
+            let Some(attribute_end) = matching_attribute(source, start) else {
+                break;
+            };
             if is_test_attribute(&source[start + 2..attribute_end - 1]) {
-                let Some(function) = find_code_pattern(source, attribute_end, b"fn") else { break; };
-                let Some(name) = function_name(source, function) else { break; };
-                let Some(open) = find_code_byte(source, function, b'{') else { break; };
+                let Some(function) = find_code_pattern(source, attribute_end, b"fn") else {
+                    break;
+                };
+                let Some(name) = function_name(source, function) else {
+                    break;
+                };
+                let Some(open) = find_code_byte(source, function, b'{') else {
+                    break;
+                };
                 if let Some(end) = matching_brace(source, open) {
                     test_function_names.insert(name);
                     if let Some(comments) = preceding_line_comments(source, start) {
@@ -178,14 +270,21 @@ fn test_code<'a>(path: &Path, source: &'a str) -> Vec<&'a str> {
 fn function_name(source: &str, start: usize) -> Option<&str> {
     let bytes = source.as_bytes();
     if !bytes[start..].starts_with(b"fn")
-        || bytes.get(start + 2).is_none_or(|byte| !byte.is_ascii_whitespace())
+        || bytes
+            .get(start + 2)
+            .is_none_or(|byte| !byte.is_ascii_whitespace())
     {
         return None;
     }
     let mut name_start = start + 2;
-    while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) { name_start += 1; }
+    while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
+        name_start += 1;
+    }
     let mut name_end = name_start;
-    while bytes.get(name_end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') {
+    while bytes
+        .get(name_end)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
         name_end += 1;
     }
     (name_end > name_start).then_some(&source[name_start..name_end])
@@ -207,15 +306,25 @@ fn append_referenced_test_functions<'a>(
                 cursor = end;
             } else if brace_depth == 0
                 && bytes[cursor..].starts_with(b"fn")
-                && (cursor == 0 || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
+                && (cursor == 0
+                    || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
                 && bytes.get(cursor + 2).is_some_and(u8::is_ascii_whitespace)
             {
-                let Some(name) = function_name(source, cursor) else { cursor += 2; continue; };
-                let Some(open) = find_code_byte(source, cursor + 2 + name.len(), b'{') else { break; };
-                let Some(end) = matching_brace(source, open) else { break; };
+                let Some(name) = function_name(source, cursor) else {
+                    cursor += 2;
+                    continue;
+                };
+                let Some(open) = find_code_byte(source, cursor + 2 + name.len(), b'{') else {
+                    break;
+                };
+                let Some(end) = matching_brace(source, open) else {
+                    break;
+                };
                 if !test_function_names.contains(name)
                     && !appended_names.contains(name)
-                    && selected.iter().any(|code| contains_function_call_in_code(code, name))
+                    && selected
+                        .iter()
+                        .any(|code| contains_function_call_in_code(code, name))
                 {
                     selected.push(&source[cursor..=end]);
                     appended_names.insert(name);
@@ -231,7 +340,9 @@ fn append_referenced_test_functions<'a>(
                 cursor += 1;
             }
         }
-        if !added { break; }
+        if !added {
+            break;
+        }
     }
 }
 
@@ -243,17 +354,27 @@ fn contains_function_call_in_code(source: &str, name: &str) -> bool {
         if let Some(end) = skip_non_code(source, cursor) {
             cursor = end;
         } else if bytes[cursor..].starts_with(name)
-            && (cursor == 0 || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
-            && bytes.get(cursor + name.len()).is_none_or(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+            && (cursor == 0
+                || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
+            && bytes
+                .get(cursor + name.len())
+                .is_none_or(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
         {
             let mut after_name = cursor + name.len();
-            while bytes.get(after_name).is_some_and(u8::is_ascii_whitespace) { after_name += 1; }
+            while bytes.get(after_name).is_some_and(u8::is_ascii_whitespace) {
+                after_name += 1;
+            }
             let prefix = source[..cursor].trim_end();
             let is_method = prefix.ends_with('.');
             let is_definition = prefix.strip_suffix("fn").is_some_and(|before_fn| {
-                before_fn.chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+                before_fn
+                    .chars()
+                    .next_back()
+                    .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
             });
-            if bytes.get(after_name) == Some(&b'(') && !is_method && !is_definition { return true; }
+            if bytes.get(after_name) == Some(&b'(') && !is_method && !is_definition {
+                return true;
+            }
             cursor = after_name;
         } else {
             cursor += 1;
@@ -271,22 +392,47 @@ fn append_referenced_test_constants<'a>(source: &'a str, selected: &mut Vec<&'a 
             cursor = end;
         } else if brace_depth == 0
             && bytes[cursor..].starts_with(b"const")
-            && (cursor == 0 || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
-            && bytes.get(cursor + 5).is_some_and(|byte| byte.is_ascii_whitespace())
+            && (cursor == 0
+                || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
+            && bytes
+                .get(cursor + 5)
+                .is_some_and(|byte| byte.is_ascii_whitespace())
         {
             let mut name_start = cursor + 5;
-            while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) { name_start += 1; }
+            while bytes.get(name_start).is_some_and(u8::is_ascii_whitespace) {
+                name_start += 1;
+            }
             let mut name_end = name_start;
-            while bytes.get(name_end).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_') { name_end += 1; }
-            if name_end == name_start { cursor += 5; continue; }
+            while bytes
+                .get(name_end)
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            {
+                name_end += 1;
+            }
+            if name_end == name_start {
+                cursor += 5;
+                continue;
+            }
             let name = &source[name_start..name_end];
-            let Some(equal) = find_code_byte(source, name_end, b'=') else { break; };
-            let Some(end) = declaration_semicolon(source, equal + 1) else { break; };
-            let referenced = selected.iter().any(|test| contains_identifier_in_code(test, name));
-            if referenced { selected.push(&source[cursor..=end]); }
+            let Some(equal) = find_code_byte(source, name_end, b'=') else {
+                break;
+            };
+            let Some(end) = declaration_semicolon(source, equal + 1) else {
+                break;
+            };
+            let referenced = selected
+                .iter()
+                .any(|test| contains_identifier_in_code(test, name));
+            if referenced {
+                selected.push(&source[cursor..=end]);
+            }
             cursor = end + 1;
         } else {
-            match bytes[cursor] { b'{' => brace_depth += 1, b'}' => brace_depth = brace_depth.saturating_sub(1), _ => {} }
+            match bytes[cursor] {
+                b'{' => brace_depth += 1,
+                b'}' => brace_depth = brace_depth.saturating_sub(1),
+                _ => {}
+            }
             cursor += 1;
         }
     }
@@ -323,8 +469,11 @@ fn contains_identifier_in_code(source: &str, name: &str) -> bool {
         if let Some(end) = skip_non_code(source, cursor) {
             cursor = end;
         } else if bytes[cursor..].starts_with(name)
-            && (cursor == 0 || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
-            && bytes.get(cursor + name.len()).is_none_or(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
+            && (cursor == 0
+                || !(bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_'))
+            && bytes
+                .get(cursor + name.len())
+                .is_none_or(|byte| !(byte.is_ascii_alphanumeric() || *byte == b'_'))
         {
             return true;
         } else {
@@ -343,7 +492,9 @@ fn preceding_line_comments(source: &str, start: usize) -> Option<&str> {
     let mut first_comment = None;
     while line_start > 0 {
         let previous_end = line_start - 1;
-        let previous_start = source[..previous_end].rfind('\n').map_or(0, |newline| newline + 1);
+        let previous_start = source[..previous_end]
+            .rfind('\n')
+            .map_or(0, |newline| newline + 1);
         let line = source[previous_start..previous_end].trim();
         if line.starts_with("//") {
             first_comment = Some(previous_start);
@@ -355,7 +506,12 @@ fn preceding_line_comments(source: &str, start: usize) -> Option<&str> {
 
     first_comment.map(|comment_start| &source[comment_start..start])
 }
-fn append_test_line_comments<'a>(source: &'a str, mut cursor: usize, end: usize, code: &mut Vec<&'a str>) {
+fn append_test_line_comments<'a>(
+    source: &'a str,
+    mut cursor: usize,
+    end: usize,
+    code: &mut Vec<&'a str>,
+) {
     let bytes = source.as_bytes();
     while cursor < end {
         if bytes[cursor..].starts_with(b"//") {
@@ -374,19 +530,32 @@ fn append_test_line_comments<'a>(source: &'a str, mut cursor: usize, end: usize,
     }
 }
 
-fn append_test_comments<'a>(source: &'a str, mut cursor: usize, end: usize, code: &mut Vec<&'a str>) {
+fn append_test_comments<'a>(
+    source: &'a str,
+    mut cursor: usize,
+    end: usize,
+    code: &mut Vec<&'a str>,
+) {
     while let Some(start) = find_code_pattern(source, cursor, b"#[") {
         if start >= end {
             break;
         }
-        let Some(attribute_end) = matching_attribute(source, start) else { break; };
+        let Some(attribute_end) = matching_attribute(source, start) else {
+            break;
+        };
         if is_test_attribute(&source[start + 2..attribute_end - 1]) {
             if let Some(comments) = preceding_line_comments(source, start) {
                 code.push(comments);
             }
-            let Some(function) = find_code_pattern(source, attribute_end, b"fn") else { break; };
-            let Some(open) = find_code_byte(source, function, b'{') else { break; };
-            let Some(function_end) = matching_brace(source, open) else { break; };
+            let Some(function) = find_code_pattern(source, attribute_end, b"fn") else {
+                break;
+            };
+            let Some(open) = find_code_byte(source, function, b'{') else {
+                break;
+            };
+            let Some(function_end) = matching_brace(source, open) else {
+                break;
+            };
             if function_end >= end {
                 break;
             }
@@ -399,7 +568,9 @@ fn append_test_comments<'a>(source: &'a str, mut cursor: usize, end: usize, code
 }
 fn matching_attribute(source: &str, start: usize) -> Option<usize> {
     let bytes = source.as_bytes();
-    if !bytes.get(start..)?.starts_with(b"#[") { return None; }
+    if !bytes.get(start..)?.starts_with(b"#[") {
+        return None;
+    }
     let mut depth = 0usize;
     let mut i = start + 1;
     while i < bytes.len() {
@@ -411,7 +582,9 @@ fn matching_attribute(source: &str, start: usize) -> Option<usize> {
             b'[' => depth += 1,
             b']' => {
                 depth -= 1;
-                if depth == 0 { return Some(i + 1); }
+                if depth == 0 {
+                    return Some(i + 1);
+                }
             }
             _ => {}
         }
@@ -421,8 +594,14 @@ fn matching_attribute(source: &str, start: usize) -> Option<usize> {
 }
 
 fn is_test_attribute(attribute: &str) -> bool {
-    let path = attribute.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':')).next().unwrap_or("");
-    matches!(path.rsplit("::").next(), Some("test" | "rstest" | "test_case" | "proptest" | "quickcheck"))
+    let path = attribute
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ':'))
+        .next()
+        .unwrap_or("");
+    matches!(
+        path.rsplit("::").next(),
+        Some("test" | "rstest" | "test_case" | "proptest" | "quickcheck")
+    )
 }
 
 fn find_code_pattern(source: &str, mut i: usize, pattern: &[u8]) -> Option<usize> {
@@ -457,24 +636,41 @@ fn find_code_byte(source: &str, mut i: usize, target: u8) -> Option<usize> {
 fn skip_non_code(source: &str, i: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     if bytes[i..].starts_with(b"//") {
-        return Some(i + bytes[i..].iter().position(|byte| *byte == b'\n').unwrap_or(bytes.len() - i));
+        return Some(
+            i + bytes[i..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .unwrap_or(bytes.len() - i),
+        );
     }
     if bytes[i..].starts_with(b"/*") {
         let mut cursor = i + 2;
         let mut depth = 1usize;
         while cursor < bytes.len() && depth > 0 {
-            if bytes[cursor..].starts_with(b"/*") { depth += 1; cursor += 2; }
-            else if bytes[cursor..].starts_with(b"*/") { depth -= 1; cursor += 2; }
-            else { cursor += 1; }
+            if bytes[cursor..].starts_with(b"/*") {
+                depth += 1;
+                cursor += 2;
+            } else if bytes[cursor..].starts_with(b"*/") {
+                depth -= 1;
+                cursor += 2;
+            } else {
+                cursor += 1;
+            }
         }
         return Some(cursor);
     }
-    let raw_start = if bytes[i] == b'r' { Some(i) }
-        else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') { Some(i + 1) }
-        else { None };
+    let raw_start = if bytes[i] == b'r' {
+        Some(i)
+    } else if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'r') {
+        Some(i + 1)
+    } else {
+        None
+    };
     if let Some(start) = raw_start {
         let mut quote = start + 1;
-        while bytes.get(quote) == Some(&b'#') { quote += 1; }
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
         if bytes.get(quote) == Some(&b'"') {
             let hashes = quote - start - 1;
             let mut cursor = quote + 1;
@@ -491,36 +687,52 @@ fn skip_non_code(source: &str, i: usize) -> Option<usize> {
             return Some(bytes.len());
         }
     }
-    let quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'') { i + 1 }
-        else if bytes[i] == b'\'' { i }
-        else { usize::MAX };
+    let quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'\'') {
+        i + 1
+    } else if bytes[i] == b'\'' {
+        i
+    } else {
+        usize::MAX
+    };
     if quote != usize::MAX {
         let content = quote + 1;
         let end = if bytes.get(content) == Some(&b'\\') {
             match bytes.get(content + 1) {
-                Some(b'u') if bytes.get(content + 2) == Some(&b'{') => {
-                    bytes[content + 3..].iter().position(|byte| *byte == b'}').map(|offset| content + 3 + offset + 1)
-                }
+                Some(b'u') if bytes.get(content + 2) == Some(&b'{') => bytes[content + 3..]
+                    .iter()
+                    .position(|byte| *byte == b'}')
+                    .map(|offset| content + 3 + offset + 1),
                 Some(b'x') => Some(content + 4),
                 Some(_) => Some(content + 2),
                 None => None,
             }
         } else {
-            source.get(content..).and_then(|rest| rest.chars().next()).map(|ch| content + ch.len_utf8())
+            source
+                .get(content..)
+                .and_then(|rest| rest.chars().next())
+                .map(|ch| content + ch.len_utf8())
         };
         if let Some(end) = end.filter(|end| bytes.get(*end) == Some(&b'\'')) {
             return Some(end + 1);
         }
     }
-    let string_quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"') { i + 1 }
-        else if bytes[i] == b'"' { i }
-        else { usize::MAX };
+    let string_quote = if bytes[i] == b'b' && bytes.get(i + 1) == Some(&b'"') {
+        i + 1
+    } else if bytes[i] == b'"' {
+        i
+    } else {
+        usize::MAX
+    };
     if string_quote != usize::MAX {
         let mut cursor = string_quote + 1;
         while cursor < bytes.len() {
-            if bytes[cursor] == b'\\' { cursor = (cursor + 2).min(bytes.len()); }
-            else if bytes[cursor] == b'"' { return Some(cursor + 1); }
-            else { cursor += 1; }
+            if bytes[cursor] == b'\\' {
+                cursor = (cursor + 2).min(bytes.len());
+            } else if bytes[cursor] == b'"' {
+                return Some(cursor + 1);
+            } else {
+                cursor += 1;
+            }
         }
         return Some(bytes.len());
     }
@@ -538,7 +750,12 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
         }
         match bytes[i] {
             b'{' => depth += 1,
-            b'}' => { depth -= 1; if depth == 0 { return Some(i); } },
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
             _ => {}
         }
         i += 1;
@@ -550,13 +767,17 @@ fn contains_id(source: &str, id: &str) -> bool {
     if is_line_comment_block(source) {
         return contains_id_in_comment_block(source, id);
     }
-    if !source.contains(id) { return false; }
+    if !source.contains(id) {
+        return false;
+    }
     let bytes = source.as_bytes();
     let mut cursor = 0;
     let mut code_start = 0;
     while cursor < bytes.len() {
         if let Some(end) = skip_non_code(source, cursor) {
-            if contains_id_in_code(&source[code_start..cursor], id) { return true; }
+            if contains_id_in_code(&source[code_start..cursor], id) {
+                return true;
+            }
             cursor = end;
             code_start = end;
         } else {
@@ -574,9 +795,10 @@ fn contains_id_in_test_string_operands(source: &str, id: &str) -> bool {
     let mut cursor = 0;
     while cursor < bytes.len() {
         if let Some((end, contents)) = string_literal(source, cursor) {
-            let assertion_argument = delimiters.iter().rev().find_map(|(_, limit, argument, _)| {
-                limit.map(|limit| *argument < limit)
-            });
+            let assertion_argument = delimiters
+                .iter()
+                .rev()
+                .find_map(|(_, limit, argument, _)| limit.map(|limit| *argument < limit));
             let in_diagnostic = delimiters.iter().any(|(_, _, _, diagnostic)| *diagnostic);
             if assertion_argument.is_none()
                 && !in_diagnostic
@@ -603,9 +825,12 @@ fn contains_id_in_test_string_operands(source: &str, id: &str) -> bool {
                 b'[' => delimiters.push((b']', None, 0, false)),
                 b'{' => delimiters.push((b'}', None, 0, false)),
                 b')' | b']' | b'}'
-                    if delimiters.last().is_some_and(|(close, _, _, _)| *close == bytes[cursor]) => {
-                        delimiters.pop();
-                    }
+                    if delimiters
+                        .last()
+                        .is_some_and(|(close, _, _, _)| *close == bytes[cursor]) =>
+                {
+                    delimiters.pop();
+                }
                 b',' => {
                     if let Some((_, Some(_), argument, _)) = delimiters.last_mut() {
                         *argument += 1;
@@ -621,21 +846,35 @@ fn contains_id_in_test_string_operands(source: &str, id: &str) -> bool {
 
 fn diagnostic_macro(source: &str, start: usize) -> Option<(usize, u8)> {
     const MACROS: [&[u8]; 7] = [
-        b"println", b"eprintln", b"format", b"panic", b"todo", b"unimplemented", b"dbg",
+        b"println",
+        b"eprintln",
+        b"format",
+        b"panic",
+        b"todo",
+        b"unimplemented",
+        b"dbg",
     ];
     let bytes = source.as_bytes();
     for name in MACROS {
         if !bytes[start..].starts_with(name)
             || (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_'))
-            || bytes.get(start + name.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            || bytes
+                .get(start + name.len())
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         {
             continue;
         }
         let mut cursor = start + name.len();
-        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
-        if bytes.get(cursor) != Some(&b'!') { continue; }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'!') {
+            continue;
+        }
         cursor += 1;
-        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
         return match bytes.get(cursor) {
             Some(b'(') => Some((cursor + 1, b')')),
             Some(b'{') => Some((cursor + 1, b'}')),
@@ -646,18 +885,29 @@ fn diagnostic_macro(source: &str, start: usize) -> Option<(usize, u8)> {
 }
 
 fn diagnostic_call(source: &str, start: usize) -> Option<(usize, u8)> {
-    const CALLS: [&[u8]; 4] = [b"expect", b"expect_err", b"unwrap_or_else", b"unwrap_or_default"];
+    const CALLS: [&[u8]; 4] = [
+        b"expect",
+        b"expect_err",
+        b"unwrap_or_else",
+        b"unwrap_or_default",
+    ];
     let bytes = source.as_bytes();
     for name in CALLS {
         if !bytes[start..].starts_with(name)
             || (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_'))
-            || bytes.get(start + name.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+            || bytes
+                .get(start + name.len())
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
         {
             continue;
         }
         let mut cursor = start + name.len();
-        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) { cursor += 1; }
-        if bytes.get(cursor) == Some(&b'(') { return Some((cursor + 1, b')')); }
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) == Some(&b'(') {
+            return Some((cursor + 1, b')'));
+        }
     }
     None
 }
@@ -666,8 +916,13 @@ fn is_active_test_string_operand(source: &str, start: usize, end: usize) -> bool
     let prefix = source[..start].trim_end();
     let suffix = source[end..].trim_start();
     if [
-        "println!(", "eprintln!(", "format!(", "panic!(", "expect(",
-        "expect_err(", "unwrap_or_else(",
+        "println!(",
+        "eprintln!(",
+        "format!(",
+        "panic!(",
+        "expect(",
+        "expect_err(",
+        "unwrap_or_else(",
     ]
     .iter()
     .any(|diagnostic| prefix.ends_with(diagnostic))
@@ -686,9 +941,10 @@ fn is_active_test_string_operand(source: &str, start: usize, end: usize) -> bool
             && next_is_operand_delimiter)
 }
 fn is_line_comment_block(source: &str) -> bool {
-    if source.lines().any(|line| {
-        !line.trim().is_empty() && !line.trim_start().starts_with("//")
-    }) {
+    if source
+        .lines()
+        .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with("//"))
+    {
         return false;
     }
     let mut lines = source.lines().filter(|line| !line.trim().is_empty());
@@ -696,22 +952,25 @@ fn is_line_comment_block(source: &str) -> bool {
 }
 
 fn contains_id_in_comment_block(source: &str, id: &str) -> bool {
-    source.lines().filter_map(|line| line.trim_start().strip_prefix("//")).any(|comment| {
-        let mut cursor = 0;
-        let mut code_start = 0;
-        while cursor < comment.len() {
-            if let Some((end, _)) = string_literal(comment, cursor) {
-                if contains_id_in_code(&comment[code_start..cursor], id) {
-                    return true;
+    source
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("//"))
+        .any(|comment| {
+            let mut cursor = 0;
+            let mut code_start = 0;
+            while cursor < comment.len() {
+                if let Some((end, _)) = string_literal(comment, cursor) {
+                    if contains_id_in_code(&comment[code_start..cursor], id) {
+                        return true;
+                    }
+                    cursor = end;
+                    code_start = end;
+                } else {
+                    cursor += 1;
                 }
-                cursor = end;
-                code_start = end;
-            } else {
-                cursor += 1;
             }
-        }
-        contains_id_in_code(&comment[code_start..], id)
-    })
+            contains_id_in_code(&comment[code_start..], id)
+        })
 }
 
 fn contains_id_in_assertion_args(source: &str, id: &str) -> bool {
@@ -720,11 +979,19 @@ fn contains_id_in_assertion_args(source: &str, id: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         if let Some((end, contents)) = string_literal(source, i) {
-            let active_argument = delimiters.iter().rev().find_map(|(_, limit, argument)| {
-                limit.map(|limit| *argument < limit)
-            });
-            if active_argument == Some(true) && contains_id_in_string_operand(source, i, contents, id) { return true; }
-            if active_argument == Some(false) { i = end; continue; }
+            let active_argument = delimiters
+                .iter()
+                .rev()
+                .find_map(|(_, limit, argument)| limit.map(|limit| *argument < limit));
+            if active_argument == Some(true)
+                && contains_id_in_string_operand(source, i, contents, id)
+            {
+                return true;
+            }
+            if active_argument == Some(false) {
+                i = end;
+                continue;
+            }
             i = end;
         } else if let Some(end) = skip_non_code(source, i) {
             i = end;
@@ -737,9 +1004,16 @@ fn contains_id_in_assertion_args(source: &str, id: &str) -> bool {
                 b'[' => delimiters.push((b']', None, 0)),
                 b'{' => delimiters.push((b'}', None, 0)),
                 b')' | b']' | b'}'
-                    if delimiters.last().is_some_and(|(close, _, _)| *close == bytes[i]) => { delimiters.pop(); }
+                    if delimiters
+                        .last()
+                        .is_some_and(|(close, _, _)| *close == bytes[i]) =>
+                {
+                    delimiters.pop();
+                }
                 b',' => {
-                    if let Some((_, Some(_), argument)) = delimiters.last_mut() { *argument += 1; }
+                    if let Some((_, Some(_), argument)) = delimiters.last_mut() {
+                        *argument += 1;
+                    }
                 }
                 _ => {}
             }
@@ -751,18 +1025,30 @@ fn contains_id_in_assertion_args(source: &str, id: &str) -> bool {
 
 fn string_literal(source: &str, start: usize) -> Option<(usize, &str)> {
     let bytes = source.as_bytes();
-    let raw_start = if bytes.get(start) == Some(&b'r') { Some(start) }
-        else if bytes.get(start) == Some(&b'b') && bytes.get(start + 1) == Some(&b'r') { Some(start + 1) }
-        else { None };
+    let raw_start = if bytes.get(start) == Some(&b'r') {
+        Some(start)
+    } else if bytes.get(start) == Some(&b'b') && bytes.get(start + 1) == Some(&b'r') {
+        Some(start + 1)
+    } else {
+        None
+    };
     let (quote, hashes) = if let Some(raw_start) = raw_start {
         let mut quote = raw_start + 1;
-        while bytes.get(quote) == Some(&b'#') { quote += 1; }
-        if bytes.get(quote) != Some(&b'"') { return None; }
+        while bytes.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if bytes.get(quote) != Some(&b'"') {
+            return None;
+        }
         (quote, quote - raw_start - 1)
     } else {
-        let quote = if bytes.get(start) == Some(&b'"') { start }
-            else if bytes.get(start) == Some(&b'b') && bytes.get(start + 1) == Some(&b'"') { start + 1 }
-            else { return None; };
+        let quote = if bytes.get(start) == Some(&b'"') {
+            start
+        } else if bytes.get(start) == Some(&b'b') && bytes.get(start + 1) == Some(&b'"') {
+            start + 1
+        } else {
+            return None;
+        };
         (quote, 0)
     };
     let end = skip_non_code(source, start)?;
@@ -772,20 +1058,34 @@ fn string_literal(source: &str, start: usize) -> Option<(usize, &str)> {
 
 fn assertion_macro(source: &str, start: usize) -> Option<(usize, u8, usize)> {
     const MACROS: [(&[u8], usize); 6] = [
-        (b"debug_assert_eq", 2), (b"debug_assert_ne", 2), (b"assert_eq", 2),
-        (b"assert_ne", 2), (b"debug_assert", 1), (b"assert", 1),
+        (b"debug_assert_eq", 2),
+        (b"debug_assert_ne", 2),
+        (b"assert_eq", 2),
+        (b"assert_ne", 2),
+        (b"debug_assert", 1),
+        (b"assert", 1),
     ];
     let bytes = source.as_bytes();
     for (name, arguments) in MACROS {
-        if !bytes[start..].starts_with(name) ||
-            (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_')) ||
-            bytes.get(start + name.len()).is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        { continue; }
+        if !bytes[start..].starts_with(name)
+            || (start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'_'))
+            || bytes
+                .get(start + name.len())
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        {
+            continue;
+        }
         let mut i = start + name.len();
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
-        if bytes.get(i) != Some(&b'!') { continue; }
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
+        if bytes.get(i) != Some(&b'!') {
+            continue;
+        }
         i += 1;
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) { i += 1; }
+        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
+            i += 1;
+        }
         return match bytes.get(i) {
             Some(b'(') => Some((i + 1, b')', arguments)),
             Some(b'{') => Some((i + 1, b'}', arguments)),
@@ -803,11 +1103,17 @@ fn contains_id_in_format_string(contents: &str, id: &str) -> bool {
         match bytes[cursor] {
             b'{' if bytes.get(cursor + 1) == Some(&b'{') => cursor += 2,
             b'{' => {
-                if contains_id(&contents[text_start..cursor], id) { return true; }
+                if contains_id(&contents[text_start..cursor], id) {
+                    return true;
+                }
                 cursor += 1;
                 let mut depth = 1usize;
                 while cursor < bytes.len() && depth > 0 {
-                    match bytes[cursor] { b'{' => depth += 1, b'}' => depth -= 1, _ => {} }
+                    match bytes[cursor] {
+                        b'{' => depth += 1,
+                        b'}' => depth -= 1,
+                        _ => {}
+                    }
                     cursor += 1;
                 }
                 text_start = cursor;
@@ -820,27 +1126,48 @@ fn contains_id_in_format_string(contents: &str, id: &str) -> bool {
 
 fn contains_id_in_string_operand(source: &str, start: usize, contents: &str, id: &str) -> bool {
     let prefix = source[..start].trim_end();
-    let Some(before_open) = prefix.strip_suffix('(') else { return contains_id(contents, id); };
+    let Some(before_open) = prefix.strip_suffix('(') else {
+        return contains_id(contents, id);
+    };
     let before_bang = before_open.trim_end();
-    let Some(macro_name) = before_bang.strip_suffix('!') else { return contains_id(contents, id); };
+    let Some(macro_name) = before_bang.strip_suffix('!') else {
+        return contains_id(contents, id);
+    };
     let macro_name = macro_name.trim_end();
-    const FORMAT_MACROS: [&str; 8] = ["format", "format_args", "println", "eprintln", "panic", "todo", "unimplemented", "write"];
+    const FORMAT_MACROS: [&str; 8] = [
+        "format",
+        "format_args",
+        "println",
+        "eprintln",
+        "panic",
+        "todo",
+        "unimplemented",
+        "write",
+    ];
     let is_format = FORMAT_MACROS.iter().any(|name| {
         macro_name.ends_with(name)
             && macro_name[..macro_name.len() - name.len()]
-                .chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
+                .chars()
+                .next_back()
+                .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'))
     }) || macro_name.ends_with("writeln")
         && macro_name[..macro_name.len() - "writeln".len()]
-            .chars().next_back().is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
-    if is_format { contains_id_in_format_string(contents, id) } else { contains_id(contents, id) }
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_ascii_alphanumeric() || c == '_'));
+    if is_format {
+        contains_id_in_format_string(contents, id)
+    } else {
+        contains_id(contents, id)
+    }
 }
 
 fn contains_id_in_code(source: &str, id: &str) -> bool {
     source.match_indices(id).any(|(start, _)| {
         let before = source[..start].chars().next_back();
         let after = source[start + id.len()..].chars().next();
-        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-') &&
-            !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+        !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+            && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
     })
 }
 
@@ -852,14 +1179,27 @@ mod tests {
     struct Temp(PathBuf);
     impl Temp {
         fn new() -> Self {
-            let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let n = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
             let path = std::env::temp_dir().join(format!("orna-citations-{n}"));
-            fs::create_dir_all(&path).unwrap(); Self(path)
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
         }
     }
-    impl Drop for Temp { fn drop(&mut self) { let _ = fs::remove_dir_all(&self.0); } }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
     fn report(cited: &[&str], uncited: &[&str]) -> CitationReport {
-        CitationReport { cited_ids: cited.iter().map(|s| (*s).to_owned()).collect(), uncited_ids: uncited.iter().map(|s| (*s).to_owned()).collect(), chapters: BTreeMap::new(), locations: BTreeMap::new() }
+        CitationReport {
+            cited_ids: cited.iter().map(|s| (*s).to_owned()).collect(),
+            uncited_ids: uncited.iter().map(|s| (*s).to_owned()).collect(),
+            chapters: BTreeMap::new(),
+            locations: BTreeMap::new(),
+        }
     }
     fn scanned_a() -> BTreeSet<String> {
         ["a".to_owned()].into()
@@ -873,12 +1213,38 @@ mod tests {
         let catalogue = root.join("requirements.json");
         fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"},{"id":"REQ-002","chapter":"one"},{"id":"REQ-003","chapter":"two"}]"#).unwrap();
         fs::write(root.join("crates/a/src/lib.rs"), "const PROD: &str = \"REQ-002\"; #[cfg(test)] mod tests { fn actual_test() { let _ = REQ-001; } }").unwrap();
-        fs::write(root.join("crates/a/tests/a.rs"), "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = REQ-003; }").unwrap();
-        fs::write(root.join("crates/a/tests/fixtures/ignored.rs"), "// REQ-002").unwrap();
+        fs::write(
+            root.join("crates/a/tests/a.rs"),
+            "const HELPER: &str = \"REQ-002\"; #[test] fn actual_test() { let _ = REQ-003; }",
+        )
+        .unwrap();
+        fs::write(
+            root.join("crates/a/tests/fixtures/ignored.rs"),
+            "// REQ-002",
+        )
+        .unwrap();
         let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
-        assert_eq!(result.cited_ids, ["REQ-001", "REQ-003"].into_iter().map(str::to_owned).collect());
-        assert_eq!(result.chapters["one"], ChapterCounts { cited: 1, uncited: 1 });
-        assert_eq!(result.chapters["two"], ChapterCounts { cited: 1, uncited: 0 });
+        assert_eq!(
+            result.cited_ids,
+            ["REQ-001", "REQ-003"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        assert_eq!(
+            result.chapters["one"],
+            ChapterCounts {
+                cited: 1,
+                uncited: 1
+            }
+        );
+        assert_eq!(
+            result.chapters["two"],
+            ChapterCounts {
+                cited: 1,
+                uncited: 0
+            }
+        );
     }
     #[test]
     fn ignores_citations_in_crates_outside_the_scanned_set() {
@@ -888,9 +1254,20 @@ mod tests {
         fs::create_dir_all(root.join("crates/dead/tests")).unwrap();
         let catalogue = root.join("requirements.json");
         fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"}]"#).unwrap();
-        fs::write(root.join("crates/dead/tests/a.rs"), "#[test] fn dead_test() { assert_eq!(1, \"REQ-001\"); }").unwrap();
-        assert!(cite_requirements(&catalogue, root, &scanned_a()).unwrap().cited_ids.is_empty());
-        assert!(cite_requirements(&catalogue, root, &BTreeSet::from(["missing".to_owned()])).is_err());
+        fs::write(
+            root.join("crates/dead/tests/a.rs"),
+            "#[test] fn dead_test() { assert_eq!(1, \"REQ-001\"); }",
+        )
+        .unwrap();
+        assert!(
+            cite_requirements(&catalogue, root, &scanned_a())
+                .unwrap()
+                .cited_ids
+                .is_empty()
+        );
+        assert!(
+            cite_requirements(&catalogue, root, &BTreeSet::from(["missing".to_owned()])).is_err()
+        );
     }
     #[test]
     fn reports_locations_for_all_restored_requirement_ids() {
@@ -898,26 +1275,45 @@ mod tests {
         let root = &tmp.0;
         fs::create_dir_all(root.join("crates/a/tests")).unwrap();
         let ids = [
-            concat!("ORNA-", "CFLOW-001"), concat!("ORNA-", "CONF-001"),
-            concat!("ORNA-", "OBJECT-003"), concat!("ORNA-", "OBJECT-005"),
-            concat!("ORNA-", "PIPE-001"), concat!("ORNA-", "PIPE-002"),
+            concat!("ORNA-", "CFLOW-001"),
+            concat!("ORNA-", "CONF-001"),
+            concat!("ORNA-", "OBJECT-003"),
+            concat!("ORNA-", "OBJECT-005"),
+            concat!("ORNA-", "PIPE-001"),
+            concat!("ORNA-", "PIPE-002"),
             concat!("ORNA-", "PROTO-004"),
         ];
-        let entries = ids.iter().map(|id| format!("{{\"id\":\"{id}\",\"chapter\":\"restored\"}}"))
-            .collect::<Vec<_>>().join(",");
+        let entries = ids
+            .iter()
+            .map(|id| format!("{{\"id\":\"{id}\",\"chapter\":\"restored\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
         let catalogue = root.join("requirements.json");
         fs::write(&catalogue, format!("[{entries}]")).unwrap();
         let mut source = String::from("#[test]\nfn restored_requirements() {\n");
-        for id in ids { source.push_str(&format!("    assert_eq!(1, \"{id}\");\n")); }
+        for id in ids {
+            source.push_str(&format!("    assert_eq!(1, \"{id}\");\n"));
+        }
         source.push_str("}\n");
         fs::write(root.join("crates/a/tests/restored.rs"), source).unwrap();
 
         let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
-        assert_eq!(result.cited_ids, ids.into_iter().map(str::to_owned).collect());
+        assert_eq!(
+            result.cited_ids,
+            ids.into_iter().map(str::to_owned).collect()
+        );
         for id in ids {
-            let locations = result.locations.get(id).unwrap_or_else(|| panic!("missing locations for {id}"));
+            let locations = result
+                .locations
+                .get(id)
+                .unwrap_or_else(|| panic!("missing locations for {id}"));
             assert!(!locations.is_empty(), "empty locations for {id}");
-            assert!(locations.iter().all(|location| location.file == "crates/a/tests/restored.rs" && location.line > 0));
+            assert!(
+                locations
+                    .iter()
+                    .all(|location| location.file == "crates/a/tests/restored.rs"
+                        && location.line > 0)
+            );
         }
     }
     #[test]
@@ -926,7 +1322,11 @@ mod tests {
         let root = &tmp.0;
         fs::create_dir_all(root.join("crates/a/tests")).unwrap();
         let catalogue = root.join("requirements.json");
-        fs::write(&catalogue, r#"[{"id":"REQ-001","chapter":"one"},{"id":"REQ-002","chapter":"one"}]"#).unwrap();
+        fs::write(
+            &catalogue,
+            r#"[{"id":"REQ-001","chapter":"one"},{"id":"REQ-002","chapter":"one"}]"#,
+        )
+        .unwrap();
         fs::write(
             root.join("crates/a/tests/a.rs"),
             "// REQ-001 is the behavior covered here\n#[test]\nfn actual_test() { assert!(true); }\n\n// REQ-002 belongs to an ordinary helper, not a test.\nfn helper() {}",
@@ -934,7 +1334,10 @@ mod tests {
         .unwrap();
 
         let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
-        assert_eq!(result.cited_ids, ["REQ-001"].into_iter().map(str::to_owned).collect());
+        assert_eq!(
+            result.cited_ids,
+            ["REQ-001"].into_iter().map(str::to_owned).collect()
+        );
     }
 
     #[test]
@@ -956,7 +1359,10 @@ mod tests {
         .unwrap();
         let unit_test_code = fs::read_to_string(root.join("crates/a/src/lib.rs")).unwrap();
         let selected = test_code(Path::new("crates/a/src/lib.rs"), &unit_test_code);
-        assert!(selected.iter().any(|code| contains_id(code, "REQ-002")), "{selected:?}");
+        assert!(
+            selected.iter().any(|code| contains_id(code, "REQ-002")),
+            "{selected:?}"
+        );
         fs::write(
             root.join("crates/a/tests/a.rs"),
             "// REQ-001 directly annotates this test.\n#[test]\nfn integration_test() {}\n\n// REQ-003 is outside test code.\nfn helper() {}",
@@ -966,7 +1372,10 @@ mod tests {
         let result = cite_requirements(&catalogue, root, &scanned_a()).unwrap();
         assert_eq!(
             result.cited_ids,
-            ["REQ-001", "REQ-002"].into_iter().map(str::to_owned).collect()
+            ["REQ-001", "REQ-002"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
         );
     }
     #[test]
@@ -976,12 +1385,25 @@ mod tests {
         assert_eq!(selected.len(), 2);
         assert!(selected[0].contains("REQ-IN"));
         assert!(selected[1].contains("REQ-AFTER"));
-        assert!(test_code(Path::new("tests/integration.rs"), "const HELPER: &str = \"REQ-TESTS\"; #[test] fn actual() { let _ = \"REQ-TESTS\"; }").len() == 1);
+        assert!(
+            test_code(
+                Path::new("tests/integration.rs"),
+                "const HELPER: &str = \"REQ-TESTS\"; #[test] fn actual() { let _ = \"REQ-TESTS\"; }"
+            )
+            .len()
+                == 1
+        );
         let async_source = "#[tokio::test] async fn actual() { assert_eq!(value, \"REQ-ASYNC\"); }";
         let async_selected = test_code(Path::new("tests/integration.rs"), async_source);
         assert_eq!(async_selected.len(), 1);
         assert!(contains_id(async_selected[0], "REQ-ASYNC"));
-        assert!(test_code(Path::new("tests/integration.rs"), "fn f() { // REQ-TESTS\n }").is_empty());
+        assert!(
+            test_code(
+                Path::new("tests/integration.rs"),
+                "fn f() { // REQ-TESTS\n }"
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -999,40 +1421,85 @@ mod tests {
 
         let inert_source = r##"#[test] fn example() { let note = "REQ-001"; }"##;
         let inert_selected = test_code(Path::new("tests/integration.rs"), inert_source);
-        assert!(!inert_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            !inert_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
-        let expected_source = r##"#[test] fn example() { assert_eq!(diagnostic.code(), "REQ-001"); }"##;
+        let expected_source =
+            r##"#[test] fn example() { assert_eq!(diagnostic.code(), "REQ-001"); }"##;
         let expected_selected = test_code(Path::new("tests/integration.rs"), expected_source);
-        assert!(expected_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            expected_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
         let not_equal_source = r##"#[test] fn example() { assert_ne!(actual, "REQ-001"); }"##;
         let not_equal_selected = test_code(Path::new("tests/integration.rs"), not_equal_source);
-        assert!(not_equal_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            not_equal_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
-        let condition_source = r##"#[test] fn example() { assert!(values.contains(&"REQ-001")); }"##;
+        let condition_source =
+            r##"#[test] fn example() { assert!(values.contains(&"REQ-001")); }"##;
         let condition_selected = test_code(Path::new("tests/integration.rs"), condition_source);
-        assert!(condition_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            condition_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
         let comment_source = "#[test] fn example() { // assert_eq!(actual, \"REQ-001\");\n}";
         let comment_selected = test_code(Path::new("tests/integration.rs"), comment_source);
-        assert!(!comment_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            !comment_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
         let citation_source = "#[test] fn example() {\n    // REQ-001 is cited by this active test.\n    assert!(true);\n}";
         let citation_selected = test_code(Path::new("tests/integration.rs"), citation_source);
-        assert!(citation_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            citation_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
-        let message_source = r##"#[test] fn example() { assert_eq!(actual, expected, "REQ-001"); }"##;
+        let message_source =
+            r##"#[test] fn example() { assert_eq!(actual, expected, "REQ-001"); }"##;
         let message_selected = test_code(Path::new("tests/integration.rs"), message_source);
-        assert!(!message_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            !message_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
 
-        let placeholder_source = r##"#[test] fn example() { assert_eq!(format!("{value:REQ-001}"), expected); }"##;
+        let placeholder_source =
+            r##"#[test] fn example() { assert_eq!(format!("{value:REQ-001}"), expected); }"##;
         let placeholder_selected = test_code(Path::new("tests/integration.rs"), placeholder_source);
-        assert!(!placeholder_selected.iter().any(|code| contains_id(code, "REQ-001")));
-        let format_text_source = r##"#[test] fn example() { assert_eq!(format!("REQ-001: {value}"), expected); }"##;
+        assert!(
+            !placeholder_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
+        let format_text_source =
+            r##"#[test] fn example() { assert_eq!(format!("REQ-001: {value}"), expected); }"##;
         let format_text_selected = test_code(Path::new("tests/integration.rs"), format_text_source);
-        assert!(format_text_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            format_text_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
         let production_source = r##"const PROD: &str = "REQ-001"; #[cfg(test)] mod tests { #[test] fn example() { assert!(true); } }"##;
         let production_selected = test_code(Path::new("src/lib.rs"), production_source);
-        assert!(!production_selected.iter().any(|code| contains_id(code, "REQ-001")));
+        assert!(
+            !production_selected
+                .iter()
+                .any(|code| contains_id(code, "REQ-001"))
+        );
     }
 
     #[test]
@@ -1052,7 +1519,9 @@ mod tests {
             let inert_note = "REQ-009";
         }"##;
         let selected = test_code(Path::new("tests/integration.rs"), source);
-        for id in ["REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006"] {
+        for id in [
+            "REQ-001", "REQ-002", "REQ-003", "REQ-004", "REQ-005", "REQ-006",
+        ] {
             assert!(selected.iter().any(|code| contains_id(code, id)), "{id}");
         }
         for id in ["REQ-007", "REQ-008", "REQ-009", "REQ-010", "REQ-012"] {
@@ -1090,7 +1559,13 @@ mod tests {
         for id in ["REQ-002", "REQ-003", "REQ-004"] {
             assert!(!selected.iter().any(|code| contains_id(code, id)), "{id}");
         }
-        assert_eq!(selected.iter().filter(|code| code.starts_with("fn selected_helper(")).count(), 1);
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|code| code.starts_with("fn selected_helper("))
+                .count(),
+            1
+        );
     }
     #[test]
     fn matching_brace_ignores_char_byte_and_string_literal_closers() {
@@ -1101,19 +1576,36 @@ mod tests {
 
     #[test]
     fn fails_when_uncited_count_rises() {
-        let baseline = CitationBaseline { max_uncited: 1, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
+        let baseline = CitationBaseline {
+            max_uncited: 1,
+            scanned_crates: BTreeSet::new(),
+            cited_ids: ["REQ-1".to_owned()].into(),
+        };
         assert!(check_ratchet(&report(&["REQ-1"], &["A", "B"]), &baseline).is_err());
     }
 
     #[test]
     fn fails_when_previously_cited_id_drops_even_if_count_does_not_rise() {
-        let baseline = CitationBaseline { max_uncited: 2, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
-        assert!(check_ratchet(&report(&[], &["REQ-1"]), &baseline).unwrap_err().dropped_ids.contains("REQ-1"));
+        let baseline = CitationBaseline {
+            max_uncited: 2,
+            scanned_crates: BTreeSet::new(),
+            cited_ids: ["REQ-1".to_owned()].into(),
+        };
+        assert!(
+            check_ratchet(&report(&[], &["REQ-1"]), &baseline)
+                .unwrap_err()
+                .dropped_ids
+                .contains("REQ-1")
+        );
     }
 
     #[test]
     fn permits_lowering_uncited_baseline_without_dropping_citations() {
-        let baseline = CitationBaseline { max_uncited: 1, scanned_crates: BTreeSet::new(), cited_ids: ["REQ-1".to_owned()].into() };
+        let baseline = CitationBaseline {
+            max_uncited: 1,
+            scanned_crates: BTreeSet::new(),
+            cited_ids: ["REQ-1".to_owned()].into(),
+        };
         assert!(check_ratchet(&report(&["REQ-1"], &[]), &baseline).is_ok());
     }
 }

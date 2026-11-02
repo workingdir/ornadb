@@ -11,12 +11,11 @@
 //! `.orna` fixture. The report must keep each requirement partially executed
 //! because this stage does not prove the full requirement.
 
-
 mod support;
 use orna_conformance_v1::{
     BoundedEvaluator, Corpus, FixtureStageBinding, Harness, RuntimeAdapter, Stage,
 };
-use orna_traceability_v1::{generate_with_engine_witnesses, Status};
+use orna_traceability_v1::{Status, generate_with_engine_witnesses};
 use serde_json::Value;
 use std::{
     fs,
@@ -24,11 +23,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const IMPLEMENTATION_REF: &str =
-    "crates/orna-conformance-v1/src/lib.rs::Harness::run_fixture";
-const TEST_REF: &str =
-    "crates/orna-traceability-v1/tests/traceability_gap_evidence_bh1i.rs::ten_fixture_typecheck_boundaries_remain_per_requirement";
-
+const IMPLEMENTATION_REF: &str = "crates/orna-conformance-v1/src/lib.rs::Harness::run_fixture";
+const TEST_REF: &str = "crates/orna-traceability-v1/tests/traceability_gap_evidence_bh1i.rs::ten_fixture_typecheck_boundaries_remain_per_requirement";
 
 // These are exact frozen-reference examples, compiled into this new test and
 // loaded by the conformance Harness after being copied byte-for-byte.
@@ -146,9 +142,7 @@ impl ReferenceCopy {
             .duration_since(UNIX_EPOCH)
             .expect("system clock is after the Unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "orna-traceability-gap-bh1i-{nonce}"
-        ));
+        let path = std::env::temp_dir().join(format!("orna-traceability-gap-bh1i-{nonce}"));
         copy_dir(&reference_root(), &path);
         for (logical_path, source) in FIXTURE_SOURCES {
             let fixture_path = path.join(logical_path);
@@ -177,7 +171,9 @@ impl Drop for ReferenceCopy {
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
+        })
 }
 
 fn copy_dir(from: &Path, to: &Path) {
@@ -185,7 +181,11 @@ fn copy_dir(from: &Path, to: &Path) {
     for entry in fs::read_dir(from).expect("read frozen reference directory") {
         let entry = entry.expect("read frozen reference entry");
         let destination = to.join(entry.file_name());
-        if entry.file_type().expect("read frozen reference entry type").is_dir() {
+        if entry
+            .file_type()
+            .expect("read frozen reference entry type")
+            .is_dir()
+        {
             copy_dir(&entry.path(), &destination);
         } else {
             fs::copy(entry.path(), destination).expect("copy frozen reference file");
@@ -193,10 +193,16 @@ fn copy_dir(from: &Path, to: &Path) {
     }
 }
 
-const RETIRED_REQUIREMENTS: &[&str] = &["ORNA-PATH-006", "ORNA-PATH-012", "ORNA-PROJECT-001", "ORNA-PROJECT-003"];
+const RETIRED_REQUIREMENTS: &[&str] = &[
+    "ORNA-PATH-006",
+    "ORNA-PATH-012",
+    "ORNA-PROJECT-001",
+    "ORNA-PROJECT-003",
+];
 
 fn active_rows() -> impl Iterator<Item = &'static Row> {
-    ROWS.iter().filter(|row| !RETIRED_REQUIREMENTS.contains(&row.requirement))
+    ROWS.iter()
+        .filter(|row| !RETIRED_REQUIREMENTS.contains(&row.requirement))
 }
 
 fn assert_superseded_requirements(root: &Path) {
@@ -205,7 +211,9 @@ fn assert_superseded_requirements(root: &Path) {
             .expect("read authoritative requirement changes"),
     )
     .expect("parse authoritative requirement changes");
-    let retired = changes["retired"].as_array().expect("retired requirement array");
+    let retired = changes["retired"]
+        .as_array()
+        .expect("retired requirement array");
     for requirement in RETIRED_REQUIREMENTS {
         let entry = retired
             .iter()
@@ -254,7 +262,10 @@ fn ten_fixture_typecheck_boundaries_remain_per_requirement() {
     assert_superseded_requirements(copied.path());
     let corpus = Corpus::load(copied.path()).expect("copied frozen corpus loads");
     assert!(
-        !corpus.publication_digests.keys().any(|key| key.starts_with("Orna-")),
+        !corpus
+            .publication_digests
+            .keys()
+            .any(|key| key.starts_with("Orna-")),
         "1.1.0 normative map pins no markdown publication key"
     );
     support::assert_markdown_publication_digest(copied.path());

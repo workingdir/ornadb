@@ -14,7 +14,9 @@ fn optional_int(value: i64) -> Raw {
 }
 
 fn optional_ints(values: &[i64]) -> CanonicalValue {
-    canonical(Raw::Array(values.iter().copied().map(optional_int).collect()))
+    canonical(Raw::Array(
+        values.iter().copied().map(optional_int).collect(),
+    ))
 }
 
 fn session() -> AdmittedReplSession {
@@ -38,7 +40,9 @@ fn query_windows_compute_rate_and_trapezoidal_integral_per_overlapping_window() 
     assert_eq!(rate, Some(optional_ints(&[2, 2])));
 
     let integral = session
-        .submit(include_str!("fixtures/stdlib-query-window-integrate-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-integrate-pkbay.orna"
+        ))
         .unwrap_or_else(|error| panic!("window integration failed with {}", error.code()));
     assert_eq!(integral, Some(optional_ints(&[20, 36])));
 }
@@ -49,7 +53,9 @@ fn sparse_statistic_windows_keep_their_source_time_order() {
         .submit(include_str!(
             "fixtures/stdlib-query-time-order-sparse-windows-d05h9.orna"
         ))
-        .unwrap_or_else(|error| panic!("sparse ordered window values failed with {}", error.code()));
+        .unwrap_or_else(|error| {
+            panic!("sparse ordered window values failed with {}", error.code())
+        });
     assert_eq!(
         actual,
         Some(canonical(Raw::Array(vec![
@@ -64,12 +70,16 @@ fn sparse_statistic_windows_keep_their_source_time_order() {
 fn query_windows_preserve_elapsed_time_across_sparse_nonoverlapping_windows() {
     let mut session = session();
     let rate = session
-        .submit(include_str!("fixtures/stdlib-query-window-rate-sparse-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-rate-sparse-pkbay.orna"
+        ))
         .unwrap_or_else(|error| panic!("sparse window rate failed with {}", error.code()));
     assert_eq!(rate, Some(optional_ints(&[2, 2])));
 
     let integral = session
-        .submit(include_str!("fixtures/stdlib-query-window-integrate-sparse-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-integrate-sparse-pkbay.orna"
+        ))
         .unwrap_or_else(|error| panic!("sparse window integration failed with {}", error.code()));
     assert_eq!(integral, Some(optional_ints(&[2, 30])));
 }
@@ -78,25 +88,40 @@ fn query_windows_preserve_elapsed_time_across_sparse_nonoverlapping_windows() {
 fn query_windows_keep_sparse_step_boundaries_and_omit_the_short_tail() {
     let mut session = session();
     let rate = session
-        .submit(include_str!("fixtures/stdlib-query-window-rate-deep-sparse-hb3lu.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-rate-deep-sparse-hb3lu.orna"
+        ))
         .unwrap_or_else(|error| panic!("deep sparse window rate failed with {}", error.code()));
     assert_eq!(rate, Some(optional_ints(&[2, 2])));
 
     let derivative = session
-        .submit(include_str!("fixtures/stdlib-query-window-derivative-deep-sparse-hb3lu.orna"))
-        .unwrap_or_else(|error| panic!("deep sparse window derivative failed with {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-derivative-deep-sparse-hb3lu.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!("deep sparse window derivative failed with {}", error.code())
+        });
     assert_eq!(derivative, Some(canonical(Raw::Bool(true))));
 
     let integral = session
-        .submit(include_str!("fixtures/stdlib-query-window-integrate-deep-sparse-hb3lu.orna"))
-        .unwrap_or_else(|error| panic!("deep sparse window integration failed with {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-integrate-deep-sparse-hb3lu.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "deep sparse window integration failed with {}",
+                error.code()
+            )
+        });
     assert_eq!(integral, Some(optional_ints(&[1, 40])));
 }
 
 #[test]
 fn query_window_derivative_uses_each_pair_right_endpoint_and_exact_slope() {
     let actual = session()
-        .submit(include_str!("fixtures/stdlib-query-window-derivative-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-derivative-pkbay.orna"
+        ))
         .unwrap_or_else(|error| panic!("window derivative failed with {}", error.code()));
     assert_eq!(actual, Some(canonical(Raw::Bool(true))));
 }
@@ -104,12 +129,16 @@ fn query_window_derivative_uses_each_pair_right_endpoint_and_exact_slope() {
 #[test]
 fn time_series_windows_omit_short_tails_and_keep_strict_time_order() {
     let short = session()
-        .submit(include_str!("fixtures/stdlib-query-window-time-short-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-short-pkbay.orna"
+        ))
         .unwrap_or_else(|error| panic!("short time-series window failed with {}", error.code()));
     assert_eq!(short, Some(canonical(Raw::Array(Vec::new()))));
 
     let error = session()
-        .submit(include_str!("fixtures/stdlib-query-window-time-duplicate-pkbay.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-duplicate-pkbay.orna"
+        ))
         .expect_err("equal timestamps in a complete window must fail");
     assert_eq!(error.code(), "ORNA-EVAL-ERROR");
 }
@@ -138,17 +167,23 @@ fn time_series_checks_ordering_inside_a_multi_point_sparse_gap() {
 fn time_series_statistics_preserve_elapsed_time_after_a_deeper_sparse_gap() {
     let mut session = session();
     let rate = session
-        .submit(include_str!("fixtures/stdlib-query-window-rate-deep-gap-neuwd.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-rate-deep-gap-neuwd.orna"
+        ))
         .unwrap_or_else(|error| panic!("deep-gap window rate failed with {}", error.code()));
     assert_eq!(rate, Some(optional_ints(&[2, 2])));
 
     let derivative = session
-        .submit(include_str!("fixtures/stdlib-query-window-derivative-deep-gap-neuwd.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-derivative-deep-gap-neuwd.orna"
+        ))
         .unwrap_or_else(|error| panic!("deep-gap derivative failed with {}", error.code()));
     assert_eq!(derivative, Some(canonical(Raw::Bool(true))));
 
     let integral = session
-        .submit(include_str!("fixtures/stdlib-query-window-integrate-deep-gap-neuwd.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-integrate-deep-gap-neuwd.orna"
+        ))
         .unwrap_or_else(|error| panic!("deep-gap integration failed with {}", error.code()));
     assert_eq!(integral, Some(optional_ints(&[1, 51])));
 }
@@ -167,17 +202,23 @@ fn time_series_window_rejects_a_singleton_source_even_without_complete_windows()
 fn time_series_window_validates_bounds_before_sparse_source_cardinality() {
     let mut session = session();
     let invalid_size = session
-        .submit(include_str!("fixtures/stdlib-query-window-time-invalid-size-hb3lu.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-invalid-size-hb3lu.orna"
+        ))
         .expect_err("nonpositive window size must fail before source-series validation");
     assert_eq!(invalid_size.code(), "ORNA-EVAL-ERROR");
 
     let invalid_step = session
-        .submit(include_str!("fixtures/stdlib-query-window-time-invalid-step-hb3lu.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-invalid-step-hb3lu.orna"
+        ))
         .expect_err("nonpositive window step must fail before source-series validation");
     assert_eq!(invalid_step.code(), "ORNA-EVAL-ERROR");
 
     let singleton_window = session
-        .submit(include_str!("fixtures/stdlib-query-window-time-singleton-window-hb3lu.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-time-singleton-window-hb3lu.orna"
+        ))
         .expect_err("each time-series statistic window must contain two points");
     assert_eq!(singleton_window.code(), "ORNA-EVAL-ERROR");
 }

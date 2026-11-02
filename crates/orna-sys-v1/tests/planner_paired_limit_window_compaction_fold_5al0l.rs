@@ -875,8 +875,7 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
     let unknown = joins["table:Unknown"];
     let key = "paired_limit_aggregate_spill_restoration_fold_identity";
     let limit_component = "paired_limit_aggregate_spill_restoration_limit_fold_identity";
-    let aggregate_component =
-        "paired_limit_aggregate_spill_restoration_aggregate_fold_identity";
+    let aggregate_component = "paired_limit_aggregate_spill_restoration_aggregate_fold_identity";
 
     assert_eq!(
         text(first, "paired_limit_aggregate_spill_restoration_transition"),
@@ -891,19 +890,31 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
         text(first, "paired_aggregate_spill_restoration_fold_identity")
     );
     assert_eq!(
-        integer(first, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        integer(
+            first,
+            "paired_limit_aggregate_spill_restoration_limit_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(first, "paired_limit_aggregate_spill_restoration_limit_stage_count"),
+        integer(
+            first,
+            "paired_limit_aggregate_spill_restoration_limit_stage_count"
+        ),
         2
     );
     assert_eq!(
-        integer(first, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        integer(
+            first,
+            "paired_limit_aggregate_spill_restoration_aggregate_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(first, "paired_limit_aggregate_spill_restoration_spill_pair_count"),
+        integer(
+            first,
+            "paired_limit_aggregate_spill_restoration_spill_pair_count"
+        ),
         1
     );
 
@@ -913,44 +924,74 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
         "carried_across_sparse_input"
     );
     assert_eq!(
-        text(compact, "paired_limit_aggregate_spill_restoration_transition"),
+        text(
+            compact,
+            "paired_limit_aggregate_spill_restoration_transition"
+        ),
         "advanced_aggregate_restoration"
     );
     assert_eq!(text(compact, limit_component), text(gap, limit_component));
-    assert_ne!(text(compact, aggregate_component), text(gap, aggregate_component));
+    assert_ne!(
+        text(compact, aggregate_component),
+        text(gap, aggregate_component)
+    );
     assert_ne!(text(compact, key), text(gap, key));
     assert_eq!(
-        integer(compact, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        integer(
+            compact,
+            "paired_limit_aggregate_spill_restoration_aggregate_pair_count"
+        ),
         2
     );
     assert_eq!(
-        integer(compact, "paired_limit_aggregate_spill_restoration_spill_pair_count"),
+        integer(
+            compact,
+            "paired_limit_aggregate_spill_restoration_spill_pair_count"
+        ),
         2
     );
 
     assert_eq!(
-        text(restore, "paired_limit_aggregate_spill_restoration_transition"),
+        text(
+            restore,
+            "paired_limit_aggregate_spill_restoration_transition"
+        ),
         "advanced_limit_and_aggregate_restoration"
     );
     assert_ne!(text(restore, key), text(compact, key));
     assert_eq!(
-        integer(restore, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        integer(
+            restore,
+            "paired_limit_aggregate_spill_restoration_limit_pair_count"
+        ),
         2
     );
     assert_eq!(
-        integer(restore, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        integer(
+            restore,
+            "paired_limit_aggregate_spill_restoration_aggregate_pair_count"
+        ),
         3
     );
     assert_eq!(
-        text(unknown, "paired_limit_aggregate_spill_restoration_transition"),
+        text(
+            unknown,
+            "paired_limit_aggregate_spill_restoration_transition"
+        ),
         "advanced_limit_and_aggregate_restoration"
     );
     assert_eq!(
-        integer(unknown, "paired_limit_aggregate_spill_restoration_limit_pair_count"),
+        integer(
+            unknown,
+            "paired_limit_aggregate_spill_restoration_limit_pair_count"
+        ),
         3
     );
     assert_eq!(
-        integer(unknown, "paired_limit_aggregate_spill_restoration_aggregate_pair_count"),
+        integer(
+            unknown,
+            "paired_limit_aggregate_spill_restoration_aggregate_pair_count"
+        ),
         4
     );
     assert_eq!(text(original.root(), key), text(unknown, key));
@@ -977,11 +1018,17 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
     );
     assert_eq!(
         text(changed_first, limit_component),
-        text(changed_first, "paired_join_limit_anchor_cascade_fold_identity")
+        text(
+            changed_first,
+            "paired_join_limit_anchor_cascade_fold_identity"
+        )
     );
     assert_eq!(
         text(changed_first, aggregate_component),
-        text(changed_first, "paired_aggregate_spill_restoration_fold_identity")
+        text(
+            changed_first,
+            "paired_aggregate_spill_restoration_fold_identity"
+        )
     );
 
     let mut changed_spills = spill_descriptors.clone();
@@ -1050,10 +1097,7 @@ fn paired_limit_identity_tracks_sparse_aggregate_spill_restoration() {
         text(limit_only_restore, limit_component),
         text(limit_only_compact, limit_component)
     );
-    assert_ne!(
-        text(limit_only_restore, key),
-        text(limit_only_compact, key)
-    );
+    assert_ne!(text(limit_only_restore, key), text(limit_only_compact, key));
 }
 #[test]
 fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
@@ -1103,19 +1147,31 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
         text(first, "paired_window_compaction_spill_fold_identity")
     );
     assert_eq!(
-        integer(first, "paired_scoped_limit_window_restoration_limit_pair_count"),
+        integer(
+            first,
+            "paired_scoped_limit_window_restoration_limit_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(first, "paired_scoped_limit_window_restoration_limit_stage_count"),
+        integer(
+            first,
+            "paired_scoped_limit_window_restoration_limit_stage_count"
+        ),
         2
     );
     assert_eq!(
-        integer(first, "paired_scoped_limit_window_restoration_window_pair_count"),
+        integer(
+            first,
+            "paired_scoped_limit_window_restoration_window_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(first, "paired_scoped_limit_window_restoration_window_stage_count"),
+        integer(
+            first,
+            "paired_scoped_limit_window_restoration_window_stage_count"
+        ),
         2
     );
 
@@ -1134,11 +1190,17 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
     assert_ne!(text(compact, window_fold), text(gap, window_fold));
     assert_ne!(text(compact, key), text(gap, key));
     assert_eq!(
-        integer(compact, "paired_scoped_limit_window_restoration_limit_pair_count"),
+        integer(
+            compact,
+            "paired_scoped_limit_window_restoration_limit_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(compact, "paired_scoped_limit_window_restoration_window_pair_count"),
+        integer(
+            compact,
+            "paired_scoped_limit_window_restoration_window_pair_count"
+        ),
         2
     );
 
@@ -1148,11 +1210,17 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
     );
     assert_ne!(text(restore, key), text(compact, key));
     assert_eq!(
-        integer(restore, "paired_scoped_limit_window_restoration_limit_pair_count"),
+        integer(
+            restore,
+            "paired_scoped_limit_window_restoration_limit_pair_count"
+        ),
         2
     );
     assert_eq!(
-        integer(restore, "paired_scoped_limit_window_restoration_window_pair_count"),
+        integer(
+            restore,
+            "paired_scoped_limit_window_restoration_window_pair_count"
+        ),
         3
     );
     assert_eq!(
@@ -1160,11 +1228,17 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
         "advanced_limit_scope_and_window_restoration"
     );
     assert_eq!(
-        integer(unknown, "paired_scoped_limit_window_restoration_limit_pair_count"),
+        integer(
+            unknown,
+            "paired_scoped_limit_window_restoration_limit_pair_count"
+        ),
         3
     );
     assert_eq!(
-        integer(unknown, "paired_scoped_limit_window_restoration_window_pair_count"),
+        integer(
+            unknown,
+            "paired_scoped_limit_window_restoration_window_pair_count"
+        ),
         4
     );
     assert_eq!(
@@ -1202,7 +1276,10 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
     );
     assert_eq!(
         text(changed_first, window_fold),
-        text(changed_first, "paired_window_compaction_spill_fold_identity")
+        text(
+            changed_first,
+            "paired_window_compaction_spill_fold_identity"
+        )
     );
 
     let mut changed_spills = spill_descriptors.clone();
@@ -1223,7 +1300,10 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
             "paired_window_compaction_spill_fold_identity"
         )
     );
-    assert_ne!(text(first, window_fold), text(changed_spill_first, window_fold));
+    assert_ne!(
+        text(first, window_fold),
+        text(changed_spill_first, window_fold)
+    );
     assert_ne!(text(first, key), text(changed_spill_first, key));
     assert_ne!(
         text(original.root(), "join_cost_fold_identity"),
@@ -1252,11 +1332,20 @@ fn scoped_limit_identity_tracks_paired_window_restoration_folds() {
     let limit_only_compact = limit_only_joins["table:Compact"];
     let limit_only_restore = limit_only_joins["table:Restore"];
     assert_eq!(
-        text(limit_only_restore, "paired_scoped_limit_window_restoration_transition"),
+        text(
+            limit_only_restore,
+            "paired_scoped_limit_window_restoration_transition"
+        ),
         "advanced_limit_scope"
     );
-    assert_ne!(text(limit_only_restore, limit_scope), text(limit_only_compact, limit_scope));
-    assert_eq!(text(limit_only_restore, window_fold), text(limit_only_compact, window_fold));
+    assert_ne!(
+        text(limit_only_restore, limit_scope),
+        text(limit_only_compact, limit_scope)
+    );
+    assert_eq!(
+        text(limit_only_restore, window_fold),
+        text(limit_only_compact, window_fold)
+    );
     assert_ne!(text(limit_only_restore, key), text(limit_only_compact, key));
 }
 
@@ -1347,11 +1436,17 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
     assert_ne!(text(compact, spill_identity), text(gap, spill_identity));
     assert_ne!(text(compact, key), text(gap, key));
     assert_eq!(
-        integer(compact, "paired_bounded_limit_window_spill_limit_pair_count"),
+        integer(
+            compact,
+            "paired_bounded_limit_window_spill_limit_pair_count"
+        ),
         1
     );
     assert_eq!(
-        integer(compact, "paired_bounded_limit_window_spill_spill_pair_count"),
+        integer(
+            compact,
+            "paired_bounded_limit_window_spill_spill_pair_count"
+        ),
         2
     );
     assert_eq!(
@@ -1366,11 +1461,17 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
     assert_eq!(integer(restore, bound), 19);
     assert_ne!(text(restore, key), text(compact, key));
     assert_eq!(
-        integer(restore, "paired_bounded_limit_window_spill_limit_pair_count"),
+        integer(
+            restore,
+            "paired_bounded_limit_window_spill_limit_pair_count"
+        ),
         2
     );
     assert_eq!(
-        integer(restore, "paired_bounded_limit_window_spill_spill_pair_count"),
+        integer(
+            restore,
+            "paired_bounded_limit_window_spill_spill_pair_count"
+        ),
         3
     );
     assert_eq!(
@@ -1384,11 +1485,17 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
     );
     assert_eq!(integer(unknown, bound), 11);
     assert_eq!(
-        integer(unknown, "paired_bounded_limit_window_spill_limit_pair_count"),
+        integer(
+            unknown,
+            "paired_bounded_limit_window_spill_limit_pair_count"
+        ),
         3
     );
     assert_eq!(
-        integer(unknown, "paired_bounded_limit_window_spill_spill_pair_count"),
+        integer(
+            unknown,
+            "paired_bounded_limit_window_spill_spill_pair_count"
+        ),
         4
     );
     assert_eq!(
@@ -1420,7 +1527,10 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
     );
     let changed_first = joins_by_source(&changed_limit)["table:First"];
     assert_eq!(integer(changed_first, bound), 7);
-    assert_ne!(text(first, limit_identity), text(changed_first, limit_identity));
+    assert_ne!(
+        text(first, limit_identity),
+        text(changed_first, limit_identity)
+    );
     assert_ne!(text(first, key), text(changed_first, key));
     assert_ne!(
         text(original.root(), "join_cost_fold_identity"),
@@ -1439,7 +1549,10 @@ fn bounded_limit_identity_tracks_paired_window_spill_folds() {
     );
     let changed_spill_first = joins_by_source(&changed_spill)["table:First"];
     assert_eq!(integer(changed_spill_first, bound), 7);
-    assert_ne!(text(first, spill_identity), text(changed_spill_first, spill_identity));
+    assert_ne!(
+        text(first, spill_identity),
+        text(changed_spill_first, spill_identity)
+    );
     assert_ne!(text(first, key), text(changed_spill_first, key));
     assert_ne!(
         text(original.root(), "join_cost_fold_identity"),
@@ -1508,8 +1621,20 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
     let projection_key = "paired_bounded_projection_spill_restoration_projection_identity";
     let restore_key = "paired_bounded_projection_spill_restoration_spill_fold_identity";
 
-    assert_eq!(integer(project, "paired_bounded_projection_spill_restoration_projection_count"), 2);
-    assert_eq!(integer(project, "paired_bounded_projection_spill_restoration_input_rows"), 399);
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_projection_count"
+        ),
+        2
+    );
+    assert_eq!(
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_input_rows"
+        ),
+        399
+    );
     assert_eq!(
         integer(
             project,
@@ -1528,24 +1653,39 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
     assert_eq!(project.estimated_rows(), Some(399));
     assert_eq!(project.estimated_work(), Some(798));
     assert_eq!(
-        integer(project, "paired_bounded_projection_spill_restoration_aggregate_pair_count"),
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_aggregate_pair_count"
+        ),
         3
     );
     assert_eq!(
-        integer(project, "paired_bounded_projection_spill_restoration_aggregate_stage_count"),
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_aggregate_stage_count"
+        ),
         5
     );
     assert_eq!(
-        integer(project, "paired_bounded_projection_spill_restoration_spill_pair_count"),
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_spill_pair_count"
+        ),
         3
     );
     assert_eq!(
-        integer(project, "paired_bounded_projection_spill_restoration_spill_stage_count"),
+        integer(
+            project,
+            "paired_bounded_projection_spill_restoration_spill_stage_count"
+        ),
         3
     );
     assert_eq!(
         text(project, restore_key),
-        text(restore_join, "paired_aggregate_spill_restoration_fold_identity")
+        text(
+            restore_join,
+            "paired_aggregate_spill_restoration_fold_identity"
+        )
     );
     assert!(text(project, projection_key).starts_with("projection-chain:"));
     assert!(text(project, fold_key).starts_with("paired-bounded-projection-spill-restoration:"));
@@ -1558,23 +1698,54 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
         .iter()
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the reduced-limit plan retains Project");
-    assert_eq!(integer(reduced_project, "paired_bounded_projection_spill_restoration_result_row_upper_bound"), 3);
-    assert_eq!(integer(reduced_project, "paired_bounded_projection_spill_restoration_estimated_projection_work"), 798);
-    assert_eq!(text(reduced_project, projection_key), text(project, projection_key));
-    assert_eq!(text(reduced_project, restore_key), text(project, restore_key));
+    assert_eq!(
+        integer(
+            reduced_project,
+            "paired_bounded_projection_spill_restoration_result_row_upper_bound"
+        ),
+        3
+    );
+    assert_eq!(
+        integer(
+            reduced_project,
+            "paired_bounded_projection_spill_restoration_estimated_projection_work"
+        ),
+        798
+    );
+    assert_eq!(
+        text(reduced_project, projection_key),
+        text(project, projection_key)
+    );
+    assert_eq!(
+        text(reduced_project, restore_key),
+        text(project, restore_key)
+    );
     assert_ne!(text(reduced_project, fold_key), text(project, fold_key));
 
     let mut changed_projection_query = projected_query.clone();
     changed_projection_query.projections[1] = expression("expr:replacement-value");
-    let changed_projection = explain(&changed_projection_query, &pair_descriptors, &spill_descriptors);
+    let changed_projection = explain(
+        &changed_projection_query,
+        &pair_descriptors,
+        &spill_descriptors,
+    );
     let changed_projection_node = changed_projection
         .nodes()
         .iter()
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the changed expression still creates Project");
-    assert_ne!(text(changed_projection_node, projection_key), text(project, projection_key));
-    assert_ne!(text(changed_projection_node, fold_key), text(project, fold_key));
-    assert_eq!(text(changed_projection_node, restore_key), text(project, restore_key));
+    assert_ne!(
+        text(changed_projection_node, projection_key),
+        text(project, projection_key)
+    );
+    assert_ne!(
+        text(changed_projection_node, fold_key),
+        text(project, fold_key)
+    );
+    assert_eq!(
+        text(changed_projection_node, restore_key),
+        text(project, restore_key)
+    );
 
     let mut changed_spills = spill_descriptors.clone();
     changed_spills[0].memory_budget_bytes += 1;
@@ -1584,14 +1755,25 @@ fn bounded_projection_identity_tracks_paired_spill_restore_folds() {
         .iter()
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the changed spill still creates Project");
-    assert_eq!(text(changed_restore_node, projection_key), text(project, projection_key));
-    assert_ne!(text(changed_restore_node, restore_key), text(project, restore_key));
-    assert_ne!(text(changed_restore_node, fold_key), text(project, fold_key));
+    assert_eq!(
+        text(changed_restore_node, projection_key),
+        text(project, projection_key)
+    );
+    assert_ne!(
+        text(changed_restore_node, restore_key),
+        text(project, restore_key)
+    );
+    assert_ne!(
+        text(changed_restore_node, fold_key),
+        text(project, fold_key)
+    );
 }
 
 #[test]
 fn bounded_window_identity_tracks_paired_restore_projection_folds() {
-    assert!(BOUNDED_WINDOW_RESTORE_PROJECTION_FIXTURE.contains("bounded_window_restore_projection"));
+    assert!(
+        BOUNDED_WINDOW_RESTORE_PROJECTION_FIXTURE.contains("bounded_window_restore_projection")
+    );
 
     let declared = ["table:First", "table:Gap", "table:Compact", "table:Restore"];
     let pair_descriptors = pairs("table:Anchor", &declared);
@@ -1670,15 +1852,23 @@ fn bounded_window_identity_tracks_paired_restore_projection_folds() {
         "paired_bounded_window_projection_spill_restoration_projection_fold_identity";
     let spill_fold_key = "paired_bounded_window_projection_spill_restoration_spill_fold_identity";
 
-    assert!(text(project, fold_key).starts_with("paired-bounded-window-projection-spill-restoration:"));
+    assert!(
+        text(project, fold_key).starts_with("paired-bounded-window-projection-spill-restoration:")
+    );
     assert!(text(project, window_key).starts_with("bounded-window-chain:"));
     assert_eq!(
         text(project, projection_fold_key),
-        text(project, "paired_bounded_projection_spill_restoration_fold_identity")
+        text(
+            project,
+            "paired_bounded_projection_spill_restoration_fold_identity"
+        )
     );
     assert_eq!(
         text(project, spill_fold_key),
-        text(restore_join, "paired_aggregate_spill_restoration_fold_identity")
+        text(
+            restore_join,
+            "paired_aggregate_spill_restoration_fold_identity"
+        )
     );
     assert_eq!(
         integer(
@@ -1731,8 +1921,14 @@ fn bounded_window_identity_tracks_paired_restore_projection_folds() {
         .iter()
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the changed finite frame retains Project");
-    assert_ne!(text(changed_window_project, window_key), text(project, window_key));
-    assert_ne!(text(changed_window_project, fold_key), text(project, fold_key));
+    assert_ne!(
+        text(changed_window_project, window_key),
+        text(project, window_key)
+    );
+    assert_ne!(
+        text(changed_window_project, fold_key),
+        text(project, fold_key)
+    );
 
     let mut changed_projection_query = bounded_query.clone();
     changed_projection_query.projections[1] = expression("expr:replacement-window-value");
@@ -1746,12 +1942,18 @@ fn bounded_window_identity_tracks_paired_restore_projection_folds() {
         .iter()
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the changed output expression retains Project");
-    assert_eq!(text(changed_projection_project, window_key), text(project, window_key));
+    assert_eq!(
+        text(changed_projection_project, window_key),
+        text(project, window_key)
+    );
     assert_ne!(
         text(changed_projection_project, projection_fold_key),
         text(project, projection_fold_key)
     );
-    assert_ne!(text(changed_projection_project, fold_key), text(project, fold_key));
+    assert_ne!(
+        text(changed_projection_project, fold_key),
+        text(project, fold_key)
+    );
 
     let mut changed_spills = spill_descriptors.clone();
     changed_spills[0].memory_budget_bytes += 1;
@@ -1762,13 +1964,25 @@ fn bounded_window_identity_tracks_paired_restore_projection_folds() {
         .find(|node| node.kind() == PlanNodeKind::Project)
         .expect("the changed spill still restores a projection fold");
     let changed_restore_join = joins_by_source(&changed_restore)["table:Restore"];
-    assert_eq!(text(changed_restore_project, window_key), text(project, window_key));
+    assert_eq!(
+        text(changed_restore_project, window_key),
+        text(project, window_key)
+    );
     assert_eq!(
         text(changed_restore_project, spill_fold_key),
-        text(changed_restore_join, "paired_aggregate_spill_restoration_fold_identity")
+        text(
+            changed_restore_join,
+            "paired_aggregate_spill_restoration_fold_identity"
+        )
     );
-    assert_ne!(text(changed_restore_project, spill_fold_key), text(project, spill_fold_key));
-    assert_ne!(text(changed_restore_project, fold_key), text(project, fold_key));
+    assert_ne!(
+        text(changed_restore_project, spill_fold_key),
+        text(project, spill_fold_key)
+    );
+    assert_ne!(
+        text(changed_restore_project, fold_key),
+        text(project, fold_key)
+    );
 
     let unbounded_aggregates = aggregate_descriptors
         .iter()
