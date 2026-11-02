@@ -124,6 +124,58 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
         assert_eq!(&distinct, keys, "each table key set is distinct");
     }
 
+    // Exact key shapes. The bundle bytes come from the in-repo test encoder
+    // (`examples/build_legacy_fixture.rs` in orna-repository-v1), not a 1.0.0
+    // golden, so these checks pin what the reader decodes from that encoder's
+    // output. They are not spec evidence.
+    let date_key = |text: &str| {
+        let tagged = OvbRaw::Tag(60001, Box::new(OvbRaw::Text(text.to_owned())));
+        CanonicalValue::new(tagged).unwrap()
+    };
+    let date_keys = encoded_keys(&["1969-12-31", "1970-01-01", "1970-01-02"].map(date_key));
+    assert!(key_sets.contains(&date_keys), "Date keys -1, 0, 1 not found");
+    for table in &tables {
+        for row in table.rows() {
+            let is_known_key = matches!(
+                row.key().raw(),
+                OvbRaw::Int(_) | OvbRaw::Text(_) | OvbRaw::Tag(60001, _)
+            );
+            assert!(is_known_key, "key is not an Int, Str or Date key");
+        }
+    }
+
+    // Key-only live rows: each decoded value is the 60009 record the reader builds
+    // for a key-only segment, `[null, [[field, key]]]`. The single field is named
+    // by a 16-byte UUID tagged 37 and repeats the row key. The fixture stores no
+    // other column, so no stored value is asserted here.
+    for table in &tables {
+        let mut field_names = std::collections::BTreeSet::new();
+        for row in table.rows() {
+            let OvbRaw::Tag(60009, record) = row.value().raw() else {
+                panic!("row value is not a 60009 record");
+            };
+            let OvbRaw::Array(parts) = &**record else {
+                panic!("60009 record is not an array");
+            };
+            let [OvbRaw::Null, OvbRaw::Array(fields)] = parts.as_slice() else {
+                panic!("60009 record is not [null, fields]");
+            };
+            let [OvbRaw::Array(field)] = fields.as_slice() else {
+                panic!("key-only row must carry exactly one field");
+            };
+            let [OvbRaw::Tag(37, field_name), stored] = field.as_slice() else {
+                panic!("key-only field is not a tagged name and a value");
+            };
+            let OvbRaw::Bytes(name_bytes) = &**field_name else {
+                panic!("key-only field name is not bytes");
+            };
+            assert_eq!(name_bytes.len(), 16, "field name is a 16-byte UUID");
+            assert!(stored == row.key().raw(), "key-only field repeats the row key");
+            field_names.insert(name_bytes.clone());
+        }
+        assert_eq!(field_names.len(), 1, "each table names one key field");
+    }
+
     let source_head_before = git(&source, &["rev-parse", "HEAD"]);
     let source_status_before = git(&source, &["status", "--porcelain"]);
 
