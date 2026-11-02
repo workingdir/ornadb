@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -19,20 +19,16 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const STR: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const UUID: [u8; 16] = [
-    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-    0x2f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
 const DATE: [u8; 16] = [
-    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e,
-    0x3f,
+    0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d, 0x3e, 0x3f,
 ];
 const INSTANT: [u8; 16] = [
-    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e,
-    0x4f,
+    0x40, 0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47, 0x48, 0x49, 0x4a, 0x4b, 0x4c, 0x4d, 0x4e, 0x4f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -148,7 +144,11 @@ fn tuple(values: Vec<OvbRaw>) -> Vec<u8> {
     encoded(OvbRaw::Tag(60015, Box::new(OvbRaw::Array(values))))
 }
 
-fn parquet(profile: &CompactOvbProfile, physical_ids: &[[u8; 16]], values: &[Vec<Vec<u8>>]) -> Vec<u8> {
+fn parquet(
+    profile: &CompactOvbProfile,
+    physical_ids: &[[u8; 16]],
+    values: &[Vec<Vec<u8>>],
+) -> Vec<u8> {
     assert_eq!(physical_ids.len(), values.len());
     let mut message = String::from("message schema {");
     for id in physical_ids {
@@ -262,23 +262,30 @@ fn ovb_fallback_dictionary_decodes_all_four_logical_kinds_in_declared_order_and_
     let columns = reader.metadata().row_group(0).columns();
     assert_eq!(columns.len(), 4);
     let schema_columns = reader.metadata().file_metadata().schema_descr().columns();
-    assert!(columns
-        .iter()
-        .enumerate()
-        .all(|(index, _)| schema_columns[index].physical_type() == Type::BYTE_ARRAY));
-    assert!(columns
-        .iter()
-        .all(|column| matches!(column.compression(), Compression::ZSTD(_))));
-    assert!(columns
-        .iter()
-        .all(|column| column.dictionary_page_offset().is_some()));
+    assert!(
+        columns
+            .iter()
+            .enumerate()
+            .all(|(index, _)| schema_columns[index].physical_type() == Type::BYTE_ARRAY)
+    );
+    assert!(
+        columns
+            .iter()
+            .all(|column| matches!(column.compression(), Compression::ZSTD(_)))
+    );
+    assert!(
+        columns
+            .iter()
+            .all(|column| column.dictionary_page_offset().is_some())
+    );
     assert!(columns.iter().all(|column| {
         column
             .encodings()
             .any(|encoding| encoding == Encoding::RLE_DICTIONARY)
     }));
 
-    let decoded = CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 5).unwrap();
+    let decoded =
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &bytes, 5).unwrap();
     assert_eq!(decoded, expected);
 
     let index = profile
@@ -312,13 +319,21 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .enumerate()
         .flat_map(|(row_group, group)| {
-            group.columns().iter().enumerate().map(move |(column, meta)| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
-                let end = start + meta.compressed_size() as usize;
-                let data_offset = meta.data_page_offset() as usize - start;
-                let (data, shift, inserted) = checksummed_chunk(&source[start..end], data_offset);
-                (row_group, column, start, end, data, shift, inserted)
-            })
+            group
+                .columns()
+                .iter()
+                .enumerate()
+                .map(move |(column, meta)| {
+                    let start = meta
+                        .dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset())
+                        as usize;
+                    let end = start + meta.compressed_size() as usize;
+                    let data_offset = meta.data_page_offset() as usize - start;
+                    let (data, shift, inserted) =
+                        checksummed_chunk(&source[start..end], data_offset);
+                    (row_group, column, start, end, data, shift, inserted)
+                })
         })
         .collect::<Vec<_>>();
     chunks.sort_by_key(|chunk| chunk.2);
@@ -355,10 +370,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let metadata = parquet::file::metadata::ParquetMetaData::new(
-        metadata.file_metadata().clone(),
-        row_groups,
-    );
+    let metadata =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), row_groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
         .finish()

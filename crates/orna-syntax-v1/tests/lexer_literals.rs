@@ -1,4 +1,4 @@
-use orna_syntax_v1::{lex, parse_expression, Expr, LiteralKind, TokenKind};
+use orna_syntax_v1::{Expr, LiteralKind, TokenKind, lex, parse_expression};
 
 fn source(index: usize) -> &'static str {
     std::str::from_utf8(include_bytes!("fixtures/lexer_literals.orna"))

@@ -180,7 +180,14 @@ fn renames_across_modules_leave_the_project_valid() {
     // (module, text before the name, offset into it, old name, new name,
     // expected edit count)
     let renames = [
-        (&catalog, "dim Length", "dim ".len(), "Length", "Distance", 3),
+        (
+            &catalog,
+            "dim Length",
+            "dim ".len(),
+            "Length",
+            "Distance",
+            3,
+        ),
         (&catalog, "unit metre", "unit ".len(), "metre", "meter", 2),
         (&main, "s: Status", "s: ".len(), "Status", "State", 8),
         (&catalog, "type Badge", "type ".len(), "Badge", "Tag", 5),
@@ -191,7 +198,10 @@ fn renames_across_modules_leave_the_project_valid() {
     ];
     for (uri, needle, offset, old_name, new_name, expected) in renames {
         let edits = session.rename(uri, needle, offset, new_name);
-        assert_eq!(edits, expected, "edits renaming `{old_name}` to `{new_name}`");
+        assert_eq!(
+            edits, expected,
+            "edits renaming `{old_name}` to `{new_name}`"
+        );
         session.assert_gone(old_name);
         session.assert_valid(&format!("renaming `{old_name}` to `{new_name}`"));
     }

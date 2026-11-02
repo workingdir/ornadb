@@ -24,8 +24,13 @@ fn shipped_closure() -> BTreeSet<String> {
         .arg(workspace_root().join("Cargo.toml"))
         .output()
         .expect("run cargo metadata");
-    assert!(output.status.success(), "cargo metadata failed: {}", String::from_utf8_lossy(&output.stderr));
-    let metadata: Value = serde_json::from_slice(&output.stdout).expect("cargo metadata emits JSON");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let metadata: Value =
+        serde_json::from_slice(&output.stdout).expect("cargo metadata emits JSON");
     let packages: BTreeMap<&str, &Value> = metadata["packages"]
         .as_array()
         .expect("packages array")
@@ -39,7 +44,13 @@ fn shipped_closure() -> BTreeSet<String> {
                 .as_array()
                 .expect("targets array")
                 .iter()
-                .any(|target| target["kind"].as_array().expect("target kinds").iter().any(|kind| kind == "bin"))
+                .any(|target| {
+                    target["kind"]
+                        .as_array()
+                        .expect("target kinds")
+                        .iter()
+                        .any(|kind| kind == "bin")
+                })
         })
         .map(|(name, _)| *name)
         .collect();
@@ -49,7 +60,10 @@ fn shipped_closure() -> BTreeSet<String> {
         if !visited.insert(name) {
             continue;
         }
-        for dependency in packages[name]["dependencies"].as_array().expect("dependencies array") {
+        for dependency in packages[name]["dependencies"]
+            .as_array()
+            .expect("dependencies array")
+        {
             let shipped = dependency["kind"].is_null() || dependency["kind"] == "build";
             let path_dependency = !dependency["path"].is_null();
             let dependency_name = dependency["name"].as_str().expect("dependency name");
@@ -61,12 +75,16 @@ fn shipped_closure() -> BTreeSet<String> {
     visited
         .into_iter()
         .map(|name| {
-            Path::new(packages[name]["manifest_path"].as_str().expect("manifest path"))
-                .parent()
-                .and_then(Path::file_name)
-                .and_then(|directory| directory.to_str())
-                .expect("crate directory name")
-                .to_owned()
+            Path::new(
+                packages[name]["manifest_path"]
+                    .as_str()
+                    .expect("manifest path"),
+            )
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|directory| directory.to_str())
+            .expect("crate directory name")
+            .to_owned()
         })
         .collect()
 }
@@ -75,7 +93,8 @@ fn shipped_closure() -> BTreeSet<String> {
 fn scanned_crates_equal_the_shipped_binary_closure() {
     let baseline_path = workspace_root().join("crates/orna-traceability-v1/citation-baseline.json");
     let baseline: CitationBaseline =
-        serde_json::from_slice(&fs::read(&baseline_path).expect("read citation baseline")).expect("parse citation baseline");
+        serde_json::from_slice(&fs::read(&baseline_path).expect("read citation baseline"))
+            .expect("parse citation baseline");
     let closure = shipped_closure();
     let missing: Vec<&String> = closure.difference(&baseline.scanned_crates).collect();
     let extra: Vec<&String> = baseline.scanned_crates.difference(&closure).collect();

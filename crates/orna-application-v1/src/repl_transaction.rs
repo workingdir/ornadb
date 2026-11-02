@@ -1,8 +1,8 @@
 use super::*;
 use orna_project_v1::{
-    admit_format3_row, blob_placeholder, evaluator_rows, has_text_primary_key,
-    holds_blob, restore_stored_blobs, runtime_key_from_evaluator, CommittedTable, ProjectLoader,
-    StoredSchema,
+    CommittedTable, ProjectLoader, StoredSchema, admit_format3_row, blob_placeholder,
+    evaluator_rows, has_text_primary_key, holds_blob, restore_stored_blobs,
+    runtime_key_from_evaluator,
 };
 use orna_repository_v1::{OrpBlobBinding, Repository, RepositoryFormatContext};
 use orna_semantic_v1::Type;
@@ -110,8 +110,8 @@ impl ApplicationAuthority {
             captured_rows,
             table_ids,
         )?
-            .with_insert_defaults(defaults, functions, self.limits)
-            .with_automatic_id_watermarks(&watermarks);
+        .with_insert_defaults(defaults, functions, self.limits)
+        .with_automatic_id_watermarks(&watermarks);
         let mut effects = ReplTransactionEffectHandler {
             bindings,
             mutations,
@@ -155,7 +155,7 @@ impl ApplicationAuthority {
             &committed,
             activation,
         )
-            .map_err(failure)?;
+        .map_err(failure)?;
         Ok((value, successor, activation, external_effects_possible))
     }
 }
@@ -226,7 +226,8 @@ fn lower_evaluator_row(
     storage_order: &[String],
     record: &[u8],
 ) -> Result<Vec<u8>, ApplicationError> {
-    let decoded = CanonicalValue::decode(record).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let decoded =
+        CanonicalValue::decode(record).map_err(|_| ApplicationError::InvalidTableMetadata)?;
     let OvbRaw::Map(entries) = decoded.raw() else {
         return Err(ApplicationError::InvalidTableMetadata);
     };
@@ -237,12 +238,20 @@ fn lower_evaluator_row(
         };
         fields.insert(name.as_str(), field_value);
     }
-    let stored_schema = StoredSchema::new(descriptor).map_err(|_| ApplicationError::InvalidTableMetadata)?;
+    let stored_schema =
+        StoredSchema::new(descriptor).map_err(|_| ApplicationError::InvalidTableMetadata)?;
     let mut stored_values = Vec::with_capacity(storage_order.len());
     for name in storage_order {
-        let field = stored_schema.field(name).ok_or(ApplicationError::InvalidTableMetadata)?;
-        let value = fields.get(name.as_str()).ok_or(ApplicationError::InvalidTableMetadata)?;
-        let ty = schema.fields.get(name).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let field = stored_schema
+            .field(name)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        let value = fields
+            .get(name.as_str())
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
+        let ty = schema
+            .fields
+            .get(name)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         stored_values.push(if holds_blob(ty) {
             (*value).clone()
         } else {
@@ -267,15 +276,12 @@ fn normalize_repl_mutations(
     committed: &BTreeMap<String, CommittedTable>,
     activation: StagedActivation,
 ) -> Result<StagedActivation, ApplicationError> {
-    let (
-        value,
-        mutations,
-        snapshot_generation,
-        source_row_schemas,
-        protected_field_pins,
-        effects,
-    ) = activation.into_parts();
-    let commit = scope.project.source_commit().ok_or(ApplicationError::InvalidTableMetadata)?;
+    let (value, mutations, snapshot_generation, source_row_schemas, protected_field_pins, effects) =
+        activation.into_parts();
+    let commit = scope
+        .project
+        .source_commit()
+        .ok_or(ApplicationError::InvalidTableMetadata)?;
     let mut descriptors_by_table = BTreeMap::<String, orna_value_v1::SchemaDescriptor>::new();
     // The stored tuple this activation has left at each key so far; `None`
     // marks a removed row, which then shadows the committed one.
@@ -283,7 +289,9 @@ fn normalize_repl_mutations(
     let mut normalized = Vec::with_capacity(mutations.len());
     for mutation in mutations {
         let table = mutation.table().to_owned();
-        let table_schema = tables.get(&table).ok_or(ApplicationError::InvalidTableMetadata)?;
+        let table_schema = tables
+            .get(&table)
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         let committed_table = committed
             .get(&table)
             .ok_or(ApplicationError::InvalidTableMetadata)?;
@@ -306,7 +314,8 @@ fn normalize_repl_mutations(
         let text_primary_key = has_text_primary_key(table_schema);
         let key = runtime_key_from_evaluator(mutation.key(), text_primary_key)
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
-        let rekey_to = mutation.rekey_to()
+        let rekey_to = mutation
+            .rekey_to()
             .map(|key| runtime_key_from_evaluator(key, text_primary_key))
             .transpose()
             .map_err(|_| ApplicationError::InvalidTableMetadata)?;
@@ -325,7 +334,10 @@ fn normalize_repl_mutations(
             normalized.push(mutation);
             continue;
         };
-        let object_id = table_ids.get(&table).copied().ok_or(ApplicationError::InvalidTableMetadata)?;
+        let object_id = table_ids
+            .get(&table)
+            .copied()
+            .ok_or(ApplicationError::InvalidTableMetadata)?;
         if !descriptors_by_table.contains_key(&table) {
             let schema = ProjectLoader::default()
                 .resolve_committed_source_table_schema(scope.repository, commit, object_id)
@@ -333,12 +345,17 @@ fn normalize_repl_mutations(
             descriptors_by_table.insert(table.clone(), schema.binding().descriptor().clone());
         }
         let storage_order = &committed_table.storage_order;
-        let encoded = lower_evaluator_row(&descriptors_by_table[&table], table_schema, storage_order, &row_value)
-            .and_then(|stored| {
-                restore_stored_blobs(&stored, storage_order, table_schema, source.as_deref())
-                    .map_err(|_| ApplicationError::InvalidTableMetadata)
-            })
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let encoded = lower_evaluator_row(
+            &descriptors_by_table[&table],
+            table_schema,
+            storage_order,
+            &row_value,
+        )
+        .and_then(|stored| {
+            restore_stored_blobs(&stored, storage_order, table_schema, source.as_deref())
+                .map_err(|_| ApplicationError::InvalidTableMetadata)
+        })
+        .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         // A rekey moves the stored tuple: its old key is freed for later
         // mutations and its new key carries the restored references.
         if let Some(new_key) = mutation.rekey_to() {
@@ -347,7 +364,11 @@ fn normalize_repl_mutations(
         } else {
             written.insert(source_key, Some(encoded.clone()));
         }
-        normalized.push(mutation.with_reencoded_value(encoded).map_err(|_| ApplicationError::InvalidTableMetadata)?);
+        normalized.push(
+            mutation
+                .with_reencoded_value(encoded)
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?,
+        );
     }
     Ok(StagedActivation {
         value,
@@ -408,7 +429,11 @@ fn admitted_project_tables(
     scope: &ReplTransactionScope<'_>,
 ) -> Result<AdmittedProjectTables, ApplicationError> {
     let project = scope.project;
-    let analysis = analyze_with_providers(project.modules(), &authority.catalogue, SystemProviders::Production);
+    let analysis = analyze_with_providers(
+        project.modules(),
+        &authority.catalogue,
+        SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return Err(ApplicationError::Semantic(
             analysis
@@ -544,25 +569,23 @@ impl ReplTransactionEffectHandler<'_, '_> {
                     })?;
                 let key = self.mutations.key_from_row(&schema, &row)?;
                 let mutation_id = self.mutation_id();
-                let commit = self
-                    .scope
-                    .project
-                    .source_commit()
-                    .ok_or_else(|| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                let commit = self.scope.project.source_commit().ok_or_else(|| {
+                    SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                })?;
                 let committed_schema = ProjectLoader::default()
-                    .resolve_committed_source_table_schema(
-                        self.scope.repository,
-                        commit,
-                        object_id,
-                    )
-                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                    .resolve_committed_source_table_schema(self.scope.repository, commit, object_id)
+                    .map_err(|_| {
+                        SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                    })?;
                 let value_context = self
                     .scope
                     .format_context
                     .open_value_context(object_id.bytes())
-                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
-                let (admission_row, blob_bindings) = self
-                    .row_fields_for_admission(&schema, &row, &mut prebound_blob_bindings)?;
+                    .map_err(|_| {
+                        SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                    })?;
+                let (admission_row, blob_bindings) =
+                    self.row_fields_for_admission(&schema, &row, &mut prebound_blob_bindings)?;
                 let admitted = admit_format3_row(
                     self.scope.project,
                     &key,
@@ -576,7 +599,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 let mutation_index = self.mutations.mutations.len();
                 self.mutations
                     .record_admitted_source_row(admitted, &value_context)
-                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                    .map_err(|_| {
+                        SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                    })?;
                 let recorded = self.mutations.mutations[mutation_index].clone();
                 let mut insert = TableMutation::insert(
                     recorded.id(),
@@ -584,7 +609,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
                     recorded.key().to_vec(),
                     recorded
                         .value()
-                        .ok_or_else(|| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?
+                        .ok_or_else(|| {
+                            SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                        })?
                         .to_vec(),
                 )
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?
@@ -595,9 +622,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
                     .iter()
                     .filter(|pin| pin.mutation_id() == recorded.id())
                 {
-                    insert = insert
-                        .with_protected_content_pin(pin.pin())
-                        .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                    insert = insert.with_protected_content_pin(pin.pin()).map_err(|_| {
+                        SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                    })?;
                 }
                 self.mutations.mutations[mutation_index] = insert;
                 self.mutations
@@ -609,8 +636,13 @@ impl ReplTransactionEffectHandler<'_, '_> {
                 Ok(Some(row))
             }
             "upsert" | "update" => {
-                if arguments.iter().any(|argument| contains_blob_value(&schema, argument)) {
-                    return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-SNAPSHOT"));
+                if arguments
+                    .iter()
+                    .any(|argument| contains_blob_value(&schema, argument))
+                {
+                    return Err(SourceMutationEffectHandler::effect_error(
+                        "ORNA-EVAL-TABLE-SNAPSHOT",
+                    ));
                 }
                 self.mutations.handle(callee, arguments)
             }
@@ -637,24 +669,35 @@ impl ReplTransactionEffectHandler<'_, '_> {
         prebound_blob_bindings: &mut BTreeMap<String, OrpBlobBinding>,
     ) -> Result<(OvbRaw, Vec<(String, OrpBlobBinding)>), EvaluationError> {
         let OvbRaw::Map(entries) = row.raw() else {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         };
         let mut values = BTreeMap::new();
         for (key, value) in entries {
             let OvbRaw::Text(name) = key else {
-                return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+                return Err(SourceMutationEffectHandler::effect_error(
+                    "ORNA-EVAL-TABLE-ROW",
+                ));
             };
             if values.insert(name.as_str(), value).is_some() {
-                return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+                return Err(SourceMutationEffectHandler::effect_error(
+                    "ORNA-EVAL-TABLE-ROW",
+                ));
             }
         }
-        let admission = schema
-            .admission
-            .as_ref()
-            .ok_or_else(|| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-UNADMITTED"))?;
-        let key_fields = admission.keys.iter().map(|(name, _)| name.as_str()).collect::<BTreeSet<_>>();
+        let admission = schema.admission.as_ref().ok_or_else(|| {
+            SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-UNADMITTED")
+        })?;
+        let key_fields = admission
+            .keys
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<BTreeSet<_>>();
         if values.keys().any(|name| !schema.fields.contains_key(*name)) {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         }
 
         let mut stored_fields = Vec::with_capacity(values.len());
@@ -676,8 +719,13 @@ impl ReplTransactionEffectHandler<'_, '_> {
                         let binding = match prebound_blob_bindings.remove(name) {
                             Some(binding) => binding,
                             None => {
-                                let value_context = ContextValue::new(ValueFormat::Ovb2, blob.clone())
-                                    .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
+                                let value_context = ContextValue::new(
+                                    ValueFormat::Ovb2,
+                                    blob.clone(),
+                                )
+                                .map_err(|_| {
+                                    SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW")
+                                })?;
                                 self.external_dispatched = true;
                                 self.bindings.accept_captured_blob_for_row(&value_context)?
                             }
@@ -691,7 +739,9 @@ impl ReplTransactionEffectHandler<'_, '_> {
             }
         }
         if !prebound_blob_bindings.is_empty() {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         }
         Ok((OvbRaw::Map(stored_fields), bindings))
     }
@@ -723,12 +773,7 @@ impl EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
         self.observe_sys_dispatch();
-        let result = EffectHandler::handle_with_budget(
-            self.bindings,
-            callee,
-            arguments,
-            budget,
-        );
+        let result = EffectHandler::handle_with_budget(self.bindings, callee, arguments, budget);
         self.record_dispatch(&result);
         if let Some(value) = result? {
             return Ok(Some(value));
@@ -861,11 +906,15 @@ impl ReplTransactionEffectHandler<'_, '_> {
             return Ok(None);
         }
         let OvbRaw::Map(input_fields) = input_row.raw() else {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         };
         let mut sanitized_row = input_row.raw().clone();
         let OvbRaw::Map(sanitized_fields) = &mut sanitized_row else {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         };
         let mut blob_bindings = BTreeMap::new();
         for (field, ty) in &schema.fields {
@@ -891,14 +940,18 @@ impl ReplTransactionEffectHandler<'_, '_> {
             }
             let value = in_profile_of(input_row, blob.clone())?;
             self.external_dispatched = true;
-            let binding = self.bindings.accept_captured_blob_for_row(&value)
+            let binding = self
+                .bindings
+                .accept_captured_blob_for_row(&value)
                 .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-VALUE"))?;
             blob_bindings.insert(field.clone(), binding);
             let Some((_, sanitized)) = sanitized_fields
                 .iter_mut()
                 .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
             else {
-                return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+                return Err(SourceMutationEffectHandler::effect_error(
+                    "ORNA-EVAL-TABLE-ROW",
+                ));
             };
             *sanitized = blob_placeholder(ty);
         }
@@ -907,11 +960,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
         }
         let canonical_row = CanonicalValue::new(sanitized_row)
             .map_err(|_| SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"))?;
-        let result = self.handle_table_effect_with_blob_bindings(
-            callee,
-            &[canonical_row],
-            blob_bindings,
-        )?;
+        let result =
+            self.handle_table_effect_with_blob_bindings(callee, &[canonical_row], blob_bindings)?;
         let Some(result) = result else {
             return Ok(None);
         };
@@ -952,12 +1002,8 @@ impl ReplTransactionEffectHandler<'_, '_> {
     ) -> Result<Option<ContextValue>, EvaluationError> {
         if expression_name_path(callee).as_deref() == Some("sys.blob.capture_file") {
             self.observe_sys_dispatch();
-            let result = Ovb2EffectHandler::handle_with_budget(
-                self.bindings,
-                callee,
-                arguments,
-                budget,
-            );
+            let result =
+                Ovb2EffectHandler::handle_with_budget(self.bindings, callee, arguments, budget);
             self.record_dispatch(&result);
             return result;
         }
@@ -971,12 +1017,7 @@ impl ReplTransactionEffectHandler<'_, '_> {
             return Ok(None);
         }
         let canonical_arguments = Self::canonical_arguments(arguments)?;
-        let value = EffectHandler::handle_with_budget(
-            self,
-            callee,
-            &canonical_arguments,
-            budget,
-        )?;
+        let value = EffectHandler::handle_with_budget(self, callee, &canonical_arguments, budget)?;
         Self::contextualize_canonical_result(value)
     }
 
@@ -1058,13 +1099,7 @@ impl Ovb2EffectHandler for ReplTransactionEffectHandler<'_, '_> {
         budget: &mut StepBudget,
         cancellation: Option<&orna_evaluator_v1::CancellationToken>,
     ) -> Result<Option<ContextValue>, EvaluationError> {
-        self.handle_contextual_registered_effect(
-            operation,
-            callee,
-            arguments,
-            budget,
-            cancellation,
-        )
+        self.handle_contextual_registered_effect(operation, callee, arguments, budget, cancellation)
     }
 
     /// A lazily captured Blob arrives as a ROV-3 value in its capture context.
@@ -1125,8 +1160,12 @@ fn blob_value<'a>(ty: &Type, value: &'a OvbRaw) -> Option<Option<&'a OvbRaw>> {
         return Some(match value {
             OvbRaw::Null => None,
             OvbRaw::Tag(60_013, encoded) => match encoded.as_ref() {
-                OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(value)] if value == &BigInt::from(0)) => None,
-                OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(value), _] if value == &BigInt::from(1)) => parts.get(1),
+                OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(value)] if value == &BigInt::from(0)) => {
+                    None
+                }
+                OvbRaw::Array(parts) if matches!(parts.as_slice(), [OvbRaw::Int(value), _] if value == &BigInt::from(1)) => {
+                    parts.get(1)
+                }
                 _ => Some(value),
             },
             _ => Some(value),
@@ -1141,7 +1180,9 @@ fn restore_contextual_blob_values(
     input: &OvbRaw,
 ) -> Result<OvbRaw, EvaluationError> {
     let (OvbRaw::Map(output_fields), OvbRaw::Map(input_fields)) = (output, input) else {
-        return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+        return Err(SourceMutationEffectHandler::effect_error(
+            "ORNA-EVAL-TABLE-ROW",
+        ));
     };
     let mut restored = output_fields.clone();
     for (field, ty) in &schema.fields {
@@ -1158,7 +1199,9 @@ fn restore_contextual_blob_values(
             .iter_mut()
             .find(|(key, _)| matches!(key, OvbRaw::Text(name) if name == field))
         else {
-            return Err(SourceMutationEffectHandler::effect_error("ORNA-EVAL-TABLE-ROW"));
+            return Err(SourceMutationEffectHandler::effect_error(
+                "ORNA-EVAL-TABLE-ROW",
+            ));
         };
         *value = original.clone();
     }
@@ -1188,4 +1231,3 @@ mod tests {
         ));
     }
 }
-

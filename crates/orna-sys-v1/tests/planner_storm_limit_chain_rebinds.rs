@@ -1,8 +1,8 @@
 use orna_sys_v1::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
     DisjunctStormLimitRebindDescription, ExplainError, ExpressionRef, ObjectRef,
-    PlanByteCapHandoffRoute, PlanByteCapScopeSegment, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
+    PlanByteCapHandoffRoute, PlanByteCapScopeSegment, PlanDetail, PlanNodeKind,
+    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
     explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
@@ -810,16 +810,19 @@ fn known_byte_caps_stay_bounded_across_stages_when_row_estimates_are_unknown() {
 
     let first_stage = &stages[0];
     assert_eq!(
-        first_stage.details().get("limit_chain_rebind_dimension_scope"),
+        first_stage
+            .details()
+            .get("limit_chain_rebind_dimension_scope"),
         Some(&PlanDetail::Text(
             "rows_and_bytes_capped_independently_unknown_dimensions_remain_unknown".to_owned()
         ))
     );
     assert_eq!(
-        first_stage.details().get("limit_chain_rebind_stage_input_scope"),
+        first_stage
+            .details()
+            .get("limit_chain_rebind_stage_input_scope"),
         Some(&PlanDetail::Text(
-            "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes"
-                .to_owned()
+            "post_limit_branch_input_then_previous_rebind_stage_bounded_rows_and_bytes".to_owned()
         ))
     );
 }
@@ -920,7 +923,11 @@ fn known_byte_caps_survive_unknown_work_in_nested_rebind_storm_stages() {
         .iter()
         .map(|stage| (stage.estimated_rows(), stage.estimated_bytes()))
         .collect::<Vec<_>>();
-    assert!(cardinalities.iter().all(|(rows, bytes)| rows.is_none() && bytes.is_some()));
+    assert!(
+        cardinalities
+            .iter()
+            .all(|(rows, bytes)| rows.is_none() && bytes.is_some())
+    );
     for pair in cardinalities.windows(2) {
         assert_eq!(pair[1].0, None);
         assert!(pair[1].1.unwrap() <= pair[0].1.unwrap());
@@ -956,10 +963,7 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
     let mut deep_branch = branch(
         &[20, 8],
         1,
-        vec![
-            rebind(1, vec![leaf_first]),
-            rebind(2, vec![leaf_second]),
-        ],
+        vec![rebind(1, vec![leaf_first]), rebind(2, vec![leaf_second])],
     );
     deep_branch.nested_storms.push(storm(
         "expr:deep-post-rebind-storm",
@@ -978,10 +982,13 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
                 1,
                 vec![
                     rebind(1, vec![nested_rebind.clone()]),
-                    rebind(2, vec![storm(
-                        "expr:middle-position-two",
-                        (0..2).map(|_| branch(&[30], 2, vec![])).collect(),
-                    )]),
+                    rebind(
+                        2,
+                        vec![storm(
+                            "expr:middle-position-two",
+                            (0..2).map(|_| branch(&[30], 2, vec![])).collect(),
+                        )],
+                    ),
                 ],
             ),
             branch(&[8], 2, vec![]),
@@ -992,15 +999,22 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
         1,
         vec![
             rebind(1, vec![middle_rebind.clone()]),
-            rebind(2, vec![storm(
-                "expr:outer-position-two",
-                (0..2).map(|_| branch(&[22], 2, vec![])).collect(),
-            )]),
+            rebind(
+                2,
+                vec![storm(
+                    "expr:outer-position-two",
+                    (0..2).map(|_| branch(&[22], 2, vec![])).collect(),
+                )],
+            ),
         ],
     );
     outer_branch.nested_storms.push(storm(
         "expr:outer-post-chain-nested",
-        vec![branch(&[14, 7], 1, vec![rebind(1, vec![nested_rebind.clone()])])],
+        vec![branch(
+            &[14, 7],
+            1,
+            vec![rebind(1, vec![nested_rebind.clone()])],
+        )],
     ));
 
     let stages = [
@@ -1044,11 +1058,19 @@ fn byte_caps_stay_local_through_deep_unknown_rebind_chains() {
 
     let estimates = filters
         .iter()
-        .map(|filter| (filter.estimated_rows(), filter.estimated_bytes(), filter.estimated_work()))
+        .map(|filter| {
+            (
+                filter.estimated_rows(),
+                filter.estimated_bytes(),
+                filter.estimated_work(),
+            )
+        })
         .collect::<Vec<_>>();
-    assert!(estimates.iter().all(|(rows, bytes, work)| {
-        rows.is_none() && bytes.is_some() && work.is_none()
-    }));
+    assert!(
+        estimates
+            .iter()
+            .all(|(rows, bytes, work)| { rows.is_none() && bytes.is_some() && work.is_none() })
+    );
     assert!(estimates[0].1.unwrap() <= 2_048);
     for pair in estimates.windows(2) {
         assert_eq!(pair[1].0, None);
@@ -1081,20 +1103,13 @@ fn nested_rebind_byte_cap_scope_exposes_deepest_unknown_cascade_level() {
             vec![branch(&[100, 50], 1, vec![rebind(1, vec![child])])],
         )
     };
-    let leaf = storm(
-        "expr:scope-leaf",
-        vec![branch(&[80], 1, vec![])],
-    );
+    let leaf = storm("expr:scope-leaf", vec![branch(&[80], 1, vec![])]);
     let level_four = wrap_rebind("expr:scope-level-four", leaf);
     let level_three = wrap_rebind("expr:scope-level-three", level_four);
     let level_two = wrap_rebind("expr:scope-level-two", level_three.clone());
     let deepest = wrap_rebind("expr:scope-deepest", level_two);
     let medium = wrap_rebind("expr:scope-medium", level_three);
-    let stages = [
-        deepest.clone(),
-        medium,
-        deepest,
-    ];
+    let stages = [deepest.clone(), medium, deepest];
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(
         &query(None, Some(2_048)),
         &stages,
@@ -1130,13 +1145,12 @@ fn nested_rebind_byte_cap_scope_exposes_deepest_unknown_cascade_level() {
     assert_eq!(
         filters
             .iter()
-            .map(|filter| match filter
-                .details()
-                .get("limit_chain_rebind_max_nested_depth")
-            {
-                Some(PlanDetail::Integer(depth)) => Some(*depth),
-                _ => None,
-            })
+            .map(
+                |filter| match filter.details().get("limit_chain_rebind_max_nested_depth") {
+                    Some(PlanDetail::Integer(depth)) => Some(*depth),
+                    _ => None,
+                }
+            )
             .collect::<Vec<_>>(),
         vec![Some(4), Some(3), Some(4)]
     );
@@ -1278,9 +1292,11 @@ fn unknown_row_byte_caps_report_rebind_handoffs_by_nested_depth() {
         .iter()
         .map(|filter| (filter.estimated_rows(), filter.estimated_bytes()))
         .collect::<Vec<_>>();
-    assert!(byte_estimates
-        .iter()
-        .all(|(rows, bytes)| rows.is_none() && bytes.is_some()));
+    assert!(
+        byte_estimates
+            .iter()
+            .all(|(rows, bytes)| rows.is_none() && bytes.is_some())
+    );
     assert!(byte_estimates[0].1.unwrap() <= 2_048);
     assert!(byte_estimates[1].1.unwrap() <= byte_estimates[0].1.unwrap());
     assert_eq!(
@@ -1363,7 +1379,11 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
         _ => unreachable!("top-level storm stages carry their one-based index"),
     });
 
-    assert!(filters.iter().all(|filter| filter.estimated_rows().is_none()));
+    assert!(
+        filters
+            .iter()
+            .all(|filter| filter.estimated_rows().is_none())
+    );
     let byte_estimates = filters
         .iter()
         .map(|filter| filter.estimated_bytes().expect("known byte estimate"))
@@ -1470,7 +1490,10 @@ fn unknown_row_byte_caps_report_scoped_handoff_routes_by_nested_depth() {
             PlanByteCapScopeSegment::Limit { position: 1 },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 1 },
-            PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+            PlanByteCapScopeSegment::RebindCascadeOutput {
+                position: 1,
+                index: 1
+            },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 2 },
         ]
@@ -1588,7 +1611,10 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
     let parsed = orna_syntax_v1::parse_module(REBIND_CAP_HANDOFF_ROUTES_FIXTURE);
     assert!(parsed.is_ok(), "fixture parses: {:?}", parsed.diagnostics);
 
-    let leaf = storm("expr:typed-route-unknown-leaf", vec![branch(&[10], 1, vec![])]);
+    let leaf = storm(
+        "expr:typed-route-unknown-leaf",
+        vec![branch(&[10], 1, vec![])],
+    );
     let nested = storm(
         "expr:typed-route-unknown-nested",
         vec![branch(&[20], 1, vec![rebind(1, vec![leaf])])],
@@ -1605,7 +1631,9 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
     let filter = explained
         .nodes()
         .iter()
-        .find(|node| node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm"))
+        .find(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
         .expect("outer storm is visible");
     let routes = match filter
         .details()
@@ -1639,8 +1667,11 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
                 PlanByteCapScopeSegment::Rebind { position: 1 },
                 PlanByteCapScopeSegment::Cascade { index: 1 },
             ],
-            input_scope: "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1".to_owned(),
-            output_scope: "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1/rebind1/cascade1".to_owned(),
+            input_scope: "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1"
+                .to_owned(),
+            output_scope:
+                "root/storm1/branch1/limit1/branch_output1/nested1/branch1/limit1/rebind1/cascade1"
+                    .to_owned(),
             input_bytes: None,
             output_bytes: None,
         }
@@ -1652,8 +1683,7 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
             .unwrap()
             .iter()
             .find(|node| node["details"]["disjunct_storm"] == 1)
-            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
-            ["input_bytes"],
+            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]["input_bytes"],
         serde_json::Value::Null
     );
     assert_eq!(
@@ -1662,8 +1692,8 @@ fn typed_handoff_routes_preserve_nested_storm_steps_and_unknown_bytes() {
             .unwrap()
             .iter()
             .find(|node| node["details"]["disjunct_storm"] == 1)
-            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]
-            ["input_path"][4],
+            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][0]["input_path"]
+            [4],
         serde_json::json!({ "kind": "nested_storm", "index": 1 })
     );
 }
@@ -1716,12 +1746,9 @@ fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
 
         let mut expected_input_path = Vec::new();
         for prior_stage in 1..=stage_index {
-            expected_input_path.push(PlanByteCapScopeSegment::StormStage {
-                index: prior_stage,
-            });
-            expected_input_path.push(PlanByteCapScopeSegment::StormStageOutput {
-                index: prior_stage,
-            });
+            expected_input_path.push(PlanByteCapScopeSegment::StormStage { index: prior_stage });
+            expected_input_path
+                .push(PlanByteCapScopeSegment::StormStageOutput { index: prior_stage });
         }
         expected_input_path.push(PlanByteCapScopeSegment::StormStage {
             index: stage_index + 1,
@@ -1738,10 +1765,7 @@ fn typed_handoff_routes_preserve_prior_storm_stage_outputs() {
                 "/storm{prior_stage}/storm_stage_output{prior_stage}"
             ));
         }
-        expected_input_scope.push_str(&format!(
-            "/storm{}/branch1/limit1",
-            stage_index + 1
-        ));
+        expected_input_scope.push_str(&format!("/storm{}/branch1/limit1", stage_index + 1));
         assert_eq!(routes[0].input_scope, expected_input_scope);
 
         expected_input_path.extend([
@@ -1819,7 +1843,9 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
     let filter = explained
         .nodes()
         .iter()
-        .find(|node| node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm"))
+        .find(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
         .expect("outer storm is visible");
     let routes = match filter
         .details()
@@ -1853,7 +1879,10 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
             PlanByteCapScopeSegment::Limit { position: 1 },
             PlanByteCapScopeSegment::Rebind { position: 1 },
             PlanByteCapScopeSegment::Cascade { index: 1 },
-            PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+            PlanByteCapScopeSegment::RebindCascadeOutput {
+                position: 1,
+                index: 1,
+            },
             PlanByteCapScopeSegment::BranchOutput { index: 1 },
         ];
         for prior_nested in 1..=nested_index {
@@ -1897,8 +1926,8 @@ fn typed_handoff_routes_preserve_nested_storm_outputs_across_rebinds() {
             .unwrap()
             .iter()
             .find(|node| node["details"]["disjunct_storm"] == 1)
-            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][3]
-            ["input_path"][10],
+            .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"][3]["input_path"]
+            [10],
         serde_json::json!({ "kind": "nested_storm_output", "index": 2 })
     );
 }
@@ -1928,14 +1957,19 @@ fn typed_handoff_routes_keep_nested_ancestry_when_byte_estimates_are_unknown() {
     outer_branch.nested_storms = nested_storms;
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(
         &query(None, None),
-        &[storm("expr:unknown-byte-output-ancestry", vec![outer_branch])],
+        &[storm(
+            "expr:unknown-byte-output-ancestry",
+            vec![outer_branch],
+        )],
         &[],
     )
     .expect("unknown byte estimates do not erase typed nested ancestry");
     let filter = explained
         .nodes()
         .iter()
-        .find(|node| node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm"))
+        .find(|node| {
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
+        })
         .expect("outer storm is visible");
     let routes = match filter
         .details()
@@ -1948,16 +1982,20 @@ fn typed_handoff_routes_keep_nested_ancestry_when_byte_estimates_are_unknown() {
     assert_eq!(routes[0].depth, 1);
     assert_eq!(routes[1].depth, 2);
     assert_eq!(routes[2].depth, 2);
-    assert!(routes
-        .iter()
-        .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none()));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none())
+    );
     assert!(routes.iter().all(|route| {
         route.output_path.len() == route.input_path.len() + 2
             && route.output_path[..route.input_path.len()] == route.input_path
     }));
-    assert!(routes[2].input_path.contains(&PlanByteCapScopeSegment::NestedStormOutput {
-        index: 1,
-    }));
+    assert!(
+        routes[2]
+            .input_path
+            .contains(&PlanByteCapScopeSegment::NestedStormOutput { index: 1 })
+    );
 
     let serialized = serde_json::to_value(&explained).expect("explained plans serialize");
     let serialized_routes = &serialized["nodes"]
@@ -1967,7 +2005,10 @@ fn typed_handoff_routes_keep_nested_ancestry_when_byte_estimates_are_unknown() {
         .find(|node| node["details"]["disjunct_storm"] == 1)
         .unwrap()["details"]["limit_chain_rebind_byte_cap_handoff_route_records"];
     assert_eq!(serialized_routes[2]["input_bytes"], serde_json::Value::Null);
-    assert_eq!(serialized_routes[2]["output_bytes"], serde_json::Value::Null);
+    assert_eq!(
+        serialized_routes[2]["output_bytes"],
+        serde_json::Value::Null
+    );
 }
 
 #[test]
@@ -2001,12 +2042,18 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
     let mut outer_branch = branch(
         &[80, 40],
         1,
-        vec![rebind(1, vec![first_rebind]), rebind(2, vec![second_rebind])],
+        vec![
+            rebind(1, vec![first_rebind]),
+            rebind(2, vec![second_rebind]),
+        ],
     );
     outer_branch.nested_storms = nested_storms;
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(
         &query(None, Some(4_096)),
-        &[storm("expr:unknown-row-output-ancestry", vec![outer_branch])],
+        &[storm(
+            "expr:unknown-row-output-ancestry",
+            vec![outer_branch],
+        )],
         &[],
     )
     .expect("unknown row estimates retain nested output ancestry and known byte caps");
@@ -2014,8 +2061,7 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
         .nodes()
         .iter()
         .find(|node| {
-            node.kind() == PlanNodeKind::Filter
-                && node.details().contains_key("disjunct_storm")
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
         })
         .expect("outer storm is visible");
     assert_eq!(filter.estimated_rows(), None);
@@ -2033,9 +2079,11 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
     assert_eq!(routes[1].depth, 1);
     assert_eq!(routes[2].depth, 2);
     assert_eq!(routes[3].depth, 2);
-    assert!(routes
-        .iter()
-        .all(|route| route.input_bytes.is_some() && route.output_bytes.is_some()));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.input_bytes.is_some() && route.output_bytes.is_some())
+    );
 
     assert_eq!(
         routes[0].input_path,
@@ -2047,7 +2095,10 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
     );
     let mut second_limit_path = routes[0].output_path.clone();
     second_limit_path.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 1,
+            index: 1,
+        },
         PlanByteCapScopeSegment::Limit { position: 2 },
     ]);
     assert_eq!(routes[1].input_path, second_limit_path);
@@ -2107,15 +2158,17 @@ fn typed_handoff_routes_preserve_nested_outputs_with_unknown_rows() {
         serialized_filter["estimated_bytes"].as_u64(),
         filter.estimated_bytes()
     );
-    let serialized_routes = serialized_filter["details"]
-        ["limit_chain_rebind_byte_cap_handoff_route_records"]
-        .as_array()
-        .expect("typed routes serialize as an array");
+    let serialized_routes =
+        serialized_filter["details"]["limit_chain_rebind_byte_cap_handoff_route_records"]
+            .as_array()
+            .expect("typed routes serialize as an array");
     assert_eq!(serialized_routes.len(), 4);
-    assert!(serialized_routes[3]["input_path"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 })));
+    assert!(
+        serialized_routes[3]["input_path"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 }))
+    );
     assert!(serialized_routes[3]["input_bytes"].as_u64().is_some());
     assert!(serialized_routes[3]["output_bytes"].as_u64().is_some());
 }
@@ -2150,7 +2203,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
     let mut outer_branch = branch(
         &[96, 48],
         1,
-        vec![rebind(1, vec![first_rebind]), rebind(2, vec![second_rebind])],
+        vec![
+            rebind(1, vec![first_rebind]),
+            rebind(2, vec![second_rebind]),
+        ],
     );
     outer_branch.nested_storms = nested_storms;
     let explained = explain_query_with_disjunct_storm_branch_limit_chains(
@@ -2166,8 +2222,7 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
         .nodes()
         .iter()
         .find(|node| {
-            node.kind() == PlanNodeKind::Filter
-                && node.details().contains_key("disjunct_storm")
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
         })
         .expect("outer storm is visible");
     assert_eq!(filter.estimated_rows(), None);
@@ -2184,9 +2239,11 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
     assert_eq!(routes[0].depth, 1);
     assert_eq!(routes[1].depth, 1);
     assert!(routes[2..].iter().all(|route| route.depth == 2));
-    assert!(routes
-        .iter()
-        .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none()));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none())
+    );
 
     assert_eq!(
         routes[0].input_path,
@@ -2198,7 +2255,10 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
     );
     let mut second_limit_input = routes[0].output_path.clone();
     second_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 1,
+            index: 1,
+        },
         PlanByteCapScopeSegment::Limit { position: 2 },
     ]);
     assert_eq!(routes[1].input_path, second_limit_input);
@@ -2262,19 +2322,21 @@ fn typed_handoff_routes_preserve_nested_outputs_after_unknown_rebinds() {
         .expect("outer storm is serialized");
     assert!(serialized_filter.get("estimated_rows").is_none());
     assert!(serialized_filter.get("estimated_bytes").is_none());
-    let serialized_routes = serialized_filter["details"]
-        ["limit_chain_rebind_byte_cap_handoff_route_records"]
-        .as_array()
-        .expect("typed routes serialize as an array");
+    let serialized_routes =
+        serialized_filter["details"]["limit_chain_rebind_byte_cap_handoff_route_records"]
+            .as_array()
+            .expect("typed routes serialize as an array");
     assert_eq!(serialized_routes.len(), 5);
     assert!(serialized_routes.iter().all(|route| {
         route["input_bytes"] == serde_json::Value::Null
             && route["output_bytes"] == serde_json::Value::Null
     }));
-    assert!(serialized_routes[4]["input_path"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 })));
+    assert!(
+        serialized_routes[4]["input_path"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 }))
+    );
 }
 
 #[test]
@@ -2337,8 +2399,7 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
         .nodes()
         .iter()
         .find(|node| {
-            node.kind() == PlanNodeKind::Filter
-                && node.details().contains_key("disjunct_storm")
+            node.kind() == PlanNodeKind::Filter && node.details().contains_key("disjunct_storm")
         })
         .expect("outer storm is visible");
     assert_eq!(filter.estimated_rows(), None);
@@ -2354,9 +2415,11 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     assert_eq!(routes.len(), 8);
     assert!(routes[..2].iter().all(|route| route.depth == 1));
     assert!(routes[2..].iter().all(|route| route.depth == 2));
-    assert!(routes
-        .iter()
-        .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none()));
+    assert!(
+        routes
+            .iter()
+            .all(|route| route.input_bytes.is_none() && route.output_bytes.is_none())
+    );
     assert!(routes.iter().all(|route| {
         route.output_path.len() == route.input_path.len() + 2
             && route.output_path[..route.input_path.len()] == route.input_path
@@ -2372,7 +2435,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     );
     let mut outer_second_limit_input = routes[0].output_path.clone();
     outer_second_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 1,
+            index: 1,
+        },
         PlanByteCapScopeSegment::Limit { position: 2 },
     ]);
     assert_eq!(routes[1].input_path, outer_second_limit_input);
@@ -2384,7 +2450,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
 
     let mut first_nested_limit_input = routes[1].output_path.clone();
     first_nested_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::BranchOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::Branch { index: 1 },
@@ -2393,14 +2462,20 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     assert_eq!(routes[2].input_path, first_nested_limit_input);
     let mut first_nested_second_limit_input = routes[2].output_path.clone();
     first_nested_second_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 1,
+            index: 1,
+        },
         PlanByteCapScopeSegment::Limit { position: 2 },
     ]);
     assert_eq!(routes[3].input_path, first_nested_second_limit_input);
 
     let mut second_nested_limit_input = routes[1].output_path.clone();
     second_nested_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::BranchOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
@@ -2412,7 +2487,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
 
     let mut third_nested_limit_input = routes[1].output_path.clone();
     third_nested_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 2, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 2,
+            index: 1,
+        },
         PlanByteCapScopeSegment::BranchOutput { index: 1 },
         PlanByteCapScopeSegment::NestedStorm { index: 1 },
         PlanByteCapScopeSegment::NestedStormOutput { index: 1 },
@@ -2425,7 +2503,10 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
     assert_eq!(routes[6].input_path, third_nested_limit_input);
     let mut third_nested_second_limit_input = routes[6].output_path.clone();
     third_nested_second_limit_input.extend([
-        PlanByteCapScopeSegment::RebindCascadeOutput { position: 1, index: 1 },
+        PlanByteCapScopeSegment::RebindCascadeOutput {
+            position: 1,
+            index: 1,
+        },
         PlanByteCapScopeSegment::Limit { position: 2 },
     ]);
     assert_eq!(routes[7].input_path, third_nested_second_limit_input);
@@ -2439,23 +2520,27 @@ fn typed_handoff_routes_preserve_ancestry_through_unknown_nested_limit_chains() 
         .expect("outer storm is serialized");
     assert!(serialized_filter.get("estimated_rows").is_none());
     assert!(serialized_filter.get("estimated_bytes").is_none());
-    let serialized_routes = serialized_filter["details"]
-        ["limit_chain_rebind_byte_cap_handoff_route_records"]
-        .as_array()
-        .expect("typed routes serialize as an array");
+    let serialized_routes =
+        serialized_filter["details"]["limit_chain_rebind_byte_cap_handoff_route_records"]
+            .as_array()
+            .expect("typed routes serialize as an array");
     assert_eq!(serialized_routes.len(), 8);
     assert!(serialized_routes.iter().all(|route| {
         route["input_bytes"] == serde_json::Value::Null
             && route["output_bytes"] == serde_json::Value::Null
     }));
-    assert!(serialized_routes[7]["input_path"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 })));
-    assert!(serialized_routes[7]["input_path"]
-        .as_array()
-        .unwrap()
-        .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 })));
+    assert!(
+        serialized_routes[7]["input_path"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 1 }))
+    );
+    assert!(
+        serialized_routes[7]["input_path"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!({ "kind": "nested_storm_output", "index": 2 }))
+    );
 }
 
 #[test]

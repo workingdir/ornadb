@@ -33,7 +33,16 @@ fn source_unit<'a>(analysis: &'a Analysis, name: &str) -> &'a SourceUnitMetadata
         .source_units
         .values()
         .find(|unit| unit.identity.name == name)
-        .unwrap_or_else(|| panic!("source unit {name} was not resolved; available: {:?}", analysis.source_units.keys().map(|identity| identity.name.clone()).collect::<Vec<_>>()))
+        .unwrap_or_else(|| {
+            panic!(
+                "source unit {name} was not resolved; available: {:?}",
+                analysis
+                    .source_units
+                    .keys()
+                    .map(|identity| identity.name.clone())
+                    .collect::<Vec<_>>()
+            )
+        })
 }
 
 fn function<'a>(analysis: &'a Analysis, name: &str) -> &'a Type {
@@ -48,18 +57,34 @@ fn function<'a>(analysis: &'a Analysis, name: &str) -> &'a Type {
 #[test]
 fn declared_unit_metadata_uses_reduced_dimensions_scale_and_affinity() {
     let analysis = analysis();
-    assert!(analysis.is_ok(), "diagnostics={:?}; total_speed={:?}", analysis.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>(), function(&analysis, "total_speed"));
+    assert!(
+        analysis.is_ok(),
+        "diagnostics={:?}; total_speed={:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>(),
+        function(&analysis, "total_speed")
+    );
 
-    let length_axis = source_unit(&analysis, "m").dimension_basis.keys().next().unwrap().clone();
-    let time_axis = source_unit(&analysis, "s").dimension_basis.keys().next().unwrap().clone();
+    let length_axis = source_unit(&analysis, "m")
+        .dimension_basis
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    let time_axis = source_unit(&analysis, "s")
+        .dimension_basis
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
     assert_eq!(
         source_unit(&analysis, "kmph").dimension_basis,
         BTreeMap::from([(length_axis.clone(), 1), (time_axis, -1)])
     );
-    assert_eq!(
-        source_unit(&analysis, "kmph").scale.numerator,
-        "5"
-    );
+    assert_eq!(source_unit(&analysis, "kmph").scale.numerator, "5");
     assert_eq!(source_unit(&analysis, "kmph").scale.denominator, "18");
 
     let metre = source_unit(&analysis, "m");
@@ -82,7 +107,15 @@ fn declared_unit_metadata_uses_reduced_dimensions_scale_and_affinity() {
 #[test]
 fn relation_sum_and_mean_preserve_quantity_dimensions() {
     let analysis = analysis();
-    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>());
+    assert!(
+        analysis.is_ok(),
+        "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
 
     let Type::Function {
         parameters: sum_parameters,
@@ -132,12 +165,18 @@ fn relation_sum_and_mean_preserve_quantity_dimensions() {
 #[test]
 fn integrating_speed_over_time_reduces_to_length() {
     let analysis = analysis();
-    assert!(analysis.is_ok(), "{:?}", analysis.diagnostics.iter().map(|diagnostic| diagnostic.message()).collect::<Vec<_>>());
+    assert!(
+        analysis.is_ok(),
+        "{:?}",
+        analysis
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
 
     let Type::Function {
-        parameters,
-        result,
-        ..
+        parameters, result, ..
     } = function(&analysis, "travelled")
     else {
         panic!("travelled has a function type");
@@ -162,6 +201,9 @@ fn integrating_speed_over_time_reduces_to_length() {
         panic!("integration returns a source-unit quantity");
     };
     assert_eq!(numeric.as_ref(), &Type::Float);
-    assert_eq!(dimension_basis, &source_unit(&analysis, "m").dimension_basis);
+    assert_eq!(
+        dimension_basis,
+        &source_unit(&analysis, "m").dimension_basis
+    );
     assert_eq!(scale, &source_unit(&analysis, "kmph").scale);
 }

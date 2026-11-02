@@ -72,9 +72,7 @@ fn pinned_core_collection_source_executes_the_documented_list_operations() {
     }
 
     let failed_one = session
-        .submit(
-            "one([1, 2, 3], value => if value < 3 { true } else { 1 / (value - 3) == 0 })",
-        )
+        .submit("one([1, 2, 3], value => if value < 3 { true } else { 1 / (value - 3) == 0 })")
         .expect_err("one must propagate callback failures after multiple matches");
     assert_eq!(failed_one.code(), "ORNA-EVAL-DIVIDE-BY-ZERO");
 

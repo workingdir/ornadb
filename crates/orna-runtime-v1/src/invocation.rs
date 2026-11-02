@@ -14,15 +14,14 @@ use libsql::{TransactionBehavior, params};
 use num_bigint::BigInt;
 use orna_foundation_v1::{
     CwdCapture, FunctionRef, InvocationArgumentRef, InvocationRef, RunRef, SnapshotRef, TypeRef,
-    function_reference, invocation_argument_reference,
-    invocation_reference, object_reference, snapshot_reference, type_reference,
-    validate_function_reference, validate_invocation_argument_reference,
-    validate_invocation_reference, validate_type_reference,
+    function_reference, invocation_argument_reference, invocation_reference, object_reference,
+    snapshot_reference, type_reference, validate_function_reference,
+    validate_invocation_argument_reference, validate_invocation_reference, validate_type_reference,
 };
 
 use crate::{
-    CatalogueFunction, RunObservationId, RuntimeError, RuntimeState, WriterLease, decode_bool,
-    CatalogueError, decode_u64, encode_capture, fixed, now_ms, validate_digest, validate_id,
+    CatalogueError, CatalogueFunction, RunObservationId, RuntimeError, RuntimeState, WriterLease,
+    decode_bool, decode_u64, encode_capture, fixed, now_ms, validate_digest, validate_id,
     validate_observation_text, validate_writer_lease,
 };
 
@@ -321,9 +320,12 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
             .ok_or(RuntimeError::RecoveryInvalid)?;
         let stored_name: String = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let stored_revision: [u8; 32] = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let stored_semantic: [u8; 32] = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let stored_result: [u8; 16] = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let stored_revision: [u8; 32] =
+            fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let stored_semantic: [u8; 32] =
+            fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let stored_result: [u8; 16] =
+            fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let stored_ms: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
         if stored_name != qualified_name
             || stored_revision != function.object.revision_id
@@ -350,7 +352,8 @@ impl RuntimeState {
         {
             persisted_parameters.push((
                 decode_u64(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-                row.get::<String>(1).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<String>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 fixed::<16>(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
             ));
         }
@@ -446,9 +449,21 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
             .ok_or(RuntimeError::ProcedureMaterializationConflict)?;
-        let revision: [u8; 32] = fixed(procedure_row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let semantic: [u8; 32] = fixed(procedure_row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let result_type: [u8; 16] = fixed(procedure_row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let revision: [u8; 32] = fixed(
+            procedure_row
+                .get(0)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let semantic: [u8; 32] = fixed(
+            procedure_row
+                .get(1)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
+        let result_type: [u8; 16] = fixed(
+            procedure_row
+                .get(2)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?;
         if revision != procedure.revision_id
             || semantic != procedure.semantic_hash
             || result_type != procedure.result_type_object_id
@@ -556,14 +571,18 @@ impl RuntimeState {
             .ok_or(RuntimeError::InvocationStateConflict)?;
         let owner = WriterLease {
             owner_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-            epoch: decode_u64(row.get::<i64>(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+            epoch: decode_u64(
+                row.get::<i64>(1)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?,
         };
         if owner != writer {
             return Err(RuntimeError::OwnerLost);
         }
         let parent: Option<Vec<u8>> = row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?;
         let current = decode_invocation_status(
-            row.get::<i64>(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            row.get::<i64>(3)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
         )?;
         if current.is_terminal() || current != InvocationObservationStatus::Running {
             return Err(RuntimeError::InvocationStateConflict);
@@ -572,7 +591,11 @@ impl RuntimeState {
             .query(
                 "SELECT 1 FROM sys_invocation_observation
                  WHERE parent_invocation_id = ?1 AND status IN (?2, ?3) LIMIT 1",
-                params![id.to_vec(), InvocationObservationStatus::Queued.code(), InvocationObservationStatus::Running.code()],
+                params![
+                    id.to_vec(),
+                    InvocationObservationStatus::Queued.code(),
+                    InvocationObservationStatus::Running.code()
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -763,7 +786,9 @@ impl RuntimeState {
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
-            ids.push(fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?);
+            ids.push(fixed(
+                row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?,
+            )?);
         }
         let mut observations = Vec::with_capacity(ids.len());
         for id in ids {
@@ -802,10 +827,7 @@ impl RuntimeState {
         {
             return Err(RuntimeError::InvocationTailInvalid);
         }
-        let after_sequence = after
-            .as_ref()
-            .map(|cursor| cursor.sequence)
-            .unwrap_or(0);
+        let after_sequence = after.as_ref().map(|cursor| cursor.sequence).unwrap_or(0);
         let row_limit = i64::try_from(limit + 1).map_err(|_| RuntimeError::InvocationTailLimit)?;
         let mut rows = tx
             .query(
@@ -813,7 +835,8 @@ impl RuntimeState {
                  FROM sys_invocation_observation_tail
                  WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
                 params![
-                    i64::try_from(after_sequence).map_err(|_| RuntimeError::InvocationTailInvalid)?,
+                    i64::try_from(after_sequence)
+                        .map_err(|_| RuntimeError::InvocationTailInvalid)?,
                     row_limit,
                 ],
             )
@@ -826,11 +849,16 @@ impl RuntimeState {
             .map_err(|_| RuntimeError::StorageUnavailable)?
         {
             events.push((
-                decode_u64(row.get::<i64>(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                decode_u64(
+                    row.get::<i64>(0)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
                 fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-                row.get::<i64>(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(2)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 decode_invocation_status(
-                    row.get::<i64>(3).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                    row.get::<i64>(3)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
                 )?,
             ));
         }
@@ -941,9 +969,7 @@ fn bind_invocation_arguments(
     procedure: &MaterializedProcedure,
     mut arguments: Vec<InvocationArgumentInput>,
 ) -> Result<Vec<(u64, InvocationArgumentInput, [u8; 16])>, RuntimeError> {
-    if arguments.len() > MAX_INVOCATION_ARGUMENTS
-        || arguments.len() != procedure.parameters.len()
-    {
+    if arguments.len() > MAX_INVOCATION_ARGUMENTS || arguments.len() != procedure.parameters.len() {
         return Err(RuntimeError::InvocationOwnerInvalid);
     }
     arguments.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
@@ -968,11 +994,7 @@ fn bind_invocation_arguments(
         if input.type_reference != parameter.type_reference {
             return Err(RuntimeError::InvocationOwnerInvalid);
         }
-        bound.push((
-            parameter.position,
-            input,
-            parameter.type_object_id,
-        ));
+        bound.push((parameter.position, input, parameter.type_object_id));
     }
     bound.sort_by_key(|(position, _, _)| *position);
     Ok(bound)
@@ -1039,15 +1061,21 @@ async fn validate_launch_owner(
                 .map_err(|_| RuntimeError::StorageUnavailable)?
                 .ok_or(RuntimeError::InvocationOwnerInvalid)?;
             let parent_snapshot: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
-            let parent_digest: [u8; 32] = fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+            let parent_digest: [u8; 32] =
+                fixed(row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
             let parent_status = decode_invocation_status(
-                row.get::<i64>(2).map_err(|_| RuntimeError::RecoveryInvalid)?,
+                row.get::<i64>(2)
+                    .map_err(|_| RuntimeError::RecoveryInvalid)?,
             )?;
             let parent_owner = WriterLease {
                 owner_id: fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-                epoch: decode_u64(row.get::<i64>(4).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                epoch: decode_u64(
+                    row.get::<i64>(4)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
             };
-            let parent_run: Option<Vec<u8>> = row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            let parent_run: Option<Vec<u8>> =
+                row.get(5).map_err(|_| RuntimeError::RecoveryInvalid)?;
             let parent_run = parent_run.map(fixed::<16>).transpose()?;
             if parent_snapshot != encode_capture(capture)?
                 || parent_digest != capture.generation_digest()
@@ -1138,7 +1166,8 @@ async fn load_invocation_observation(
     };
     let function_object_id = fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let snapshot_bytes: Vec<u8> = row.get(1).map_err(|_| RuntimeError::RecoveryInvalid)?;
-    let generation_digest: [u8; 32] = fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+    let generation_digest: [u8; 32] =
+        fixed(row.get(2).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_id: [u8; 16] = fixed(row.get(3).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
     let runtime_generation: i64 = row.get(4).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let capture = crate::decode_capture(snapshot_bytes.clone(), generation_digest)?;
@@ -1165,7 +1194,10 @@ async fn load_invocation_observation(
     };
     let writer = WriterLease {
         owner_id: fixed(row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-        epoch: decode_u64(row.get::<i64>(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+        epoch: decode_u64(
+            row.get::<i64>(10)
+                .map_err(|_| RuntimeError::RecoveryInvalid)?,
+        )?,
     };
     if writer.epoch == 0 {
         return Err(RuntimeError::RecoveryInvalid);
@@ -1174,7 +1206,8 @@ async fn load_invocation_observation(
     let ended_ms: Option<i64> = row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let observed_ms: i64 = row.get(13).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let status = decode_invocation_status(
-        row.get::<i64>(14).map_err(|_| RuntimeError::RecoveryInvalid)?,
+        row.get::<i64>(14)
+            .map_err(|_| RuntimeError::RecoveryInvalid)?,
     )?;
     let failure_code: Option<String> = row.get(16).map_err(|_| RuntimeError::RecoveryInvalid)?;
     let idempotency_key_hash: Option<Vec<u8>> =
@@ -1201,7 +1234,10 @@ async fn load_invocation_observation(
         validate_diagnostic_code(code)?;
     }
     let mut current_writer_rows = connection
-        .query("SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1", ())
+        .query(
+            "SELECT owner_id, epoch FROM writer_lease WHERE singleton = 1",
+            (),
+        )
         .await
         .map_err(|_| RuntimeError::StorageUnavailable)?;
     let live = match current_writer_rows
@@ -1212,28 +1248,24 @@ async fn load_invocation_observation(
         Some(row) => {
             let current = WriterLease {
                 owner_id: fixed(row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
-                epoch: decode_u64(row.get::<i64>(1).map_err(|_| RuntimeError::RecoveryInvalid)?)?,
+                epoch: decode_u64(
+                    row.get::<i64>(1)
+                        .map_err(|_| RuntimeError::RecoveryInvalid)?,
+                )?,
             };
             !status.is_terminal() && current == writer
         }
         None => false,
     };
-    let invocation = invocation_reference(
-        capture.database_id(),
-        capture.snapshot().clone(),
-        id,
-    )
-    .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let invocation = invocation_reference(capture.database_id(), capture.snapshot().clone(), id)
+        .map_err(|_| RuntimeError::InvalidObservationReference)?;
     validate_invocation_reference(invocation.clone().into_row_ref(), &capture)
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let parent = match owner {
         InvocationLaunchOwner::Parent(parent_id) => {
-            let reference = invocation_reference(
-                capture.database_id(),
-                capture.snapshot().clone(),
-                parent_id,
-            )
-            .map_err(|_| RuntimeError::InvalidObservationReference)?;
+            let reference =
+                invocation_reference(capture.database_id(), capture.snapshot().clone(), parent_id)
+                    .map_err(|_| RuntimeError::InvalidObservationReference)?;
             Some(
                 validate_invocation_reference(reference.into_row_ref(), &capture)
                     .map_err(|_| RuntimeError::InvalidObservationReference)?,
@@ -1242,9 +1274,10 @@ async fn load_invocation_observation(
         _ => None,
     };
     let run = if let Some(run_id) = run_id {
-        let run_observation = super::load_run_observation_tx(connection, RunObservationId(run_id), &capture)
-            .await?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let run_observation =
+            super::load_run_observation_tx(connection, RunObservationId(run_id), &capture)
+                .await?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
         Some(
             run_observation
                 .reference()
@@ -1308,8 +1341,8 @@ async fn load_materialized_procedure(
         capture.snapshot().clone(),
     )
     .map_err(|_| RuntimeError::InvalidObservationReference)?;
-    let function = function_reference(object)
-        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let function =
+        function_reference(object).map_err(|_| RuntimeError::InvalidObservationReference)?;
     validate_function_reference(function.clone().into_row_ref(), capture)
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     let result_type = make_type_reference(capture, result_type_object_id)?;
@@ -1375,8 +1408,8 @@ fn make_type_reference(
         capture.snapshot().clone(),
     )
     .map_err(|_| RuntimeError::InvalidObservationReference)?;
-    let type_reference = type_reference(object)
-        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+    let type_reference =
+        type_reference(object).map_err(|_| RuntimeError::InvalidObservationReference)?;
     validate_type_reference(type_reference.clone().into_row_ref(), capture)
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
     Ok(type_reference)
@@ -1463,7 +1496,10 @@ fn decode_invocation_status(value: i64) -> Result<InvocationObservationStatus, R
 }
 
 fn bigint_to_i64(value: &BigInt) -> Result<i64, RuntimeError> {
-    value.to_string().parse().map_err(|_| RuntimeError::RecoveryInvalid)
+    value
+        .to_string()
+        .parse()
+        .map_err(|_| RuntimeError::RecoveryInvalid)
 }
 
 impl fmt::Display for InvocationObservationStatus {

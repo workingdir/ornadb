@@ -64,10 +64,17 @@ fn standard_definitions_outside_a_project_open_the_reference_source() {
         .find(|(logical, _)| logical == "std/math.orna")
         .expect("reference std.math")
         .1;
-    assert_eq!(text, reference, "the copy is the source the server analysed");
+    assert_eq!(
+        text, reference,
+        "the copy is the source the server analysed"
+    );
 
     // The imported name opens the same declaration.
-    let imported = definition(&mut client, uri, position_of(MATH_USE, "increment(value)", 1));
+    let imported = definition(
+        &mut client,
+        uri,
+        position_of(MATH_USE, "increment(value)", 1),
+    );
     assert_eq!(imported, qualified);
     client.shutdown();
 }
@@ -93,7 +100,8 @@ fn git(directory: &Path, args: &[&str]) -> String {
 }
 
 const CAPTURED_COLLECTION: &str = "/// The captured answer.\npub fn answer(): Int = 42;\n";
-const ANSWER_USE: &str = "use std.collection.{answer};\npub fn twice(): Int = answer() + answer();\n";
+const ANSWER_USE: &str =
+    "use std.collection.{answer};\npub fn twice(): Int = answer() + answer();\n";
 
 /// Captures `stdlib/std` in `project` as `orna` records a standard
 /// dependency: a submodule gitlink committed in the project.
@@ -114,7 +122,12 @@ fn capture_standard(project: &Project) {
     git(project.root(), &["add", "main.orna", ".gitmodules"]);
     git(
         project.root(),
-        &["update-index", "--add", "--cacheinfo", &format!("160000,{commit},stdlib/std")],
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{commit},stdlib/std"),
+        ],
     );
     git(project.root(), &["commit", "--quiet", "-m", "capture std"]);
 }
@@ -133,7 +146,10 @@ fn project_standard_definitions_open_the_captured_snapshot() {
     let location = definition(&mut client, &uri, position_of(ANSWER_USE, "answer() +", 1));
     let (path, text) = cached_source(cache.path(), &location);
     assert!(path.ends_with("std/collection.orna"), "{}", path.display());
-    assert_eq!(text, CAPTURED_COLLECTION, "the captured snapshot, not the reference library");
+    assert_eq!(
+        text, CAPTURED_COLLECTION,
+        "the captured snapshot, not the reference library"
+    );
     assert_eq!(text_at(&text, &location["range"]), "answer");
     client.shutdown();
 }

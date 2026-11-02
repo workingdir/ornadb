@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{
     Environment, Functions, Limits, PureFunction, evaluate_expression_with_functions,
 };
@@ -351,7 +350,9 @@ fn encoded_map_projection_keeps_values_paired_through_deep_key_ordering() {
         ]),
     ]));
     assert_eq!(
-        evaluate(include_str!("fixtures/stdlib-map-ovb-deep-order-m6kj2.orna")),
+        evaluate(include_str!(
+            "fixtures/stdlib-map-ovb-deep-order-m6kj2.orna"
+        )),
         Ok(expected)
     );
 }

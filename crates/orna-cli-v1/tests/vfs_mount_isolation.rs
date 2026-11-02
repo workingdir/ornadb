@@ -280,12 +280,7 @@ async fn temp_created_before_owner_change_is_refused_with_eagain_and_keeps_scrat
         std::fs::read_to_string(&temp).expect("the refused scratch is kept"),
         music_row("Stale temp"),
     );
-    await_draft_guard(
-        &fixture,
-        b'1',
-        "the refused scratch is an unresolved draft",
-    )
-    .await;
+    await_draft_guard(&fixture, b'1', "the refused scratch is an unresolved draft").await;
 
     std::fs::remove_file(&temp).expect("remove the refused scratch");
     await_draft_guard(
@@ -306,11 +301,8 @@ async fn two_temporaries_for_one_row_capture_their_own_baselines() {
         return;
     }
     let fixture = start_editor_mount(false).await;
-    let stale = write_temporary_sibling(
-        &fixture,
-        ".data.orna.stale-temp",
-        &music_row("Stale temp"),
-    );
+    let stale =
+        write_temporary_sibling(&fixture, ".data.orna.stale-temp", &music_row("Stale temp"));
     owner_routed_edit(&fixture, "Owner change");
     assert_errno(
         std::fs::rename(&stale, &fixture.data_path),
@@ -318,11 +310,8 @@ async fn two_temporaries_for_one_row_capture_their_own_baselines() {
         "a temp created before the owner change must be refused",
     );
 
-    let fresh = write_temporary_sibling(
-        &fixture,
-        ".data.orna.fresh-temp",
-        &music_row("Fresh temp"),
-    );
+    let fresh =
+        write_temporary_sibling(&fixture, ".data.orna.fresh-temp", &music_row("Fresh temp"));
     std::fs::rename(&fresh, &fixture.data_path)
         .expect("a temp created after the owner change renames over the owner's row");
     let view = fresh_view(&fixture);
@@ -440,7 +429,10 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    assert!(!output.status.success(), "stale orna edit must fail: {diagnostics}");
+    assert!(
+        !output.status.success(),
+        "stale orna edit must fail: {diagnostics}"
+    );
     assert!(
         diagnostics.contains("E2000"),
         "the refusal is the stale-edit cause E2000: {diagnostics}"
@@ -453,7 +445,11 @@ async fn orna_edit_refuses_save_when_row_changed_during_editor_session() {
     let retained = diagnostics
         .split("draft retained at ")
         .nth(1)
-        .and_then(|rest| rest.split(['\n', ',', '"']).next()).map_or_else(|| panic!("the E2000 refusal names the retained draft path: {diagnostics}"), |path| PathBuf::from(path.trim()));
+        .and_then(|rest| rest.split(['\n', ',', '"']).next())
+        .map_or_else(
+            || panic!("the E2000 refusal names the retained draft path: {diagnostics}"),
+            |path| PathBuf::from(path.trim()),
+        );
     let draft = std::fs::read_to_string(&retained)
         .unwrap_or_else(|error| panic!("retained draft at {}: {error}", retained.display()));
     assert!(
@@ -480,7 +476,10 @@ async fn owner_write_is_visible_through_mount_to_every_new_open() {
 
     owner_routed_edit(&fixture, "Api write");
     let accepted = fresh_view(&fixture);
-    assert!(accepted.contains("Api write"), "a new open sees the owner write, got {accepted}");
+    assert!(
+        accepted.contains("Api write"),
+        "a new open sees the owner write, got {accepted}"
+    );
     for _ in 0..3 {
         let mut reopened = File::open(&fixture.data_path).unwrap();
         assert_eq!(read_from_start(&mut reopened), accepted);
@@ -506,7 +505,11 @@ async fn stat_after_owner_write_reports_fresh_size() {
     owner_routed_edit(&fixture, "Api write with a longer title");
     let accepted = fresh_view(&fixture);
     let size = std::fs::metadata(&fixture.data_path).unwrap().len();
-    assert_eq!(size, accepted.len() as u64, "stat reports the accepted row size");
+    assert_eq!(
+        size,
+        accepted.len() as u64,
+        "stat reports the accepted row size"
+    );
 }
 
 /// ORNA-VFS-019 and 41-vfs.md:67-68: a writer opened before an owner-routed write
@@ -590,7 +593,9 @@ async fn writer_stat_reports_its_own_draft_size() {
     let fixture = start_editor_mount(false).await;
     let mut writer = open_rw(&fixture);
     writer.set_len(0).unwrap();
-    writer.write_all(music_row("Stale writer").as_bytes()).unwrap();
+    writer
+        .write_all(music_row("Stale writer").as_bytes())
+        .unwrap();
     assert_eq!(
         std::fs::metadata(&fixture.data_path).unwrap().len(),
         music_row("Stale writer").len() as u64,
@@ -610,7 +615,9 @@ async fn other_open_stat_after_refused_writer_reports_accepted_size() {
     let fixture = start_editor_mount(false).await;
     let mut writer = open_rw(&fixture);
     writer.set_len(0).unwrap();
-    writer.write_all(music_row("Stale writer").as_bytes()).unwrap();
+    writer
+        .write_all(music_row("Stale writer").as_bytes())
+        .unwrap();
     owner_routed_edit(&fixture, "Owner change");
     assert_errno(
         writer.sync_all(),
@@ -647,7 +654,11 @@ async fn reader_opened_before_owner_write_keeps_fstat_size() {
     let original = fresh_view(&fixture);
     let reader = File::open(&fixture.data_path).unwrap();
     owner_routed_edit(&fixture, "Api write with a longer title");
-    assert_ne!(fresh_view(&fixture).len(), original.len(), "the owner write changes the size");
+    assert_ne!(
+        fresh_view(&fixture).len(),
+        original.len(),
+        "the owner write changes the size"
+    );
     assert_eq!(
         reader.metadata().unwrap().len(),
         original.len() as u64,
@@ -856,7 +867,10 @@ async fn reader_opened_before_shrinking_owner_write_keeps_old_bytes() {
     assert_eq!(read_from_start(&mut reader), pinned);
     owner_routed_edit(&fixture, "x");
     let accepted = fresh_view(&fixture);
-    assert!(accepted.len() < pinned.len(), "the owner write shrinks the row, got {accepted}");
+    assert!(
+        accepted.len() < pinned.len(),
+        "the owner write shrinks the row, got {accepted}"
+    );
     assert_eq!(
         read_from_start(&mut reader),
         pinned,
@@ -953,7 +967,11 @@ async fn reader_opened_before_owner_write_keeps_old_bytes() {
 
     owner_routed_edit(&fixture, "Api write with a longer title");
     let accepted = fresh_view(&fixture);
-    assert_ne!(accepted.len(), original.len(), "the owner write changes the size");
+    assert_ne!(
+        accepted.len(),
+        original.len(),
+        "the owner write changes the size"
+    );
 
     assert_eq!(
         read_from_start(&mut old_reader),

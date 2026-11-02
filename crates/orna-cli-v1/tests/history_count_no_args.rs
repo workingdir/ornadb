@@ -17,7 +17,11 @@ const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 #[test]
 fn history_count_without_relation_or_key_is_a_usage_error() {
     let directory = TempDir::new().unwrap();
-    std::fs::copy(Path::new(FIXTURES).join(FIXTURE), directory.path().join(FIXTURE)).unwrap();
+    std::fs::copy(
+        Path::new(FIXTURES).join(FIXTURE),
+        directory.path().join(FIXTURE),
+    )
+    .unwrap();
 
     let output = run_in(directory.path(), &["history", "--count"]);
 
@@ -37,5 +41,8 @@ fn history_count_without_relation_or_key_is_a_usage_error() {
         stderr.contains("History expects a relation and a row key"),
         "stderr: {stderr}"
     );
-    assert!(!stderr.contains("Repository could not be opened"), "stderr: {stderr}");
+    assert!(
+        !stderr.contains("Repository could not be opened"),
+        "stderr: {stderr}"
+    );
 }

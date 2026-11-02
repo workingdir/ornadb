@@ -27,10 +27,7 @@ fn repository(files: &[(&str, &str)]) -> (TempDir, Repository) {
 #[test]
 fn complete_project_loads_and_validates_every_loose_row() {
     let (_directory, repository) = repository(&[
-        (
-            "main.orna",
-            include_str!("fixtures/loose-rows/main.orna"),
-        ),
+        ("main.orna", include_str!("fixtures/loose-rows/main.orna")),
         (
             "Contact/north/42.orna",
             include_str!("fixtures/loose-rows/valid.orna"),
@@ -57,7 +54,11 @@ fn complete_project_loads_and_validates_every_loose_row() {
     assert_eq!(project.modules().len(), 1);
     assert_eq!(project.loose_rows().len(), 5);
     let analysis = analyze_with_catalogue(project.modules(), &Catalogue::authoritative_fixture());
-    assert!(analysis.is_ok(), "table declaration failed: {:?}", analysis.diagnostics);
+    assert!(
+        analysis.is_ok(),
+        "table declaration failed: {:?}",
+        analysis.diagnostics
+    );
 
     let mut passed = Vec::new();
     let mut rejected = Vec::new();

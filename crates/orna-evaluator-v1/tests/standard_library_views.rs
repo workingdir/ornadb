@@ -13,11 +13,9 @@ fn pinned_views_module_is_snapshot_bound_and_importable() {
         .into_iter()
         .filter(|(path, _)| path == "std/collection.orna" || path == "std/views.orna")
         .collect::<Vec<_>>();
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/wc6kr-collection-views",
-        sources.clone(),
-    )
-    .expect("collection and views sources are captured in an immutable std snapshot");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/wc6kr-collection-views", sources.clone())
+            .expect("collection and views sources are captured in an immutable std snapshot");
     for (path, source) in &sources {
         profile
             .verify_source(path, source)
@@ -30,18 +28,20 @@ fn pinned_views_module_is_snapshot_bound_and_importable() {
         .1
         .clone();
     changed_views.push_str("\n// changed after snapshot capture\n");
-    assert!(profile.verify_source("std/views.orna", &changed_views).is_err());
+    assert!(
+        profile
+            .verify_source("std/views.orna", &changed_views)
+            .is_err()
+    );
 
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("std.views resolves its collection dependency in the captured bundle");
-    let mut session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured views source failed to load: {}", error.code()));
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!("captured views source failed to load: {}", error.code())
+            });
     session
         .submit(include_str!("fixtures/stdlib-use-views-wc6kr.orna"))
         .unwrap_or_else(|error| panic!("views import failed: {}", error.code()));
@@ -51,11 +51,20 @@ fn pinned_views_module_is_snapshot_bound_and_importable() {
 fn core_assertions_work_without_std_and_views_remain_optional() {
     let mut session = AdmittedReplSession::new(Limits::default());
     session
-        .submit(include_str!("fixtures/stdlib-core-assertions-without-views-wc6kr.orna"))
-        .unwrap_or_else(|error| panic!("core assertion declaration failed without std: {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-core-assertions-without-views-wc6kr.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "core assertion declaration failed without std: {}",
+                error.code()
+            )
+        });
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-core-assertions-call-without-views-wc6kr.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-core-assertions-call-without-views-wc6kr.orna"
+            ))
             .unwrap_or_else(|error| panic!("core assertion failed without std: {}", error.code())),
         Some(bool_value(true))
     );
@@ -63,7 +72,9 @@ fn core_assertions_work_without_std_and_views_remain_optional() {
     let mut without_views = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         without_views
-            .submit(include_str!("fixtures/stdlib-views-without-snapshot-wc6kr.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-views-without-snapshot-wc6kr.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"

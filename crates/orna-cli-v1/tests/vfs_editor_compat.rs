@@ -36,7 +36,11 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     let relation_id = fixture.relation_id;
     let row_directory = &fixture.row_directory;
     let data_path = &fixture.data_path;
-    assert!(std::fs::read_to_string(data_path).unwrap().contains("Original"));
+    assert!(
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("Original")
+    );
     let mut private_writer = OpenOptions::new()
         .read(true)
         .write(true)
@@ -55,14 +59,18 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(observer_view.contains("Original"));
     drop(private_writer);
     drop(observer);
-    assert!(std::fs::read_to_string(data_path).unwrap().contains("Original"));
-    write_and_sync(
-        data_path,
-        "{ title: \"In place\", artist: \"Kieran\", }\n",
-    )
-    .expect("in-place editor save must validate and sync");
-    assert!(std::fs::read_to_string(data_path).unwrap().contains("In place"));
-
+    assert!(
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("Original")
+    );
+    write_and_sync(data_path, "{ title: \"In place\", artist: \"Kieran\", }\n")
+        .expect("in-place editor save must validate and sync");
+    assert!(
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("In place")
+    );
 
     // 41-vfs.md:67: an unknown file inside a row directory is private scratch, not a column.
     // Its create succeeds, leaves the row document unchanged, and it can be unlinked.
@@ -97,7 +105,9 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         "rename must reject a scratch whose captured row baseline is stale",
     );
     assert!(
-        std::fs::read_to_string(data_path).unwrap().contains("New baseline"),
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("New baseline"),
         "stale rename must preserve the newer accepted row",
     );
     let temporary = row_directory.join(".data.orna.editor-tmp");
@@ -111,7 +121,11 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     file.sync_all().expect("editor syncs temporary file");
     drop(file);
     std::fs::rename(&temporary, data_path).expect("editor atomically replaces data.orna");
-    assert!(std::fs::read_to_string(data_path).unwrap().contains("Renamed"));
+    assert!(
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("Renamed")
+    );
 
     let durable_before_rejection = format3::committed_store_rows(repository, relation_id);
     let mut invalid = OpenOptions::new()
@@ -123,13 +137,20 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     invalid
         .write_all(b"{ title: 123, artist: \"Kieran\", }\n")
         .unwrap();
-    assert!(invalid.sync_all().is_err(), "invalid row must be rejected at sync");
+    assert!(
+        invalid.sync_all().is_err(),
+        "invalid row must be rejected at sync"
+    );
     invalid.seek(SeekFrom::Start(0)).unwrap();
     let mut rejected_draft = String::new();
     invalid.read_to_string(&mut rejected_draft).unwrap();
     assert!(rejected_draft.contains("title: 123"));
     drop(invalid);
-    assert!(std::fs::read_to_string(data_path).unwrap().contains("Renamed"));
+    assert!(
+        std::fs::read_to_string(data_path)
+            .unwrap()
+            .contains("Renamed")
+    );
     let durable_after_rejection = format3::committed_store_rows(repository, relation_id);
     assert_eq!(
         durable_after_rejection, durable_before_rejection,
@@ -161,8 +182,7 @@ async fn editor_saves_reject_aforeign_writer_lease() {
     );
     let durable_after = format3::committed_store_rows(&fixture.repository, fixture.relation_id);
     assert_eq!(
-        durable_after,
-        durable_before,
+        durable_after, durable_before,
         "rejected save must preserve the durable row",
     );
 
@@ -467,7 +487,9 @@ async fn current_runtime_row(
     key: &[u8],
 ) -> Option<Vec<u8>> {
     let (identity, digest) = format3::cli_runtime_identity(repository);
-    let state = RuntimeState::open(repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(repository, identity, digest)
+        .await
+        .unwrap();
     let table_identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id)).unwrap();
     let snapshot = state
         .begin_admitted_table_activation(std::slice::from_ref(&table_identity))
@@ -491,7 +513,6 @@ fn editor_script(directory: &TempDir, document: &str) -> PathBuf {
     std::fs::set_permissions(&path, permissions).unwrap();
     path
 }
-
 
 fn run_row_edit(repository_directory: &TempDir, editor: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_orna"))
@@ -557,7 +578,10 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
         .args(["c", "0", "0"])
         .output()
         .expect("mknod is available on Linux");
-    assert!(!device_output.status.success(), "device nodes are unsupported");
+    assert!(
+        !device_output.status.success(),
+        "device nodes are unsupported"
+    );
     let device_error = String::from_utf8_lossy(&device_output.stderr);
     assert!(
         device_error.contains("Operation not permitted"),
@@ -601,15 +625,20 @@ async fn editor_mount_refuses_chmod_and_chown_with_eperm() {
         return;
     }
     let fixture = start_editor_mount(false).await;
-    let chmod = std::fs::set_permissions(&fixture.data_path, std::fs::Permissions::from_mode(0o600));
+    let chmod =
+        std::fs::set_permissions(&fixture.data_path, std::fs::Permissions::from_mode(0o600));
     assert_eq!(
-        chmod.expect_err("chmod on an editable mount must fail").raw_os_error(),
+        chmod
+            .expect_err("chmod on an editable mount must fail")
+            .raw_os_error(),
         Some(libc::EPERM),
         "chmod on an editable mount"
     );
     let chown = std::os::unix::fs::chown(&fixture.data_path, Some(0), Some(0));
     assert_eq!(
-        chown.expect_err("chown on an editable mount must fail").raw_os_error(),
+        chown
+            .expect_err("chown on an editable mount must fail")
+            .raw_os_error(),
         Some(libc::EPERM),
         "chown on an editable mount"
     );
@@ -629,9 +658,10 @@ async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation(
         false,
     )
     .await;
-    let original = current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london")
-        .await
-        .expect("initial committed row exists");
+    let original =
+        current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london")
+            .await
+            .expect("initial committed row exists");
 
     let mut open_draft = OpenOptions::new()
         .read(true)
@@ -674,14 +704,10 @@ async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation(
         String::from_utf8_lossy(&external.stderr),
         orna_value_v1::decode_canonical_storage_value(&original),
     );
-    let externally_committed = current_runtime_row(
-        &fixture.repository,
-        fixture.relation_id,
-        "Music",
-        b"london",
-    )
-    .await
-    .expect("the non-VFS writer committed the row");
+    let externally_committed =
+        current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london")
+            .await
+            .expect("the non-VFS writer committed the row");
     assert!(
         String::from_utf8_lossy(&externally_committed).contains("External commit"),
         "the non-VFS writer's row is current",
@@ -695,7 +721,10 @@ async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation(
     open_draft.seek(SeekFrom::Start(0)).unwrap();
     let mut pinned_draft = String::new();
     open_draft.read_to_string(&mut pinned_draft).unwrap();
-    assert!(pinned_draft.contains("Stale draft"), "the open handle remains pinned to its draft");
+    assert!(
+        pinned_draft.contains("Stale draft"),
+        "the open handle remains pinned to its draft"
+    );
     assert_eq!(
         current_runtime_row(&fixture.repository, fixture.relation_id, "Music", b"london").await,
         Some(externally_committed),

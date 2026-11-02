@@ -11,14 +11,13 @@
 //! These views address the host-visible names; they do not yet project the
 //! FUSE tree, which remains the VFS-1 host slice.
 
+use fs2::FileExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     io::Write,
     path::{Path, PathBuf},
 };
-use fs2::FileExt;
-
 
 use sha2::{Digest, Sha256};
 
@@ -80,13 +79,17 @@ impl std::fmt::Display for MountError {
             Self::HostFilesystem => formatter.write_str("mountpoint or mount registry unavailable"),
             Self::Format(error) => write!(formatter, "snapshot not mountable: {error}"),
             Self::MountpointNotEmpty => formatter.write_str("mountpoint is not empty"),
-            Self::MountpointAlreadyAttached => formatter.write_str("a mount view is already attached there"),
+            Self::MountpointAlreadyAttached => {
+                formatter.write_str("a mount view is already attached there")
+            }
             Self::MountpointOverlapsWorktree => {
                 formatter.write_str("mountpoint overlaps the backing worktree")
             }
             Self::RecordInvalid => formatter.write_str("retained mount-view record is invalid"),
             Self::NotAttached => formatter.write_str("no mount view is attached there"),
-            Self::SnapshotPinUnavailable => formatter.write_str("snapshot could not be pinned for the mount"),
+            Self::SnapshotPinUnavailable => {
+                formatter.write_str("snapshot could not be pinned for the mount")
+            }
             Self::AttachRollbackFailed => formatter.write_str(
                 "mount attachment failed and rollback could not clean up its pin or staging record",
             ),
@@ -103,10 +106,7 @@ fn hex(bytes: &[u8]) -> String {
     text
 }
 
-fn mount_registry_owner_id(
-    paths: &RuntimePaths,
-    create: bool,
-) -> Result<[u8; 16], MountError> {
+fn mount_registry_owner_id(paths: &RuntimePaths, create: bool) -> Result<[u8; 16], MountError> {
     let path = paths.root().join(MOUNT_REGISTRY_OWNER_ID_FILE);
     match fs::symlink_metadata(&path) {
         Ok(metadata) => {
@@ -761,9 +761,7 @@ fn validate_mount_record_location(
     Ok(())
 }
 
-fn reconcile_mount_registry_locked(
-    repository: &Repository,
-) -> Result<[u8; 16], MountError> {
+fn reconcile_mount_registry_locked(repository: &Repository) -> Result<[u8; 16], MountError> {
     let paths = repository.runtime_paths();
     let registry_owner_id = mount_registry_owner_id(paths, true)?;
     let mut pins = BTreeMap::new();
@@ -800,9 +798,10 @@ fn reconcile_mount_registry_locked(
     let mut transient_files = Vec::new();
     for entry in entries {
         let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-        if path.extension().is_some_and(|extension| {
-            extension == "staging" || extension == "tmp"
-        }) {
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "staging" || extension == "tmp")
+        {
             transient_files.push(path);
             continue;
         }
@@ -869,9 +868,10 @@ impl Repository {
         let mut statuses = Vec::new();
         for entry in entries {
             let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-            if path.extension().is_some_and(|extension| {
-                extension == "staging" || extension == "tmp"
-            }) {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "staging" || extension == "tmp")
+            {
                 continue;
             }
             let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;
@@ -947,9 +947,10 @@ impl Repository {
         let mut found = None;
         for entry in entries {
             let path = entry.map_err(|_| MountError::HostFilesystem)?.path();
-            if path.extension().is_some_and(|extension| {
-                extension == "staging" || extension == "tmp"
-            }) {
+            if path
+                .extension()
+                .is_some_and(|extension| extension == "staging" || extension == "tmp")
+            {
                 continue;
             }
             let bytes = fs::read(&path).map_err(|_| MountError::HostFilesystem)?;

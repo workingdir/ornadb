@@ -36,15 +36,41 @@ fn adding_a_new_table_row_keeps_older_rows_in_head_and_prior_history() {
     git(root.path(), &["add", "tables/Reading/2.orna"]);
     git(root.path(), &["commit", "-m", "append new table row"]);
 
-    let paths = git(root.path(), &["ls-tree", "-r", "--name-only", "HEAD", "--", "tables/Reading"]);
-    assert_eq!(paths.lines().collect::<Vec<_>>(), ["tables/Reading/1.orna", "tables/Reading/2.orna"]);
-    assert_eq!(git(root.path(), &["show", "HEAD:tables/Reading/1.orna"]), OLD_ROW.trim());
-    assert_eq!(git(root.path(), &["show", "HEAD:tables/Reading/2.orna"]), NEW_ROW.trim());
+    let paths = git(
+        root.path(),
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "--",
+            "tables/Reading",
+        ],
+    );
     assert_eq!(
-        git(root.path(), &["show", &format!("{old_snapshot}:tables/Reading/1.orna")]),
+        paths.lines().collect::<Vec<_>>(),
+        ["tables/Reading/1.orna", "tables/Reading/2.orna"]
+    );
+    assert_eq!(
+        git(root.path(), &["show", "HEAD:tables/Reading/1.orna"]),
         OLD_ROW.trim()
     );
-    assert!(git(root.path(), &["rev-list", "HEAD"]).lines().any(|commit| commit == old_snapshot));
+    assert_eq!(
+        git(root.path(), &["show", "HEAD:tables/Reading/2.orna"]),
+        NEW_ROW.trim()
+    );
+    assert_eq!(
+        git(
+            root.path(),
+            &["show", &format!("{old_snapshot}:tables/Reading/1.orna")]
+        ),
+        OLD_ROW.trim()
+    );
+    assert!(
+        git(root.path(), &["rev-list", "HEAD"])
+            .lines()
+            .any(|commit| commit == old_snapshot)
+    );
 }
 
 #[test]
@@ -68,7 +94,10 @@ fn explicit_row_deletion_is_visible_and_keeps_ancestor_history() {
 
     fs::remove_file(table.join("1.orna")).unwrap();
     git(root.path(), &["add", "-u", "tables/Reading/1.orna"]);
-    git(root.path(), &["commit", "-m", "explicitly delete old table row"]);
+    git(
+        root.path(),
+        &["commit", "-m", "explicitly delete old table row"],
+    );
 
     assert_eq!(
         git(root.path(), &["show", "-s", "--format=%s", "HEAD"]),
@@ -79,11 +108,24 @@ fn explicit_row_deletion_is_visible_and_keeps_ancestor_history() {
         "D\ttables/Reading/1.orna"
     );
     assert_eq!(
-        git(root.path(), &["ls-tree", "-r", "--name-only", "HEAD", "--", "tables/Reading"]),
+        git(
+            root.path(),
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "HEAD",
+                "--",
+                "tables/Reading"
+            ]
+        ),
         "tables/Reading/2.orna"
     );
     assert_eq!(
-        git(root.path(), &["show", &format!("{before_delete}:tables/Reading/1.orna")]),
+        git(
+            root.path(),
+            &["show", &format!("{before_delete}:tables/Reading/1.orna")]
+        ),
         OLD_ROW.trim()
     );
     let ancestry = git(root.path(), &["rev-list", "HEAD"]);
@@ -102,7 +144,10 @@ fn replacing_a_row_at_the_same_path_keeps_its_prior_snapshot_reachable() {
     fs::create_dir_all(row_path.parent().unwrap()).unwrap();
     fs::write(&row_path, REPLACED_ROW_BEFORE).unwrap();
     git(root.path(), &["add", "tables/Reading/1.orna"]);
-    git(root.path(), &["commit", "-m", "seed row before replacement"]);
+    git(
+        root.path(),
+        &["commit", "-m", "seed row before replacement"],
+    );
     let prior_snapshot = git(root.path(), &["rev-parse", "HEAD"]);
 
     fs::write(&row_path, REPLACED_ROW_AFTER).unwrap();
@@ -124,9 +169,11 @@ fn replacing_a_row_at_the_same_path_keeps_its_prior_snapshot_reachable() {
         git(root.path(), &["diff", "--name-status", "HEAD^", "HEAD"]),
         "M\ttables/Reading/1.orna"
     );
-    assert!(git(root.path(), &["rev-list", "HEAD"])
-        .lines()
-        .any(|commit| commit == prior_snapshot));
+    assert!(
+        git(root.path(), &["rev-list", "HEAD"])
+            .lines()
+            .any(|commit| commit == prior_snapshot)
+    );
 }
 
 #[test]
@@ -148,13 +195,26 @@ fn delete_and_reinsert_keeps_the_pre_tombstone_snapshot_reachable() {
     git(root.path(), &["commit", "-m", "explicitly delete row"]);
     let tombstone_snapshot = git(root.path(), &["rev-parse", "HEAD"]);
     assert_eq!(
-        git(root.path(), &["ls-tree", "-r", "--name-only", "HEAD", "--", "tables/Reading"]),
+        git(
+            root.path(),
+            &[
+                "ls-tree",
+                "-r",
+                "--name-only",
+                "HEAD",
+                "--",
+                "tables/Reading"
+            ]
+        ),
         ""
     );
 
     fs::write(&row_path, REPLACED_ROW_AFTER).unwrap();
     git(root.path(), &["add", "tables/Reading/1.orna"]);
-    git(root.path(), &["commit", "-m", "reinsert row after deletion"]);
+    git(
+        root.path(),
+        &["commit", "-m", "reinsert row after deletion"],
+    );
 
     assert_eq!(
         git(root.path(), &["show", "HEAD:tables/Reading/1.orna"]),
@@ -163,7 +223,10 @@ fn delete_and_reinsert_keeps_the_pre_tombstone_snapshot_reachable() {
     assert_eq!(
         git(
             root.path(),
-            &["show", &format!("{original_snapshot}:tables/Reading/1.orna")]
+            &[
+                "show",
+                &format!("{original_snapshot}:tables/Reading/1.orna")
+            ]
         ),
         REPLACED_ROW_BEFORE.trim()
     );

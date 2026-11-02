@@ -36,7 +36,9 @@ fn std_test_expect_and_should_contracts_return_their_documented_boolean_values()
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-test-typed-absence-frf2c.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-test-typed-absence-frf2c.orna"
+        )),
         Ok(None)
     );
 
@@ -82,18 +84,23 @@ fn core_assertions_remain_available_without_the_optional_test_module() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-use-test-without-snapshot-frf2c.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-use-test-without-snapshot-frf2c.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-core-assertion-without-test-frf2c.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-assertion-without-test-frf2c.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        session
-            .submit(include_str!("fixtures/stdlib-core-assertion-call-without-test-frf2c.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-assertion-call-without-test-frf2c.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
 }

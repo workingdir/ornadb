@@ -100,8 +100,16 @@ fn exact_fraction_and_exponent_fixtures_parse_without_float_suffixes() {
 fn interpolation_fixture_parses_and_has_interpolation_tokens() {
     assert!(parse_module(INTERPOLATION).diagnostics.is_empty());
     let tokens = lex(INTERPOLATION).expect("interpolation lexes");
-    assert!(tokens.iter().any(|token| token.kind == TokenKind::InterpolationStart));
-    assert!(tokens.iter().any(|token| token.kind == TokenKind::InterpolationEnd));
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::InterpolationStart)
+    );
+    assert!(
+        tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::InterpolationEnd)
+    );
 }
 
 // ORNA-RECORD-001, source/04-lexical.md:83.
@@ -120,5 +128,9 @@ fn anonymous_function_direct_braced_block_fixture_parses() {
 #[test]
 fn record_condition_requires_parentheses() {
     assert!(parse_module(RECORD_CONDITION_VALID).diagnostics.is_empty());
-    assert!(!parse_module(RECORD_CONDITION_INVALID).diagnostics.is_empty());
+    assert!(
+        !parse_module(RECORD_CONDITION_INVALID)
+            .diagnostics
+            .is_empty()
+    );
 }

@@ -285,9 +285,7 @@ impl Repository {
             .output()
             .map_err(|_| FetchError::Repository(RepositoryError::GitUnavailable))?;
         if !output.status.success() {
-            return Err(FetchError::Repository(
-                RepositoryError::GitOperationFailed,
-            ));
+            return Err(FetchError::Repository(RepositoryError::GitOperationFailed));
         }
         let output = String::from_utf8(output.stdout).map_err(|_| FetchError::InvalidContinuity)?;
         let mut continuity = Vec::new();
@@ -430,9 +428,10 @@ impl PushRequest {
             return Err(FetchError::InvalidRemote);
         }
         let mut seen = BTreeSet::new();
-        if internal.iter().any(|reference| {
-            !valid_fetch_full_ref(reference) || !seen.insert(reference.clone())
-        }) {
+        if internal
+            .iter()
+            .any(|reference| !valid_fetch_full_ref(reference) || !seen.insert(reference.clone()))
+        {
             return Err(FetchError::InvalidContinuity);
         }
         Ok(Self {
@@ -454,7 +453,6 @@ impl PushRequest {
         &self.internal
     }
 }
-
 
 /// Stable failures from the fetch boundary.  No Git command line, URL,
 /// credential, local path, or stderr is retained in this type.
@@ -773,12 +771,7 @@ impl Repository {
         let required = request
             .continuity
             .iter()
-            .map(|witness| {
-                (
-                    witness.reference().as_str(),
-                    witness.expected().as_str(),
-                )
-            })
+            .map(|witness| (witness.reference().as_str(), witness.expected().as_str()))
             .collect::<BTreeMap<_, _>>();
         for (source, object_id) in advertised
             .iter()
@@ -862,7 +855,12 @@ impl Repository {
         let updated = match &old {
             None => true,
             Some(old) if old == &object_id => false,
-            Some(_) if matches!(kind, RefKind::Branch | RefKind::Internal | RefKind::Allocator) => {
+            Some(_)
+                if matches!(
+                    kind,
+                    RefKind::Branch | RefKind::Internal | RefKind::Allocator
+                ) =>
+            {
                 true
             }
             Some(_) => return Err(FetchError::RefConflict),
@@ -937,7 +935,6 @@ impl Repository {
     pub fn pull(&self, request: &FetchRequest) -> Result<FetchReport, FetchError> {
         self.fetch(request)
     }
-
 }
 impl Repository {
     /// Pushes Orna continuity refs before the ordinary branch ref. Allocator
@@ -974,8 +971,7 @@ impl Repository {
         let allocator_updates = self.plan_allocator_push(request.remote(), &allocators)?;
         let mut ordered = Vec::with_capacity(others.len().saturating_add(1));
         for reference in others {
-            let object_id =
-                local_ref_oid(self, reference)?.ok_or(FetchError::InvalidContinuity)?;
+            let object_id = local_ref_oid(self, reference)?.ok_or(FetchError::InvalidContinuity)?;
             ordered.push(format!("{object_id}:{reference}"));
         }
         ordered.push(format!("{branch_head}:{branch_ref}"));
@@ -1331,8 +1327,7 @@ fn advertise_fetch(
         let (object_id, reference) = record
             .split_once('\t')
             .ok_or(FetchError::MalformedAdvertisement)?;
-        if (!expected.contains(reference)
-            && !is_continuity_ref(reference)
+        if (!expected.contains(reference) && !is_continuity_ref(reference)
             || !valid_fetch_full_ref(reference)
             || object_id.len() != object_id_length
             || !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()))
@@ -1345,8 +1340,6 @@ fn advertise_fetch(
     }
     Ok(advertised)
 }
-
-
 
 fn continuity_state(
     required: &[RequiredInternalRef],
@@ -1424,7 +1417,11 @@ fn fetch_objects(
     remote: &str,
     plans: &[RefPlan],
 ) -> Result<(), FetchError> {
-    download_objects(repository, remote, plans.iter().map(|plan| plan.source.as_str()))
+    download_objects(
+        repository,
+        remote,
+        plans.iter().map(|plan| plan.source.as_str()),
+    )
 }
 
 /// Downloads the objects the remote's `sources` name without changing any
@@ -1744,9 +1741,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
-            .and_then(|(target, gate)| {
-                (target.as_path() == worktree).then(|| Arc::clone(gate))
-            });
+            .and_then(|(target, gate)| (target.as_path() == worktree).then(|| Arc::clone(gate)));
         if let Some(gate) = gate {
             gate.0.wait();
             gate.1.wait();
@@ -1868,7 +1863,10 @@ mod tests {
         fs::create_dir_all(alternates.parent().unwrap()).unwrap();
         fs::write(
             &alternates,
-            format!("{}\n", root.path().join("remote.git").join("objects").display()),
+            format!(
+                "{}\n",
+                root.path().join("remote.git").join("objects").display()
+            ),
         )
         .unwrap();
 
@@ -2029,18 +2027,20 @@ mod tests {
             "the parent repository must not already hold the fetched commit"
         );
 
-        let mut child = KillOnDrop(Command::new(std::env::current_exe().expect("resolve test binary"))
-            .args([
-                "--exact",
-                FETCH_CRASH_TEST,
-                "--nocapture",
-                "--test-threads=1",
-            ])
-            .env(FETCH_CRASH_ROOT, root.as_os_str())
-            .env(FAULT_INJECTION_HOLD_ENV, "30")
-            .stdout(Stdio::null())
-            .spawn()
-            .expect("spawn the held fetch"));
+        let mut child = KillOnDrop(
+            Command::new(std::env::current_exe().expect("resolve test binary"))
+                .args([
+                    "--exact",
+                    FETCH_CRASH_TEST,
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FETCH_CRASH_ROOT, root.as_os_str())
+                .env(FAULT_INJECTION_HOLD_ENV, "30")
+                .stdout(Stdio::null())
+                .spawn()
+                .expect("spawn the held fetch"),
+        );
 
         let deadline = Instant::now() + Duration::from_secs(20);
         while !fetched_object_on_disk(&objects, &head) && Instant::now() < deadline {
@@ -2082,7 +2082,10 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let local = root.path().join("local");
         fs::create_dir(&local).unwrap();
-        git(root.path(), &["init", "-b", "main", local.to_str().unwrap()]);
+        git(
+            root.path(),
+            &["init", "-b", "main", local.to_str().unwrap()],
+        );
         git(&local, &["config", "user.name", "kierandrewett"]);
         git(&local, &["config", "user.email", "kieran@drewett.dev"]);
         git(&local, &["config", "commit.gpgsign", "false"]);
@@ -2265,7 +2268,10 @@ mod tests {
     /// Publishes `value` as the remote allocator watermark of `reference`.
     fn set_remote_watermark(local: &Path, reference: &str, value: &str) -> String {
         let object = watermark(local, value);
-        git(local, &["push", "origin", &format!("+{object}:{reference}")]);
+        git(
+            local,
+            &["push", "origin", &format!("+{object}:{reference}")],
+        );
         object
     }
 
@@ -2315,7 +2321,10 @@ mod tests {
             Err(FetchError::RefConflict)
         ));
         assert_eq!(git(&remote, &["rev-parse", "refs/heads/main"]), initial);
-        assert_eq!(git(&remote, &["rev-parse", ALLOCATOR_REF]), remote_allocator);
+        assert_eq!(
+            git(&remote, &["rev-parse", ALLOCATOR_REF]),
+            remote_allocator
+        );
         assert_eq!(git(&local, &["rev-parse", "HEAD"]), local_head);
         assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), local_allocator);
     }
@@ -2358,7 +2367,8 @@ mod tests {
         let created = set_remote_watermark(&local, OTHER_ALLOCATOR_REF, "4");
         let repository = Repository::discover(&local).unwrap();
         let fetch = || {
-            repository.fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
+            repository
+                .fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
         };
 
         let report = fetch().unwrap();
@@ -2372,7 +2382,10 @@ mod tests {
         assert_eq!(git(&local, &["rev-parse", ALLOCATOR_REF]), advanced);
 
         let head = git(&local, &["rev-parse", "HEAD"]);
-        git(&local, &["push", "origin", &format!("+{head}:{OTHER_ALLOCATOR_REF}")]);
+        git(
+            &local,
+            &["push", "origin", &format!("+{head}:{OTHER_ALLOCATOR_REF}")],
+        );
         assert!(matches!(fetch(), Err(FetchError::InvalidContinuity)));
         assert_eq!(git(&local, &["rev-parse", OTHER_ALLOCATOR_REF]), created);
     }
@@ -2425,10 +2438,8 @@ mod tests {
 
         let repository = Repository::discover(&local).unwrap();
         let request = || {
-            repository.fetch_with_local_continuity(
-                "origin",
-                [RequestedRef::branch("main").unwrap()],
-            )
+            repository
+                .fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
         };
 
         let missing = request().unwrap();
@@ -2446,7 +2457,11 @@ mod tests {
 
         git(
             &local,
-            &["push", "origin", &format!("{CHECKPOINT_REF}:{CHECKPOINT_REF}")],
+            &[
+                "push",
+                "origin",
+                &format!("{CHECKPOINT_REF}:{CHECKPOINT_REF}"),
+            ],
         );
         let continuous = request().unwrap();
         assert_eq!(continuous.continuity(), Some(RemoteContinuity::Continuous));
@@ -2494,14 +2509,21 @@ mod tests {
             .fetch_with_local_continuity("origin", [RequestedRef::branch("main").unwrap()])
             .unwrap();
 
-        assert_eq!(report.continuity(), None, "private refs make no continuity claim");
+        assert_eq!(
+            report.continuity(),
+            None,
+            "private refs make no continuity claim"
+        );
         assert!(report.internal().is_empty());
         assert_eq!(
             local_ref_oid(&repository, "refs/remotes/origin/main").unwrap(),
             Some(head)
         );
         assert_eq!(
-            git(&local, &["for-each-ref", "--format=%(refname)", "refs/orna/"]),
+            git(
+                &local,
+                &["for-each-ref", "--format=%(refname)", "refs/orna/"]
+            ),
             "refs/orna/migration-candidates/fedcba9876543210\n\
              refs/orna/pins/fedcba9876543210/pending/local-row",
             "only the local private refs remain; none of the remote's is fetched"

@@ -194,7 +194,10 @@ impl Views {
             libraries
                 .entry(profile.revision_digest())
                 .or_insert_with(|| {
-                    Arc::new(StandardLibrary::captured(profile, loaded.standard_sources()))
+                    Arc::new(StandardLibrary::captured(
+                        profile,
+                        loaded.standard_sources(),
+                    ))
                 }),
         )
     }
@@ -239,5 +242,7 @@ fn is_orna(uri: &Uri) -> bool {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

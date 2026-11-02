@@ -44,7 +44,12 @@ fn explicit_png_preview_returns_bounded_rgba_pixels() {
             rgba: vec![10, 20, 30, 255, 10, 20, 30, 255],
         }
     );
-    assert_eq!(blob.read(0, blob.length()).expect("raw bytes remain readable").len() as u64, blob.length());
+    assert_eq!(
+        blob.read(0, blob.length())
+            .expect("raw bytes remain readable")
+            .len() as u64,
+        blob.length()
+    );
 }
 
 /// ORNA-MEDIA-005: malformed and oversized inputs are rejected without panicking.
@@ -68,12 +73,7 @@ fn malformed_inputs_and_oversized_dimensions_are_rejected_without_panicking() {
     }
 
     // Decoder dimension checks run before any pixel-buffer allocation.
-    let too_wide = encoded_blob(
-        ImageFormat::Png,
-        "image/png",
-        MAX_PREVIEW_DIMENSION + 1,
-        1,
-    );
+    let too_wide = encoded_blob(ImageFormat::Png, "image/png", MAX_PREVIEW_DIMENSION + 1, 1);
     assert_eq!(
         decode_image_preview(&too_wide),
         Err(PreviewError::MalformedOrOverLimit)
@@ -104,15 +104,22 @@ fn unsupported_active_content_is_not_read_or_decoded() {
         Err(PreviewError::UnsupportedMediaType)
     );
     assert_eq!(blob.content_identity(), identity);
-    assert_eq!(blob.read(0, svg.len() as u64).expect("raw SVG is preservable"), svg);
+    assert_eq!(
+        blob.read(0, svg.len() as u64)
+            .expect("raw SVG is preservable"),
+        svg
+    );
 }
 
 /// ORNA-MEDIA-005: preview input over the limit is rejected with a typed error.
 #[test]
 fn preview_input_limit_rejects_before_attempting_full_blob_read() {
     let bytes = vec![0_u8; (MAX_PREVIEW_INPUT_BYTES + 1) as usize];
-    let blob = Blob::from_bytes_with_annotation(bytes, "image/png", None)
-        .expect("valid PNG declaration");
-    assert_eq!(decode_image_preview(&blob), Err(PreviewError::InputTooLarge));
+    let blob =
+        Blob::from_bytes_with_annotation(bytes, "image/png", None).expect("valid PNG declaration");
+    assert_eq!(
+        decode_image_preview(&blob),
+        Err(PreviewError::InputTooLarge)
+    );
     assert_eq!(blob.length(), MAX_PREVIEW_INPUT_BYTES + 1);
 }

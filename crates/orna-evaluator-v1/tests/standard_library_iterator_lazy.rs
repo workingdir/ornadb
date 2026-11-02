@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{
     AdmittedReplSession, Environment, Functions, Limits, NominalDefinition, NominalDefinitions,
     NominalField, PureFunction, evaluate_expression_with_functions,

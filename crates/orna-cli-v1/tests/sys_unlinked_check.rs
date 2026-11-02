@@ -47,16 +47,18 @@ fn check_rejects_unlinked_sys_callables_with_version_incompatible() {
         let output = check(&project);
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{source}: {stderr}");
-        assert!(stderr.contains("sys.version.incompatible"), "{source}: {stderr}");
+        assert!(
+            stderr.contains("sys.version.incompatible"),
+            "{source}: {stderr}"
+        );
         assert!(stderr.contains(member), "{source}: {stderr}");
     }
 }
 
 #[test]
 fn check_admits_the_linked_blob_annotation() {
-    let project = project(
-        "pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");\n",
-    );
+    let project =
+        project("pub fn label(value: Blob): Blob = sys.blob.annotate(value, \"text/plain\");\n");
     let output = check(&project);
     assert!(
         output.status.success(),

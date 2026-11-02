@@ -65,7 +65,10 @@ impl StandardLibrary {
     }
 
     /// The standard dependency a project captures, verified by `profile`.
-    pub(crate) fn captured(profile: &StandardDependencyProfile, sources: &[(String, String)]) -> Self {
+    pub(crate) fn captured(
+        profile: &StandardDependencyProfile,
+        sources: &[(String, String)],
+    ) -> Self {
         Self::new(hex(&profile.revision_digest()), sources.iter().cloned())
     }
 
@@ -129,8 +132,8 @@ impl StandardLibrary {
         let start = self
             .symbols
             .partition_point(|entry| entry.module.as_str() < module);
-        let end = start
-            + self.symbols[start..].partition_point(|entry| entry.module.as_str() == module);
+        let end =
+            start + self.symbols[start..].partition_point(|entry| entry.module.as_str() == module);
         &self.symbols[start..end]
     }
 
@@ -142,7 +145,11 @@ impl StandardLibrary {
     }
 
     /// The parameter names of the function `name` in `module`.
-    pub(crate) fn function_parameters(&self, module: &str, name: &str) -> Option<Vec<Option<String>>> {
+    pub(crate) fn function_parameters(
+        &self,
+        module: &str,
+        name: &str,
+    ) -> Option<Vec<Option<String>>> {
         let standard = self.symbol(module, name)?;
         (standard.symbol.kind == EditorSymbolKind::Function)
             .then(|| standard.symbol.parameter_names.clone())
@@ -232,9 +239,15 @@ impl StandardLibrary {
     /// Where `standard` is declared: its name in a read-only copy of its
     /// source below the user cache directory.
     pub(crate) fn location(&self, standard: &StandardSymbol) -> Option<Location> {
-        let path = cache_root()?.join(&self.digest).join(relative_path(&standard.path)?);
+        let path = cache_root()?
+            .join(&self.digest)
+            .join(relative_path(&standard.path)?);
         write_read_only(&path, &standard.source)?;
-        let uri = url::Url::from_file_path(&path).ok()?.as_str().parse::<Uri>().ok()?;
+        let uri = url::Url::from_file_path(&path)
+            .ok()?
+            .as_str()
+            .parse::<Uri>()
+            .ok()?;
         Some(Location {
             uri,
             range: PositionMapper::new(&standard.source).range(&standard.symbol.selection),
@@ -318,7 +331,10 @@ mod tests {
                 "std/collection.orna".to_owned(),
                 "/// The answer.\npub fn answer(): Int = 42;\nfn hidden(): Int = 1;\n".to_owned(),
             ),
-            ("std/io/main.orna".to_owned(), "pub fn read(): Int = 1;\n".to_owned()),
+            (
+                "std/io/main.orna".to_owned(),
+                "pub fn read(): Int = 1;\n".to_owned(),
+            ),
         ];
         let profile = StandardDependencyProfile::from_sources("captured", sources.clone()).unwrap();
         let library = StandardLibrary::captured(&profile, &sources);
@@ -347,7 +363,10 @@ mod tests {
             .join(&library.digest)
             .join("std/collection.orna");
         write_read_only(&path, &standard.source).unwrap();
-        assert_eq!(fs::read_to_string(&path).unwrap(), "pub fn answer(): Int = 42;\n");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "pub fn answer(): Int = 42;\n"
+        );
         assert!(fs::metadata(&path).unwrap().permissions().readonly());
         // A second write keeps the existing copy.
         write_read_only(&path, &standard.source).unwrap();

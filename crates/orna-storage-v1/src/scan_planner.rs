@@ -53,7 +53,7 @@ impl CompactKeyRange {
             match lower_key.cmp(upper_key) {
                 Ordering::Greater => return Err(CompactScanPlanError::ReversedRange),
                 Ordering::Equal if !lower_inclusive || !upper_inclusive => {
-                    return Err(CompactScanPlanError::EmptyRange)
+                    return Err(CompactScanPlanError::EmptyRange);
                 }
                 _ => {}
             }
@@ -62,11 +62,15 @@ impl CompactKeyRange {
     }
 
     pub fn lower(&self) -> Option<(&CompactKeyIdentity, bool)> {
-        self.lower.as_ref().map(|(key, inclusive)| (key, *inclusive))
+        self.lower
+            .as_ref()
+            .map(|(key, inclusive)| (key, *inclusive))
     }
 
     pub fn upper(&self) -> Option<(&CompactKeyIdentity, bool)> {
-        self.upper.as_ref().map(|(key, inclusive)| (key, *inclusive))
+        self.upper
+            .as_ref()
+            .map(|(key, inclusive)| (key, *inclusive))
     }
 }
 
@@ -163,7 +167,9 @@ pub fn plan_compact_scan(
     if manifest.schema() != profile.schema_fingerprint() {
         return Err(CompactScanPlanError::WrongSchema);
     }
-    let mut projected = required_field_ids.into_iter().collect::<std::collections::BTreeSet<_>>();
+    let mut projected = required_field_ids
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     projected.extend(profile.key_field_ids());
 
     let mut decoded_bounds = Vec::with_capacity(manifest.entries().len());
@@ -192,14 +198,22 @@ pub fn plan_compact_scan(
             (first_min.clone(), first_max.clone()),
             |(min, max), (_, entry_min, entry_max)| {
                 (
-                    if entry_min < &min { (*entry_min).clone() } else { min },
-                    if entry_max > &max { (*entry_max).clone() } else { max },
+                    if entry_min < &min {
+                        (*entry_min).clone()
+                    } else {
+                        min
+                    },
+                    if entry_max > &max {
+                        (*entry_max).clone()
+                    } else {
+                        max
+                    },
                 )
             },
         );
         let shard_may_match = key_bounds_overlap(&shard_min, &shard_max, &range);
-        let shard_number = u64::try_from(shard_number)
-            .map_err(|_| CompactScanPlanError::InvalidManifestBounds)?;
+        let shard_number =
+            u64::try_from(shard_number).map_err(|_| CompactScanPlanError::InvalidManifestBounds)?;
         if shard_may_match {
             selected_shards.push(shard_number);
         } else {
@@ -235,20 +249,23 @@ fn key_bounds_overlap(
     max: &CompactKeyIdentity,
     range: &CompactKeyRange,
 ) -> bool {
-    let before_lower = range.lower.as_ref().is_some_and(|(lower, inclusive)| {
-        match max.cmp(lower) {
-            Ordering::Less => true,
-            Ordering::Equal => !inclusive,
-            Ordering::Greater => false,
-        }
-    });
-    let after_upper = range.upper.as_ref().is_some_and(|(upper, inclusive)| {
-        match min.cmp(upper) {
+    let before_lower =
+        range
+            .lower
+            .as_ref()
+            .is_some_and(|(lower, inclusive)| match max.cmp(lower) {
+                Ordering::Less => true,
+                Ordering::Equal => !inclusive,
+                Ordering::Greater => false,
+            });
+    let after_upper = range
+        .upper
+        .as_ref()
+        .is_some_and(|(upper, inclusive)| match min.cmp(upper) {
             Ordering::Greater => true,
             Ordering::Equal => !inclusive,
             Ordering::Less => false,
-        }
-    });
+        });
     !before_lower && !after_upper
 }
 
@@ -283,8 +300,7 @@ mod tests {
     use super::*;
     use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 
-    const KEY_FIELD: Uuid =
-        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
 
     fn profile() -> CompactOvbProfile {
         let table = Uuid::from_u128(1);

@@ -319,7 +319,11 @@ fn run_mv(
     let source_already_renamed = original_source.is_none();
 
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_providers(&modules, &catalogue, orna_semantic_v1::SystemProviders::DeclaredSurface);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        &modules,
+        &catalogue,
+        orna_semantic_v1::SystemProviders::DeclaredSurface,
+    );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -403,20 +407,20 @@ fn run_mv(
             modules[module_index].source.as_bytes(),
         )
         .is_err()
-        {
-            if !restore_source_after_failed_write(
-                &source_path,
-                original_source.as_bytes(),
-                modules[module_index].source.as_bytes(),
-            ) {
-                return Err(mv_partial_update_error());
-            }
-            return Err(Diagnostic::target(
-                "E2100",
-                "table source could not be updated",
-                "check source-file permissions and retry mv",
-            ));
+    {
+        if !restore_source_after_failed_write(
+            &source_path,
+            original_source.as_bytes(),
+            modules[module_index].source.as_bytes(),
+        ) {
+            return Err(mv_partial_update_error());
         }
+        return Err(Diagnostic::target(
+            "E2100",
+            "table source could not be updated",
+            "check source-file permissions and retry mv",
+        ));
+    }
 
     let staged_sources = staged_rename
         .as_deref()
@@ -523,7 +527,9 @@ fn run_store_mv(
     let mut modules = project.modules().to_vec();
     // After an interrupted run the worktree already declares the new name:
     // the source is left as it is and only the index is staged.
-    let (module_index, original_source) = if let Some((module_index, span)) = declaration_name_span(&modules, kind, old) {
+    let (module_index, original_source) = if let Some((module_index, span)) =
+        declaration_name_span(&modules, kind, old)
+    {
         let original_source = std::mem::take(&mut modules[module_index].source);
         modules[module_index].source = renamed_name_source(&original_source, &span, new_leaf);
         (module_index, Some(original_source))
@@ -583,20 +589,20 @@ fn run_store_mv(
             modules[module_index].source.as_bytes(),
         )
         .is_err()
-        {
-            if !restore_source_after_failed_write(
-                &source_path,
-                original_source.as_bytes(),
-                modules[module_index].source.as_bytes(),
-            ) {
-                return Err(mv_partial_update_error());
-            }
-            return Err(Diagnostic::target(
-                "E2100",
-                "the source could not be updated",
-                "check source-file permissions and retry `orna mv`",
-            ));
+    {
+        if !restore_source_after_failed_write(
+            &source_path,
+            original_source.as_bytes(),
+            modules[module_index].source.as_bytes(),
+        ) {
+            return Err(mv_partial_update_error());
         }
+        return Err(Diagnostic::target(
+            "E2100",
+            "the source could not be updated",
+            "check source-file permissions and retry `orna mv`",
+        ));
+    }
     let staged_sources = staged_edit
         .as_deref()
         .map(|updated| (logical_path.as_str(), updated.as_bytes()))
@@ -620,9 +626,10 @@ fn run_store_mv(
                     &source_path,
                     original_source.as_bytes(),
                     modules[module_index].source.as_bytes(),
-                ) {
-                    return Err(mv_partial_update_error());
-                }
+                )
+            {
+                return Err(mv_partial_update_error());
+            }
             Err(match failed {
                 Err(error) => identity_error(error),
                 Ok(_) => identity_error(orna_project_v1::ObjectIdentityError::MissingIdentity),
@@ -697,21 +704,32 @@ fn declaration_name_span(
             .map(|token| token.span.clone())
     };
     let leaf = segments.last()?;
-    let span = parsed.value.items.iter().find_map(|item| match (&item.declaration, kind) {
-        (Declaration::Table { name, .. }, ObjectKind::Table) if name == declaration => {
-            name_in(&item.span, Some(Keyword::Table), name)
-        }
-        (Declaration::Type { name, .. }, ObjectKind::Type) if name == declaration => {
-            name_in(&item.span, Some(Keyword::Type), name)
-        }
-        (Declaration::Enum { name, .. }, ObjectKind::Type) if name == declaration => {
-            name_in(&item.span, Some(Keyword::Enum), name)
-        }
-        (Declaration::Unit { name, .. }, ObjectKind::Unit) if name == declaration => {
-            name_in(&item.span, Some(Keyword::Unit), name)
-        }
-        (Declaration::Table { name, keys, members }, ObjectKind::Field) if name == declaration => {
-            keys.iter()
+    let span = parsed
+        .value
+        .items
+        .iter()
+        .find_map(|item| match (&item.declaration, kind) {
+            (Declaration::Table { name, .. }, ObjectKind::Table) if name == declaration => {
+                name_in(&item.span, Some(Keyword::Table), name)
+            }
+            (Declaration::Type { name, .. }, ObjectKind::Type) if name == declaration => {
+                name_in(&item.span, Some(Keyword::Type), name)
+            }
+            (Declaration::Enum { name, .. }, ObjectKind::Type) if name == declaration => {
+                name_in(&item.span, Some(Keyword::Enum), name)
+            }
+            (Declaration::Unit { name, .. }, ObjectKind::Unit) if name == declaration => {
+                name_in(&item.span, Some(Keyword::Unit), name)
+            }
+            (
+                Declaration::Table {
+                    name,
+                    keys,
+                    members,
+                },
+                ObjectKind::Field,
+            ) if name == declaration => keys
+                .iter()
                 .find_map(|key| match &key.pattern {
                     orna_syntax_v1::Pattern::Name(key_name, span) if key_name == leaf => {
                         Some(span.clone())
@@ -725,36 +743,37 @@ fn declaration_name_span(
                         }
                         _ => None,
                     })
-                })
-        }
-        (Declaration::Enum { name, variants, .. }, ObjectKind::Variant) if name == declaration => {
-            variants
-                .iter()
-                .find(|variant| variant.name == *leaf)
-                .and_then(|variant| name_in(&variant.span, None, &variant.name))
-        }
-        (Declaration::Enum { name, variants, .. }, ObjectKind::VariantField)
-            if name == declaration =>
-        {
-            let variant = variants
-                .iter()
-                .find(|variant| variant.name == segments[declaration_index + 1])?;
-            let field = variant.fields.iter().find(|field| field.name == *leaf)?;
-            name_in(&field.span, None, &field.name)
-        }
-        (
-            Declaration::Type {
-                name,
-                representation: TypeRepresentation::Nominal { members },
-                ..
-            },
-            ObjectKind::TypeField,
-        ) if name == declaration => members.iter().find_map(|member| match member {
-            TypeMember::Field { name, span, .. } if name == leaf => name_in(span, None, name),
+                }),
+            (Declaration::Enum { name, variants, .. }, ObjectKind::Variant)
+                if name == declaration =>
+            {
+                variants
+                    .iter()
+                    .find(|variant| variant.name == *leaf)
+                    .and_then(|variant| name_in(&variant.span, None, &variant.name))
+            }
+            (Declaration::Enum { name, variants, .. }, ObjectKind::VariantField)
+                if name == declaration =>
+            {
+                let variant = variants
+                    .iter()
+                    .find(|variant| variant.name == segments[declaration_index + 1])?;
+                let field = variant.fields.iter().find(|field| field.name == *leaf)?;
+                name_in(&field.span, None, &field.name)
+            }
+            (
+                Declaration::Type {
+                    name,
+                    representation: TypeRepresentation::Nominal { members },
+                    ..
+                },
+                ObjectKind::TypeField,
+            ) if name == declaration => members.iter().find_map(|member| match member {
+                TypeMember::Field { name, span, .. } if name == leaf => name_in(span, None, name),
+                _ => None,
+            }),
             _ => None,
-        }),
-        _ => None,
-    })?;
+        })?;
     Some((module_index, span))
 }
 
@@ -817,9 +836,7 @@ fn mv_staged_source_error(title: &'static str) -> Diagnostic {
 
 fn split_qualified_name(name: &str) -> Option<(&str, &str)> {
     let (namespace, leaf) = name.rsplit_once('.').unwrap_or(("", name));
-    if leaf.is_empty()
-        || name.split('.').any(str::is_empty)
-        || !name.split('.').all(is_identifier)
+    if leaf.is_empty() || name.split('.').any(str::is_empty) || !name.split('.').all(is_identifier)
     {
         return None;
     }
@@ -894,7 +911,10 @@ fn table_declaration_name_span(
     Some(name.span.clone())
 }
 
-pub(crate) fn checked_project_source_path(root: &Path, logical_path: &str) -> Result<PathBuf, Diagnostic> {
+pub(crate) fn checked_project_source_path(
+    root: &Path,
+    logical_path: &str,
+) -> Result<PathBuf, Diagnostic> {
     let relative = Path::new(logical_path);
     let component_count = relative.components().count();
     if relative.is_absolute()
@@ -923,7 +943,11 @@ pub(crate) fn checked_project_source_path(root: &Path, logical_path: &str) -> Re
     Ok(path)
 }
 
-pub(crate) fn write_source_atomically(path: &Path, expected: &[u8], replacement: &[u8]) -> io::Result<()> {
+pub(crate) fn write_source_atomically(
+    path: &Path,
+    expected: &[u8],
+    replacement: &[u8],
+) -> io::Result<()> {
     write_source_atomically_before_replace(path, expected, replacement, || Ok(()))
 }
 
@@ -981,7 +1005,11 @@ fn write_source_atomically_before_replace(
     result
 }
 
-pub(crate) fn restore_source_after_failed_write(path: &Path, original: &[u8], updated: &[u8]) -> bool {
+pub(crate) fn restore_source_after_failed_write(
+    path: &Path,
+    original: &[u8],
+    updated: &[u8],
+) -> bool {
     let Ok(current) = fs::symlink_metadata(path) else {
         return false;
     };
@@ -1211,8 +1239,8 @@ fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnost
             format!("{other:?}"),
         ),
     })?;
-    let destination_repository =
-        orna_repository_v1::Repository::discover(copy.destination()).map_err(|error| {
+    let destination_repository = orna_repository_v1::Repository::discover(copy.destination())
+        .map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2100",
                 "migration destination could not be opened",
@@ -1362,7 +1390,11 @@ mod short_runtime_summary_tests {
 /// `git -C PATH NAME ...` so the Git operation targets the database's repository,
 /// not the current directory. Managed-local runs in the current worktree. Socket
 /// and remote endpoints have no local repository to run Git against.
-fn run_git_passthrough(endpoint: &Endpoint, name: &str, arguments: &[String]) -> Result<(), Diagnostic> {
+fn run_git_passthrough(
+    endpoint: &Endpoint,
+    name: &str,
+    arguments: &[String],
+) -> Result<(), Diagnostic> {
     let mut command = std::process::Command::new("git");
     match endpoint {
         Endpoint::ManagedLocal => {}
@@ -1434,7 +1466,12 @@ mod mv_tests {
         assert!(write_source_atomically(&link, b"target", b"replacement").is_err());
 
         assert_eq!(fs::read(&target).unwrap(), b"target");
-        assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     /// W62-08: the replacement source must not inherit setuid/setgid/sticky.
@@ -1463,13 +1500,11 @@ mod mv_tests {
         let source = directory.path().join("main.orna");
         fs::write(&source, b"before").unwrap();
 
-        let error = write_source_atomically_before_replace(
-            &source,
-            b"before",
-            b"replacement",
-            || fs::write(&source, b"external change"),
-        )
-        .unwrap_err();
+        let error =
+            write_source_atomically_before_replace(&source, b"before", b"replacement", || {
+                fs::write(&source, b"external change")
+            })
+            .unwrap_err();
 
         assert_eq!(error.kind(), io::ErrorKind::Other);
         assert_eq!(fs::read(&source).unwrap(), b"external change");
@@ -1488,12 +1523,24 @@ mod mv_tests {
         let source = directory.path().join("main.orna");
         fs::write(&source, b"original").unwrap();
 
-        assert!(restore_source_after_failed_write(&source, b"original", b"updated"));
+        assert!(restore_source_after_failed_write(
+            &source,
+            b"original",
+            b"updated"
+        ));
         fs::write(&source, b"updated").unwrap();
-        assert!(restore_source_after_failed_write(&source, b"original", b"updated"));
+        assert!(restore_source_after_failed_write(
+            &source,
+            b"original",
+            b"updated"
+        ));
         assert_eq!(fs::read(&source).unwrap(), b"original");
         fs::write(&source, b"concurrent").unwrap();
-        assert!(!restore_source_after_failed_write(&source, b"original", b"updated"));
+        assert!(!restore_source_after_failed_write(
+            &source,
+            b"original",
+            b"updated"
+        ));
         assert_eq!(fs::read(&source).unwrap(), b"concurrent");
     }
 }

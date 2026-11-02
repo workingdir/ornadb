@@ -23,12 +23,12 @@ use parquet::{
 use sha2::{Digest, Sha256};
 use uuid::{Uuid, Version};
 
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+use crate::PublicationJournalEntry;
 use crate::{
     GitCommitRef, IndexGeneration, ManagedFileChange, ManagedPath, PrivateCommit,
     PublicationJournal, Repository, RepositoryError,
 };
-#[cfg(any(test, feature = "legacy-fixture-writer"))]
-use crate::PublicationJournalEntry;
 
 /// Maximum number of entries in one canonical compact-manifest shard.
 pub const COMPACT_MANIFEST_SHARD_LIMIT: usize = 256;
@@ -803,7 +803,10 @@ fn schema_descriptor_table(descriptor: &SchemaDescriptor) -> Result<Uuid, Reposi
 /// metadata that names the right leaf but a different logical field.
 /// Verified physical leaves: the fallback kind and physical info for each
 /// column index named by the manifest.
-type VerifiedPhysicalColumns = (BTreeMap<usize, OvbFallbackKind>, BTreeMap<usize, PhysicalColumnInfo>);
+type VerifiedPhysicalColumns = (
+    BTreeMap<usize, OvbFallbackKind>,
+    BTreeMap<usize, PhysicalColumnInfo>,
+);
 
 fn verify_physical_columns(
     columns: &[u8],
@@ -2167,7 +2170,10 @@ fn required_physical_metadata(
         ("orna.profile".to_owned(), COMPACT_PROFILE.to_owned()),
         ("orna.table".to_owned(), table.to_string()),
         ("orna.schema.sha256".to_owned(), hex(&schema)),
-        ("orna.columns.ovb".to_owned(), orna_value_v1::base64_encode(columns)),
+        (
+            "orna.columns.ovb".to_owned(),
+            orna_value_v1::base64_encode(columns),
+        ),
         ("orna.encoder".to_owned(), encoder_version.to_owned()),
     ])
 }
@@ -4527,10 +4533,10 @@ impl fmt::Display for CompactSegmentRole {
     }
 }
 
-#[cfg(any(test, feature = "legacy-fixture-writer"))]
-mod legacy_fixture_writer;
 #[cfg(feature = "legacy-fixture-writer")]
 mod legacy_fixture_builder;
+#[cfg(any(test, feature = "legacy-fixture-writer"))]
+mod legacy_fixture_writer;
 #[cfg(feature = "legacy-fixture-writer")]
 pub use legacy_fixture_builder::write_legacy_format1_fixture;
 
@@ -4847,7 +4853,10 @@ mod tests {
                 "orna.schema.ovb".into(),
                 Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".into(), Some(orna_value_v1::base64_encode(columns))),
+            KeyValue::new(
+                "orna.columns.ovb".into(),
+                Some(orna_value_v1::base64_encode(columns)),
+            ),
             KeyValue::new("orna.encoder".into(), Some("test-encoder-v1".into())),
         ];
         let properties = Arc::new(
@@ -4911,7 +4920,11 @@ mod tests {
         test_git(temp.path(), &["config", "commit.gpgsign", "false"]);
         fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
         fs::create_dir_all(temp.path().join(".orna")).unwrap();
-        fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+        fs::write(
+            temp.path().join(".orna/format.orna"),
+            "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+        )
+        .unwrap();
         test_git(temp.path(), &["add", "."]);
         test_git(temp.path(), &["commit", "-m", "initial"]);
         let repository = Repository::discover(temp.path()).unwrap();
@@ -5018,7 +5031,10 @@ mod tests {
                 "orna.schema.ovb".to_owned(),
                 Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
             ),
-            KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
+            KeyValue::new(
+                "orna.columns.ovb".to_owned(),
+                Some(orna_value_v1::base64_encode(columns)),
+            ),
             KeyValue::new(
                 "orna.encoder".to_owned(),
                 Some("test-encoder-v1".to_owned()),
@@ -6245,14 +6261,15 @@ mod tests {
             CompactManifestWitness::decode(&bytes, &mut 0, 40).unwrap(),
             witness
         );
-        let data_path = witness.entries[0].path.as_path().to_str().unwrap().to_owned();
+        let data_path = witness.entries[0]
+            .path
+            .as_path()
+            .to_str()
+            .unwrap()
+            .to_owned();
         for hostile in ["../escape", "/etc/passwd", "a\\b", "a\0b", "a//b"] {
-            let spliced = crate::tests::splice_length_prefixed(
-                &bytes,
-                &data_path,
-                hostile,
-                u32::to_be_bytes,
-            );
+            let spliced =
+                crate::tests::splice_length_prefixed(&bytes, &data_path, hostile, u32::to_be_bytes);
             assert!(
                 CompactManifestWitness::decode(&spliced, &mut 0, 40).is_err(),
                 "compact entry path {hostile:?} must not decode"

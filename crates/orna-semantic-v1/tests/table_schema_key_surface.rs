@@ -16,7 +16,10 @@ fn admit(
     source: &str,
 ) -> orna_semantic_v1::RowUnitAdmission {
     let table_path = format!("contacts/{table}");
-    let key_path = key_path.iter().map(|part| (*part).to_owned()).collect::<Vec<_>>();
+    let key_path = key_path
+        .iter()
+        .map(|part| (*part).to_owned())
+        .collect::<Vec<_>>();
     let logical_path = format!("{table_path}/{}", key_path.join("/"));
     admit_row_unit(
         analysis,
@@ -59,8 +62,7 @@ fn table_schema_exposes_automatic_id_and_checks_key_defaults_and_computed_self()
             && diagnostic.message() == "type has no canonical primary-key encoding"
     }));
     assert!(invalid.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == DIAG_TYPE
-            && diagnostic.message() == "static types are incompatible"
+        diagnostic.code() == DIAG_TYPE && diagnostic.message() == "static types are incompatible"
     }));
     assert!(invalid.diagnostics.iter().any(|diagnostic| {
         diagnostic.code() == orna_semantic_v1::DIAG_DUPLICATE
@@ -170,10 +172,7 @@ fn path_keys_require_canonical_typed_date_instant_decimal_and_uuid_text() {
         ("Dated", "2024-02-29.orna"),
         ("Timed", "2024-02-29T00~3a00~3a00Z.orna"),
         ("DecimalKey", "15e-1.decimal.orna"),
-        (
-            "UuidKey",
-            "123e4567-e89b-12d3-a456-426614174000.orna",
-        ),
+        ("UuidKey", "123e4567-e89b-12d3-a456-426614174000.orna"),
     ] {
         let row = admit(
             &analysis,
@@ -186,15 +185,9 @@ fn path_keys_require_canonical_typed_date_instant_decimal_and_uuid_text() {
 
     for (table, key) in [
         ("Dated", "2023-02-29.orna"),
-        (
-            "Timed",
-            "2024-02-29T01~3a00~3a00~2b01~3a00.orna",
-        ),
+        ("Timed", "2024-02-29T01~3a00~3a00~2b01~3a00.orna"),
         ("DecimalKey", "150e-2.decimal.orna"),
-        (
-            "UuidKey",
-            "123E4567-E89B-12D3-A456-426614174000.orna",
-        ),
+        ("UuidKey", "123E4567-E89B-12D3-A456-426614174000.orna"),
     ] {
         let row = admit(
             &analysis,
@@ -212,5 +205,4 @@ fn path_keys_require_canonical_typed_date_instant_decimal_and_uuid_text() {
         include_str!("fixtures/table-row-text.orna"),
     );
     assert!(!invalid_integer.is_ok());
-
 }

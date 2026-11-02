@@ -385,8 +385,16 @@ fn cli_migration_copy_retry_recovers_the_same_candidate() {
 fn cli_migration_copy_rejects_mixed_worktree_metadata() {
     let oversized = vec![b'x'; 64 * 1024 + 1];
     for (label, metadata_file, marker) in [
-        ("mixed", ".orna/format.orna", &b"{repository_format: 3, storage_profile: \"compact-storage-v1\"}\n"[..]),
-        ("unknown", ".orna/format.orna", &b"{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n"[..]),
+        (
+            "mixed",
+            ".orna/format.orna",
+            &b"{repository_format: 3, storage_profile: \"compact-storage-v1\"}\n"[..],
+        ),
+        (
+            "unknown",
+            ".orna/format.orna",
+            &b"{repository_format: 99, storage_profile: \"compact-storage-v1\"}\n"[..],
+        ),
         (
             "changed database identity",
             ".orna/database.orna",
@@ -460,9 +468,7 @@ fn cli_migration_copy_names_unparseable_committed_format_record() {
     assert_eq!(output.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("E2100"), "{stderr}");
     assert!(
-        stderr.contains(
-            "migration source could not be admitted: repository metadata is invalid"
-        ),
+        stderr.contains("migration source could not be admitted: repository metadata is invalid"),
         "{stderr}"
     );
     assert!(stderr.contains("ORNA-REPO-CONTEXT-002"), "{stderr}");
@@ -705,9 +711,16 @@ fn cli_migration_copy_abort_finishes_a_discard_interrupted_after_the_quarantine_
     // The rename is the commit point: the source may move on afterwards.
     let quarantine = quarantine_of(&destination);
     fs::rename(&destination, &quarantine).unwrap();
-    fs::write(source.join("notes.txt"), b"committed after the commit point\n").unwrap();
+    fs::write(
+        source.join("notes.txt"),
+        b"committed after the commit point\n",
+    )
+    .unwrap();
     git_output(&source, &["add", "notes.txt"]);
-    git_output(&source, &["commit", "-m", "source moved after the commit point"]);
+    git_output(
+        &source,
+        &["commit", "-m", "source moved after the commit point"],
+    );
 
     let finished = run_abort(&source, &destination);
     assert!(
@@ -805,7 +818,12 @@ fn cli_migration_copy_abort_refuses_a_symlink_to_the_prepared_candidate() {
 
     let output = run_abort(&source, &link);
     assert_refused(&output, "migration copy could not be discarded");
-    assert!(fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(
+        fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
     assert!(destination.is_dir());
     assert!(journal_is_present(&destination));
 }
@@ -908,7 +926,11 @@ fn cli_migration_copy_unstaged_source_edit_changes_the_runtime_intent() {
         "migration copy: {}",
         String::from_utf8_lossy(&prepared.stderr)
     );
-    fs::write(source.join("main.orna"), b"unstaged edit after the first prepare\n").unwrap();
+    fs::write(
+        source.join("main.orna"),
+        b"unstaged edit after the first prepare\n",
+    )
+    .unwrap();
     let second = parent.path().join("second");
     let prepared = run_copy(&source, &second, "0", &git_trace);
     assert!(
@@ -925,7 +947,10 @@ fn cli_migration_copy_unstaged_source_edit_changes_the_runtime_intent() {
             .runtime_intent_id()
             .expect("prepared migration runtime intent")
     };
-    assert_ne!(runtime_intent(first.as_path()), runtime_intent(second.as_path()));
+    assert_ne!(
+        runtime_intent(first.as_path()),
+        runtime_intent(second.as_path())
+    );
 }
 
 #[test]
@@ -946,7 +971,10 @@ fn cli_migration_copy_refuses_while_a_discard_quarantine_is_pending() {
     fs::rename(&destination, &quarantine).unwrap();
 
     let refused = run_copy(&source, &destination, "0", &git_trace);
-    assert_refused(&refused, "migration copy could not be prepared or recovered");
+    assert_refused(
+        &refused,
+        "migration copy could not be prepared or recovered",
+    );
     assert!(!destination.exists());
     assert!(journal_is_present(&quarantine));
 

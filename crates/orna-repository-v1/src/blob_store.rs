@@ -15,9 +15,7 @@ use std::{cell::Cell, fmt, io::Read};
 
 use sha2::{Digest, Sha256};
 
-use crate::native_graph::{
-    GraphError, NativeObjectId, MAX_GRAPH_HEIGHT, MAX_REFS,
-};
+use crate::native_graph::{GraphError, MAX_GRAPH_HEIGHT, MAX_REFS, NativeObjectId};
 
 pub const MAX_BLOB_LENGTH: u64 = i64::MAX as u64;
 pub const GEAR_MINIMUM: usize = 65_536;

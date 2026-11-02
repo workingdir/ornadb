@@ -3,8 +3,8 @@ use std::future::Future;
 
 use super::{
     ActivationEffectReport, CatalogueAdmission, FaultInjector, RunningTableRequestContinuation,
-    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity, TableMutation,
-    TerminalOutcome, WriterLease, validate_mutation_identities,
+    RuntimeError, RuntimeState, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
+    TableMutation, TerminalOutcome, WriterLease, validate_mutation_identities,
 };
 
 tokio::task_local! {

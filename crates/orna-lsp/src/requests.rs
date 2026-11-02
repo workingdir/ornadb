@@ -111,8 +111,8 @@ fn work<C>(
             return;
         };
         let id = job.request.id.clone();
-        let result = (!job.cancelled.load(Ordering::Acquire))
-            .then(|| handler(&job.context, job.request));
+        let result =
+            (!job.cancelled.load(Ordering::Acquire)).then(|| handler(&job.context, job.request));
         lock(in_flight).remove(&id);
         let response_result = match result {
             Some(result) if !job.cancelled.load(Ordering::Acquire) => result,
@@ -130,7 +130,9 @@ fn work<C>(
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

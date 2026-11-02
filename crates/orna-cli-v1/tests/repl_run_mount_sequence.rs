@@ -66,13 +66,22 @@ fn transcript(output: &Output) -> String {
 }
 
 fn assert_success(step: &str, output: &Output) {
-    assert_eq!(output.status.code(), Some(0), "{step} failed: {}", transcript(output));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{step} failed: {}",
+        transcript(output)
+    );
     let text = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(!text.contains("ORNA-"), "{step} reported an error code: {}", transcript(output));
+    assert!(
+        !text.contains("ORNA-"),
+        "{step} reported an error code: {}",
+        transcript(output)
+    );
 }
 
 /// The durable `music` rows, each as its encoded field bytes rendered lossily.
@@ -114,8 +123,11 @@ async fn run_then_repl_effect_and_capture_exit_zero_and_first_run_commit_persist
     );
     assert_success("REPL effect", &repl_effect);
 
-    std::fs::write(root.join("recording.mp3"), b"synthetic audio for the sequence")
-        .expect("write media");
+    std::fs::write(
+        root.join("recording.mp3"),
+        b"synthetic audio for the sequence",
+    )
+    .expect("write media");
     let capture = format!(
         "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);",
         root = root.to_string_lossy().as_ref(),
@@ -124,7 +136,9 @@ async fn run_then_repl_effect_and_capture_exit_zero_and_first_run_commit_persist
 
     let after_capture = committed_music_text(root).await;
     assert!(
-        after_capture.iter().any(|row| row.contains("Edited by run")),
+        after_capture
+            .iter()
+            .any(|row| row.contains("Edited by run")),
         "first run's committed effect must remain durable: {after_capture:?}"
     );
 }

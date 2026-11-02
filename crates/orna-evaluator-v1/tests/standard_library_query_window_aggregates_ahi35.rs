@@ -22,7 +22,9 @@ fn optional_int(value: i64) -> Raw {
 }
 
 fn optional_ints(values: &[i64]) -> CanonicalValue {
-    canonical(Raw::Array(values.iter().copied().map(optional_int).collect()))
+    canonical(Raw::Array(
+        values.iter().copied().map(optional_int).collect(),
+    ))
 }
 
 fn nested_ints(values: &[&[i64]]) -> CanonicalValue {
@@ -99,7 +101,11 @@ fn query_window_statistics_return_exact_values_for_overlapping_and_trailing_edge
 #[test]
 fn query_window_aggregates_omit_input_shorter_than_the_window() {
     let actual = session()
-        .submit(include_str!("fixtures/stdlib-query-window-aggregate-short-ahi35.orna"))
-        .unwrap_or_else(|error| panic!("short query window aggregate failed with {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-query-window-aggregate-short-ahi35.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!("short query window aggregate failed with {}", error.code())
+        });
     assert_eq!(actual, Some(ints(&[])));
 }

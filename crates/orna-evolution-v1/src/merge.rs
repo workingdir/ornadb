@@ -8,22 +8,44 @@
 //! merge only when the edits agree or one branch retains the base value.
 
 use super::{
-    CanonicalValue, Field, ObjectId, Schema, Table,
-    VersionFence, validate_schema, SchemaSide,
+    CanonicalValue, Field, ObjectId, Schema, SchemaSide, Table, VersionFence, validate_schema,
 };
-use std::{collections::{BTreeMap, BTreeSet}, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SchemaMergeConflict {
     Version,
     InvalidInput,
-    DuplicateTableName { name: String, tables: Vec<ObjectId> },
-    DuplicateFieldName { table: ObjectId, field: ObjectId, name: String },
-    TableAddition { table: ObjectId },
-    TableDeletionAndEdit { table: ObjectId },
-    TableProperty { table: ObjectId, property: &'static str },
-    FieldAddition { table: ObjectId, field: ObjectId },
-    FieldDeletionAndEdit { table: ObjectId, field: ObjectId },
+    DuplicateTableName {
+        name: String,
+        tables: Vec<ObjectId>,
+    },
+    DuplicateFieldName {
+        table: ObjectId,
+        field: ObjectId,
+        name: String,
+    },
+    TableAddition {
+        table: ObjectId,
+    },
+    TableDeletionAndEdit {
+        table: ObjectId,
+    },
+    TableProperty {
+        table: ObjectId,
+        property: &'static str,
+    },
+    FieldAddition {
+        table: ObjectId,
+        field: ObjectId,
+    },
+    FieldDeletionAndEdit {
+        table: ObjectId,
+        field: ObjectId,
+    },
     FieldProperty {
         table: ObjectId,
         field: ObjectId,
@@ -49,11 +71,17 @@ struct SchemaConflictCollector {
 
 impl SchemaConflictCollector {
     fn new(limit: usize) -> Self {
-        Self { conflicts: Vec::new(), count: 0, limit }
+        Self {
+            conflicts: Vec::new(),
+            count: 0,
+            limit,
+        }
     }
 
     fn push(&mut self, conflict: SchemaMergeConflict) {
-        if self.exceeded() { return; }
+        if self.exceeded() {
+            return;
+        }
         self.count = self.count.saturating_add(1);
         if self.conflicts.len() < self.limit {
             self.conflicts.push(conflict);
@@ -69,9 +97,13 @@ impl SchemaConflictCollector {
     }
 
     fn failure(mut self) -> SchemaMergeFailure {
-        self.conflicts.sort_by_key(|conflict| format!("{conflict:?}"));
+        self.conflicts
+            .sort_by_key(|conflict| format!("{conflict:?}"));
         self.conflicts.dedup();
-        SchemaMergeFailure { conflicts: self.conflicts, conflicts_lower_bound: self.count }
+        SchemaMergeFailure {
+            conflicts: self.conflicts,
+            conflicts_lower_bound: self.count,
+        }
     }
 }
 
@@ -103,7 +135,11 @@ fn choose<T: Clone + Eq>(base: &T, left: &T, right: &T) -> Result<T, ()> {
     }
 }
 
-fn merge_optional<T: Clone + Eq>(base: Option<&T>, left: Option<&T>, right: Option<&T>) -> Option<T> {
+fn merge_optional<T: Clone + Eq>(
+    base: Option<&T>,
+    left: Option<&T>,
+    right: Option<&T>,
+) -> Option<T> {
     if left == right {
         left.cloned()
     } else if left == base {
@@ -132,7 +168,11 @@ fn unique_schema(schema: &Schema) -> bool {
 /// Different edits to one property, including a column type, are reported as
 /// schema conflicts. Required-field compatibility remains the migration
 /// planner's responsibility; this function combines declarations only.
-pub fn merge_schema(base: &Schema, left: &Schema, right: &Schema) -> Result<Schema, Vec<SchemaMergeConflict>> {
+pub fn merge_schema(
+    base: &Schema,
+    left: &Schema,
+    right: &Schema,
+) -> Result<Schema, Vec<SchemaMergeConflict>> {
     merge_schema_bounded(base, left, right, usize::MAX).map_err(|failure| failure.conflicts)
 }
 
@@ -146,7 +186,8 @@ pub fn merge_schema_bounded(
 ) -> Result<Schema, SchemaMergeFailure> {
     let mut conflicts = SchemaConflictCollector::new(max_conflicts);
     if [base, left, right].into_iter().any(|schema| {
-        !unique_schema(schema) || validate_schema(schema, SchemaSide::From, VersionFence::V1).is_err()
+        !unique_schema(schema)
+            || validate_schema(schema, SchemaSide::From, VersionFence::V1).is_err()
     }) {
         conflicts.push(SchemaMergeConflict::InvalidInput);
         return Err(conflicts.failure());
@@ -177,7 +218,9 @@ pub fn merge_schema_bounded(
             (None, None, None) => {}
             (None, Some(table), None) | (None, None, Some(table)) => tables.push(table.clone()),
             (None, Some(l), Some(r)) if l == r => tables.push(l.clone()),
-            (None, Some(_), Some(_)) => conflicts.push(SchemaMergeConflict::TableAddition { table: id }),
+            (None, Some(_), Some(_)) => {
+                conflicts.push(SchemaMergeConflict::TableAddition { table: id })
+            }
             (Some(_), None, None) => {}
             (Some(base), Some(left), Some(right)) => {
                 if let Some(table) = merge_table(base, left, right, &mut conflicts) {
@@ -190,7 +233,9 @@ pub fn merge_schema_bounded(
                 conflicts.push(SchemaMergeConflict::TableDeletionAndEdit { table: id })
             }
         }
-        if conflicts.exceeded() { return Err(conflicts.failure()); }
+        if conflicts.exceeded() {
+            return Err(conflicts.failure());
+        }
     }
 
     let mut table_names = BTreeMap::new();
@@ -211,7 +256,9 @@ pub fn merge_schema_bounded(
                 });
             }
         }
-        if conflicts.exceeded() { return Err(conflicts.failure()); }
+        if conflicts.exceeded() {
+            return Err(conflicts.failure());
+        }
     }
     let merged = Schema { version, tables };
     if validate_schema(&merged, SchemaSide::To, VersionFence::V1).is_err() {
@@ -225,7 +272,11 @@ pub fn merge_schema_bounded(
 }
 
 fn tables_by_id(schema: &Schema) -> BTreeMap<ObjectId, &Table> {
-    schema.tables.iter().map(|table| (table.id, table)).collect()
+    schema
+        .tables
+        .iter()
+        .map(|table| (table.id, table))
+        .collect()
 }
 
 fn merge_table(
@@ -255,7 +306,12 @@ fn merge_table(
         }
     };
     if conflicts.exceeded() {
-        return Some(Table { id: base.id, name, explicit_key, fields: Vec::new() });
+        return Some(Table {
+            id: base.id,
+            name,
+            explicit_key,
+            fields: Vec::new(),
+        });
     }
     let base_fields = fields_by_id(base);
     let left_fields = fields_by_id(left);
@@ -281,7 +337,9 @@ fn merge_table(
             }),
             (Some(_), None, None) => {}
             (Some(base_field), Some(left_field), Some(right_field)) => {
-                if let Some(field) = merge_field(base.id, base_field, left_field, right_field, conflicts) {
+                if let Some(field) =
+                    merge_field(base.id, base_field, left_field, right_field, conflicts)
+                {
                     fields.push(field);
                 }
             }
@@ -294,9 +352,16 @@ fn merge_table(
                 })
             }
         }
-        if conflicts.exceeded() { break; }
+        if conflicts.exceeded() {
+            break;
+        }
     }
-    Some(Table { id: base.id, name, explicit_key, fields })
+    Some(Table {
+        id: base.id,
+        name,
+        explicit_key,
+        fields,
+    })
 }
 
 fn fields_by_id(table: &Table) -> BTreeMap<ObjectId, &Field> {
@@ -315,7 +380,11 @@ fn property<T: Clone + Eq>(
     match choose(base, left, right) {
         Ok(value) => value,
         Err(()) => {
-            conflicts.push(SchemaMergeConflict::FieldProperty { table, field, property: name });
+            conflicts.push(SchemaMergeConflict::FieldProperty {
+                table,
+                field,
+                property: name,
+            });
             base.clone()
         }
     }
@@ -330,10 +399,36 @@ fn merge_field(
 ) -> Option<Field> {
     Some(Field {
         id: base.id,
-        name: property(table, base.id, "name", &base.name, &left.name, &right.name, conflicts),
-        ty: property(table, base.id, "type", &base.ty, &left.ty, &right.ty, conflicts),
-        role: property(table, base.id, "role", &base.role, &left.role, &right.role, conflicts),
-        optional: property(table, base.id, "optional", &base.optional, &left.optional, &right.optional, conflicts),
+        name: property(
+            table,
+            base.id,
+            "name",
+            &base.name,
+            &left.name,
+            &right.name,
+            conflicts,
+        ),
+        ty: property(
+            table, base.id, "type", &base.ty, &left.ty, &right.ty, conflicts,
+        ),
+        role: property(
+            table,
+            base.id,
+            "role",
+            &base.role,
+            &left.role,
+            &right.role,
+            conflicts,
+        ),
+        optional: property(
+            table,
+            base.id,
+            "optional",
+            &base.optional,
+            &left.optional,
+            &right.optional,
+            conflicts,
+        ),
         introduction_fallback: property(
             table,
             base.id,
@@ -363,15 +458,27 @@ pub struct KeyedRow {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowMergeConflict {
-    Identity { table: ObjectId, key: CanonicalValue },
-    DeleteAndEdit { table: ObjectId, key: CanonicalValue },
-    KeyCollision { table: ObjectId, key: CanonicalValue },
+    Identity {
+        table: ObjectId,
+        key: CanonicalValue,
+    },
+    DeleteAndEdit {
+        table: ObjectId,
+        key: CanonicalValue,
+    },
+    KeyCollision {
+        table: ObjectId,
+        key: CanonicalValue,
+    },
     Fields {
         table: ObjectId,
         key: CanonicalValue,
         fields: Vec<ObjectId>,
     },
-    AutomaticKeyCollision { table: ObjectId, key: CanonicalValue },
+    AutomaticKeyCollision {
+        table: ObjectId,
+        key: CanonicalValue,
+    },
 }
 
 /// Availability of one key in a snapshot supplied to a row merge.
@@ -388,7 +495,10 @@ pub enum RowSnapshotState<'a> {
     /// live row that must remain deleted. Its identity must match the key
     /// being reconciled; retaining it here prevents a marker for one key from
     /// being mistaken for an unrelated missing row.
-    Tombstone { table: ObjectId, key: &'a CanonicalValue },
+    Tombstone {
+        table: ObjectId,
+        key: &'a CanonicalValue,
+    },
     Pruned,
 }
 
@@ -408,7 +518,10 @@ pub enum RowMergeOperation {
     Upsert(KeyedRow),
     /// A versioned deletion of a key visible in the common base. This
     /// preserves the deletion effect without authorizing Git-history pruning.
-    Tombstone { table: ObjectId, key: CanonicalValue },
+    Tombstone {
+        table: ObjectId,
+        key: CanonicalValue,
+    },
     /// The key is absent from a complete base and both complete branches; no
     /// deletion record is needed for a row that never existed in the base.
     Absent,
@@ -446,7 +559,9 @@ pub fn merge_keyed_row_states(
         }
     }
     if !pruned_sides.is_empty() {
-        return Err(RowSnapshotMergeError::PrunedInput { sides: pruned_sides });
+        return Err(RowSnapshotMergeError::PrunedInput {
+            sides: pruned_sides,
+        });
     }
 
     let identity = |state| match state {
@@ -463,7 +578,11 @@ pub fn merge_keyed_row_states(
                 left_key
                     .encode()
                     .expect("validated row keys remain encodable")
-                    .cmp(&right_key.encode().expect("validated row keys remain encodable"))
+                    .cmp(
+                        &right_key
+                            .encode()
+                            .expect("validated row keys remain encodable"),
+                    )
             })
         })
         .copied();
@@ -478,10 +597,12 @@ pub fn merge_keyed_row_states(
             .flatten()
             .any(|(other_table, other_key)| *other_table != table || *other_key != key)
     {
-        return Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
-            table,
-            key: key.clone(),
-        }));
+        return Err(RowSnapshotMergeError::Conflict(
+            RowMergeConflict::Identity {
+                table,
+                key: key.clone(),
+            },
+        ));
     }
 
     let row = |state| match state {
@@ -512,38 +633,58 @@ pub fn merge_keyed_row(
     left: Option<&KeyedRow>,
     right: Option<&KeyedRow>,
 ) -> Result<Option<KeyedRow>, RowMergeConflict> {
-    let stable_branch_identity = [left, right]
-        .into_iter()
-        .flatten()
-        .min_by(|left, right| {
-            left.table.cmp(&right.table).then_with(|| {
-                left.key
-                    .encode()
-                    .expect("validated row keys remain encodable")
-                    .cmp(&right.key.encode().expect("validated row keys remain encodable"))
-            })
-        });
+    let stable_branch_identity = [left, right].into_iter().flatten().min_by(|left, right| {
+        left.table.cmp(&right.table).then_with(|| {
+            left.key
+                .encode()
+                .expect("validated row keys remain encodable")
+                .cmp(
+                    &right
+                        .key
+                        .encode()
+                        .expect("validated row keys remain encodable"),
+                )
+        })
+    });
     // Keep a supplied base as the diagnostic anchor; where there is no base,
     // canonical table/key order makes identity conflicts invariant under
     // swapping the two branches. ORNA-MERGE leaves this payload choice open.
     let exemplar = base.or(stable_branch_identity);
-    let Some(exemplar) = exemplar else { return Ok(None) };
+    let Some(exemplar) = exemplar else {
+        return Ok(None);
+    };
     let identity_matches = |row: &KeyedRow| row.table == exemplar.table && row.key == exemplar.key;
-    if [base, left, right].into_iter().flatten().any(|row| !identity_matches(row)) {
-        return Err(RowMergeConflict::Identity { table: exemplar.table, key: exemplar.key.clone() });
+    if [base, left, right]
+        .into_iter()
+        .flatten()
+        .any(|row| !identity_matches(row))
+    {
+        return Err(RowMergeConflict::Identity {
+            table: exemplar.table,
+            key: exemplar.key.clone(),
+        });
     }
     if let (Some(base), Some(left), Some(right)) = (base, left, right)
         && (base.key_kind != left.key_kind || base.key_kind != right.key_kind)
     {
-        return Err(RowMergeConflict::Identity { table: base.table, key: base.key.clone() });
+        return Err(RowMergeConflict::Identity {
+            table: base.table,
+            key: base.key.clone(),
+        });
     }
     match (base, left, right) {
         (None, None, _) | (None, _, None) => Ok(left.or(right).cloned()),
         // Generated IDs are identities allocated independently by branch
         // histories. Even equal payloads do not prove these are one insert;
         // keep the collision visible instead of silently renumbering a row.
-        (None, Some(left), Some(right)) if left.key_kind == RowKeyKind::Automatic || right.key_kind == RowKeyKind::Automatic => {
-            Err(RowMergeConflict::AutomaticKeyCollision { table: left.table, key: left.key.clone() })
+        (None, Some(left), Some(right))
+            if left.key_kind == RowKeyKind::Automatic
+                || right.key_kind == RowKeyKind::Automatic =>
+        {
+            Err(RowMergeConflict::AutomaticKeyCollision {
+                table: left.table,
+                key: left.key.clone(),
+            })
         }
         (None, Some(left), Some(right)) if left == right => Ok(Some(left.clone())),
         (None, Some(left), Some(_right)) => Err(RowMergeConflict::KeyCollision {
@@ -554,19 +695,35 @@ pub fn merge_keyed_row(
         (Some(base), Some(left), None) if left == base => Ok(None),
         (Some(base), None, Some(right)) if right == base => Ok(None),
         (Some(base), None, Some(_)) | (Some(base), Some(_), None) => {
-            Err(RowMergeConflict::DeleteAndEdit { table: base.table, key: base.key.clone() })
+            Err(RowMergeConflict::DeleteAndEdit {
+                table: base.table,
+                key: base.key.clone(),
+            })
         }
         (Some(base), Some(left), Some(right)) => {
             if left.key_kind != base.key_kind || right.key_kind != base.key_kind {
-                return Err(RowMergeConflict::Identity { table: base.table, key: base.key.clone() });
+                return Err(RowMergeConflict::Identity {
+                    table: base.table,
+                    key: base.key.clone(),
+                });
             }
             // Stable field IDs define both merge order and conflict detail
             // order, independent of row or source-fixture field ordering.
-            let ids: BTreeSet<_> = base.fields.keys().chain(left.fields.keys()).chain(right.fields.keys()).copied().collect();
+            let ids: BTreeSet<_> = base
+                .fields
+                .keys()
+                .chain(left.fields.keys())
+                .chain(right.fields.keys())
+                .copied()
+                .collect();
             let mut fields = BTreeMap::new();
             let mut conflicts = Vec::new();
             for id in ids {
-                let value = merge_optional(base.fields.get(&id), left.fields.get(&id), right.fields.get(&id));
+                let value = merge_optional(
+                    base.fields.get(&id),
+                    left.fields.get(&id),
+                    right.fields.get(&id),
+                );
                 if left.fields.get(&id) != right.fields.get(&id)
                     && left.fields.get(&id) != base.fields.get(&id)
                     && right.fields.get(&id) != base.fields.get(&id)
@@ -577,9 +734,18 @@ pub fn merge_keyed_row(
                 }
             }
             if conflicts.is_empty() {
-                Ok(Some(KeyedRow { table: base.table, key: base.key.clone(), key_kind: base.key_kind, fields }))
+                Ok(Some(KeyedRow {
+                    table: base.table,
+                    key: base.key.clone(),
+                    key_kind: base.key_kind,
+                    fields,
+                }))
             } else {
-                Err(RowMergeConflict::Fields { table: base.table, key: base.key.clone(), fields: conflicts })
+                Err(RowMergeConflict::Fields {
+                    table: base.table,
+                    key: base.key.clone(),
+                    fields: conflicts,
+                })
             }
         }
     }
@@ -619,7 +785,11 @@ pub fn merge_checkpoint_generation(
     } else if right == base {
         Ok(left.cloned())
     } else {
-        Err(CheckpointMergeConflict { base: base.cloned(), left: left.cloned(), right: right.cloned() })
+        Err(CheckpointMergeConflict {
+            base: base.cloned(),
+            left: left.cloned(),
+            right: right.cloned(),
+        })
     }
 }
 
@@ -639,7 +809,11 @@ impl CheckpointIdentity {
         source_identity: impl Into<String>,
         partition: Option<String>,
     ) -> Self {
-        Self { consumer_identity, source_identity: source_identity.into(), partition }
+        Self {
+            consumer_identity,
+            source_identity: source_identity.into(),
+            partition,
+        }
     }
 }
 
@@ -696,7 +870,11 @@ impl CheckpointPosition {
         }
         CanonicalValue::decode(&canonical_payload)
             .map_err(|_| CheckpointPositionError::InvalidCanonicalPayload)?;
-        Ok(Self { format, format_version, canonical_payload })
+        Ok(Self {
+            format,
+            format_version,
+            canonical_payload,
+        })
     }
 
     pub fn format(&self) -> &str {
@@ -753,7 +931,9 @@ impl CheckpointSnapshot {
                 return Err(CheckpointSnapshotError::DuplicateIdentity);
             }
         }
-        Ok(Self { checkpoints: indexed })
+        Ok(Self {
+            checkpoints: indexed,
+        })
     }
 
     pub fn checkpoints(&self) -> &BTreeMap<CheckpointIdentity, CheckpointPosition> {
@@ -877,7 +1057,11 @@ pub fn merge_checkpoint_snapshots_bounded(
         } else if right_position == base_position {
             Ok(left_position.cloned())
         } else {
-            Err(checkpoint_conflict_reason(base_position, left_position, right_position))
+            Err(checkpoint_conflict_reason(
+                base_position,
+                left_position,
+                right_position,
+            ))
         };
         match result {
             Ok(Some(position)) => {
@@ -913,5 +1097,7 @@ pub fn merge_checkpoint_snapshots_bounded(
             conflicts_lower_bound: conflict_count,
         });
     }
-    Ok(CheckpointSnapshot { checkpoints: merged })
+    Ok(CheckpointSnapshot {
+        checkpoints: merged,
+    })
 }

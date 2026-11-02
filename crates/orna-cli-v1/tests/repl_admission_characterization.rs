@@ -78,10 +78,8 @@ fn characterizes_current_behaviour_fn_main_typed_in_repl_is_accepted_without_ent
 /// root function. R1 names the `assert` declaration.
 #[test]
 fn characterizes_current_behaviour_root_top_level_assert_refuses_the_whole_session() {
-    let project = initialized_project(&[(
-        "main.orna",
-        "pub fn answer() = 1;\nassert answer() == 1;\n",
-    )]);
+    let project =
+        initialized_project(&[("main.orna", "pub fn answer() = 1;\nassert answer() == 1;\n")]);
 
     let output = run_one_shot(project.path(), "main.answer()");
     let text = combined(&output);

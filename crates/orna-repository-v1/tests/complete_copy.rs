@@ -392,7 +392,10 @@ fn complete_copy_relative_dependency_does_not_fall_through_to_the_parent() {
         .env(CHILD, root.path())
         .status()
         .expect("run child export");
-    assert!(status.success(), "relative dependency export failed: {status}");
+    assert!(
+        status.success(),
+        "relative dependency export failed: {status}"
+    );
 }
 
 /// Relative-path fall-through at the real entry point: the working directory is a
@@ -412,14 +415,27 @@ fn complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent()
         }];
         std::env::set_current_dir(&root).expect("enter healthy parent");
         let result = export_complete_copy(&repository, "HEAD", &archive, &sources);
-        assert!(result.is_err(), "corrupt relative child must not adopt parent");
+        assert!(
+            result.is_err(),
+            "corrupt relative child must not adopt parent"
+        );
         return;
     }
 
     let root = TempDir::new().expect("create fixture root");
     let dependency = dependency_repository(root.path());
     let project = superproject(root.path(), &dependency);
-    git(&project, &["-c", "protocol.file.allow=always", "submodule", "update", "--init", "--recursive"]);
+    git(
+        &project,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "update",
+            "--init",
+            "--recursive",
+        ],
+    );
     git(root.path(), &["init", "-q"]);
     fs::write(dependency.join(".git").join("HEAD"), b"garbage\n").expect("corrupt child HEAD");
     let status = Command::new(std::env::current_exe().expect("test binary"))
@@ -429,7 +445,10 @@ fn complete_copy_relative_corrupt_dependency_fails_closed_under_healthy_parent()
         .env(CHILD, root.path())
         .status()
         .expect("run child export");
-    assert!(status.success(), "corrupt relative dependency export did not fail closed: {status}");
+    assert!(
+        status.success(),
+        "corrupt relative dependency export did not fail closed: {status}"
+    );
 }
 
 #[test]
@@ -849,8 +868,10 @@ fn complete_copy_refuses_a_dependency_path_that_names_git_metadata() {
     {
         let tampered = root.path().join(format!("tampered-{index}"));
         copy_archive(&archive, &tampered);
-        let tampered_document =
-            document.replace("dependency\tdeps/std\t", &format!("dependency\t{hostile}\t"));
+        let tampered_document = document.replace(
+            "dependency\tdeps/std\t",
+            &format!("dependency\t{hostile}\t"),
+        );
         assert_ne!(tampered_document, document, "the dependency path changed");
         fs::write(tampered.join("manifest.tsv"), &tampered_document).expect("write manifest");
         let destination = root.path().join(format!("copy-{index}"));

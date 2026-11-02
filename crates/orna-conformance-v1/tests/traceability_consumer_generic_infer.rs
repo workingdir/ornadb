@@ -43,7 +43,11 @@ fn durable_consumer_multiple_roots_gets_extraction_diagnostic() {
 #[test]
 fn local_generic_call_infers_its_type_argument() {
     let result = analyze(GENERIC_INFERRED_ARGUMENT);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
     let module = result.modules.values().next().expect("main module");
     assert_eq!(
         module.exports.get("answer").map(|function| &function.ty),
@@ -61,6 +65,18 @@ fn local_generic_call_infers_its_type_argument() {
 #[test]
 fn generic_function_accepts_multiple_protocol_bounds() {
     let result = analyze(GENERIC_INFERRED_ARGUMENT);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
-    assert!(result.modules.values().next().unwrap().exports.contains_key("answer"));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
+    assert!(
+        result
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .exports
+            .contains_key("answer")
+    );
 }

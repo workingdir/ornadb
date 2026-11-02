@@ -10,15 +10,15 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use orna_evaluator_v1::{
-    EffectHandler, Environment, EvaluationError, ExplainCatalogue, Functions, Limits,
-    PureFunction, RelationPage, StepBudget, invoke_named_with_effects,
+    EffectHandler, Environment, EvaluationError, ExplainCatalogue, Functions, Limits, PureFunction,
+    RelationPage, StepBudget, invoke_named_with_effects,
 };
 use orna_foundation_v1::CanonicalValue;
+use orna_syntax_v1::{Expr, parse_expression};
 use orna_sys_v1::{
     ObjectRef, SnapshotRef, SystemProviderHost, SystemSurfaceMember, system_api_json,
     system_dispatch_table, system_provider_linkage,
 };
-use orna_syntax_v1::{Expr, parse_expression};
 
 /// A host catalogue that pins one relation source for `sys.explain(Query)`.
 #[derive(Debug)]
@@ -90,10 +90,7 @@ fn dotted_path(expression: &Expr) -> Option<String> {
 }
 
 /// Evaluates `expression` as the body of a zero-argument function.
-fn evaluate(
-    expression: &str,
-    host: &mut RecordingHost,
-) -> Result<CanonicalValue, EvaluationError> {
+fn evaluate(expression: &str, host: &mut RecordingHost) -> Result<CanonicalValue, EvaluationError> {
     let parsed = parse_expression(expression);
     assert!(parsed.is_ok(), "{expression}: {:?}", parsed.diagnostics);
     let functions = Functions::from([(
@@ -214,17 +211,22 @@ fn linked_explain_query_is_dispatched_natively_through_the_host_catalogue() {
         catalogue: Some(Arc::new(PinnedSource("sys.Storage"))),
         ..RecordingHost::default()
     };
-    evaluate("sys.Storage | sys.explain()", &mut pinned).unwrap_or_else(|error| {
-        panic!("explain lowers a pinned query: {}", error.code())
-    });
+    evaluate("sys.Storage | sys.explain()", &mut pinned)
+        .unwrap_or_else(|error| panic!("explain lowers a pinned query: {}", error.code()));
     assert!(pinned.forwarded.is_empty(), "explain is native dispatch");
-    assert!(pinned.relation_sources.is_empty(), "explain never scans rows");
+    assert!(
+        pinned.relation_sources.is_empty(),
+        "explain never scans rows"
+    );
 
     let mut uncatalogued = RecordingHost::default();
     let error = evaluate("sys.Storage | sys.explain()", &mut uncatalogued)
         .expect_err("a host without a catalogue cannot pin the query source");
     assert_eq!(error.code(), "sys.version.incompatible");
-    assert!(uncatalogued.forwarded.is_empty(), "explain is native dispatch");
+    assert!(
+        uncatalogued.forwarded.is_empty(),
+        "explain is native dispatch"
+    );
 }
 
 #[test]
@@ -244,17 +246,26 @@ fn evaluator_relation_sources_are_exactly_the_relation_links() {
         if host.relation_sources.is_empty() {
             if native.contains(&path) {
                 outcome.unwrap_or_else(|error| {
-                    panic!("{path} is evaluator-native but did not count: {}", error.code())
+                    panic!(
+                        "{path} is evaluator-native but did not count: {}",
+                        error.code()
+                    )
                 });
                 recognised.insert(path);
             } else {
-                assert!(outcome.is_err(), "{path} counted rows without a relation source");
+                assert!(
+                    outcome.is_err(),
+                    "{path} counted rows without a relation source"
+                );
             }
             continue;
         }
         assert_eq!(host.relation_sources, BTreeSet::from([path.clone()]));
         outcome.unwrap_or_else(|error| {
-            panic!("{path} is a relation source but did not count: {}", error.code())
+            panic!(
+                "{path} is a relation source but did not count: {}",
+                error.code()
+            )
         });
         recognised.insert(path);
     }
