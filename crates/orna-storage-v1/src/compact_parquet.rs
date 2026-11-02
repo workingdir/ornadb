@@ -1962,7 +1962,7 @@ fn read_ovb_column(
         .map(|value| {
             let value = CanonicalValue::decode(value.data())
                 .map_err(|_| CompactParquetError::InvalidMetadata)?;
-            if !valid_ovb_fallback(&value.raw(), expected_kind) {
+            if !valid_ovb_fallback(value.raw(), expected_kind) {
                 return Err(CompactParquetError::UnsupportedKeyMapping);
             }
             Ok(value.raw().clone())
