@@ -263,7 +263,7 @@ fn dictionary_instant_int64_timestamp_decodes_canonical_tag_60002_values() {
         &profile,
         &[INSTANT],
         &[instant_type()],
-        &[values.clone()],
+        std::slice::from_ref(&values),
         true,
     );
     let reader = SerializedFileReader::new(Bytes::copy_from_slice(&bytes)).unwrap();

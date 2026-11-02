@@ -60,7 +60,10 @@ fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
-fn candidate_digest(generation: u64, mutations: &[(u64, &[u8], Option<&[u8]>)]) -> [u8; 32] {
+/// One candidate mutation: sequence number, key bytes and optional value bytes.
+type CandidateMutation<'a> = (u64, &'a [u8], Option<&'a [u8]>);
+
+fn candidate_digest(generation: u64, mutations: &[CandidateMutation<'_>]) -> [u8; 32] {
     let mut bytes = Vec::from(&b"ORNA-COMPACT-CANDIDATE-1\0"[..]);
     bytes.extend_from_slice(&generation.to_be_bytes());
     for (sequence, key, value) in mutations {

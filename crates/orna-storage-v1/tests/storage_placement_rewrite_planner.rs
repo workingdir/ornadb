@@ -333,7 +333,7 @@ fn automatic_thresholds_and_explicit_editable_path_errors_are_checked_before_mut
         existing_numeric_paths(10_000),
         [PlacementCandidate::insert(
             key(1),
-            body.clone(),
+            body,
             Some(editable_path("1")),
         )],
     )
@@ -1335,7 +1335,7 @@ fn rewrite_source_fence_preserves_the_full_editable_tail_at_repeated_generations
         })
         .collect();
     let fixture_rows = [REWRITE_TAIL_FIRST, REWRITE_TAIL_LAST]
-        .map(|source| rewrite_tail_fixture_key(source))
+        .map(rewrite_tail_fixture_key)
         .map(|value| (key(value), row(value).encode().unwrap()));
 
     assert_eq!(plan.previous_generation(), 0);
