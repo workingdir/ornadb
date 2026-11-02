@@ -855,8 +855,8 @@ fn module_namespace_matches(path: &str, expected: &str) -> bool {
     let module_path = match without_extension.rsplit_once('/') {
         Some((directory, "main")) => directory,
         Some(_) => without_extension,
-        None if without_extension == "main" => "",
-        None => without_extension,
+        None if without_extension != "main" => without_extension,
+        None => "",
     };
     if module_path.is_empty() {
         return expected.is_empty();
