@@ -10021,6 +10021,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn durable_async_rejections_replay_after_session_resume() {
         const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
 
@@ -10402,6 +10403,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn request_status_snapshots_retain_reserved_and_running_targets_after_completion() {
         const FIXTURE: &str = include_str!("../tests/fixtures/live-runtime-boundary.orna");
 
@@ -10423,12 +10425,14 @@ mod tests {
 
         let running_target = [42; 16];
         let eval = eval_source_frame(running_target, FIXTURE);
-        let target_fingerprint = match Envelope::decode(&eval, Limits::default().protocol)
+        let Message::Eval {
+            fingerprint: target_fingerprint,
+            ..
+        } = Envelope::decode(&eval, Limits::default().protocol)
             .unwrap()
             .message
-        {
-            Message::Eval { fingerprint, .. } => fingerprint,
-            _ => unreachable!("the fixture is admitted through Eval"),
+        else {
+            unreachable!("the fixture is admitted through Eval");
         };
         let ticket = match futures::executor::block_on(host.prepare_application_frame(
             attachment,
@@ -11221,16 +11225,14 @@ mod tests {
     }
 
     fn rejecting_validator(code: DiagnosticCode) -> TableCandidateValidatorFactory {
-        Box::new(move |_: &RuntimeActivationContext| rejecting_candidate(code))
+        Box::new(move |_: &RuntimeActivationContext| Ok(rejecting_candidate(code)))
     }
 
-    fn rejecting_candidate(
-        code: DiagnosticCode,
-    ) -> Result<Box<dyn TableActivationCandidateValidator>> {
-        Ok(Box::new(RejectingTableCandidateValidator {
+    fn rejecting_candidate(code: DiagnosticCode) -> Box<dyn TableActivationCandidateValidator> {
+        Box::new(RejectingTableCandidateValidator {
             tables: vec!["Hook".into()],
             code,
-        }))
+        })
     }
 
     #[test]
