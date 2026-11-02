@@ -91,7 +91,7 @@ fn aliased_imported_helper_assertion_keeps_transitive_dependencies() {
         plan.dependencies,
         BTreeSet::from(["checks.User".to_owned(), "checks.Account".to_owned()])
     );
-    assert_eq!(plan.effects.may_fail, true);
+    assert!(plan.effects.may_fail);
     assert_eq!(
         plan.effects.effects,
         BTreeSet::from([orna_semantic_v1::EffectKind::TableRead])
