@@ -60,7 +60,8 @@ mod armed {
             .expect("create staged publication crash marker");
         file.write_all(boundary.as_bytes())
             .expect("write staged publication crash marker");
-        file.sync_all().expect("sync staged publication crash marker");
+        file.sync_all()
+            .expect("sync staged publication crash marker");
         drop(file);
         std::fs::hard_link(&staging, marker).expect("publish publication crash marker");
         std::fs::remove_file(&staging).expect("remove staged publication crash marker");

@@ -58,5 +58,8 @@ fn browser_profile_wasm_matches_native_canonical_output() {
         .arg(expected_hex)
         .status()
         .expect("Node.js is available");
-    assert!(result.success(), "shared evaluator Wasm output differs from native OVB output");
+    assert!(
+        result.success(),
+        "shared evaluator Wasm output differs from native OVB output"
+    );
 }

@@ -26,7 +26,10 @@ fn range_upper_endpoint_accepts_control_expressions() {
 
 fn expression_is_rejected(source: &str) {
     let parsed = parse_expression(source);
-    assert!(!parsed.is_ok(), "{source} should be rejected by the grammar");
+    assert!(
+        !parsed.is_ok(),
+        "{source} should be rejected by the grammar"
+    );
 }
 
 // W27-02 (grammar pipeline_stage = postfix_expression): a stage cannot be
@@ -35,7 +38,13 @@ fn expression_is_rejected(source: &str) {
 // production that continues a stage with them.
 #[test]
 fn pipeline_stage_is_a_postfix_expression() {
-    for source in ["1 | f + 1", "1 | f * 2", "1 | f .. 2", "1 | f ^ 2", "1 |? f - 1"] {
+    for source in [
+        "1 | f + 1",
+        "1 | f * 2",
+        "1 | f .. 2",
+        "1 | f ^ 2",
+        "1 |? f - 1",
+    ] {
         expression_is_rejected(source);
     }
     for source in ["1 | f(2) | g.h", "a | f ?? b", "a | f == b", "1 | f || b"] {
@@ -48,7 +57,12 @@ fn pipeline_stage_is_a_postfix_expression() {
 // infix operator.
 #[test]
 fn lambda_is_only_a_complete_expression() {
-    for source in ["1 + x => x", "a == (b) => b", "1 + (a) => a", "f(1 + x => x)"] {
+    for source in [
+        "1 + x => x",
+        "a == (b) => b",
+        "1 + (a) => a",
+        "f(1 + x => x)",
+    ] {
         expression_is_rejected(source);
     }
     for source in ["x => x + 1", "(a) => a", "f(x => x)"] {
@@ -74,7 +88,11 @@ fn parenthesised_single_pattern_is_grouping() {
     let Expr::Control { arms, .. } = parsed.value else {
         panic!("expected a case expression");
     };
-    assert!(matches!(arms[0].pattern, Pattern::Name(..)), "{:?}", arms[0].pattern);
+    assert!(
+        matches!(arms[0].pattern, Pattern::Name(..)),
+        "{:?}",
+        arms[0].pattern
+    );
 }
 
 // W27-06 (grammar enum_record_pattern: qualified_variant requires a dot): a bare
@@ -89,7 +107,12 @@ fn enum_record_pattern_requires_qualified_variant() {
 // for an alias), never keywords.
 #[test]
 fn use_alias_and_import_names_are_identifiers() {
-    for source in ["use a.b as c;", "use a.b as _;", "use a.{ b, c };", "use a.b.*;"] {
+    for source in [
+        "use a.b as c;",
+        "use a.b as _;",
+        "use a.{ b, c };",
+        "use a.b.*;",
+    ] {
         let parsed = parse_module(source);
         assert!(parsed.is_ok(), "{source}: {:?}", parsed.diagnostics);
     }

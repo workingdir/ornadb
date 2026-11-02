@@ -74,6 +74,12 @@ fn legacy_bare_module_repository_is_refused_with_e2200() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(!output.status.success(), "legacy store must be refused: {stderr}");
-    assert!(stderr.contains("E2200"), "refusal must carry E2200: {stderr}");
+    assert!(
+        !output.status.success(),
+        "legacy store must be refused: {stderr}"
+    );
+    assert!(
+        stderr.contains("E2200"),
+        "refusal must carry E2200: {stderr}"
+    );
 }

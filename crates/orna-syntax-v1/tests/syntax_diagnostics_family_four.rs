@@ -61,14 +61,23 @@ fn nested_case_recovery_inside_interpolation_keeps_suffix_arms_and_text() {
         ..
     } = &outer_arms[0].body
     else {
-        panic!("nested interpolation string was lost: {:?}", outer_arms[0].body);
+        panic!(
+            "nested interpolation string was lost: {:?}",
+            outer_arms[0].body
+        );
     };
     let [
-        StringSegment::Text { text: nested_prefix, .. },
+        StringSegment::Text {
+            text: nested_prefix,
+            ..
+        },
         StringSegment::Expression {
             value: nested_case, ..
         },
-        StringSegment::Text { text: nested_suffix, .. },
+        StringSegment::Text {
+            text: nested_suffix,
+            ..
+        },
     ] = nested_segments.as_slice()
     else {
         panic!("nested interpolation boundaries or text were lost: {nested_segments:?}");
@@ -91,7 +100,8 @@ fn nested_case_recovery_inside_interpolation_keeps_suffix_arms_and_text() {
 
 #[test]
 fn nested_case_recovery_inside_interpolation_keeps_an_unseparated_suffix() {
-    let source = include_str!("fixtures/nested-case-recovery-implicit-suffix-in-interpolation.orna");
+    let source =
+        include_str!("fixtures/nested-case-recovery-implicit-suffix-in-interpolation.orna");
     let parsed = parse_module(source);
 
     assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
@@ -106,7 +116,8 @@ fn nested_case_recovery_inside_interpolation_keeps_an_unseparated_suffix() {
         panic!("expected the interpolation function");
     };
     let Expr::Block {
-        tail: Some(root_tail), ..
+        tail: Some(root_tail),
+        ..
     } = body
     else {
         panic!("expected a string expression at the block tail: {body:?}");
@@ -141,14 +152,23 @@ fn nested_case_recovery_inside_interpolation_keeps_an_unseparated_suffix() {
         ..
     } = &outer_arms[0].body
     else {
-        panic!("nested interpolation string was lost: {:?}", outer_arms[0].body);
+        panic!(
+            "nested interpolation string was lost: {:?}",
+            outer_arms[0].body
+        );
     };
     let [
-        StringSegment::Text { text: nested_prefix, .. },
+        StringSegment::Text {
+            text: nested_prefix,
+            ..
+        },
         StringSegment::Expression {
             value: nested_case, ..
         },
-        StringSegment::Text { text: nested_suffix, .. },
+        StringSegment::Text {
+            text: nested_suffix,
+            ..
+        },
     ] = nested_segments.as_slice()
     else {
         panic!("nested interpolation boundaries or text were lost: {nested_segments:?}");

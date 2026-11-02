@@ -14,7 +14,7 @@
 //! context, so the comparison is one pair of immutable reads taken from the
 //! local repository alone: no fetch, no remote, and no media payload.
 
-use super::{Diagnostic, Endpoint, local_project_path, cli_row_key};
+use super::{Diagnostic, Endpoint, cli_row_key, local_project_path};
 
 use orna_repository_v1::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
@@ -23,8 +23,8 @@ use orna_repository_v1::{
 use orna_runtime_v1::TableObjectId;
 use orna_value_v1::{BlobMetadata, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value};
 
-use std::collections::{BTreeMap, BTreeSet};
 use orna_repository_v1::relation_admission::CommittedRekey;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Most revisions one history listing reports when `--limit` is not given.
 const DEFAULT_HISTORY_LIMIT: usize = 64;
@@ -777,9 +777,11 @@ fn run_diff(
         || before_schema.table_object_id() != TableObjectId::new(relation)
         || after_schema.table_object_id() != TableObjectId::new(relation)
         || before_format
-            .database_id().is_none_or(|id| before_schema.database_id() != id.as_bytes())
+            .database_id()
+            .is_none_or(|id| before_schema.database_id() != id.as_bytes())
         || after_format
-            .database_id().is_none_or(|id| after_schema.database_id() != id.as_bytes())
+            .database_id()
+            .is_none_or(|id| after_schema.database_id() != id.as_bytes())
         || before_schema.snapshot_id() != &before_format.snapshot_pin().snapshot_id()
         || after_schema.snapshot_id() != &after_format.snapshot_pin().snapshot_id()
     {
@@ -1082,7 +1084,9 @@ fn pair_rekeys(
     let mut vacated = BTreeSet::<Vec<u8>>::new();
     let mut reused = BTreeSet::<Vec<u8>>::new();
     for (old, new) in moves {
-        let origin = if let Some(origin) = origins.remove(old) { origin } else {
+        let origin = if let Some(origin) = origins.remove(old) {
+            origin
+        } else {
             if vacated.contains(old) {
                 reused.insert(old.clone());
             }

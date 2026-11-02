@@ -1,8 +1,7 @@
 use std::process::Command;
 
 // Legacy 1.0.0 snapshot (144 scenarios). The 1.1.0 corpus has 279 scenario oracles.
-const LEGACY_REFERENCE_SCENARIOS: &str =
-    include_str!("fixtures/legacy-1.0.0/tests/scenarios.json");
+const LEGACY_REFERENCE_SCENARIOS: &str = include_str!("fixtures/legacy-1.0.0/tests/scenarios.json");
 const BATCH_91_144: &[&str] = &[
     "PRES-001",
     "PRES-002",
@@ -93,19 +92,26 @@ fn executes_final_scenario_batch_by_id_against_the_1_1_0_report() {
         .expect("bounded conformance runner starts");
     let cli_exit_code = output.status.code().expect("runner exits normally");
     println!("bounded CLI exit code: {cli_exit_code}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "runner stdout is not a conformance report JSON: {error}; stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    let reported = report["scenarios"].as_array().expect("scenario report array");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "runner stdout is not a conformance report JSON: {error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    let reported = report["scenarios"]
+        .as_array()
+        .expect("scenario report array");
     assert_eq!(reported.len(), 279);
     let by_id = reported
         .iter()
         .map(|result| (result["scenario"].as_str().expect("scenario ID"), result))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(by_id.len(), 279, "scenario IDs are unique in the 1.1.0 report");
+    assert_eq!(
+        by_id.len(),
+        279,
+        "scenario IDs are unique in the 1.1.0 report"
+    );
 
     let (mut corpus_passed, mut corpus_failed, mut corpus_absent) = (0, 0, 0);
     for result in reported {
@@ -113,7 +119,10 @@ fn executes_final_scenario_batch_by_id_against_the_1_1_0_report() {
             "passed" => corpus_passed += 1,
             "failed" => corpus_failed += 1,
             "skipped" => corpus_absent += 1,
-            status => panic!("scenario {} has unknown status {status:?}", result["scenario"]),
+            status => panic!(
+                "scenario {} has unknown status {status:?}",
+                result["scenario"]
+            ),
         }
     }
 
@@ -159,12 +168,35 @@ fn executes_final_scenario_batch_by_id_against_the_1_1_0_report() {
         "batch 91-144 totals: passed={passed} failed={failed} absent={absent} legacy_only={}",
         legacy_only.len()
     );
-    println!("final corpus totals: dispositioned=279/279 passed={corpus_passed} failed={corpus_failed} absent={corpus_absent}; bounded adapter results are not Orna-engine execution");
-    assert_eq!(legacy_only, ["PROFILE-001", "PROJECT-LIFE-001", "ROW-002", "STORAGE-DISJOINT-001", "SYS-STORAGE-ADMIN-100"]);
-    assert_eq!(passed, 4, "only adapter-witnessed scenarios may be reported passed");
-    assert_eq!(passed_ids, ["REPL-001", "SYS-RT-RENAME-100", "TXN-001", "TXN-002"]);
-    assert_eq!(failed, 0, "scenario failures require a fixture-level repair");
+    println!(
+        "final corpus totals: dispositioned=279/279 passed={corpus_passed} failed={corpus_failed} absent={corpus_absent}; bounded adapter results are not Orna-engine execution"
+    );
+    assert_eq!(
+        legacy_only,
+        [
+            "PROFILE-001",
+            "PROJECT-LIFE-001",
+            "ROW-002",
+            "STORAGE-DISJOINT-001",
+            "SYS-STORAGE-ADMIN-100"
+        ]
+    );
+    assert_eq!(
+        passed, 4,
+        "only adapter-witnessed scenarios may be reported passed"
+    );
+    assert_eq!(
+        passed_ids,
+        ["REPL-001", "SYS-RT-RENAME-100", "TXN-001", "TXN-002"]
+    );
+    assert_eq!(
+        failed, 0,
+        "scenario failures require a fixture-level repair"
+    );
     assert_eq!(absent, 45, "all non-witnessed scenarios remain absent");
     assert_eq!((corpus_passed, corpus_failed, corpus_absent), (12, 0, 267));
-    assert_eq!(cli_exit_code, 1, "the full bounded report remains incomplete");
+    assert_eq!(
+        cli_exit_code, 1,
+        "the full bounded report remains incomplete"
+    );
 }

@@ -38,16 +38,11 @@ fn session() -> AdmittedReplSession {
 fn query_aggregates_only_complete_stepped_windows_to_real_mean_values() {
     let mut session = session();
     let actual = session
-        .submit(include_str!(
-            "fixtures/stdlib-query-window-mean-azb4m.orna"
-        ))
+        .submit(include_str!("fixtures/stdlib-query-window-mean-azb4m.orna"))
         .unwrap_or_else(|error| panic!("window mean failed with {}", error.code()));
     assert_eq!(
         actual,
-        Some(canonical(Raw::Array(vec![
-            option_int(4),
-            option_int(10),
-        ])))
+        Some(canonical(Raw::Array(vec![option_int(4), option_int(10),])))
     );
     let short = session
         .submit(include_str!(

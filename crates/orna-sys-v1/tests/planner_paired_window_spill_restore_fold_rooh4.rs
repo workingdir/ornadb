@@ -311,10 +311,7 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
         "a sparse join carries the exact two accumulated spill pairs"
     );
     assert_eq!(
-        text(
-            tail,
-            "paired_window_cost_restoration_spill_fold_identity"
-        ),
+        text(tail, "paired_window_cost_restoration_spill_fold_identity"),
         text(
             child_b,
             "paired_window_cost_restoration_spill_fold_identity"
@@ -405,10 +402,7 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
         "the nested spill identity binds paired cost ancestry"
     );
     assert_ne!(
-        text(
-            tail,
-            "paired_window_cost_restoration_spill_fold_identity"
-        ),
+        text(tail, "paired_window_cost_restoration_spill_fold_identity"),
         text(
             changed_cost_joins["pair:table:Tail"],
             "paired_window_cost_restoration_spill_fold_identity"
@@ -424,10 +418,7 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
         "changing the paired restore checkpoint leaves the spill estimate unchanged"
     );
     assert_ne!(
-        text(
-            child_b,
-            "paired_window_cost_restoration_pair_identity"
-        ),
+        text(child_b, "paired_window_cost_restoration_pair_identity"),
         text(
             changed_restore_joins["pair:table:ChildB"],
             "paired_window_cost_restoration_pair_identity"
@@ -446,10 +437,7 @@ fn paired_spill_identity_is_retained_by_nested_window_restore_folds() {
         "the nested spill identity binds the exact paired restore checkpoint"
     );
     assert_ne!(
-        text(
-            tail,
-            "paired_window_cost_restoration_spill_fold_identity"
-        ),
+        text(tail, "paired_window_cost_restoration_spill_fold_identity"),
         text(
             changed_restore_joins["pair:table:Tail"],
             "paired_window_cost_restoration_spill_fold_identity"

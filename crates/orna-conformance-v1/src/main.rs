@@ -1646,13 +1646,15 @@ mod tests {
         assert!(parse_runner_command(vec!["--profile".into()]).is_err());
         assert!(parse_runner_command(vec!["--first-scenarios".into(), "0".into()]).is_err());
         assert!(parse_runner_command(vec!["--first-scenarios".into(), "thirty".into()]).is_err());
-        assert!(parse_runner_command(vec![
-            "--profile".into(),
-            "reference-project-runtime-adapter".into(),
-            "--first-scenarios".into(),
-            "30".into(),
-        ])
-        .is_err());
+        assert!(
+            parse_runner_command(vec![
+                "--profile".into(),
+                "reference-project-runtime-adapter".into(),
+                "--first-scenarios".into(),
+                "30".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

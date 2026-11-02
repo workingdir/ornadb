@@ -26,10 +26,7 @@
 use orna_evaluator_v1::{Environment, EvaluationError, Limits, evaluate_expression};
 use orna_value_v1::Value;
 
-fn evaluate_fixture(
-    source: &str,
-    environment: &Environment,
-) -> Result<Value, EvaluationError> {
+fn evaluate_fixture(source: &str, environment: &Environment) -> Result<Value, EvaluationError> {
     evaluate_expression(source.trim(), environment, Limits::default())
 }
 
@@ -122,7 +119,9 @@ fn pipelines_preserve_failure_and_successful_recovery_continues_once() {
     );
     assert_eq!(
         evaluate_fixture(
-            include_str!("fixtures/expressions_conformance/recovery_success_skips_next_handler.orna"),
+            include_str!(
+                "fixtures/expressions_conformance/recovery_success_skips_next_handler.orna"
+            ),
             &Environment::new(),
         )
         .unwrap(),

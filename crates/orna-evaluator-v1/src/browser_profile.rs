@@ -35,7 +35,11 @@ impl BrowserProfileError {
 
 impl fmt::Display for BrowserProfileError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "browser profile evaluation failed: {}", self.code)
+        write!(
+            formatter,
+            "browser profile evaluation failed: {}",
+            self.code
+        )
     }
 }
 
@@ -61,7 +65,9 @@ pub fn execute_browser_profile(
         let code = parsed
             .diagnostics
             .first()
-            .map_or(PROFILE_ERROR_CODE.to_owned(), |diagnostic| diagnostic.code.to_owned());
+            .map_or(PROFILE_ERROR_CODE.to_owned(), |diagnostic| {
+                diagnostic.code.to_owned()
+            });
         return Err(BrowserProfileError::code(code));
     }
 
@@ -74,7 +80,9 @@ pub fn execute_browser_profile(
         let code = analysis
             .diagnostics
             .first()
-            .map_or(PROFILE_ERROR_CODE.to_owned(), |diagnostic| diagnostic.code().to_owned());
+            .map_or(PROFILE_ERROR_CODE.to_owned(), |diagnostic| {
+                diagnostic.code().to_owned()
+            });
         return Err(BrowserProfileError::code(code));
     }
 

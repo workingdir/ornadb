@@ -6,9 +6,7 @@ use std::{
 
 use tempfile::tempdir;
 
-const SOURCE: &str = include_str!(
-    "fixtures/traceability-diff-trust-secret.orna"
-);
+const SOURCE: &str = include_str!("fixtures/traceability-diff-trust-secret.orna");
 
 fn git(repository: &Path, arguments: &[&str]) -> Output {
     Command::new("git")
@@ -44,7 +42,10 @@ fn raw_git_diff_remains_available_to_a_local_invocation() {
         "the fixture remains owned by the invoking OS account"
     );
 
-    git_succeeds(repository.path(), &["init", "--quiet", "--initial-branch=main"]);
+    git_succeeds(
+        repository.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
     git_succeeds(repository.path(), &["add", "--", "source.orna"]);
 
     let changed = SOURCE.replace("google.personal", "google.audit");

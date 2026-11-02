@@ -6,7 +6,9 @@ use sha2::{Digest, Sha256};
 fn reference_root() -> PathBuf {
     std::env::var_os("ORNA_REFERENCE_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"))
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
+        })
 }
 
 fn read_text(relative: &str) -> String {
@@ -55,7 +57,12 @@ fn source_chapters() -> Vec<String> {
         .as_array()
         .expect("source manifest array")
         .iter()
-        .map(|chapter| chapter["file"].as_str().expect("manifest source path").to_owned())
+        .map(|chapter| {
+            chapter["file"]
+                .as_str()
+                .expect("manifest source path")
+                .to_owned()
+        })
         .collect()
 }
 
@@ -75,7 +82,10 @@ fn slug(name: &str) -> String {
 /// The exact `api-*` anchors the generator emits for `api/sys.json`.
 fn expected_api_anchors(api: &Value) -> HashSet<String> {
     let mut anchors = HashSet::new();
-    for value in api["opaque_identifiers"].as_array().expect("opaque identifiers array") {
+    for value in api["opaque_identifiers"]
+        .as_array()
+        .expect("opaque identifiers array")
+    {
         let name = value
             .as_str()
             .or_else(|| value["name"].as_str())
@@ -112,7 +122,10 @@ fn explicit_source_anchors_are_unique_across_the_book() {
             }
         }
     }
-    assert!(!seen.is_empty(), "1.1.0 source must declare explicit heading anchors");
+    assert!(
+        !seen.is_empty(),
+        "1.1.0 source must declare explicit heading anchors"
+    );
 }
 
 #[test]
@@ -144,7 +157,10 @@ fn published_index_publication_ids_equal_the_publication_manifest() {
         .filter(|id| id.starts_with("ORNA-PUB-"))
         .map(str::to_owned)
         .collect();
-    assert!(!expected.is_empty(), "publication manifest declares ORNA-PUB requirements");
+    assert!(
+        !expected.is_empty(),
+        "publication manifest declares ORNA-PUB requirements"
+    );
 
     let tokens = html_publication_tokens(&read_text("index.html"));
     let published: HashSet<String> = tokens.iter().cloned().collect();
@@ -178,5 +194,8 @@ fn canonical_markdown_matches_its_sha256sums_entry() {
             (name == "Orna-1.1.0.md").then(|| digest.to_owned())
         })
         .expect("SHA256SUMS lists Orna-1.1.0.md");
-    assert_eq!(digest, published, "Orna-1.1.0.md matches its SHA256SUMS entry");
+    assert_eq!(
+        digest, published,
+        "Orna-1.1.0.md matches its SHA256SUMS entry"
+    );
 }

@@ -20,10 +20,7 @@ fn decimal_division_requires_exactness_or_explicit_rounding() {
         "finite decimal quotients remain exact"
     );
     assert_eq!(
-        session
-            .submit("1.decimal / 3.decimal")
-            .unwrap_err()
-            .code(),
+        session.submit("1.decimal / 3.decimal").unwrap_err().code(),
         "InexactDivision",
         "non-terminating decimal quotients fail without an explicit precision"
     );
@@ -58,7 +55,11 @@ fn standard_session() -> AdmittedReplSession {
 fn float_arithmetic_preserves_source_evaluation_order() {
     let mut session = AdmittedReplSession::new(Limits::default());
     let source = "((10000000000000000.0f + (-10000000000000000.0f)) + 1.0f) == 1.0f";
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }
 
 // Specified: ORNA-TIME-001; telemetry rate points use absolute Instant timestamps.
@@ -70,7 +71,11 @@ fn telemetry_rate_uses_instant_timestamps() {
         Ok(None)
     );
     let source = "stats.rate([(2024-01-01T00:00:00Z, 1), (2024-01-01T00:00:02Z, 5)]) == first([2])";
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }
 
 // Specified: ORNA-TIME-002; calendar-day buckets require an explicit time zone.
@@ -81,12 +86,18 @@ fn instant_calendar_buckets_require_and_use_the_selected_zone() {
         session.submit(include_str!("fixtures/stdlib-use-query-2213.orna")),
         Ok(None)
     );
-    assert!(session
-        .submit("query_ops.bucket_by([2024-03-31T00:30:00Z], 1.day)")
-        .is_err());
+    assert!(
+        session
+            .submit("query_ops.bucket_by([2024-03-31T00:30:00Z], 1.day)")
+            .is_err()
+    );
 
     let source = "query_ops.bucket_by([2024-03-31T00:30:00Z, 2024-03-31T23:30:00Z], 1.day, \"Europe/London\") == [[2024-03-31T00:30:00Z], [2024-03-31T23:30:00Z]]";
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }
 
 // Specified: ORNA-RANGE-007; overlapping ranges remain unequal and compare by their bounds.
@@ -94,5 +105,9 @@ fn instant_calendar_buckets_require_and_use_the_selected_zone() {
 fn overlapping_ranges_are_not_equal_and_keep_lexicographic_order() {
     let mut session = AdmittedReplSession::new(Limits::default());
     let source = "(1..=5) != (4..=8) && (1..=5) < (1..=6)";
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

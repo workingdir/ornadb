@@ -183,7 +183,10 @@ fn unknown_nested_storm_routes_retain_bounded_branch_output_ancestry() {
 
     let route_scope = |path: &[PlanByteCapScopeSegment]| {
         std::iter::once("root".to_owned())
-            .chain(path.iter().map(PlanByteCapScopeSegment::scope_component_label))
+            .chain(
+                path.iter()
+                    .map(PlanByteCapScopeSegment::scope_component_label),
+            )
             .collect::<Vec<_>>()
             .join("/")
     };

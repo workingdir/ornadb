@@ -279,7 +279,8 @@ fn apply_edits(source: &str, edits: &[Value]) -> String {
     ordered.sort_by_key(|edit| std::cmp::Reverse(edit["range"]["start"]["character"].as_u64()));
     for edit in ordered {
         let offset_of = |position: &Value| {
-            usize::try_from(position.as_u64().expect("a JSON position")).expect("position fits usize")
+            usize::try_from(position.as_u64().expect("a JSON position"))
+                .expect("position fits usize")
         };
         let line = offset_of(&edit["range"]["start"]["line"]);
         let start = offset_of(&edit["range"]["start"]["character"]);

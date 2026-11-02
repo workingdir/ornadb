@@ -3,8 +3,7 @@ use std::path::PathBuf;
 
 // This real source fixture is parsed by the companion conformance test. Its
 // presence here does not turn the frozen report into execution evidence.
-const SOURCE_FIXTURE: &str =
-    include_str!("fixtures/traceability-evidence-closure-migrate.orna");
+const SOURCE_FIXTURE: &str = include_str!("fixtures/traceability-evidence-closure-migrate.orna");
 
 const REQUIREMENTS: [&str; 10] = [
     "ORNA-TEST-004",
@@ -38,8 +37,15 @@ fn frozen_traceability_report_keeps_all_ten_planned_rows_unexecuted() {
             .iter()
             .find(|requirement| requirement.requirement_id == id)
             .unwrap_or_else(|| panic!("frozen report contains specified row {id}"));
-        assert_eq!(requirement.status, Status::JustifiedGap, "{id} remains unexecuted");
-        assert!(!requirement.boundaries.is_empty(), "{id} preserves per-row boundaries");
+        assert_eq!(
+            requirement.status,
+            Status::JustifiedGap,
+            "{id} remains unexecuted"
+        );
+        assert!(
+            !requirement.boundaries.is_empty(),
+            "{id} preserves per-row boundaries"
+        );
         assert!(
             requirement
                 .boundaries

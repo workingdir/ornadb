@@ -48,7 +48,8 @@ const CONTACTS: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
 // `a` imports `b` itself, and `main` imports `b`, `telemetry.rig` and `cloud.drive`
 // in its own right (ORNA-IMPORT-001): a namespace reached only through another
 // module's import is not in scope.
-const A: &str = "use b;\n\npub table Item(id: Str) {\n    v: Int,\n}\n\npub fn b_items() = b.Item | count();\n";
+const A: &str =
+    "use b;\n\npub table Item(id: Str) {\n    v: Int,\n}\n\npub fn b_items() = b.Item | count();\n";
 
 const B: &str = "pub table Item(id: Str) {\n    w: Str,\n}\n";
 
@@ -109,7 +110,10 @@ fn module_tables_check_run_and_query_through_qualified_identities() {
 
     // Both `Item` rows use key "x": one table under one bare name would
     // reject the second insert as a duplicate key.
-    assert_success(&project_command(directory.path(), &["run", "main.seed"]), "seed");
+    assert_success(
+        &project_command(directory.path(), &["run", "main.seed"]),
+        "seed",
+    );
     // Each module table keeps its own stored key: the two `x` rows are one row
     // per qualified table, never one row under a bare `Item` name.
     let counts = stored_row_counts(directory.path());
@@ -123,7 +127,10 @@ fn module_tables_check_run_and_query_through_qualified_identities() {
         !counts.iter().any(|(table, _)| table == "Item"),
         "module rows must not be stored under the bare name: {counts:?}"
     );
-    assert_success(&project_command(directory.path(), &["run", "main.verify"]), "verify");
+    assert_success(
+        &project_command(directory.path(), &["run", "main.verify"]),
+        "verify",
+    );
     assert_success(
         &project_command(directory.path(), &["run", "telemetry.rig.trips"]),
         "nested module function by full path",
@@ -186,7 +193,10 @@ fn stored_row_counts(directory: &Path) -> Vec<(String, i64)> {
 #[test]
 fn legacy_bare_module_rows_are_refused_not_migrated() {
     let directory = module_project();
-    assert_success(&project_command(directory.path(), &["run", "main.seed"]), "seed");
+    assert_success(
+        &project_command(directory.path(), &["run", "main.seed"]),
+        "seed",
+    );
     // Rows an earlier build stored under the bare `Item` name.
     run_state_sql(
         directory.path(),
@@ -198,5 +208,8 @@ fn legacy_bare_module_rows_are_refused_not_migrated() {
         "a store holding bare-name module rows must be refused"
     );
     let stderr = String::from_utf8_lossy(&rejected.stderr);
-    assert!(stderr.contains("E2200"), "refusal must carry E2200: {stderr}");
+    assert!(
+        stderr.contains("E2200"),
+        "refusal must carry E2200: {stderr}"
+    );
 }

@@ -42,10 +42,7 @@ pub struct DependencyEdge {
 
 impl DependencyEdge {
     /// Creates one exact dependency observation.
-    pub const fn new(
-        dependent: SemanticEntityId,
-        dependency: SemanticEntityId,
-    ) -> Self {
+    pub const fn new(dependent: SemanticEntityId, dependency: SemanticEntityId) -> Self {
         Self {
             dependent,
             dependency,
@@ -137,31 +134,21 @@ enum RowMutationKind {
 
 impl RowMutationIntent {
     /// Creates an insert identity event from a canonical logical key.
-    pub fn insert(
-        table: TypeId,
-        key: &CanonicalValue,
-    ) -> Result<Self, SemanticSnapshotError> {
+    pub fn insert(table: TypeId, key: &CanonicalValue) -> Result<Self, SemanticSnapshotError> {
         Ok(Self {
             kind: RowMutationKind::Insert {
                 table,
-                key: key
-                    .encode()
-                    .map_err(SemanticSnapshotError::ValueEncoding)?,
+                key: key.encode().map_err(SemanticSnapshotError::ValueEncoding)?,
             },
         })
     }
 
     /// Creates a delete identity event from a canonical logical key.
-    pub fn delete(
-        table: TypeId,
-        key: &CanonicalValue,
-    ) -> Result<Self, SemanticSnapshotError> {
+    pub fn delete(table: TypeId, key: &CanonicalValue) -> Result<Self, SemanticSnapshotError> {
         Ok(Self {
             kind: RowMutationKind::Delete {
                 table,
-                key: key
-                    .encode()
-                    .map_err(SemanticSnapshotError::ValueEncoding)?,
+                key: key.encode().map_err(SemanticSnapshotError::ValueEncoding)?,
             },
         })
     }
@@ -342,9 +329,8 @@ impl SemanticSnapshot {
         mut self,
         rekeys: impl IntoIterator<Item = RowRekey>,
     ) -> Result<Self, SemanticSnapshotError> {
-        self.row_mutations.extend(
-            rekeys.into_iter().map(RowMutationIntent::rekey),
-        );
+        self.row_mutations
+            .extend(rekeys.into_iter().map(RowMutationIntent::rekey));
         Ok(self)
     }
 
@@ -410,7 +396,10 @@ impl fmt::Debug for RowChange {
             .debug_struct("RowChange")
             .field("table", &self.table)
             .field("key", &"<redacted>")
-            .field("previous_key", &self.previous_key.as_ref().map(|_| "<redacted>"))
+            .field(
+                "previous_key",
+                &self.previous_key.as_ref().map(|_| "<redacted>"),
+            )
             .field("kind", &self.kind)
             .finish()
     }
@@ -629,7 +618,8 @@ fn diff_rows(
                 }
             }
             RowMutationKind::Delete { table, key } => {
-                if let Some(Identity::Base(origin)) = current_identity.remove(&(*table, key.clone()))
+                if let Some(Identity::Base(origin)) =
+                    current_identity.remove(&(*table, key.clone()))
                 {
                     deleted_base.insert((*table, origin));
                 }
@@ -705,7 +695,10 @@ fn diff_rows(
             if consumed.contains(&(table, key.clone())) {
                 return None;
             }
-            let kind = match (base.get(&(table, key.clone())), candidate.get(&(table, key.clone()))) {
+            let kind = match (
+                base.get(&(table, key.clone())),
+                candidate.get(&(table, key.clone())),
+            ) {
                 (None, Some(_)) => Some(RowChangeKind::Added),
                 (Some(_), None) => Some(RowChangeKind::Removed),
                 (Some(before), Some(after)) if before != after => Some(RowChangeKind::Updated),
@@ -823,7 +816,9 @@ impl fmt::Display for SemanticSnapshotError {
                 formatter.write_str("semantic snapshot repeats a function result identity")
             }
             Self::IdentityRekey => formatter.write_str("semantic snapshot re-key kept its key"),
-            Self::DuplicateRekey => formatter.write_str("semantic snapshot repeats a re-key intent"),
+            Self::DuplicateRekey => {
+                formatter.write_str("semantic snapshot repeats a re-key intent")
+            }
         }
     }
 }

@@ -118,7 +118,11 @@ async fn edit_draft_write_and_read_stay_bounded() {
             .read_range((chunk * CHUNK_BYTES) as u64, CHUNK_BYTES)
             .await
             .expect("read a chunk back");
-        assert_eq!(read, pattern(chunk), "chunk {chunk} round-trips through the spool");
+        assert_eq!(
+            read,
+            pattern(chunk),
+            "chunk {chunk} round-trips through the spool"
+        );
     }
 
     let peak = window_peak(baseline_live, "edit draft write and read");
@@ -140,7 +144,9 @@ async fn scratch_fsync_stays_bounded() {
         .managed_file(baseline)
         .await
         .expect("scope the destination baseline");
-    let scratch = destination.begin_temporary_replacement(CANDIDATE_BYTES).await;
+    let scratch = destination
+        .begin_temporary_replacement(CANDIDATE_BYTES)
+        .await;
     for chunk in 0..CHUNKS {
         scratch
             .write_at((chunk * CHUNK_BYTES) as u64, &pattern(chunk))
@@ -156,7 +162,11 @@ async fn scratch_fsync_stays_bounded() {
                 let range = snapshot
                     .read_range((chunk * CHUNK_BYTES) as u64, CHUNK_BYTES)
                     .expect("read a snapshot chunk");
-                assert_eq!(range, pattern(chunk), "chunk {chunk} streams from the snapshot");
+                assert_eq!(
+                    range,
+                    pattern(chunk),
+                    "chunk {chunk} streams from the snapshot"
+                );
             }
             Ok::<(), ()>(())
         })

@@ -156,7 +156,10 @@ async fn unsupported_target_and_key_format_mismatch_fail_before_mutation() {
     assert_eq!(audits.len(), 2);
     assert!(!audits[1].succeeded);
     assert_eq!(audits[1].function, "sys.admin.reset_checkpoint");
-    assert_eq!(audits[1].terminal_outcome, "failure:checkpoint_not_replayable");
+    assert_eq!(
+        audits[1].terminal_outcome,
+        "failure:checkpoint_not_replayable"
+    );
 
     let mut mismatched_key = key.clone();
     mismatched_key.position_format = Component::new("position-format-v2").unwrap();

@@ -70,7 +70,10 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     for byte in &digest {
         write!(digest_hex, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    assert_eq!(digest_hex, BUNDLE_SHA256, "committed legacy bundle digest changed");
+    assert_eq!(
+        digest_hex, BUNDLE_SHA256,
+        "committed legacy bundle digest changed"
+    );
 
     let source = parent.path().join("source");
     let clone = Command::new("git")
@@ -121,7 +124,10 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
             .map(|value| CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()),
     );
     assert!(key_sets.contains(&int_keys), "Int keys 1..=4 not found");
-    assert!(key_sets.contains(&str_keys), "Str keys alpha/beta/gamma not found");
+    assert!(
+        key_sets.contains(&str_keys),
+        "Str keys alpha/beta/gamma not found"
+    );
     for keys in &key_sets {
         let mut distinct = keys.clone();
         distinct.dedup();
@@ -137,7 +143,10 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
         CanonicalValue::new(tagged).unwrap()
     };
     let date_keys = encoded_keys(&["1969-12-31", "1970-01-01", "1970-01-02"].map(date_key));
-    assert!(key_sets.contains(&date_keys), "Date keys -1, 0, 1 not found");
+    assert!(
+        key_sets.contains(&date_keys),
+        "Date keys -1, 0, 1 not found"
+    );
     for table in &tables {
         for row in table.rows() {
             let is_known_key = matches!(
@@ -174,7 +183,10 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
                 panic!("key-only field name is not bytes");
             };
             assert_eq!(name_bytes.len(), 16, "field name is a 16-byte UUID");
-            assert!(stored == row.key().raw(), "key-only field repeats the row key");
+            assert!(
+                stored == row.key().raw(),
+                "key-only field repeats the row key"
+            );
             field_names.insert(name_bytes.clone());
         }
         assert_eq!(field_names.len(), 1, "each table names one key field");

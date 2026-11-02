@@ -18,12 +18,12 @@
 //! Only format 3 has a row writer. A format-1/2 `HEAD` stays readable but is
 //! refused before recovery, runtime access or any freeze (ORNA-UPGRADE-003).
 
+use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
+use orna_repository_v1::{CandidateAssertionGate, publication_crash_barrier};
 use orna_runtime_v1::{RuntimeState, TableMutation};
 use orna_storage_v1::RuntimePublicationCoordinator;
-use orna_repository_v1::{CandidateAssertionGate, publication_crash_barrier};
-use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 
-use super::{Diagnostic, Exit, Endpoint, local_project_path, runtime_identity, BTreeMap};
+use super::{BTreeMap, Diagnostic, Endpoint, Exit, local_project_path, runtime_identity};
 
 const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
@@ -198,12 +198,14 @@ fn validate_candidate_source_rows(
                 "table identity, descriptor, database or snapshot conflicts with the selected snapshot; the pending range was preserved",
             ));
         }
-        let value_context = format.open_value_context(table_id.bytes()).map_err(|error| {
-            publish_error(
-                "format-3 row value context could not be opened",
-                format!("{error:?}; the pending range was preserved"),
-            )
-        })?;
+        let value_context = format
+            .open_value_context(table_id.bytes())
+            .map_err(|error| {
+                publish_error(
+                    "format-3 row value context could not be opened",
+                    format!("{error:?}; the pending range was preserved"),
+                )
+            })?;
         let projected = orna_storage_v1::project_runtime_mutation_for_descriptor(
             binding.descriptor(),
             table_id.bytes(),
@@ -609,7 +611,10 @@ fn legacy_read_only_refusal(
 
 /// ORNA-PUB-012: name the condition that paused publication and keep the
 /// remedy actionable, without implying the pending tail was discarded.
-pub(super) fn describe_storage_failure(title: &'static str, error: &orna_storage_v1::Error) -> Diagnostic {
+pub(super) fn describe_storage_failure(
+    title: &'static str,
+    error: &orna_storage_v1::Error,
+) -> Diagnostic {
     use orna_storage_v1::Error as E;
     let detail = match error {
         E::LegacyReadOnly { format } => return legacy_read_only_refusal(title, *format, false),
@@ -741,7 +746,9 @@ mod tests {
             status.status.success()
         };
         let path = ".orna/store/data";
-        assert!(run("git init -q . && git config user.email t@t && git config user.name t"));
+        assert!(run(
+            "git init -q . && git config user.email t@t && git config user.name t"
+        ));
         std::fs::create_dir_all(root.join(".orna/store")).unwrap();
         std::fs::write(root.join(path), b"committed\n").unwrap();
         assert!(run("git add -A && git commit -q -m base"));

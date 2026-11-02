@@ -3,7 +3,9 @@
 //! callback results, and literal callback lists with mismatching result types
 //! are rejected.
 
-use orna_semantic_v1::{Analysis, Catalogue, DIAG_TYPE, EffectKind, ModuleInput, analyze_with_catalogue};
+use orna_semantic_v1::{
+    Analysis, Catalogue, DIAG_TYPE, EffectKind, ModuleInput, analyze_with_catalogue,
+};
 
 fn analysis(source: &str) -> Analysis {
     analyze_with_catalogue(
@@ -46,8 +48,17 @@ pub fn pause(): Null = concurrent.sleep(1.second);
     );
 
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
-    let module = analysis.modules.values().next().expect("concurrency module");
-    assert!(module.symbols["pause"].effects.effects.contains(&EffectKind::Clock));
+    let module = analysis
+        .modules
+        .values()
+        .next()
+        .expect("concurrency module");
+    assert!(
+        module.symbols["pause"]
+            .effects
+            .effects
+            .contains(&EffectKind::Clock)
+    );
 }
 
 #[test]
@@ -96,9 +107,10 @@ pub fn run(count: fn(): Int, label: fn(): Text): [Int] =
     );
 
     assert!(
-        diagnostics(&analysis).iter().any(|(code, message)| *code
-            == DIAG_TYPE
-            && *message == "parallel callbacks must have compatible result types"),
+        diagnostics(&analysis)
+            .iter()
+            .any(|(code, message)| *code == DIAG_TYPE
+                && *message == "parallel callbacks must have compatible result types"),
         "mismatching callback result types must be rejected: {:?}",
         diagnostics(&analysis)
     );

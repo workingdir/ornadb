@@ -13,11 +13,9 @@ fn pinned_error_and_result_modules_load_from_the_captured_snapshot() {
         .into_iter()
         .filter(|(path, _)| path == "std/error.orna" || path == "std/result.orna")
         .collect::<Vec<_>>();
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/typdl-error-result",
-        sources.clone(),
-    )
-    .unwrap();
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/typdl-error-result", sources.clone())
+            .unwrap();
     let error_source = sources
         .iter()
         .find(|(path, _)| path == "std/error.orna")
@@ -47,12 +45,16 @@ fn pinned_error_and_result_modules_load_from_the_captured_snapshot() {
 fn core_failure_recovery_works_without_std_and_optional_error_module_stays_missing() {
     let mut session = AdmittedReplSession::new(Limits::default());
     let core = session
-        .submit(include_str!("fixtures/stdlib-core-error-without-std-typdl.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-core-error-without-std-typdl.orna"
+        ))
         .unwrap_or_else(|error| panic!("core recovery failed: {}", error.code()));
     assert_eq!(core, Some(canonical(Raw::Bool(true))));
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-error-without-snapshot-typdl.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-error-without-snapshot-typdl.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"

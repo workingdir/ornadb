@@ -3,7 +3,13 @@ use orna_foundation_v1::CanonicalValue;
 use orna_value_v1::Raw;
 
 fn raw_ints(values: &[i64]) -> Raw {
-    Raw::Array(values.iter().copied().map(|value| Raw::Int(value.into())).collect())
+    Raw::Array(
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
+    )
 }
 
 #[test]
@@ -41,7 +47,9 @@ fn paired_sparse_window_distinct_folds_keep_frame_and_lane_identity() {
             "right window frames",
         ),
         (
-            include_str!("fixtures/stdlib-query-paired-window-fold-right-frame-distinct-y5hv5.orna"),
+            include_str!(
+                "fixtures/stdlib-query-paired-window-fold-right-frame-distinct-y5hv5.orna"
+            ),
             "right frame distinct fold",
         ),
         (
@@ -58,9 +66,7 @@ fn paired_sparse_window_distinct_folds_keep_frame_and_lane_identity() {
         ))
         .unwrap_or_else(|error| panic!("paired frame folds failed with {}", error.code()));
     let integer = |value: i64| Raw::Int(value.into());
-    let frame = |values: &[i64]| {
-        Raw::Array(values.iter().copied().map(integer).collect())
-    };
+    let frame = |values: &[i64]| Raw::Array(values.iter().copied().map(integer).collect());
     let expected_frames = CanonicalValue::new(Raw::Tag(
         60015,
         Box::new(Raw::Array(vec![
@@ -79,7 +85,12 @@ fn paired_sparse_window_distinct_folds_keep_frame_and_lane_identity() {
         .submit(include_str!(
             "fixtures/stdlib-query-paired-window-fold-result-y5hv5.orna"
         ))
-        .unwrap_or_else(|error| panic!("paired sparse window distinct folds failed with {}", error.code()));
+        .unwrap_or_else(|error| {
+            panic!(
+                "paired sparse window distinct folds failed with {}",
+                error.code()
+            )
+        });
     let expected = CanonicalValue::new(Raw::Tag(
         60015,
         Box::new(Raw::Array(vec![raw_ints(&[1, 2]), raw_ints(&[2, 1])])),

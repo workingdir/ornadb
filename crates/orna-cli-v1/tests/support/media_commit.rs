@@ -202,7 +202,9 @@ async fn commit_capture_inner(
             [ordinal + 4; 32],
             TerminalOutcome::new(vec![ordinal + 5]).unwrap(),
             &NoFault,
-            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
         )
         .await
         .unwrap();
@@ -407,7 +409,9 @@ pub async fn commit_source_captures_for_table(
             [ordinal.wrapping_add(4); 32],
             TerminalOutcome::new(vec![ordinal.wrapping_add(5)]).unwrap(),
             &NoFault,
-            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
         )
         .await
         .unwrap();
@@ -437,7 +441,10 @@ pub async fn commit_source_replacement_through_save_admission(
     table_name: &str,
     capture: &SourceCaptureRow<'_>,
 ) {
-    assert!(!capture.insert_only, "a save admission replaces an existing row");
+    assert!(
+        !capture.insert_only,
+        "a save admission replaces an existing row"
+    );
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
@@ -514,9 +521,15 @@ pub async fn commit_source_replacement_through_save_admission(
         )
     });
     let (source_mutation, source_bindings, resolved_schema) = admitted.into_mutation_and_bindings();
-    assert_eq!(resolved_schema.table_object_id(), TableObjectId::new(relation_id));
+    assert_eq!(
+        resolved_schema.table_object_id(),
+        TableObjectId::new(relation_id)
+    );
     assert_eq!(source_mutation.table(), table_name);
-    assert_eq!(source_mutation.table_object_id(), Some(TableObjectId::new(relation_id)));
+    assert_eq!(
+        source_mutation.table_object_id(),
+        Some(TableObjectId::new(relation_id))
+    );
     assert_eq!(source_mutation.key(), capture.key.as_bytes());
     // Source-row admission creates insert-only mutations; this save writes the
     // replacement over the stored row instead.
@@ -548,12 +561,9 @@ pub async fn commit_source_replacement_through_save_admission(
         .value()
         .expect("the replacement row has a value")
         .to_vec();
-    let replacement = VfsTableRowReplacement::from_admitted_mutation(
-        coordinates.table().clone(),
-        mutation,
-        pins,
-    )
-    .expect("the admitted replacement is a valid table row");
+    let replacement =
+        VfsTableRowReplacement::from_admitted_mutation(coordinates.table().clone(), mutation, pins)
+            .expect("the admitted replacement is a valid table row");
     let validator = transactional_loaded_project_candidate_validator(
         &project,
         &identities,

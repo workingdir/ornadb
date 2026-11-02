@@ -79,7 +79,11 @@ const EXPECTATIONS: &[(&str, &str, Expect)] = &[
     ("*/ pub fn after_block", "pub", Is(Keyword)),
     ("after_block()", "after_block", Is(Identifier)),
     // ORNA-LEX-004: block comments nest, and a run of `*` closes them.
-    ("inner */ still outer let */", "still outer let", Is(Comment)),
+    (
+        "inner */ still outer let */",
+        "still outer let",
+        Is(Comment),
+    ),
     ("pub fn after_nested", "after_nested", Is(Identifier)),
     ("/** doc comment **/", "doc comment", Is(Comment)),
     ("**/ pub fn after_stars", "after_stars", Is(Identifier)),
@@ -438,7 +442,11 @@ fn vim_patterns_match_whole_numerals_and_identifiers() {
         ("ornaNumber", "6.02E+23f", "[6.02E+23f]"),
         ("ornaNumber", "7f", "[7f]"),
         ("ornaNumber", "2026-09-01", "[2026-09-01]"),
-        ("ornaNumber", "2026-09-01T14:30:00Z", "[2026-09-01T14:30:00Z]"),
+        (
+            "ornaNumber",
+            "2026-09-01T14:30:00Z",
+            "[2026-09-01T14:30:00Z]",
+        ),
         (
             "ornaNumber",
             "2026-09-01T14:30:00.123+02:00",
@@ -479,7 +487,10 @@ fn vim_patterns_match_whole_numerals_and_identifiers() {
             .arg(&input_path))
         else {
             let _ = fs::remove_dir_all(&scratch);
-            return skip("Vim patterns", "vi is not installed; install vim or vim-minimal");
+            return skip(
+                "Vim patterns",
+                "vi is not installed; install vim or vim-minimal",
+            );
         };
         assert!(output.status.success(), "vi failed: {output:?}");
         let actual = fs::read_to_string(&output_path).expect("vi wrote its output");
@@ -541,7 +552,9 @@ fn sublime_syntax_loads_and_classifies_the_shared_sample() {
                 .map(Scope::build_string)
                 .collect::<Vec<_>>();
             classes.set(index, position, offset, scope_class(&scopes));
-            stack.apply(&operation).expect("the scope operation applies");
+            stack
+                .apply(&operation)
+                .expect("the scope operation applies");
             position = offset;
         }
         let scopes = stack
@@ -633,30 +646,42 @@ fn tree_sitter_grammar_and_highlights_classify_the_shared_sample() {
             ))
         })
         .collect::<Vec<_>>();
-    assert!(!spans.is_empty(), "tree-sitter reported no captures:\n{captures}");
+    assert!(
+        !spans.is_empty(),
+        "tree-sitter reported no captures:\n{captures}"
+    );
     // The innermost capture decides, as in highlighting: apply wide spans
     // first so the nodes nested in them overwrite their bytes.
     let line_lengths = SAMPLE.lines().map(str::len).collect::<Vec<_>>();
-    let width = |((start_row, start_column), (end_row, end_column)): ((usize, usize), (usize, usize))| {
-        let mut bytes = 0;
-        for (row, line_length) in line_lengths
-            .iter()
-            .enumerate()
-            .take(end_row + 1)
-            .skip(start_row)
-        {
-            let from = if row == start_row { start_column } else { 0 };
-            let to = if row == end_row { end_column } else { line_length + 1 };
-            bytes += to.saturating_sub(from);
-        }
-        bytes
-    };
+    let width =
+        |((start_row, start_column), (end_row, end_column)): ((usize, usize), (usize, usize))| {
+            let mut bytes = 0;
+            for (row, line_length) in line_lengths
+                .iter()
+                .enumerate()
+                .take(end_row + 1)
+                .skip(start_row)
+            {
+                let from = if row == start_row { start_column } else { 0 };
+                let to = if row == end_row {
+                    end_column
+                } else {
+                    line_length + 1
+                };
+                bytes += to.saturating_sub(from);
+            }
+            bytes
+        };
     spans.sort_by_key(|&(start, end, _)| std::cmp::Reverse(width((start, end))));
     let mut classes = Classes::new();
     for ((start_row, start_column), (end_row, end_column), class) in spans {
         for row in start_row..=end_row {
             let from = if row == start_row { start_column } else { 0 };
-            let to = if row == end_row { end_column } else { usize::MAX };
+            let to = if row == end_row {
+                end_column
+            } else {
+                usize::MAX
+            };
             classes.set(row, from, to, class);
         }
     }

@@ -352,7 +352,10 @@ impl<'a> StoredSchema<'a> {
         if !entries.is_empty() {
             return Err(Failure::Mismatch);
         }
-        Ok(tag(RECORD_TAG, vec![Raw::Null, Raw::Array(canonical_record_fields(stored)?)]))
+        Ok(tag(
+            RECORD_TAG,
+            vec![Raw::Null, Raw::Array(canonical_record_fields(stored)?)],
+        ))
     }
 
     fn lower_nominal(&self, id: &Raw, value: &Raw, depth: usize) -> Result<Raw, Failure> {
@@ -418,7 +421,10 @@ impl<'a> StoredSchema<'a> {
         if !entries.is_empty() {
             return Err(Failure::Mismatch);
         }
-        Ok(tag(RECORD_TAG, vec![owner.clone(), Raw::Array(canonical_record_fields(stored)?)]))
+        Ok(tag(
+            RECORD_TAG,
+            vec![owner.clone(), Raw::Array(canonical_record_fields(stored)?)],
+        ))
     }
 
     fn lower_enum(
@@ -968,9 +974,11 @@ pub table Probe(id: Str) {
             })
             .collect::<Vec<_>>();
         assert_eq!(keys.len(), 2);
-        assert!(keys[0] < keys[1], "entries are ascending by encoded field id");
+        assert!(
+            keys[0] < keys[1],
+            "entries are ascending by encoded field id"
+        );
     }
-
 
     #[test]
     fn nominal_enum_and_refined_values_lower_by_object_identity() {

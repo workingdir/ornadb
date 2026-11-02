@@ -20,10 +20,8 @@ const VERSION: &str = "1.1.0";
 const NORMATIVE_PAYLOAD_COUNT: usize = 58;
 /// The only named algorithm results the 1.1.0 model register records twice; each
 /// pair is byte-identical in the vendored `evidence/model-results.json`.
-const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] = [
-    "golden MIME audio/mpeg",
-    "golden MIME application/gzip",
-];
+const EXACT_DUPLICATE_MODEL_RESULTS: [&str; 2] =
+    ["golden MIME audio/mpeg", "golden MIME application/gzip"];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceError(String);
 impl std::fmt::Display for TraceError {
@@ -315,7 +313,9 @@ fn generate_inner(
     let evidence: EvidenceFile = read_json(root, "tests/requirement-evidence.json")?;
     let manifest: Manifest = read_json(root, "tests/conformance-manifest.json")?;
     if release.version != manifest.version {
-        return Err(err("release version disagrees with the conformance manifest"));
+        return Err(err(
+            "release version disagrees with the conformance manifest",
+        ));
     }
     let invalid: InvalidMetadata = read_json(root, "tests/invalid-metadata.json")?;
     let scenarios: Scenarios = read_json(root, "tests/scenarios.json")?;
@@ -974,7 +974,10 @@ fn validate(
                 .implementation_status
                 .as_deref()
                 .is_none_or(str::is_empty)
-            || scenario.evidence_level.as_deref().is_some_and(str::is_empty)
+            || scenario
+                .evidence_level
+                .as_deref()
+                .is_some_and(str::is_empty)
         {
             return Err(err(
                 "scenario lacks requirement links, implementation_status, or a non-empty evidence level",
@@ -1002,10 +1005,12 @@ fn validate(
 /// evidence level is classified by it; a scenario without one must be
 /// `not-executed` and is a justified gap. Anything else is rejected.
 fn scenario_status(scenario: &Scenario) -> Result<Status> {
-    let implementation_status = scenario
-        .implementation_status
-        .as_deref()
-        .ok_or_else(|| err(format!("scenario lacks implementation_status: {}", scenario.id)))?;
+    let implementation_status = scenario.implementation_status.as_deref().ok_or_else(|| {
+        err(format!(
+            "scenario lacks implementation_status: {}",
+            scenario.id
+        ))
+    })?;
     match scenario.evidence_level.as_deref() {
         Some(level) => Ok(status_from_level(level)),
         None if implementation_status == "not-executed" => Ok(Status::JustifiedGap),
@@ -1500,15 +1505,16 @@ mod tests {
                         Some("pass")
                     );
                 }
-                fs::write(&manifest, serde_json::to_vec(&value).expect("serialize manifest"))
-                    .expect("write copied manifest");
+                fs::write(
+                    &manifest,
+                    serde_json::to_vec(&value).expect("serialize manifest"),
+                )
+                .expect("write copied manifest");
                 let error = generate(&root).expect_err("invalid valid-fixture expectation");
                 assert!(
-                    error
-                        .to_string()
-                        .contains(&format!(
-                            "valid fixture lacks required pass expectations: {fixture_id}"
-                        )),
+                    error.to_string().contains(&format!(
+                        "valid fixture lacks required pass expectations: {fixture_id}"
+                    )),
                     "{phase} rejection should come from expectation validation, got: {error}"
                 );
             }
@@ -1699,10 +1705,9 @@ mod tests {
         // unchanged and make this test's positive case explicit in a copy.
         let root = copy_corpus();
         let evidence_path = root.join("tests/requirement-evidence.json");
-        let mut evidence: Value = serde_json::from_slice(
-            &fs::read(&evidence_path).expect("copied requirement evidence"),
-        )
-        .expect("valid copied requirement evidence");
+        let mut evidence: Value =
+            serde_json::from_slice(&fs::read(&evidence_path).expect("copied requirement evidence"))
+                .expect("valid copied requirement evidence");
         let requirement = evidence["requirements"]
             .as_array_mut()
             .expect("requirement evidence array")
@@ -1710,8 +1715,7 @@ mod tests {
             .find(|entry| entry["requirement"] == "ORNA-SOURCE-001")
             .expect("source requirement evidence");
         requirement["tests"][0]["fixture"] = Value::String("valid/minimal-root.orna".into());
-        requirement["tests"][0]["path"] =
-            Value::String("examples/valid/minimal-root.orna".into());
+        requirement["tests"][0]["path"] = Value::String("examples/valid/minimal-root.orna".into());
         fs::write(
             evidence_path,
             serde_json::to_vec(&evidence).expect("serialize copied requirement evidence"),

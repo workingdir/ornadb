@@ -70,10 +70,7 @@ pub fn describe_transfer_json(transfer: &ProtectedContentTransfer) -> String {
 
 /// Describes every pin as a JSON array, in order.
 pub fn describe_pins_json<'a>(pins: impl IntoIterator<Item = &'a ProtectedContentPin>) -> String {
-    let entries = pins
-        .into_iter()
-        .map(describe_pin_json)
-        .collect::<Vec<_>>();
+    let entries = pins.into_iter().map(describe_pin_json).collect::<Vec<_>>();
     format!("[{}]", entries.join(","))
 }
 

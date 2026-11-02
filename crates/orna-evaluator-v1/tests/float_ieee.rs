@@ -85,7 +85,10 @@ fn power_follows_ieee_special_cases() {
 fn negative_zero_is_preserved_by_arithmetic() {
     assert_eq!(float_bits("-0.0f"), (-0.0f64).to_bits());
     assert_eq!(float_bits("0.0f * -1.0f"), (-0.0f64).to_bits());
-    assert_eq!(float_bits("1.0f / (1.0f / 0.0f * -1.0f)"), (-0.0f64).to_bits());
+    assert_eq!(
+        float_bits("1.0f / (1.0f / 0.0f * -1.0f)"),
+        (-0.0f64).to_bits()
+    );
 }
 
 // Specified: ORNA-FLOAT-001; NaN is unordered against itself and infinities order by value.
@@ -114,8 +117,14 @@ fn scalar_min_and_max_follow_float_extrema_rules() {
     assert_eq!(float_bits("std.math.min(-0.0f, 0.0f)"), (-0.0f64).to_bits());
     assert_eq!(float_bits("std.math.max(-0.0f, 0.0f)"), 0.0f64.to_bits());
     assert_eq!(float_bits("std.math.max(0.0f, -0.0f)"), 0.0f64.to_bits());
-    assert_eq!(float_bits("std.math.min(0.0f / 0.0f, 1.0f)"), CANONICAL_NAN_BITS);
-    assert_eq!(float_bits("std.math.max(1.0f, 0.0f / 0.0f)"), CANONICAL_NAN_BITS);
+    assert_eq!(
+        float_bits("std.math.min(0.0f / 0.0f, 1.0f)"),
+        CANONICAL_NAN_BITS
+    );
+    assert_eq!(
+        float_bits("std.math.max(1.0f, 0.0f / 0.0f)"),
+        CANONICAL_NAN_BITS
+    );
 }
 
 fn session() -> AdmittedReplSession {
@@ -155,7 +164,13 @@ fn canonical_nonfinite_float_spellings_decode_and_re_encode() {
 #[test]
 fn float_values_survive_an_encode_decode_round_trip() {
     let mut repl = session();
-    for value in ["0.0f / 0.0f", "1.0f / 0.0f", "-1.0f / 0.0f", "-0.0f", "0.1f"] {
+    for value in [
+        "0.0f / 0.0f",
+        "1.0f / 0.0f",
+        "-1.0f / 0.0f",
+        "-0.0f",
+        "0.1f",
+    ] {
         let encoded = format!("std.encoding.orna.encode({value})");
         let round_trip = format!(
             "std.encoding.orna.encode(std.encoding.orna.decode(std.encoding.orna.encode({value}), as: Float))"

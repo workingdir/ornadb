@@ -27,10 +27,7 @@ fn repository() -> (TempDir, Repository) {
         directory.path(),
         &["init", "--quiet", "--initial-branch=main", "--template="],
     );
-    git(
-        directory.path(),
-        &["config", "user.name", "kierandrewett"],
-    );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
     git(
         directory.path(),
         &["config", "user.email", "kieran@drewett.dev"],
@@ -41,19 +38,17 @@ fn repository() -> (TempDir, Repository) {
     )
     .expect("write fixture root module");
     git(directory.path(), &["add", "main.orna"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "initial snapshot"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "initial snapshot"],
+    );
     let repository = Repository::discover(directory.path()).expect("discover repository");
     (directory, repository)
 }
 
 fn table_mutation(id: u8, key: u8, value: Option<&[u8]>) -> TableMutation {
-    TableMutation::new(
-        [id; 16],
-        "records",
-        vec![key],
-        value.map(<[u8]>::to_vec),
-    )
-    .expect("valid typed table mutation")
+    TableMutation::new([id; 16], "records", vec![key], value.map(<[u8]>::to_vec))
+        .expect("valid typed table mutation")
 }
 
 async fn commit(
@@ -191,12 +186,14 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         "the runtime resolver does not reinterpret Git snapshots as CWD pins"
     );
 
-    assert!(state
-        .read_table_at(&generation_zero, "records")
-        .await
-        .expect("read initial generation")
-        .rows()
-        .is_empty());
+    assert!(
+        state
+            .read_table_at(&generation_zero, "records")
+            .await
+            .expect("read initial generation")
+            .rows()
+            .is_empty()
+    );
     assert_eq!(
         state
             .read_table_at(&generation_one, "records")
@@ -211,10 +208,7 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
             .await
             .expect("read second generation")
             .rows(),
-        &[
-            (vec![1], b"two".to_vec()),
-            (vec![2], b"also two".to_vec()),
-        ]
+        &[(vec![1], b"two".to_vec()), (vec![2], b"also two".to_vec()),]
     );
     assert_eq!(
         state
@@ -245,8 +239,14 @@ async fn historical_reads_are_pinned_to_checkpoint_generations_and_cover_deletes
         .read_table_at(&generation_two, "records")
         .await
         .expect("read second generation with context");
-    assert_eq!(generation_one_rows.snapshot_id(), generation_one.snapshot_id());
-    assert_eq!(generation_two_rows.snapshot_id(), generation_two.snapshot_id());
+    assert_eq!(
+        generation_one_rows.snapshot_id(),
+        generation_one.snapshot_id()
+    );
+    assert_eq!(
+        generation_two_rows.snapshot_id(),
+        generation_two.snapshot_id()
+    );
     assert_eq!(
         generation_one_rows.require_same_context(&generation_two_rows),
         Err(RuntimeError::SnapshotContextMismatch)
@@ -389,7 +389,10 @@ async fn historical_snapshot_cannot_be_rebound_to_another_runtime_identity() {
     .await
     .expect("open second runtime");
     assert_eq!(
-        second.read_table_at(&first_pin, "records").await.unwrap_err(),
+        second
+            .read_table_at(&first_pin, "records")
+            .await
+            .unwrap_err(),
         RuntimeError::SnapshotContextMismatch
     );
     assert_eq!(
@@ -437,12 +440,14 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         .await
         .expect("resolve decoded generation zero after a later commit");
     assert_eq!(resolved_initial, initial);
-    assert!(state
-        .read_table_at(&resolved_initial, "records")
-        .await
-        .expect("read the pinned initial generation")
-        .rows()
-        .is_empty());
+    assert!(
+        state
+            .read_table_at(&resolved_initial, "records")
+            .await
+            .expect("read the pinned initial generation")
+            .rows()
+            .is_empty()
+    );
 
     let Snapshot::Cwd {
         database,
@@ -524,13 +529,15 @@ async fn as_of_pins_stay_exact_across_generation_encoding_boundaries() {
         .collect();
     for snapshot in round_tripped_boundaries.iter().skip(1) {
         assert_eq!(
-            state.resolve_historical_snapshot(snapshot).await.unwrap_err(),
+            state
+                .resolve_historical_snapshot(snapshot)
+                .await
+                .unwrap_err(),
             RuntimeError::SnapshotNotFound,
             "an unretained generation boundary must not resolve to current CWD"
         );
     }
-    assert!(Snapshot::cwd([32; 16], initial.capture().runtime_id(), BigInt::from(-1))
-        .is_err());
+    assert!(Snapshot::cwd([32; 16], initial.capture().runtime_id(), BigInt::from(-1)).is_err());
 }
 
 #[tokio::test]
@@ -642,7 +649,9 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
     }
 
     assert_eq!(
-        pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
+        pins.iter()
+            .map(|(generation, _, _)| *generation)
+            .collect::<Vec<_>>(),
         [23, 24, 255, 256]
     );
     assert!(
@@ -668,9 +677,9 @@ async fn retained_pins_cross_generation_encoding_boundaries() {
     assert_eq!(
         state
             .read_table_at(&current, "records")
-        .await
-        .expect("read generation 257")
-        .rows(),
+            .await
+            .expect("read generation 257")
+            .rows(),
         &[
             (vec![0], b"head-survivor".to_vec()),
             (vec![1], b"after-256".to_vec()),
@@ -809,7 +818,9 @@ async fn stable_prefix_neighbor_survives_extension_pin_tails() {
     }
 
     assert_eq!(
-        pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
+        pins.iter()
+            .map(|(generation, _, _)| *generation)
+            .collect::<Vec<_>>(),
         [255, 256, 257, 258]
     );
     assert!(pins.windows(2).all(|pair| {
@@ -967,13 +978,10 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     commit(
         &state,
         writer,
-        &[TableMutation::new(
-            [79; 16],
-            "records",
-            vec![5],
-            Some(prefix.clone()),
-        )
-        .expect("valid prefix restoration mutation")],
+        &[
+            TableMutation::new([79; 16], "records", vec![5], Some(prefix.clone()))
+                .expect("valid prefix restoration mutation"),
+        ],
         77,
     )
     .await;
@@ -988,7 +996,10 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     assert_eq!(historical_rows(&state, &both).await, both_rows);
     assert_eq!(historical_rows(&state, &tail_only).await, tail_only_rows);
     assert_eq!(historical_rows(&state, &restored).await, both_rows);
-    assert_eq!(both.capture().generation_digest(), restored.capture().generation_digest());
+    assert_eq!(
+        both.capture().generation_digest(),
+        restored.capture().generation_digest()
+    );
     assert_ne!(both.snapshot_id(), restored.snapshot_id());
 
     // Closing the edge tail then its prefix reaches the empty image without
@@ -1021,7 +1032,10 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     assert_eq!(historical_rows(&state, &both).await, both_rows);
     assert_eq!(historical_rows(&state, &tail_only).await, tail_only_rows);
     assert_eq!(historical_rows(&state, &restored).await, both_rows);
-    assert_eq!(historical_rows(&state, &prefix_only).await, prefix_only_rows);
+    assert_eq!(
+        historical_rows(&state, &prefix_only).await,
+        prefix_only_rows
+    );
     assert!(historical_rows(&state, &empty).await.is_empty());
 
     // A fresh edge tail can be opened after the empty case. Reopening runtime
@@ -1029,13 +1043,10 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     commit(
         &state,
         writer,
-        &[TableMutation::new(
-            [82; 16],
-            "records",
-            vec![5, 0],
-            Some(reopened_tail.clone()),
-        )
-        .expect("valid reopened tail fixture mutation")],
+        &[
+            TableMutation::new([82; 16], "records", vec![5, 0], Some(reopened_tail.clone()))
+                .expect("valid reopened tail fixture mutation"),
+        ],
         77,
     )
     .await;
@@ -1046,13 +1057,10 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
     commit(
         &state,
         writer,
-        &[TableMutation::new(
-            [83; 16],
-            "records",
-            vec![5],
-            Some(prefix.clone()),
-        )
-        .expect("valid reopened prefix fixture mutation")],
+        &[
+            TableMutation::new([83; 16], "records", vec![5], Some(prefix.clone()))
+                .expect("valid reopened prefix fixture mutation"),
+        ],
         77,
     )
     .await;
@@ -1078,8 +1086,14 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
         (vec![5], prefix),
         (vec![5, 0], reopened_tail_rows[0].1.clone()),
     ];
-    assert_eq!(historical_rows(&state, &reopened_tail_only).await, reopened_tail_rows);
-    assert_eq!(historical_rows(&state, &reopened_both).await, reopened_both_rows);
+    assert_eq!(
+        historical_rows(&state, &reopened_tail_only).await,
+        reopened_tail_rows
+    );
+    assert_eq!(
+        historical_rows(&state, &reopened_both).await,
+        reopened_both_rows
+    );
     assert_eq!(
         historical_rows(&state, &reopened_tail_after_closure).await,
         reopened_tail_rows
@@ -1089,7 +1103,11 @@ async fn case_closure_matrix_preserves_each_transition_pin() {
         (1_u64, both.capture().snapshot().clone(), both_rows.clone()),
         (2, tail_only.capture().snapshot().clone(), tail_only_rows),
         (3, restored.capture().snapshot().clone(), both_rows),
-        (4, prefix_only.capture().snapshot().clone(), prefix_only_rows),
+        (
+            4,
+            prefix_only.capture().snapshot().clone(),
+            prefix_only_rows,
+        ),
         (5, empty.capture().snapshot().clone(), Vec::new()),
         (
             6,
@@ -1488,28 +1506,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         // restoration, orphan replacement, and final tail closure.
         let prefix_value = match generation {
             256 | 259 | 261 | 263 | 264 | 266 | 273 | 277 | 282 | 284 | 288 | 291 | 295 | 298
-            | 303 | 308 | 311 | 314 | 319 | 321 | 324 | 329 | 332 | 337 | 340 | 343 | 346
-            | 353 | 355 | 359 | 362 | 367 | 370 | 375 | 378 | 384 | 387 | 393 | 396 | 402
-            | 405 | 410 | 413 | 415 | 420 | 424 | 429 | 433 | 437 | 442 | 446 | 451 | 456
-            | 461 | 466 | 469 | 473 | 479 | 482 | 484 | 488 | 491 | 493 | 497 | 499 | 503
-            | 505 | 509 | 511 | 515 | 520 | 523 | 528 | 533 | 538 | 543 | 551 | 554 | 560
-            | 563 | 567 | 571 | 576 | 584 | 589 | 595 | 600 | 606 | 611 | 617 | 622 | 628
-            | 633 | 639 | 644 | 650 | 655 | 661 | 666 | 672 | 677 | 683 | 688 | 694 | 699 | 705
-            | 710 | 716 | 721 | 727 | 732 | 738 | 743 | 749 | 754 | 760 | 765 | 771 | 776 | 782
-            | 787 | 793 | 798 | 804 | 809 | 815 | 820 | 826 | 831 | 837 | 842 | 848 | 853 | 859
-            | 864 | 870 | 875 | 881 | 886 | 892 | 897 | 903 | 908 | 914 | 919 | 925 | 930 | 936
-            | 941 | 947 | 952 | 958 | 963 | 969 | 974 | 980 | 985 | 991 | 996 | 1002 | 1007
-            | 1013 | 1018 | 1024 | 1029 | 1035 | 1040 | 1046 | 1051 | 1055 | 1058 | 1062 | 1069
-            | 1072 | 1077 | 1081 | 1089 | 1092 | 1097 | 1101 | 1107 | 1108 | 1111 | 1114
-            | 1115 | 1119 | 1122 | 1125 | 1126 | 1129 | 1130 | 1135 | 1136 | 1142 | 1145
-            | 1146 | 1147 | 1150 | 1153 | 1154 | 1157 | 1158 | 1159 | 1162 | 1163
-            | 1167 | 1168 | 1169 | 1170 | 1173 | 1174 | 1178 | 1179 | 1180 | 1183 | 1184
-            | 1189 | 1190 | 1191 | 1194 | 1195 | 1200 | 1201 | 1202 | 1208 | 1209 | 1211
-            | 1212 | 1213 | 1217 | 1218 | 1222 | 1223 | 1224 | 1229 | 1230 | 1231 | 1233
-            | 1234 | 1235 | 1241 | 1242 | 1244 | 1245 | 1246 | 1252 | 1253 | 1255 | 1256
-            | 1257 | 1261 | 1262 | 1266 | 1267 | 1268 | 1272 | 1273 | 1277 | 1278 | 1279
-            | 1285 | 1286 | 1288 | 1289 | 1290 | 1293 | 1294 | 1298 | 1299 | 1300 | 1301
-            | 1305 | 1306 | 1310 | 1311 | 1312 | 1313 | 1316 | 1317 | 1321 | 1322 | 1323 => None,
+            | 303 | 308 | 311 | 314 | 319 | 321 | 324 | 329 | 332 | 337 | 340 | 343 | 346 | 353
+            | 355 | 359 | 362 | 367 | 370 | 375 | 378 | 384 | 387 | 393 | 396 | 402 | 405 | 410
+            | 413 | 415 | 420 | 424 | 429 | 433 | 437 | 442 | 446 | 451 | 456 | 461 | 466 | 469
+            | 473 | 479 | 482 | 484 | 488 | 491 | 493 | 497 | 499 | 503 | 505 | 509 | 511 | 515
+            | 520 | 523 | 528 | 533 | 538 | 543 | 551 | 554 | 560 | 563 | 567 | 571 | 576 | 584
+            | 589 | 595 | 600 | 606 | 611 | 617 | 622 | 628 | 633 | 639 | 644 | 650 | 655 | 661
+            | 666 | 672 | 677 | 683 | 688 | 694 | 699 | 705 | 710 | 716 | 721 | 727 | 732 | 738
+            | 743 | 749 | 754 | 760 | 765 | 771 | 776 | 782 | 787 | 793 | 798 | 804 | 809 | 815
+            | 820 | 826 | 831 | 837 | 842 | 848 | 853 | 859 | 864 | 870 | 875 | 881 | 886 | 892
+            | 897 | 903 | 908 | 914 | 919 | 925 | 930 | 936 | 941 | 947 | 952 | 958 | 963 | 969
+            | 974 | 980 | 985 | 991 | 996 | 1002 | 1007 | 1013 | 1018 | 1024 | 1029 | 1035
+            | 1040 | 1046 | 1051 | 1055 | 1058 | 1062 | 1069 | 1072 | 1077 | 1081 | 1089 | 1092
+            | 1097 | 1101 | 1107 | 1108 | 1111 | 1114 | 1115 | 1119 | 1122 | 1125 | 1126 | 1129
+            | 1130 | 1135 | 1136 | 1142 | 1145 | 1146 | 1147 | 1150 | 1153 | 1154 | 1157 | 1158
+            | 1159 | 1162 | 1163 | 1167 | 1168 | 1169 | 1170 | 1173 | 1174 | 1178 | 1179 | 1180
+            | 1183 | 1184 | 1189 | 1190 | 1191 | 1194 | 1195 | 1200 | 1201 | 1202 | 1208 | 1209
+            | 1211 | 1212 | 1213 | 1217 | 1218 | 1222 | 1223 | 1224 | 1229 | 1230 | 1231 | 1233
+            | 1234 | 1235 | 1241 | 1242 | 1244 | 1245 | 1246 | 1252 | 1253 | 1255 | 1256 | 1257
+            | 1261 | 1262 | 1266 | 1267 | 1268 | 1272 | 1273 | 1277 | 1278 | 1279 | 1285 | 1286
+            | 1288 | 1289 | 1290 | 1293 | 1294 | 1298 | 1299 | 1300 | 1301 | 1305 | 1306 | 1310
+            | 1311 | 1312 | 1313 | 1316 | 1317 | 1321 | 1322 | 1323 => None,
             257 => Some(b"intermediate-prefix".to_vec()),
             265 => Some(b"original-prefix".to_vec()),
             477 => Some(b"case-closure-prefix-final".to_vec()),
@@ -1642,54 +1659,534 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         let mut mutations = Vec::new();
         if !matches!(
             generation,
-            264 | 268 | 269 | 270 | 271 | 272 | 278 | 279 | 281 | 285 | 287 | 290 | 292
-                | 294 | 297 | 299 | 300 | 301 | 304 | 306 | 307 | 310 | 313 | 315 | 316
-                | 318 | 322 | 326 | 327 | 328 | 330 | 334 | 335 | 336 | 338 | 342 | 345 | 347
-                | 348 | 350 | 351 | 352 | 356 | 358 | 361 | 363 | 364 | 366 | 369 | 371 | 372
-                | 374 | 377 | 379 | 380 | 382 | 383 | 386 | 388 | 389 | 391 | 392 | 395 | 397
-                | 398 | 400 | 401 | 404 | 406 | 407 | 409 | 412 | 416 | 418 | 419 | 422 | 423
-                | 425 | 427 | 428 | 431 | 432 | 434 | 436 | 438 | 440 | 441 | 443 | 445 | 447
-                | 449 | 450 | 452 | 454 | 455 | 457 | 458 | 460 | 463 | 464 | 465 | 467 | 470
-                | 472 | 474 | 475 | 478 | 481 | 483 | 484 | 487 | 490 | 492 | 493 | 496
-                | 501 | 502 | 504 | 505 | 508 | 510 | 511 | 514 | 517 | 518 | 519 | 521 | 524
-                | 527 | 529 | 531 | 532 | 534 | 537 | 539 | 541 | 542 | 544 | 545 | 546
-                | 548 | 549 | 550 | 552 | 555 | 556 | 557 | 559 | 561 | 564 | 566 | 568
-                | 570 | 572 | 574 | 575 | 577 | 578 | 579 | 581 | 582 | 583 | 585 | 587 | 588 | 590
-                | 592 | 593 | 594 | 596 | 598 | 599 | 601 | 603 | 604 | 605 | 607 | 609 | 610 | 612
-                | 614 | 615 | 616 | 618 | 620 | 621 | 623 | 625 | 626 | 627 | 629 | 631 | 632 | 634
-                | 636 | 637 | 638 | 640 | 642 | 643 | 645 | 647 | 648 | 649 | 651 | 653 | 654 | 656
-                | 658 | 659 | 660 | 662 | 664 | 665 | 667 | 669 | 670 | 671 | 673 | 675 | 676 | 678
-                | 680 | 681 | 682 | 684 | 686 | 687 | 689 | 691 | 692 | 693 | 695 | 697 | 698 | 700
-                | 702 | 703 | 704 | 706 | 708 | 709 | 711 | 713 | 714 | 715 | 717 | 719 | 720
-                | 722 | 724 | 725 | 726 | 728 | 730 | 731 | 733 | 735 | 736 | 737 | 739 | 741 | 742
-                | 744 | 746 | 747 | 748 | 750 | 752 | 753 | 755 | 757 | 758 | 759 | 761 | 763 | 764
-                | 766 | 768 | 769 | 770 | 772 | 774 | 775 | 777 | 779 | 780 | 781 | 783 | 785 | 786
-                | 788 | 790 | 791 | 792 | 794 | 796 | 797 | 799 | 805 | 807 | 808 | 810 | 816
-                | 818 | 819 | 821 | 827 | 829 | 830 | 832 | 838 | 840 | 841 | 843 | 849 | 851
-                | 852 | 854 | 860 | 862 | 863 | 865 | 871 | 873 | 874 | 876 | 882 | 884 | 885
-                | 887 | 893 | 895 | 896 | 898 | 904 | 906 | 907 | 909 | 915 | 917 | 918 | 920
-                | 926 | 928 | 929 | 931 | 937 | 939 | 940 | 942 | 948 | 950 | 951 | 953 | 959
-                | 961 | 962 | 964 | 970 | 972 | 973 | 975 | 981 | 983 | 984 | 986 | 992 | 994
-                | 995 | 997 | 1003 | 1005 | 1006 | 1008 | 1014 | 1016 | 1017 | 1019 | 1025 | 1027
-                | 1028 | 1030 | 1036 | 1038 | 1039 | 1041 | 1047 | 1049 | 1050 | 1052 | 1053
-                | 1059 | 1060 | 1063 | 1065 | 1067 | 1068 | 1070 | 1073 | 1075 | 1076
-                | 1078 | 1080 | 1082 | 1083 | 1084 | 1087 | 1088 | 1090 | 1093
-                | 1095 | 1098 | 1099 | 1102 | 1103 | 1105 | 1108 | 1110 | 1113 | 1117 | 1118
-                | 1120 | 1124 | 1128 | 1130 | 1132 | 1134 | 1136 | 1138 | 1140 | 1141
-                | 1143 | 1146 | 1147 | 1149 | 1151 | 1154 | 1156 | 1158 | 1163 | 1165
-                | 1166 | 1168 | 1169 | 1172 | 1174 | 1176 | 1177 | 1179 | 1180 | 1182 | 1184
-                | 1186 | 1187 | 1190 | 1191 | 1193 | 1195 | 1197 | 1198 | 1201 | 1202
-                | 1204 | 1209 | 1212 | 1213
-                | 1215 | 1218 | 1220 | 1221 | 1223 | 1224
-                | 1226 | 1228 | 1230 | 1231 | 1234 | 1235
-                | 1237 | 1239 | 1240 | 1242 | 1245 | 1246
-                | 1248 | 1250 | 1251 | 1253 | 1256 | 1257
-                | 1259 | 1262 | 1264 | 1265 | 1267 | 1268
-                | 1270 | 1273 | 1275 | 1276 | 1278 | 1279
-                | 1281 | 1283 | 1284 | 1286 | 1289 | 1290
-                | 1292 | 1294 | 1296 | 1297 | 1299 | 1300 | 1301
-                | 1303 | 1306 | 1308 | 1309 | 1311 | 1312
-                | 1313 | 1315 | 1317 | 1319 | 1320 | 1322 | 1323
+            264 | 268
+                | 269
+                | 270
+                | 271
+                | 272
+                | 278
+                | 279
+                | 281
+                | 285
+                | 287
+                | 290
+                | 292
+                | 294
+                | 297
+                | 299
+                | 300
+                | 301
+                | 304
+                | 306
+                | 307
+                | 310
+                | 313
+                | 315
+                | 316
+                | 318
+                | 322
+                | 326
+                | 327
+                | 328
+                | 330
+                | 334
+                | 335
+                | 336
+                | 338
+                | 342
+                | 345
+                | 347
+                | 348
+                | 350
+                | 351
+                | 352
+                | 356
+                | 358
+                | 361
+                | 363
+                | 364
+                | 366
+                | 369
+                | 371
+                | 372
+                | 374
+                | 377
+                | 379
+                | 380
+                | 382
+                | 383
+                | 386
+                | 388
+                | 389
+                | 391
+                | 392
+                | 395
+                | 397
+                | 398
+                | 400
+                | 401
+                | 404
+                | 406
+                | 407
+                | 409
+                | 412
+                | 416
+                | 418
+                | 419
+                | 422
+                | 423
+                | 425
+                | 427
+                | 428
+                | 431
+                | 432
+                | 434
+                | 436
+                | 438
+                | 440
+                | 441
+                | 443
+                | 445
+                | 447
+                | 449
+                | 450
+                | 452
+                | 454
+                | 455
+                | 457
+                | 458
+                | 460
+                | 463
+                | 464
+                | 465
+                | 467
+                | 470
+                | 472
+                | 474
+                | 475
+                | 478
+                | 481
+                | 483
+                | 484
+                | 487
+                | 490
+                | 492
+                | 493
+                | 496
+                | 501
+                | 502
+                | 504
+                | 505
+                | 508
+                | 510
+                | 511
+                | 514
+                | 517
+                | 518
+                | 519
+                | 521
+                | 524
+                | 527
+                | 529
+                | 531
+                | 532
+                | 534
+                | 537
+                | 539
+                | 541
+                | 542
+                | 544
+                | 545
+                | 546
+                | 548
+                | 549
+                | 550
+                | 552
+                | 555
+                | 556
+                | 557
+                | 559
+                | 561
+                | 564
+                | 566
+                | 568
+                | 570
+                | 572
+                | 574
+                | 575
+                | 577
+                | 578
+                | 579
+                | 581
+                | 582
+                | 583
+                | 585
+                | 587
+                | 588
+                | 590
+                | 592
+                | 593
+                | 594
+                | 596
+                | 598
+                | 599
+                | 601
+                | 603
+                | 604
+                | 605
+                | 607
+                | 609
+                | 610
+                | 612
+                | 614
+                | 615
+                | 616
+                | 618
+                | 620
+                | 621
+                | 623
+                | 625
+                | 626
+                | 627
+                | 629
+                | 631
+                | 632
+                | 634
+                | 636
+                | 637
+                | 638
+                | 640
+                | 642
+                | 643
+                | 645
+                | 647
+                | 648
+                | 649
+                | 651
+                | 653
+                | 654
+                | 656
+                | 658
+                | 659
+                | 660
+                | 662
+                | 664
+                | 665
+                | 667
+                | 669
+                | 670
+                | 671
+                | 673
+                | 675
+                | 676
+                | 678
+                | 680
+                | 681
+                | 682
+                | 684
+                | 686
+                | 687
+                | 689
+                | 691
+                | 692
+                | 693
+                | 695
+                | 697
+                | 698
+                | 700
+                | 702
+                | 703
+                | 704
+                | 706
+                | 708
+                | 709
+                | 711
+                | 713
+                | 714
+                | 715
+                | 717
+                | 719
+                | 720
+                | 722
+                | 724
+                | 725
+                | 726
+                | 728
+                | 730
+                | 731
+                | 733
+                | 735
+                | 736
+                | 737
+                | 739
+                | 741
+                | 742
+                | 744
+                | 746
+                | 747
+                | 748
+                | 750
+                | 752
+                | 753
+                | 755
+                | 757
+                | 758
+                | 759
+                | 761
+                | 763
+                | 764
+                | 766
+                | 768
+                | 769
+                | 770
+                | 772
+                | 774
+                | 775
+                | 777
+                | 779
+                | 780
+                | 781
+                | 783
+                | 785
+                | 786
+                | 788
+                | 790
+                | 791
+                | 792
+                | 794
+                | 796
+                | 797
+                | 799
+                | 805
+                | 807
+                | 808
+                | 810
+                | 816
+                | 818
+                | 819
+                | 821
+                | 827
+                | 829
+                | 830
+                | 832
+                | 838
+                | 840
+                | 841
+                | 843
+                | 849
+                | 851
+                | 852
+                | 854
+                | 860
+                | 862
+                | 863
+                | 865
+                | 871
+                | 873
+                | 874
+                | 876
+                | 882
+                | 884
+                | 885
+                | 887
+                | 893
+                | 895
+                | 896
+                | 898
+                | 904
+                | 906
+                | 907
+                | 909
+                | 915
+                | 917
+                | 918
+                | 920
+                | 926
+                | 928
+                | 929
+                | 931
+                | 937
+                | 939
+                | 940
+                | 942
+                | 948
+                | 950
+                | 951
+                | 953
+                | 959
+                | 961
+                | 962
+                | 964
+                | 970
+                | 972
+                | 973
+                | 975
+                | 981
+                | 983
+                | 984
+                | 986
+                | 992
+                | 994
+                | 995
+                | 997
+                | 1003
+                | 1005
+                | 1006
+                | 1008
+                | 1014
+                | 1016
+                | 1017
+                | 1019
+                | 1025
+                | 1027
+                | 1028
+                | 1030
+                | 1036
+                | 1038
+                | 1039
+                | 1041
+                | 1047
+                | 1049
+                | 1050
+                | 1052
+                | 1053
+                | 1059
+                | 1060
+                | 1063
+                | 1065
+                | 1067
+                | 1068
+                | 1070
+                | 1073
+                | 1075
+                | 1076
+                | 1078
+                | 1080
+                | 1082
+                | 1083
+                | 1084
+                | 1087
+                | 1088
+                | 1090
+                | 1093
+                | 1095
+                | 1098
+                | 1099
+                | 1102
+                | 1103
+                | 1105
+                | 1108
+                | 1110
+                | 1113
+                | 1117
+                | 1118
+                | 1120
+                | 1124
+                | 1128
+                | 1130
+                | 1132
+                | 1134
+                | 1136
+                | 1138
+                | 1140
+                | 1141
+                | 1143
+                | 1146
+                | 1147
+                | 1149
+                | 1151
+                | 1154
+                | 1156
+                | 1158
+                | 1163
+                | 1165
+                | 1166
+                | 1168
+                | 1169
+                | 1172
+                | 1174
+                | 1176
+                | 1177
+                | 1179
+                | 1180
+                | 1182
+                | 1184
+                | 1186
+                | 1187
+                | 1190
+                | 1191
+                | 1193
+                | 1195
+                | 1197
+                | 1198
+                | 1201
+                | 1202
+                | 1204
+                | 1209
+                | 1212
+                | 1213
+                | 1215
+                | 1218
+                | 1220
+                | 1221
+                | 1223
+                | 1224
+                | 1226
+                | 1228
+                | 1230
+                | 1231
+                | 1234
+                | 1235
+                | 1237
+                | 1239
+                | 1240
+                | 1242
+                | 1245
+                | 1246
+                | 1248
+                | 1250
+                | 1251
+                | 1253
+                | 1256
+                | 1257
+                | 1259
+                | 1262
+                | 1264
+                | 1265
+                | 1267
+                | 1268
+                | 1270
+                | 1273
+                | 1275
+                | 1276
+                | 1278
+                | 1279
+                | 1281
+                | 1283
+                | 1284
+                | 1286
+                | 1289
+                | 1290
+                | 1292
+                | 1294
+                | 1296
+                | 1297
+                | 1299
+                | 1300
+                | 1301
+                | 1303
+                | 1306
+                | 1308
+                | 1309
+                | 1311
+                | 1312
+                | 1313
+                | 1315
+                | 1317
+                | 1319
+                | 1320
+                | 1322
+                | 1323
         ) {
             mutations.push(
                 TableMutation::new(mutation_id, "records", vec![5], prefix_value)
@@ -2017,7 +2514,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid final remainder tail closure delete"),
+                    .expect("valid final remainder tail closure delete"),
             );
         } else if generation == 318 {
             // Restore the edge between the prefix and its final joint closure.
@@ -2061,7 +2558,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid final joint edge closure"),
+                    .expect("valid final joint edge closure"),
             );
         } else if generation == 326 {
             // Restore the final remainder tail beside the prefix.
@@ -2104,7 +2601,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid final tail-only closure delete"),
+                    .expect("valid final tail-only closure delete"),
             );
         } else if generation == 334 {
             // Rebuild the closure edge tail beside the restored prefix.
@@ -2147,7 +2644,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid final closure edge tail delete"),
+                    .expect("valid final closure edge tail delete"),
             );
         } else if generation == 342 {
             // Restore the final edge tail beside the current prefix.
@@ -2190,7 +2687,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid terminal delete-edge tail closure"),
+                    .expect("valid terminal delete-edge tail closure"),
             );
         } else if generation == 350 {
             // Restore the closure tail beside the prefix.
@@ -2233,7 +2730,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid repeated closure tail delete"),
+                    .expect("valid repeated closure tail delete"),
             );
         } else if generation == 358 {
             // Rebuild the edge tail before exercising the prefix-first close.
@@ -2276,7 +2773,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid terminal closure tail delete"),
+                    .expect("valid terminal closure tail delete"),
             );
         } else if generation == 366 {
             // Restore a second closure edge tail beside the original prefix.
@@ -6857,7 +7354,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             extension_mutation_id[0] = 1;
             mutations.push(
                 TableMutation::new(extension_mutation_id, "records", vec![5, 0], None)
-                .expect("valid final case closure edge tail fifty-eight deletion"),
+                    .expect("valid final case closure edge tail fifty-eight deletion"),
             );
         } else if generation == 1095 {
             let mut extension_mutation_id = mutation_id;
@@ -7052,7 +7549,11 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 )
                 .expect("valid terminal fixture-backed closure edge tail"),
             );
-        } else if generation == 1128 || generation == 1130 || generation == 1133 || generation == 1136 {
+        } else if generation == 1128
+            || generation == 1130
+            || generation == 1133
+            || generation == 1136
+        {
             let mut extension_mutation_id = mutation_id;
             extension_mutation_id[0] = 1;
             mutations.push(
@@ -7079,7 +7580,11 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                     extension_mutation_id,
                     "records",
                     vec![5, 0],
-                    Some(include_str!("fixtures/case_closure_edge_tail_sixty.orna").as_bytes().to_vec()),
+                    Some(
+                        include_str!("fixtures/case_closure_edge_tail_sixty.orna")
+                            .as_bytes()
+                            .to_vec(),
+                    ),
                 )
                 .expect("valid fixture-backed closure edge tail sixty"),
             );
@@ -8072,7 +8577,9 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     }
 
     assert_eq!(
-        pins.iter().map(|(generation, _, _)| *generation).collect::<Vec<_>>(),
+        pins.iter()
+            .map(|(generation, _, _)| *generation)
+            .collect::<Vec<_>>(),
         (255..=1323).collect::<Vec<_>>()
     );
     assert!(pins.windows(2).all(|pair| {
@@ -8466,24 +8973,45 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         443 => vec![],
         444 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"interplay-closure-edge-tail-two-first".to_vec()),
+            (
+                vec![5, 0],
+                b"interplay-closure-edge-tail-two-first".to_vec(),
+            ),
         ],
         445 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"interplay-closure-edge-tail-two-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"interplay-closure-edge-tail-two-replaced".to_vec(),
+            ),
         ],
-        446 => vec![(vec![5, 0], b"interplay-closure-edge-tail-two-replaced".to_vec())],
-        447 => vec![(vec![5, 0], b"interplay-closure-edge-tail-two-absent-prefix".to_vec())],
+        446 => vec![(
+            vec![5, 0],
+            b"interplay-closure-edge-tail-two-replaced".to_vec(),
+        )],
+        447 => vec![(
+            vec![5, 0],
+            b"interplay-closure-edge-tail-two-absent-prefix".to_vec(),
+        )],
         448 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"interplay-closure-edge-tail-two-reopened".to_vec()),
+            (
+                vec![5, 0],
+                b"interplay-closure-edge-tail-two-reopened".to_vec(),
+            ),
         ],
         449 => vec![(vec![5], b"original-prefix".to_vec())],
         450 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"interplay-closure-edge-tail-two-final".to_vec()),
+            (
+                vec![5, 0],
+                b"interplay-closure-edge-tail-two-final".to_vec(),
+            ),
         ],
-        451 => vec![(vec![5, 0], b"interplay-closure-edge-tail-two-final".to_vec())],
+        451 => vec![(
+            vec![5, 0],
+            b"interplay-closure-edge-tail-two-final".to_vec(),
+        )],
         452 => vec![],
         453 => vec![(vec![5], b"original-prefix".to_vec())],
         454 => vec![
@@ -8551,9 +9079,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5, 0], b"case-closure-edge-tail-two-replaced".to_vec()),
         ],
         482 => vec![(vec![5, 0], b"case-closure-edge-tail-two-replaced".to_vec())],
-        483 => vec![
-            (vec![5, 0], b"case-closure-edge-tail-two-absent-prefix".to_vec()),
-        ],
+        483 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-two-absent-prefix".to_vec(),
+        )],
         484 => vec![],
         485 => vec![(vec![5], b"original-prefix".to_vec())],
         486 => vec![
@@ -8568,12 +9097,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         490 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-three-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-three-replaced".to_vec(),
+            ),
         ],
-        491 => vec![(vec![5, 0], b"case-closure-edge-tail-three-replaced".to_vec())],
-        492 => vec![
-            (vec![5, 0], b"case-closure-edge-tail-three-absent-prefix".to_vec()),
-        ],
+        491 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-three-replaced".to_vec(),
+        )],
+        492 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-three-absent-prefix".to_vec(),
+        )],
         493 => vec![],
         494 => vec![(vec![5], b"original-prefix".to_vec())],
         495 => vec![
@@ -8594,10 +9130,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         501 => vec![(vec![5], b"case-closure-edge-prefix-four-restored".to_vec())],
         502 => vec![
             (vec![5], b"case-closure-edge-prefix-four-restored".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-four-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-four-recreated".to_vec(),
+            ),
         ],
-        503 => vec![(vec![5, 0], b"case-closure-edge-tail-four-recreated".to_vec())],
-        504 => vec![(vec![5, 0], b"case-closure-edge-tail-four-absent-prefix".to_vec())],
+        503 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-four-recreated".to_vec(),
+        )],
+        504 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-four-absent-prefix".to_vec(),
+        )],
         505 => vec![],
         506 => vec![(vec![5], b"original-prefix".to_vec())],
         507 => vec![
@@ -8609,7 +9154,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5, 0], b"case-closure-edge-tail-five-replaced".to_vec()),
         ],
         509 => vec![(vec![5, 0], b"case-closure-edge-tail-five-replaced".to_vec())],
-        510 => vec![(vec![5, 0], b"case-closure-edge-tail-five-absent-prefix".to_vec())],
+        510 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-five-absent-prefix".to_vec(),
+        )],
         511 => vec![],
         512 => vec![(vec![5], b"original-prefix".to_vec())],
         513 => vec![
@@ -8632,7 +9180,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5, 0], b"case-closure-edge-tail-six-recreated".to_vec()),
         ],
         520 => vec![(vec![5, 0], b"case-closure-edge-tail-six-recreated".to_vec())],
-        521 => vec![(vec![5, 0], b"case-closure-edge-tail-six-absent-prefix".to_vec())],
+        521 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-six-absent-prefix".to_vec(),
+        )],
         522 => vec![
             (vec![5], b"case-closure-edge-prefix-six-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-six-joint".to_vec()),
@@ -8646,10 +9197,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         527 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seven-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seven-replaced".to_vec(),
+            ),
         ],
-        528 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-replaced".to_vec())],
-        529 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-absent-prefix".to_vec())],
+        528 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seven-replaced".to_vec(),
+        )],
+        529 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seven-absent-prefix".to_vec(),
+        )],
         530 => vec![
             (vec![5], b"case-closure-edge-prefix-seven-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-seven-joint".to_vec()),
@@ -8657,9 +9217,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         531 => vec![(vec![5], b"case-closure-edge-prefix-seven-final".to_vec())],
         532 => vec![
             (vec![5], b"case-closure-edge-prefix-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seven-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seven-recreated".to_vec(),
+            ),
         ],
-        533 => vec![(vec![5, 0], b"case-closure-edge-tail-seven-recreated".to_vec())],
+        533 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seven-recreated".to_vec(),
+        )],
         534 => vec![],
         535 => vec![(vec![5], b"original-prefix".to_vec())],
         536 => vec![
@@ -8668,10 +9234,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         537 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eight-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eight-replaced".to_vec(),
+            ),
         ],
-        538 => vec![(vec![5, 0], b"case-closure-edge-tail-eight-replaced".to_vec())],
-        539 => vec![(vec![5, 0], b"case-closure-edge-tail-eight-absent-prefix".to_vec())],
+        538 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eight-replaced".to_vec(),
+        )],
+        539 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eight-absent-prefix".to_vec(),
+        )],
         540 => vec![
             (vec![5], b"case-closure-edge-prefix-eight-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-eight-joint".to_vec()),
@@ -8679,9 +9254,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         541 => vec![(vec![5], b"case-closure-edge-prefix-eight-final".to_vec())],
         542 => vec![
             (vec![5], b"case-closure-edge-prefix-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eight-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eight-recreated".to_vec(),
+            ),
         ],
-        543 => vec![(vec![5, 0], b"case-closure-edge-tail-eight-recreated".to_vec())],
+        543 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eight-recreated".to_vec(),
+        )],
         544 => vec![],
         545 => vec![(vec![5, 0], b"case-closure-edge-tail-eight-final".to_vec())],
         546 => vec![],
@@ -8696,10 +9277,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         549 => vec![(vec![5], b"original-prefix".to_vec())],
         550 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nine-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nine-recreated".to_vec(),
+            ),
         ],
-        551 => vec![(vec![5, 0], b"case-closure-edge-tail-nine-recreated".to_vec())],
-        552 => vec![(vec![5, 0], b"case-closure-edge-tail-nine-absent-prefix".to_vec())],
+        551 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-nine-recreated".to_vec(),
+        )],
+        552 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-nine-absent-prefix".to_vec(),
+        )],
         553 => vec![
             (vec![5], b"case-closure-edge-prefix-nine-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-nine-joint".to_vec()),
@@ -8717,7 +9307,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             (vec![5, 0], b"case-closure-edge-tail-ten-replaced".to_vec()),
         ],
         560 => vec![(vec![5, 0], b"case-closure-edge-tail-ten-replaced".to_vec())],
-        561 => vec![(vec![5, 0], b"case-closure-edge-tail-ten-absent-prefix".to_vec())],
+        561 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-ten-absent-prefix".to_vec(),
+        )],
         562 => vec![
             (vec![5], b"case-closure-edge-prefix-ten-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-ten-joint".to_vec()),
@@ -8737,10 +9330,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         570 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eleven-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eleven-replaced".to_vec(),
+            ),
         ],
-        571 => vec![(vec![5, 0], b"case-closure-edge-tail-eleven-replaced".to_vec())],
-        572 => vec![(vec![5, 0], b"case-closure-edge-tail-eleven-absent-prefix".to_vec())],
+        571 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eleven-replaced".to_vec(),
+        )],
+        572 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eleven-absent-prefix".to_vec(),
+        )],
         573 => vec![
             (vec![5], b"case-closure-edge-prefix-eleven-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-eleven-joint".to_vec()),
@@ -8748,9 +9350,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         574 => vec![(vec![5], b"case-closure-edge-prefix-eleven-final".to_vec())],
         575 => vec![
             (vec![5], b"case-closure-edge-prefix-eleven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eleven-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eleven-recreated".to_vec(),
+            ),
         ],
-        576 => vec![(vec![5, 0], b"case-closure-edge-tail-eleven-recreated".to_vec())],
+        576 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eleven-recreated".to_vec(),
+        )],
         577 => vec![],
         578 => vec![(vec![5, 0], b"case-closure-edge-tail-eleven-final".to_vec())],
         579 => vec![],
@@ -8760,15 +9368,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         581 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twelve-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twelve-replaced".to_vec(),
+            ),
         ],
         582 => vec![(vec![5], b"original-prefix".to_vec())],
         583 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twelve-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twelve-recreated".to_vec(),
+            ),
         ],
-        584 => vec![(vec![5, 0], b"case-closure-edge-tail-twelve-recreated".to_vec())],
-        585 => vec![(vec![5, 0], b"case-closure-edge-tail-twelve-absent-prefix".to_vec())],
+        584 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twelve-recreated".to_vec(),
+        )],
+        585 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twelve-absent-prefix".to_vec(),
+        )],
         586 => vec![
             (vec![5], b"case-closure-edge-prefix-twelve-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-twelve-joint".to_vec()),
@@ -8776,61 +9396,115 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         587 => vec![(vec![5], b"case-closure-edge-prefix-twelve-final".to_vec())],
         588 => vec![
             (vec![5], b"case-closure-edge-prefix-twelve-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twelve-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twelve-recreated".to_vec(),
+            ),
         ],
-        589 => vec![(vec![5, 0], b"case-closure-edge-tail-twelve-recreated".to_vec())],
+        589 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twelve-recreated".to_vec(),
+        )],
         590 => vec![],
         591 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirteen-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirteen-first".to_vec(),
+            ),
         ],
         592 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirteen-replaced".to_vec(),
+            ),
         ],
         593 => vec![(vec![5], b"original-prefix".to_vec())],
         594 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirteen-recreated".to_vec(),
+            ),
         ],
-        595 => vec![(vec![5, 0], b"case-closure-edge-tail-thirteen-recreated".to_vec())],
-        596 => vec![(vec![5, 0], b"case-closure-edge-tail-thirteen-absent-prefix".to_vec())],
+        595 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirteen-recreated".to_vec(),
+        )],
+        596 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirteen-absent-prefix".to_vec(),
+        )],
         597 => vec![
             (vec![5], b"case-closure-edge-prefix-thirteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirteen-joint".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirteen-joint".to_vec(),
+            ),
         ],
         598 => vec![(vec![5], b"case-closure-edge-prefix-thirteen-final".to_vec())],
         599 => vec![
             (vec![5], b"case-closure-edge-prefix-thirteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirteen-recreated".to_vec(),
+            ),
         ],
-        600 => vec![(vec![5, 0], b"case-closure-edge-tail-thirteen-recreated".to_vec())],
+        600 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirteen-recreated".to_vec(),
+        )],
         601 => vec![],
         602 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fourteen-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fourteen-first".to_vec(),
+            ),
         ],
         603 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fourteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fourteen-replaced".to_vec(),
+            ),
         ],
         604 => vec![(vec![5], b"original-prefix".to_vec())],
         605 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fourteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fourteen-recreated".to_vec(),
+            ),
         ],
-        606 => vec![(vec![5, 0], b"case-closure-edge-tail-fourteen-recreated".to_vec())],
-        607 => vec![(vec![5, 0], b"case-closure-edge-tail-fourteen-absent-prefix".to_vec())],
+        606 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fourteen-recreated".to_vec(),
+        )],
+        607 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fourteen-absent-prefix".to_vec(),
+        )],
         608 => vec![
             (vec![5], b"case-closure-edge-prefix-fourteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fourteen-joint".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fourteen-joint".to_vec(),
+            ),
         ],
         609 => vec![(vec![5], b"case-closure-edge-prefix-fourteen-final".to_vec())],
         610 => vec![
             (vec![5], b"case-closure-edge-prefix-fourteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fourteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fourteen-recreated".to_vec(),
+            ),
         ],
-        611 => vec![(vec![5, 0], b"case-closure-edge-tail-fourteen-recreated".to_vec())],
+        611 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fourteen-recreated".to_vec(),
+        )],
         612 => vec![],
         613 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -8838,15 +9512,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         614 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifteen-replaced".to_vec(),
+            ),
         ],
         615 => vec![(vec![5], b"original-prefix".to_vec())],
         616 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifteen-recreated".to_vec(),
+            ),
         ],
-        617 => vec![(vec![5, 0], b"case-closure-edge-tail-fifteen-recreated".to_vec())],
-        618 => vec![(vec![5, 0], b"case-closure-edge-tail-fifteen-absent-prefix".to_vec())],
+        617 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifteen-recreated".to_vec(),
+        )],
+        618 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifteen-absent-prefix".to_vec(),
+        )],
         619 => vec![
             (vec![5], b"case-closure-edge-prefix-fifteen-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-fifteen-joint".to_vec()),
@@ -8854,9 +9540,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         620 => vec![(vec![5], b"case-closure-edge-prefix-fifteen-final".to_vec())],
         621 => vec![
             (vec![5], b"case-closure-edge-prefix-fifteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifteen-recreated".to_vec(),
+            ),
         ],
-        622 => vec![(vec![5, 0], b"case-closure-edge-tail-fifteen-recreated".to_vec())],
+        622 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifteen-recreated".to_vec(),
+        )],
         623 => vec![],
         624 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -8864,15 +9556,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         625 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-sixteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-sixteen-replaced".to_vec(),
+            ),
         ],
         626 => vec![(vec![5], b"original-prefix".to_vec())],
         627 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-sixteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-sixteen-recreated".to_vec(),
+            ),
         ],
-        628 => vec![(vec![5, 0], b"case-closure-edge-tail-sixteen-recreated".to_vec())],
-        629 => vec![(vec![5, 0], b"case-closure-edge-tail-sixteen-absent-prefix".to_vec())],
+        628 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-sixteen-recreated".to_vec(),
+        )],
+        629 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-sixteen-absent-prefix".to_vec(),
+        )],
         630 => vec![
             (vec![5], b"case-closure-edge-prefix-sixteen-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-sixteen-joint".to_vec()),
@@ -8880,87 +9584,174 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         631 => vec![(vec![5], b"case-closure-edge-prefix-sixteen-final".to_vec())],
         632 => vec![
             (vec![5], b"case-closure-edge-prefix-sixteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-sixteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-sixteen-recreated".to_vec(),
+            ),
         ],
-        633 => vec![(vec![5, 0], b"case-closure-edge-tail-sixteen-recreated".to_vec())],
+        633 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-sixteen-recreated".to_vec(),
+        )],
         634 => vec![],
         635 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seventeen-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seventeen-first".to_vec(),
+            ),
         ],
         636 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seventeen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seventeen-replaced".to_vec(),
+            ),
         ],
         637 => vec![(vec![5], b"original-prefix".to_vec())],
         638 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seventeen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seventeen-recreated".to_vec(),
+            ),
         ],
-        639 => vec![(vec![5, 0], b"case-closure-edge-tail-seventeen-recreated".to_vec())],
-        640 => vec![(vec![5, 0], b"case-closure-edge-tail-seventeen-absent-prefix".to_vec())],
+        639 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seventeen-recreated".to_vec(),
+        )],
+        640 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seventeen-absent-prefix".to_vec(),
+        )],
         641 => vec![
-            (vec![5], b"case-closure-edge-prefix-seventeen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seventeen-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-seventeen-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seventeen-joint".to_vec(),
+            ),
         ],
-        642 => vec![(vec![5], b"case-closure-edge-prefix-seventeen-final".to_vec())],
+        642 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-seventeen-final".to_vec(),
+        )],
         643 => vec![
-            (vec![5], b"case-closure-edge-prefix-seventeen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-seventeen-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-seventeen-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-seventeen-recreated".to_vec(),
+            ),
         ],
-        644 => vec![(vec![5, 0], b"case-closure-edge-tail-seventeen-recreated".to_vec())],
+        644 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-seventeen-recreated".to_vec(),
+        )],
         645 => vec![],
         646 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eighteen-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eighteen-first".to_vec(),
+            ),
         ],
         647 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eighteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eighteen-replaced".to_vec(),
+            ),
         ],
         648 => vec![(vec![5], b"original-prefix".to_vec())],
         649 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eighteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eighteen-recreated".to_vec(),
+            ),
         ],
-        650 => vec![(vec![5, 0], b"case-closure-edge-tail-eighteen-recreated".to_vec())],
-        651 => vec![(vec![5, 0], b"case-closure-edge-tail-eighteen-absent-prefix".to_vec())],
+        650 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eighteen-recreated".to_vec(),
+        )],
+        651 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eighteen-absent-prefix".to_vec(),
+        )],
         652 => vec![
             (vec![5], b"case-closure-edge-prefix-eighteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eighteen-joint".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eighteen-joint".to_vec(),
+            ),
         ],
         653 => vec![(vec![5], b"case-closure-edge-prefix-eighteen-final".to_vec())],
         654 => vec![
             (vec![5], b"case-closure-edge-prefix-eighteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-eighteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-eighteen-recreated".to_vec(),
+            ),
         ],
-        655 => vec![(vec![5, 0], b"case-closure-edge-tail-eighteen-recreated".to_vec())],
+        655 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-eighteen-recreated".to_vec(),
+        )],
         656 => vec![],
         657 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nineteen-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nineteen-first".to_vec(),
+            ),
         ],
         658 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nineteen-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nineteen-replaced".to_vec(),
+            ),
         ],
         659 => vec![(vec![5], b"original-prefix".to_vec())],
         660 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nineteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nineteen-recreated".to_vec(),
+            ),
         ],
-        661 => vec![(vec![5, 0], b"case-closure-edge-tail-nineteen-recreated".to_vec())],
-        662 => vec![(vec![5, 0], b"case-closure-edge-tail-nineteen-absent-prefix".to_vec())],
+        661 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-nineteen-recreated".to_vec(),
+        )],
+        662 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-nineteen-absent-prefix".to_vec(),
+        )],
         663 => vec![
             (vec![5], b"case-closure-edge-prefix-nineteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nineteen-joint".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nineteen-joint".to_vec(),
+            ),
         ],
         664 => vec![(vec![5], b"case-closure-edge-prefix-nineteen-final".to_vec())],
         665 => vec![
             (vec![5], b"case-closure-edge-prefix-nineteen-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-nineteen-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-nineteen-recreated".to_vec(),
+            ),
         ],
-        666 => vec![(vec![5, 0], b"case-closure-edge-tail-nineteen-recreated".to_vec())],
+        666 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-nineteen-recreated".to_vec(),
+        )],
         667 => vec![],
         668 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -8968,15 +9759,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         669 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-replaced".to_vec(),
+            ),
         ],
         670 => vec![(vec![5], b"original-prefix".to_vec())],
         671 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-recreated".to_vec(),
+            ),
         ],
-        672 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-recreated".to_vec())],
-        673 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-absent-prefix".to_vec())],
+        672 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-recreated".to_vec(),
+        )],
+        673 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-absent-prefix".to_vec(),
+        )],
         674 => vec![
             (vec![5], b"case-closure-edge-prefix-twenty-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-twenty-joint".to_vec()),
@@ -8984,243 +9787,546 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         675 => vec![(vec![5], b"case-closure-edge-prefix-twenty-final".to_vec())],
         676 => vec![
             (vec![5], b"case-closure-edge-prefix-twenty-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-recreated".to_vec(),
+            ),
         ],
-        677 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-recreated".to_vec())],
+        677 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-recreated".to_vec(),
+        )],
         678 => vec![],
         679 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-one-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-one-first".to_vec(),
+            ),
         ],
         680 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-one-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-one-replaced".to_vec(),
+            ),
         ],
         681 => vec![(vec![5], b"original-prefix".to_vec())],
         682 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-one-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-one-recreated".to_vec(),
+            ),
         ],
-        683 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-one-recreated".to_vec())],
-        684 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-one-absent-prefix".to_vec())],
+        683 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-one-recreated".to_vec(),
+        )],
+        684 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-one-absent-prefix".to_vec(),
+        )],
         685 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-one-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-one-joint".to_vec(),
+            ),
         ],
-        686 => vec![(vec![5], b"case-closure-edge-prefix-twenty-one-final".to_vec())],
+        686 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-one-final".to_vec(),
+        )],
         687 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-one-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-one-recreated".to_vec(),
+            ),
         ],
-        688 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-one-recreated".to_vec())],
+        688 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-one-recreated".to_vec(),
+        )],
         689 => vec![],
         690 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-two-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-two-first".to_vec(),
+            ),
         ],
         691 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-two-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-two-replaced".to_vec(),
+            ),
         ],
         692 => vec![(vec![5], b"original-prefix".to_vec())],
         693 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-two-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-two-recreated".to_vec(),
+            ),
         ],
-        694 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-two-recreated".to_vec())],
-        695 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-two-absent-prefix".to_vec())],
+        694 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-two-recreated".to_vec(),
+        )],
+        695 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-two-absent-prefix".to_vec(),
+        )],
         696 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-two-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-two-joint".to_vec(),
+            ),
         ],
-        697 => vec![(vec![5], b"case-closure-edge-prefix-twenty-two-final".to_vec())],
+        697 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-two-final".to_vec(),
+        )],
         698 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-two-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-two-recreated".to_vec(),
+            ),
         ],
-        699 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-two-recreated".to_vec())],
+        699 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-two-recreated".to_vec(),
+        )],
         700 => vec![],
         701 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-three-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-three-first".to_vec(),
+            ),
         ],
         702 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-three-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-three-replaced".to_vec(),
+            ),
         ],
         703 => vec![(vec![5], b"original-prefix".to_vec())],
         704 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-three-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-three-recreated".to_vec(),
+            ),
         ],
-        705 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-three-recreated".to_vec())],
-        706 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-three-absent-prefix".to_vec())],
+        705 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-three-recreated".to_vec(),
+        )],
+        706 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-three-absent-prefix".to_vec(),
+        )],
         707 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-three-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-three-joint".to_vec(),
+            ),
         ],
-        708 => vec![(vec![5], b"case-closure-edge-prefix-twenty-three-final".to_vec())],
+        708 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-three-final".to_vec(),
+        )],
         709 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-three-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-three-recreated".to_vec(),
+            ),
         ],
-        710 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-three-recreated".to_vec())],
+        710 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-three-recreated".to_vec(),
+        )],
         711 => vec![],
         712 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-four-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-four-first".to_vec(),
+            ),
         ],
         713 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-four-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-four-replaced".to_vec(),
+            ),
         ],
         714 => vec![(vec![5], b"original-prefix".to_vec())],
         715 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-four-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-four-recreated".to_vec(),
+            ),
         ],
-        716 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-four-recreated".to_vec())],
-        717 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-four-absent-prefix".to_vec())],
+        716 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-four-recreated".to_vec(),
+        )],
+        717 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-four-absent-prefix".to_vec(),
+        )],
         718 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-four-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-four-joint".to_vec(),
+            ),
         ],
-        719 => vec![(vec![5], b"case-closure-edge-prefix-twenty-four-final".to_vec())],
+        719 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-four-final".to_vec(),
+        )],
         720 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-four-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-four-recreated".to_vec(),
+            ),
         ],
-        721 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-four-recreated".to_vec())],
+        721 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-four-recreated".to_vec(),
+        )],
         722 => vec![],
         723 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-five-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-five-first".to_vec(),
+            ),
         ],
         724 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-five-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-five-replaced".to_vec(),
+            ),
         ],
         725 => vec![(vec![5], b"original-prefix".to_vec())],
         726 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-five-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-five-recreated".to_vec(),
+            ),
         ],
-        727 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-five-recreated".to_vec())],
-        728 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-five-absent-prefix".to_vec())],
+        727 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-five-recreated".to_vec(),
+        )],
+        728 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-five-absent-prefix".to_vec(),
+        )],
         729 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-five-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-five-joint".to_vec(),
+            ),
         ],
-        730 => vec![(vec![5], b"case-closure-edge-prefix-twenty-five-final".to_vec())],
+        730 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-five-final".to_vec(),
+        )],
         731 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-five-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-five-recreated".to_vec(),
+            ),
         ],
-        732 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-five-recreated".to_vec())],
+        732 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-five-recreated".to_vec(),
+        )],
         733 => vec![],
         734 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-six-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-six-first".to_vec(),
+            ),
         ],
         735 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-six-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-six-replaced".to_vec(),
+            ),
         ],
         736 => vec![(vec![5], b"original-prefix".to_vec())],
         737 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-six-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-six-recreated".to_vec(),
+            ),
         ],
-        738 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-six-recreated".to_vec())],
-        739 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-six-absent-prefix".to_vec())],
+        738 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-six-recreated".to_vec(),
+        )],
+        739 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-six-absent-prefix".to_vec(),
+        )],
         740 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-six-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-six-joint".to_vec(),
+            ),
         ],
-        741 => vec![(vec![5], b"case-closure-edge-prefix-twenty-six-final".to_vec())],
+        741 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-six-final".to_vec(),
+        )],
         742 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-six-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-six-recreated".to_vec(),
+            ),
         ],
-        743 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-six-recreated".to_vec())],
+        743 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-six-recreated".to_vec(),
+        )],
         744 => vec![],
         745 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-seven-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-seven-first".to_vec(),
+            ),
         ],
         746 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-seven-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-seven-replaced".to_vec(),
+            ),
         ],
         747 => vec![(vec![5], b"original-prefix".to_vec())],
         748 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-seven-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-seven-recreated".to_vec(),
+            ),
         ],
-        749 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-seven-recreated".to_vec())],
-        750 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-seven-absent-prefix".to_vec())],
+        749 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-seven-recreated".to_vec(),
+        )],
+        750 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-seven-absent-prefix".to_vec(),
+        )],
         751 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-seven-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-seven-joint".to_vec(),
+            ),
         ],
-        752 => vec![(vec![5], b"case-closure-edge-prefix-twenty-seven-final".to_vec())],
+        752 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-seven-final".to_vec(),
+        )],
         753 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-seven-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-seven-recreated".to_vec(),
+            ),
         ],
-        754 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-seven-recreated".to_vec())],
+        754 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-seven-recreated".to_vec(),
+        )],
         755 => vec![],
         756 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-eight-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-eight-first".to_vec(),
+            ),
         ],
         757 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-eight-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-eight-replaced".to_vec(),
+            ),
         ],
         758 => vec![(vec![5], b"original-prefix".to_vec())],
         759 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-eight-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-eight-recreated".to_vec(),
+            ),
         ],
-        760 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-eight-recreated".to_vec())],
-        761 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-eight-absent-prefix".to_vec())],
+        760 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-eight-recreated".to_vec(),
+        )],
+        761 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-eight-absent-prefix".to_vec(),
+        )],
         762 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-eight-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-eight-joint".to_vec(),
+            ),
         ],
-        763 => vec![(vec![5], b"case-closure-edge-prefix-twenty-eight-final".to_vec())],
+        763 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-eight-final".to_vec(),
+        )],
         764 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-eight-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-eight-recreated".to_vec(),
+            ),
         ],
-        765 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-eight-recreated".to_vec())],
+        765 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-eight-recreated".to_vec(),
+        )],
         766 => vec![],
         767 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-nine-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-nine-first".to_vec(),
+            ),
         ],
         768 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-nine-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-nine-replaced".to_vec(),
+            ),
         ],
         769 => vec![(vec![5], b"original-prefix".to_vec())],
         770 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-nine-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-nine-recreated".to_vec(),
+            ),
         ],
-        771 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-nine-recreated".to_vec())],
-        772 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-nine-absent-prefix".to_vec())],
+        771 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-nine-recreated".to_vec(),
+        )],
+        772 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-nine-absent-prefix".to_vec(),
+        )],
         773 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-nine-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-nine-joint".to_vec(),
+            ),
         ],
-        774 => vec![(vec![5], b"case-closure-edge-prefix-twenty-nine-final".to_vec())],
+        774 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-twenty-nine-final".to_vec(),
+        )],
         775 => vec![
-            (vec![5], b"case-closure-edge-prefix-twenty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-twenty-nine-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-twenty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-twenty-nine-recreated".to_vec(),
+            ),
         ],
-        776 => vec![(vec![5, 0], b"case-closure-edge-tail-twenty-nine-recreated".to_vec())],
+        776 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-twenty-nine-recreated".to_vec(),
+        )],
         777 => vec![],
         778 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -9228,15 +10334,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         779 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-replaced".to_vec(),
+            ),
         ],
         780 => vec![(vec![5], b"original-prefix".to_vec())],
         781 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-recreated".to_vec(),
+            ),
         ],
-        782 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-recreated".to_vec())],
-        783 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-absent-prefix".to_vec())],
+        782 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-recreated".to_vec(),
+        )],
+        783 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-absent-prefix".to_vec(),
+        )],
         784 => vec![
             (vec![5], b"case-closure-edge-prefix-thirty-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-thirty-joint".to_vec()),
@@ -9244,243 +10362,546 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         785 => vec![(vec![5], b"case-closure-edge-prefix-thirty-final".to_vec())],
         786 => vec![
             (vec![5], b"case-closure-edge-prefix-thirty-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-recreated".to_vec(),
+            ),
         ],
-        787 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-recreated".to_vec())],
+        787 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-recreated".to_vec(),
+        )],
         788 => vec![],
         789 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-one-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-one-first".to_vec(),
+            ),
         ],
         790 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-one-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-one-replaced".to_vec(),
+            ),
         ],
         791 => vec![(vec![5], b"original-prefix".to_vec())],
         792 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-one-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-one-recreated".to_vec(),
+            ),
         ],
-        793 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-one-recreated".to_vec())],
-        794 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-one-absent-prefix".to_vec())],
+        793 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-one-recreated".to_vec(),
+        )],
+        794 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-one-absent-prefix".to_vec(),
+        )],
         795 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-one-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-one-joint".to_vec(),
+            ),
         ],
-        796 => vec![(vec![5], b"case-closure-edge-prefix-thirty-one-final".to_vec())],
+        796 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-one-final".to_vec(),
+        )],
         797 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-one-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-one-recreated".to_vec(),
+            ),
         ],
-        798 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-one-recreated".to_vec())],
+        798 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-one-recreated".to_vec(),
+        )],
         799 => vec![],
         800 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-two-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-two-first".to_vec(),
+            ),
         ],
         801 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-two-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-two-replaced".to_vec(),
+            ),
         ],
         802 => vec![(vec![5], b"original-prefix".to_vec())],
         803 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-two-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-two-recreated".to_vec(),
+            ),
         ],
-        804 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-two-recreated".to_vec())],
-        805 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-two-absent-prefix".to_vec())],
+        804 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-two-recreated".to_vec(),
+        )],
+        805 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-two-absent-prefix".to_vec(),
+        )],
         806 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-two-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-two-joint".to_vec(),
+            ),
         ],
-        807 => vec![(vec![5], b"case-closure-edge-prefix-thirty-two-final".to_vec())],
+        807 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-two-final".to_vec(),
+        )],
         808 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-two-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-two-recreated".to_vec(),
+            ),
         ],
-        809 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-two-recreated".to_vec())],
+        809 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-two-recreated".to_vec(),
+        )],
         810 => vec![],
         811 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-three-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-three-first".to_vec(),
+            ),
         ],
         812 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-three-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-three-replaced".to_vec(),
+            ),
         ],
         813 => vec![(vec![5], b"original-prefix".to_vec())],
         814 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-three-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-three-recreated".to_vec(),
+            ),
         ],
-        815 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-three-recreated".to_vec())],
-        816 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-three-absent-prefix".to_vec())],
+        815 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-three-recreated".to_vec(),
+        )],
+        816 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-three-absent-prefix".to_vec(),
+        )],
         817 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-three-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-three-joint".to_vec(),
+            ),
         ],
-        818 => vec![(vec![5], b"case-closure-edge-prefix-thirty-three-final".to_vec())],
+        818 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-three-final".to_vec(),
+        )],
         819 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-three-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-three-recreated".to_vec(),
+            ),
         ],
-        820 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-three-recreated".to_vec())],
+        820 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-three-recreated".to_vec(),
+        )],
         821 => vec![],
         822 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-four-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-four-first".to_vec(),
+            ),
         ],
         823 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-four-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-four-replaced".to_vec(),
+            ),
         ],
         824 => vec![(vec![5], b"original-prefix".to_vec())],
         825 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-four-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-four-recreated".to_vec(),
+            ),
         ],
-        826 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-four-recreated".to_vec())],
-        827 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-four-absent-prefix".to_vec())],
+        826 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-four-recreated".to_vec(),
+        )],
+        827 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-four-absent-prefix".to_vec(),
+        )],
         828 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-four-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-four-joint".to_vec(),
+            ),
         ],
-        829 => vec![(vec![5], b"case-closure-edge-prefix-thirty-four-final".to_vec())],
+        829 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-four-final".to_vec(),
+        )],
         830 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-four-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-four-recreated".to_vec(),
+            ),
         ],
-        831 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-four-recreated".to_vec())],
+        831 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-four-recreated".to_vec(),
+        )],
         832 => vec![],
         833 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-five-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-five-first".to_vec(),
+            ),
         ],
         834 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-five-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-five-replaced".to_vec(),
+            ),
         ],
         835 => vec![(vec![5], b"original-prefix".to_vec())],
         836 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-five-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-five-recreated".to_vec(),
+            ),
         ],
-        837 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-five-recreated".to_vec())],
-        838 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-five-absent-prefix".to_vec())],
+        837 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-five-recreated".to_vec(),
+        )],
+        838 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-five-absent-prefix".to_vec(),
+        )],
         839 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-five-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-five-joint".to_vec(),
+            ),
         ],
-        840 => vec![(vec![5], b"case-closure-edge-prefix-thirty-five-final".to_vec())],
+        840 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-five-final".to_vec(),
+        )],
         841 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-five-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-five-recreated".to_vec(),
+            ),
         ],
-        842 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-five-recreated".to_vec())],
+        842 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-five-recreated".to_vec(),
+        )],
         843 => vec![],
         844 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-six-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-six-first".to_vec(),
+            ),
         ],
         845 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-six-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-six-replaced".to_vec(),
+            ),
         ],
         846 => vec![(vec![5], b"original-prefix".to_vec())],
         847 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-six-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-six-recreated".to_vec(),
+            ),
         ],
-        848 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-six-recreated".to_vec())],
-        849 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-six-absent-prefix".to_vec())],
+        848 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-six-recreated".to_vec(),
+        )],
+        849 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-six-absent-prefix".to_vec(),
+        )],
         850 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-six-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-six-joint".to_vec(),
+            ),
         ],
-        851 => vec![(vec![5], b"case-closure-edge-prefix-thirty-six-final".to_vec())],
+        851 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-six-final".to_vec(),
+        )],
         852 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-six-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-six-recreated".to_vec(),
+            ),
         ],
-        853 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-six-recreated".to_vec())],
+        853 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-six-recreated".to_vec(),
+        )],
         854 => vec![],
         855 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-seven-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-seven-first".to_vec(),
+            ),
         ],
         856 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-seven-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-seven-replaced".to_vec(),
+            ),
         ],
         857 => vec![(vec![5], b"original-prefix".to_vec())],
         858 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-seven-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-seven-recreated".to_vec(),
+            ),
         ],
-        859 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-seven-recreated".to_vec())],
-        860 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-seven-absent-prefix".to_vec())],
+        859 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-seven-recreated".to_vec(),
+        )],
+        860 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-seven-absent-prefix".to_vec(),
+        )],
         861 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-seven-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-seven-joint".to_vec(),
+            ),
         ],
-        862 => vec![(vec![5], b"case-closure-edge-prefix-thirty-seven-final".to_vec())],
+        862 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-seven-final".to_vec(),
+        )],
         863 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-seven-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-seven-recreated".to_vec(),
+            ),
         ],
-        864 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-seven-recreated".to_vec())],
+        864 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-seven-recreated".to_vec(),
+        )],
         865 => vec![],
         866 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-eight-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-eight-first".to_vec(),
+            ),
         ],
         867 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-eight-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-eight-replaced".to_vec(),
+            ),
         ],
         868 => vec![(vec![5], b"original-prefix".to_vec())],
         869 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-eight-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-eight-recreated".to_vec(),
+            ),
         ],
-        870 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-eight-recreated".to_vec())],
-        871 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-eight-absent-prefix".to_vec())],
+        870 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-eight-recreated".to_vec(),
+        )],
+        871 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-eight-absent-prefix".to_vec(),
+        )],
         872 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-eight-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-eight-joint".to_vec(),
+            ),
         ],
-        873 => vec![(vec![5], b"case-closure-edge-prefix-thirty-eight-final".to_vec())],
+        873 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-eight-final".to_vec(),
+        )],
         874 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-eight-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-eight-recreated".to_vec(),
+            ),
         ],
-        875 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-eight-recreated".to_vec())],
+        875 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-eight-recreated".to_vec(),
+        )],
         876 => vec![],
         877 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-nine-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-nine-first".to_vec(),
+            ),
         ],
         878 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-nine-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-nine-replaced".to_vec(),
+            ),
         ],
         879 => vec![(vec![5], b"original-prefix".to_vec())],
         880 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-nine-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-nine-recreated".to_vec(),
+            ),
         ],
-        881 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-nine-recreated".to_vec())],
-        882 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-nine-absent-prefix".to_vec())],
+        881 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-nine-recreated".to_vec(),
+        )],
+        882 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-nine-absent-prefix".to_vec(),
+        )],
         883 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-nine-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-nine-joint".to_vec(),
+            ),
         ],
-        884 => vec![(vec![5], b"case-closure-edge-prefix-thirty-nine-final".to_vec())],
+        884 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-thirty-nine-final".to_vec(),
+        )],
         885 => vec![
-            (vec![5], b"case-closure-edge-prefix-thirty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-thirty-nine-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-thirty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-thirty-nine-recreated".to_vec(),
+            ),
         ],
-        886 => vec![(vec![5, 0], b"case-closure-edge-tail-thirty-nine-recreated".to_vec())],
+        886 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-thirty-nine-recreated".to_vec(),
+        )],
         887 => vec![],
         888 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -9488,15 +10909,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         889 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-replaced".to_vec(),
+            ),
         ],
         890 => vec![(vec![5], b"original-prefix".to_vec())],
         891 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-recreated".to_vec(),
+            ),
         ],
-        892 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-recreated".to_vec())],
-        893 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-absent-prefix".to_vec())],
+        892 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-recreated".to_vec(),
+        )],
+        893 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-absent-prefix".to_vec(),
+        )],
         894 => vec![
             (vec![5], b"case-closure-edge-prefix-forty-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-forty-joint".to_vec()),
@@ -9504,243 +10937,546 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         895 => vec![(vec![5], b"case-closure-edge-prefix-forty-final".to_vec())],
         896 => vec![
             (vec![5], b"case-closure-edge-prefix-forty-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-recreated".to_vec(),
+            ),
         ],
-        897 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-recreated".to_vec())],
+        897 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-recreated".to_vec(),
+        )],
         898 => vec![],
         899 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-one-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-one-first".to_vec(),
+            ),
         ],
         900 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-one-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-one-replaced".to_vec(),
+            ),
         ],
         901 => vec![(vec![5], b"original-prefix".to_vec())],
         902 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-one-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-one-recreated".to_vec(),
+            ),
         ],
-        903 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-one-recreated".to_vec())],
-        904 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-one-absent-prefix".to_vec())],
+        903 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-one-recreated".to_vec(),
+        )],
+        904 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-one-absent-prefix".to_vec(),
+        )],
         905 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-one-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-one-joint".to_vec(),
+            ),
         ],
-        906 => vec![(vec![5], b"case-closure-edge-prefix-forty-one-final".to_vec())],
+        906 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-one-final".to_vec(),
+        )],
         907 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-one-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-one-recreated".to_vec(),
+            ),
         ],
-        908 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-one-recreated".to_vec())],
+        908 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-one-recreated".to_vec(),
+        )],
         909 => vec![],
         910 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-two-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-two-first".to_vec(),
+            ),
         ],
         911 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-two-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-two-replaced".to_vec(),
+            ),
         ],
         912 => vec![(vec![5], b"original-prefix".to_vec())],
         913 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-two-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-two-recreated".to_vec(),
+            ),
         ],
-        914 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-two-recreated".to_vec())],
-        915 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-two-absent-prefix".to_vec())],
+        914 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-two-recreated".to_vec(),
+        )],
+        915 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-two-absent-prefix".to_vec(),
+        )],
         916 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-two-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-two-joint".to_vec(),
+            ),
         ],
-        917 => vec![(vec![5], b"case-closure-edge-prefix-forty-two-final".to_vec())],
+        917 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-two-final".to_vec(),
+        )],
         918 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-two-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-two-recreated".to_vec(),
+            ),
         ],
-        919 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-two-recreated".to_vec())],
+        919 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-two-recreated".to_vec(),
+        )],
         920 => vec![],
         921 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-three-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-three-first".to_vec(),
+            ),
         ],
         922 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-three-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-three-replaced".to_vec(),
+            ),
         ],
         923 => vec![(vec![5], b"original-prefix".to_vec())],
         924 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-three-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-three-recreated".to_vec(),
+            ),
         ],
-        925 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-three-recreated".to_vec())],
-        926 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-three-absent-prefix".to_vec())],
+        925 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-three-recreated".to_vec(),
+        )],
+        926 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-three-absent-prefix".to_vec(),
+        )],
         927 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-three-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-three-joint".to_vec(),
+            ),
         ],
-        928 => vec![(vec![5], b"case-closure-edge-prefix-forty-three-final".to_vec())],
+        928 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-three-final".to_vec(),
+        )],
         929 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-three-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-three-recreated".to_vec(),
+            ),
         ],
-        930 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-three-recreated".to_vec())],
+        930 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-three-recreated".to_vec(),
+        )],
         931 => vec![],
         932 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-four-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-four-first".to_vec(),
+            ),
         ],
         933 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-four-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-four-replaced".to_vec(),
+            ),
         ],
         934 => vec![(vec![5], b"original-prefix".to_vec())],
         935 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-four-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-four-recreated".to_vec(),
+            ),
         ],
-        936 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-four-recreated".to_vec())],
-        937 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-four-absent-prefix".to_vec())],
+        936 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-four-recreated".to_vec(),
+        )],
+        937 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-four-absent-prefix".to_vec(),
+        )],
         938 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-four-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-four-joint".to_vec(),
+            ),
         ],
-        939 => vec![(vec![5], b"case-closure-edge-prefix-forty-four-final".to_vec())],
+        939 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-four-final".to_vec(),
+        )],
         940 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-four-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-four-recreated".to_vec(),
+            ),
         ],
-        941 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-four-recreated".to_vec())],
+        941 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-four-recreated".to_vec(),
+        )],
         942 => vec![],
         943 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-five-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-five-first".to_vec(),
+            ),
         ],
         944 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-five-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-five-replaced".to_vec(),
+            ),
         ],
         945 => vec![(vec![5], b"original-prefix".to_vec())],
         946 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-five-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-five-recreated".to_vec(),
+            ),
         ],
-        947 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-five-recreated".to_vec())],
-        948 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-five-absent-prefix".to_vec())],
+        947 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-five-recreated".to_vec(),
+        )],
+        948 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-five-absent-prefix".to_vec(),
+        )],
         949 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-five-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-five-joint".to_vec(),
+            ),
         ],
-        950 => vec![(vec![5], b"case-closure-edge-prefix-forty-five-final".to_vec())],
+        950 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-five-final".to_vec(),
+        )],
         951 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-five-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-five-recreated".to_vec(),
+            ),
         ],
-        952 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-five-recreated".to_vec())],
+        952 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-five-recreated".to_vec(),
+        )],
         953 => vec![],
         954 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-six-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-six-first".to_vec(),
+            ),
         ],
         955 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-six-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-six-replaced".to_vec(),
+            ),
         ],
         956 => vec![(vec![5], b"original-prefix".to_vec())],
         957 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-six-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-six-recreated".to_vec(),
+            ),
         ],
-        958 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-six-recreated".to_vec())],
-        959 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-six-absent-prefix".to_vec())],
+        958 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-six-recreated".to_vec(),
+        )],
+        959 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-six-absent-prefix".to_vec(),
+        )],
         960 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-six-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-six-joint".to_vec(),
+            ),
         ],
-        961 => vec![(vec![5], b"case-closure-edge-prefix-forty-six-final".to_vec())],
+        961 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-six-final".to_vec(),
+        )],
         962 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-six-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-six-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-six-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-six-recreated".to_vec(),
+            ),
         ],
-        963 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-six-recreated".to_vec())],
+        963 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-six-recreated".to_vec(),
+        )],
         964 => vec![],
         965 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-seven-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-seven-first".to_vec(),
+            ),
         ],
         966 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-seven-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-seven-replaced".to_vec(),
+            ),
         ],
         967 => vec![(vec![5], b"original-prefix".to_vec())],
         968 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-seven-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-seven-recreated".to_vec(),
+            ),
         ],
-        969 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-seven-recreated".to_vec())],
-        970 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-seven-absent-prefix".to_vec())],
+        969 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-seven-recreated".to_vec(),
+        )],
+        970 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-seven-absent-prefix".to_vec(),
+        )],
         971 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-seven-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-seven-joint".to_vec(),
+            ),
         ],
-        972 => vec![(vec![5], b"case-closure-edge-prefix-forty-seven-final".to_vec())],
+        972 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-seven-final".to_vec(),
+        )],
         973 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-seven-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-seven-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-seven-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-seven-recreated".to_vec(),
+            ),
         ],
-        974 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-seven-recreated".to_vec())],
+        974 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-seven-recreated".to_vec(),
+        )],
         975 => vec![],
         976 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-eight-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-eight-first".to_vec(),
+            ),
         ],
         977 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-eight-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-eight-replaced".to_vec(),
+            ),
         ],
         978 => vec![(vec![5], b"original-prefix".to_vec())],
         979 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-eight-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-eight-recreated".to_vec(),
+            ),
         ],
-        980 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-eight-recreated".to_vec())],
-        981 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-eight-absent-prefix".to_vec())],
+        980 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-eight-recreated".to_vec(),
+        )],
+        981 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-eight-absent-prefix".to_vec(),
+        )],
         982 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-eight-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-eight-joint".to_vec(),
+            ),
         ],
-        983 => vec![(vec![5], b"case-closure-edge-prefix-forty-eight-final".to_vec())],
+        983 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-eight-final".to_vec(),
+        )],
         984 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-eight-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-eight-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-eight-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-eight-recreated".to_vec(),
+            ),
         ],
-        985 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-eight-recreated".to_vec())],
+        985 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-eight-recreated".to_vec(),
+        )],
         986 => vec![],
         987 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-nine-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-nine-first".to_vec(),
+            ),
         ],
         988 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-nine-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-nine-replaced".to_vec(),
+            ),
         ],
         989 => vec![(vec![5], b"original-prefix".to_vec())],
         990 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-nine-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-nine-recreated".to_vec(),
+            ),
         ],
-        991 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-nine-recreated".to_vec())],
-        992 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-nine-absent-prefix".to_vec())],
+        991 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-nine-recreated".to_vec(),
+        )],
+        992 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-nine-absent-prefix".to_vec(),
+        )],
         993 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-nine-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-nine-joint".to_vec(),
+            ),
         ],
-        994 => vec![(vec![5], b"case-closure-edge-prefix-forty-nine-final".to_vec())],
+        994 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-forty-nine-final".to_vec(),
+        )],
         995 => vec![
-            (vec![5], b"case-closure-edge-prefix-forty-nine-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-forty-nine-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-forty-nine-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-forty-nine-recreated".to_vec(),
+            ),
         ],
-        996 => vec![(vec![5, 0], b"case-closure-edge-tail-forty-nine-recreated".to_vec())],
+        996 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-forty-nine-recreated".to_vec(),
+        )],
         997 => vec![],
         998 => vec![
             (vec![5], b"original-prefix".to_vec()),
@@ -9748,15 +11484,27 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         ],
         999 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-replaced".to_vec(),
+            ),
         ],
         1000 => vec![(vec![5], b"original-prefix".to_vec())],
         1001 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-recreated".to_vec(),
+            ),
         ],
-        1002 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-recreated".to_vec())],
-        1003 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-absent-prefix".to_vec())],
+        1002 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-recreated".to_vec(),
+        )],
+        1003 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-absent-prefix".to_vec(),
+        )],
         1004 => vec![
             (vec![5], b"case-closure-edge-prefix-fifty-final".to_vec()),
             (vec![5, 0], b"case-closure-edge-tail-fifty-joint".to_vec()),
@@ -9764,169 +11512,397 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         1005 => vec![(vec![5], b"case-closure-edge-prefix-fifty-final".to_vec())],
         1006 => vec![
             (vec![5], b"case-closure-edge-prefix-fifty-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-recreated".to_vec(),
+            ),
         ],
-        1007 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-recreated".to_vec())],
+        1007 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-recreated".to_vec(),
+        )],
         1008 => vec![],
         1009 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-one-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-one-first".to_vec(),
+            ),
         ],
         1010 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-one-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-one-replaced".to_vec(),
+            ),
         ],
         1011 => vec![(vec![5], b"original-prefix".to_vec())],
         1012 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-one-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-one-recreated".to_vec(),
+            ),
         ],
-        1013 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-one-recreated".to_vec())],
-        1014 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-one-absent-prefix".to_vec())],
+        1013 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-one-recreated".to_vec(),
+        )],
+        1014 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-one-absent-prefix".to_vec(),
+        )],
         1015 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-one-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-one-joint".to_vec(),
+            ),
         ],
-        1016 => vec![(vec![5], b"case-closure-edge-prefix-fifty-one-final".to_vec())],
+        1016 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-one-final".to_vec(),
+        )],
         1017 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-one-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-one-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-one-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-one-recreated".to_vec(),
+            ),
         ],
-        1018 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-one-recreated".to_vec())],
+        1018 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-one-recreated".to_vec(),
+        )],
         1019 => vec![],
         1020 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-two-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-two-first".to_vec(),
+            ),
         ],
         1021 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-two-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-two-replaced".to_vec(),
+            ),
         ],
         1022 => vec![(vec![5], b"original-prefix".to_vec())],
         1023 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-two-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-two-recreated".to_vec(),
+            ),
         ],
-        1024 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-two-recreated".to_vec())],
-        1025 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-two-absent-prefix".to_vec())],
+        1024 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-two-recreated".to_vec(),
+        )],
+        1025 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-two-absent-prefix".to_vec(),
+        )],
         1026 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-two-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-two-joint".to_vec(),
+            ),
         ],
-        1027 => vec![(vec![5], b"case-closure-edge-prefix-fifty-two-final".to_vec())],
+        1027 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-two-final".to_vec(),
+        )],
         1028 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-two-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-two-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-two-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-two-recreated".to_vec(),
+            ),
         ],
-        1029 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-two-recreated".to_vec())],
+        1029 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-two-recreated".to_vec(),
+        )],
         1030 => vec![],
         1031 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-three-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-three-first".to_vec(),
+            ),
         ],
         1032 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-three-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-three-replaced".to_vec(),
+            ),
         ],
         1033 => vec![(vec![5], b"original-prefix".to_vec())],
         1034 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-three-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-three-recreated".to_vec(),
+            ),
         ],
-        1035 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-three-recreated".to_vec())],
-        1036 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-three-absent-prefix".to_vec())],
+        1035 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-three-recreated".to_vec(),
+        )],
+        1036 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-three-absent-prefix".to_vec(),
+        )],
         1037 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-three-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-three-joint".to_vec(),
+            ),
         ],
-        1038 => vec![(vec![5], b"case-closure-edge-prefix-fifty-three-final".to_vec())],
+        1038 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-three-final".to_vec(),
+        )],
         1039 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-three-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-three-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-three-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-three-recreated".to_vec(),
+            ),
         ],
-        1040 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-three-recreated".to_vec())],
+        1040 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-three-recreated".to_vec(),
+        )],
         1041 => vec![],
         1042 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-four-first".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-four-first".to_vec(),
+            ),
         ],
         1043 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-four-replaced".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-four-replaced".to_vec(),
+            ),
         ],
         1044 => vec![(vec![5], b"original-prefix".to_vec())],
         1045 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-four-recreated".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-four-recreated".to_vec(),
+            ),
         ],
-        1046 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-four-recreated".to_vec())],
-        1047 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-four-absent-prefix".to_vec())],
+        1046 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-four-recreated".to_vec(),
+        )],
+        1047 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-four-absent-prefix".to_vec(),
+        )],
         1048 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-four-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-four-joint".to_vec(),
+            ),
         ],
-        1049 => vec![(vec![5], b"case-closure-edge-prefix-fifty-four-final".to_vec())],
+        1049 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-four-final".to_vec(),
+        )],
         1050 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-four-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-four-recreated".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-four-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-four-recreated".to_vec(),
+            ),
         ],
-        1051 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-four-recreated".to_vec())],
+        1051 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-four-recreated".to_vec(),
+        )],
         1052 => vec![],
-        1053 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-five-orphan".to_vec())],
+        1053 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-five-orphan".to_vec(),
+        )],
         1054 => vec![
             (vec![5], b"original-prefix".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-five-orphan".to_vec()),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-five-orphan".to_vec(),
+            ),
         ],
-        1055 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-five-orphan".to_vec())],
+        1055 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-five-orphan".to_vec(),
+        )],
         1056 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-five-orphan".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-five-orphan".to_vec(),
+            ),
         ],
         1057 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-five-final".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-five-replaced".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-five-final".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-five-replaced".to_vec(),
+            ),
         ],
-        1058 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-five-replaced".to_vec())],
+        1058 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-five-replaced".to_vec(),
+        )],
         1059 => vec![],
-        1060 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-five-recreated".to_vec())],
+        1060 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-five-recreated".to_vec(),
+        )],
         1061 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-five-joint".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-five-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-five-joint".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-five-joint".to_vec(),
+            ),
         ],
-        1062 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-five-joint".to_vec())],
+        1062 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-five-joint".to_vec(),
+        )],
         1063 => vec![],
-        1064 => vec![(vec![5], b"case-closure-edge-prefix-fifty-six-first".to_vec())],
+        1064 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-six-first".to_vec(),
+        )],
         1065 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-six-first".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-six-first".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-six-first".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-six-first".to_vec(),
+            ),
         ],
         1066 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-six-replaced".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-six-first".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-six-replaced".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-six-first".to_vec(),
+            ),
         ],
         1067 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-six-replaced".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-six-replaced".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-six-replaced".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-six-replaced".to_vec(),
+            ),
         ],
-        1068 => vec![(vec![5], b"case-closure-edge-prefix-fifty-six-replaced".to_vec())],
+        1068 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-six-replaced".to_vec(),
+        )],
         1069 => vec![],
-        1070 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-six-recreated".to_vec())],
+        1070 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-six-recreated".to_vec(),
+        )],
         1071 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-six-joint".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-six-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-six-joint".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-six-joint".to_vec(),
+            ),
         ],
-        1072 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-six-joint".to_vec())],
+        1072 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-six-joint".to_vec(),
+        )],
         1073 => vec![],
-        1074 => vec![(vec![5], b"case-closure-edge-prefix-fifty-seven-first".to_vec())],
+        1074 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-seven-first".to_vec(),
+        )],
         1075 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-seven-first".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-seven-first".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-seven-first".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-seven-first".to_vec(),
+            ),
         ],
         1076 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-seven-first".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-seven-replaced".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-seven-first".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-seven-replaced".to_vec(),
+            ),
         ],
-        1077 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-seven-replaced".to_vec())],
+        1077 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-seven-replaced".to_vec(),
+        )],
         1078 => vec![(
             vec![5, 0],
             include_str!("fixtures/case_closure_edge_tail_fifty_seven.orna")
@@ -9934,10 +11910,19 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 .to_vec(),
         )],
         1079 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-seven-joint".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-seven-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-seven-joint".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-seven-joint".to_vec(),
+            ),
         ],
-        1080 => vec![(vec![5], b"case-closure-edge-prefix-fifty-seven-joint".to_vec())],
+        1080 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-seven-joint".to_vec(),
+        )],
         1081 => vec![],
         1082 => vec![(
             vec![5, 0],
@@ -10007,16 +11992,34 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             b"case-closure-edge-tail-fifty-eight-joint".to_vec(),
         )],
         1093 => vec![],
-        1094 => vec![(vec![5], b"case-closure-edge-prefix-fifty-nine-first".to_vec())],
+        1094 => vec![(
+            vec![5],
+            b"case-closure-edge-prefix-fifty-nine-first".to_vec(),
+        )],
         1095 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-nine-first".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-nine-first".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-nine-first".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-nine-first".to_vec(),
+            ),
         ],
         1096 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-nine-replaced".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-nine-first".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-nine-replaced".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-nine-first".to_vec(),
+            ),
         ],
-        1097 => vec![(vec![5, 0], b"case-closure-edge-tail-fifty-nine-replaced".to_vec())],
+        1097 => vec![(
+            vec![5, 0],
+            b"case-closure-edge-tail-fifty-nine-replaced".to_vec(),
+        )],
         1098 => vec![(
             vec![5, 0],
             include_str!("fixtures/case_closure_edge_tail_fifty_nine.orna")
@@ -10028,8 +12031,14 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             b"case-closure-edge-tail-fifty-nine-orphan-replaced".to_vec(),
         )],
         1100 => vec![
-            (vec![5], b"case-closure-edge-prefix-fifty-nine-joint".to_vec()),
-            (vec![5, 0], b"case-closure-edge-tail-fifty-nine-joint".to_vec()),
+            (
+                vec![5],
+                b"case-closure-edge-prefix-fifty-nine-joint".to_vec(),
+            ),
+            (
+                vec![5, 0],
+                b"case-closure-edge-tail-fifty-nine-joint".to_vec(),
+            ),
         ],
         1101 => vec![],
         1102 => vec![(
@@ -10244,10 +12253,7 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 .to_vec(),
         )],
         1136 => vec![],
-        1137 => vec![(
-            vec![5],
-            b"case-closure-edge-prefix-sixty-first".to_vec(),
-        )],
+        1137 => vec![(vec![5], b"case-closure-edge-prefix-sixty-first".to_vec())],
         1138 => vec![
             (vec![5], b"case-closure-edge-prefix-sixty-first".to_vec()),
             (
@@ -10266,15 +12272,9 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                     .to_vec(),
             ),
         ],
-        1140 => vec![(
-            vec![5],
-            b"case-closure-edge-prefix-sixty-replaced".to_vec(),
-        )],
+        1140 => vec![(vec![5], b"case-closure-edge-prefix-sixty-replaced".to_vec())],
         1141 => vec![
-            (
-                vec![5],
-                b"case-closure-edge-prefix-sixty-replaced".to_vec(),
-            ),
+            (vec![5], b"case-closure-edge-prefix-sixty-replaced".to_vec()),
             (
                 vec![5, 0],
                 b"case-closure-edge-tail-sixty-recreated".to_vec(),
@@ -10289,19 +12289,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             b"case-closure-edge-tail-sixty-orphan-replaced".to_vec(),
         )],
         1144 => vec![
-            (
-                vec![5],
-                b"case-closure-edge-prefix-sixty-restored".to_vec(),
-            ),
-            (
-                vec![5, 0],
-                b"case-closure-edge-tail-sixty-joint".to_vec(),
-            ),
+            (vec![5], b"case-closure-edge-prefix-sixty-restored".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-sixty-joint".to_vec()),
         ],
-        1145 => vec![(
-            vec![5, 0],
-            b"case-closure-edge-tail-sixty-joint".to_vec(),
-        )],
+        1145 => vec![(vec![5, 0], b"case-closure-edge-tail-sixty-joint".to_vec())],
         1146 => vec![(
             vec![5, 0],
             include_str!("fixtures/case_closure_edge_tail_sixty.orna")
@@ -11094,15 +13085,9 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
                 .to_vec(),
         )],
         1268 => vec![],
-        1269 => vec![(
-            vec![5],
-            b"case-closure-edge-prefix-seventy-first".to_vec(),
-        )],
+        1269 => vec![(vec![5], b"case-closure-edge-prefix-seventy-first".to_vec())],
         1270 => vec![
-            (
-                vec![5],
-                b"case-closure-edge-prefix-seventy-first".to_vec(),
-            ),
+            (vec![5], b"case-closure-edge-prefix-seventy-first".to_vec()),
             (
                 vec![5, 0],
                 include_str!("fixtures/case_closure_edge_tail_seventy.orna")
@@ -11133,24 +13118,12 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
             b"case-closure-edge-tail-seventy-orphan-replaced".to_vec(),
         )],
         1274 => vec![
-            (
-                vec![5],
-                b"case-closure-edge-prefix-seventy-joint".to_vec(),
-            ),
-            (
-                vec![5, 0],
-                b"case-closure-edge-tail-seventy-joint".to_vec(),
-            ),
+            (vec![5], b"case-closure-edge-prefix-seventy-joint".to_vec()),
+            (vec![5, 0], b"case-closure-edge-tail-seventy-joint".to_vec()),
         ],
-        1275 => vec![(
-            vec![5],
-            b"case-closure-edge-prefix-seventy-joint".to_vec(),
-        )],
+        1275 => vec![(vec![5], b"case-closure-edge-prefix-seventy-joint".to_vec())],
         1276 => vec![
-            (
-                vec![5],
-                b"case-closure-edge-prefix-seventy-joint".to_vec(),
-            ),
+            (vec![5], b"case-closure-edge-prefix-seventy-joint".to_vec()),
             (
                 vec![5, 0],
                 include_str!("fixtures/case_closure_edge_tail_seventy_reopened.orna")
@@ -11500,26 +13473,47 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert!(expected_rows(279).is_empty());
     assert_eq!(expected_rows(280), expected_rows(274));
     assert_eq!(expected_rows(281)[0], expected_rows(280)[0]);
-    assert_eq!(expected_rows(282), vec![(vec![5, 0], b"closure-extension".to_vec())]);
+    assert_eq!(
+        expected_rows(282),
+        vec![(vec![5, 0], b"closure-extension".to_vec())]
+    );
     assert_eq!(expected_rows(283), expected_rows(281));
     assert!(expected_rows(284).is_empty());
-    assert_eq!(expected_rows(285), vec![(vec![5, 0], b"closure-tail-only".to_vec())]);
+    assert_eq!(
+        expected_rows(285),
+        vec![(vec![5, 0], b"closure-tail-only".to_vec())]
+    );
     assert_eq!(expected_rows(286)[0], expected_rows(283)[0]);
-    assert_eq!(expected_rows(287), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(287),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert!(expected_rows(288).is_empty());
     assert_eq!(expected_rows(289), expected_rows(280));
     assert_eq!(expected_rows(290)[0], expected_rows(289)[0]);
-    assert_eq!(expected_rows(291), vec![(vec![5, 0], b"remainder-extension".to_vec())]);
+    assert_eq!(
+        expected_rows(291),
+        vec![(vec![5, 0], b"remainder-extension".to_vec())]
+    );
     assert!(expected_rows(292).is_empty());
     assert_eq!(expected_rows(293), expected_rows(280));
     assert_eq!(expected_rows(294)[0], expected_rows(293)[0]);
-    assert_eq!(expected_rows(295), vec![(vec![5, 0], b"final-extension".to_vec())]);
+    assert_eq!(
+        expected_rows(295),
+        vec![(vec![5, 0], b"final-extension".to_vec())]
+    );
     assert_eq!(expected_rows(296), expected_rows(294));
     assert_eq!(expected_rows(297), expected_rows(293));
     assert!(expected_rows(298).is_empty());
-    assert_eq!(expected_rows(299), vec![(vec![5, 0], b"final-tail-only".to_vec())]);
+    assert_eq!(
+        expected_rows(299),
+        vec![(vec![5, 0], b"final-tail-only".to_vec())]
+    );
     assert!(expected_rows(300).is_empty());
-    assert_eq!(expected_rows(301), vec![(vec![5, 0], b"edge-tail-only".to_vec())]);
+    assert_eq!(
+        expected_rows(301),
+        vec![(vec![5, 0], b"edge-tail-only".to_vec())]
+    );
     assert_eq!(
         expected_rows(302),
         vec![
@@ -11585,7 +13579,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert!(expected_rows(340).is_empty());
     assert_eq!(expected_rows(341), expected_rows(339));
     assert_eq!(expected_rows(342)[0], expected_rows(341)[0]);
-    assert_eq!(expected_rows(343), vec![(vec![5, 0], b"delete-edge-final-tail".to_vec())]);
+    assert_eq!(
+        expected_rows(343),
+        vec![(vec![5, 0], b"delete-edge-final-tail".to_vec())]
+    );
     assert_eq!(expected_rows(344), expected_rows(342));
     assert_eq!(expected_rows(345), expected_rows(341));
     assert!(expected_rows(346).is_empty());
@@ -11636,7 +13633,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-tail-final-round".to_vec())]
     );
     assert!(expected_rows(372).is_empty());
-    assert_eq!(expected_rows(373), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(373),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(374)[1], expected_rows(375)[0]);
     assert_eq!(expected_rows(375)[0], expected_rows(376)[1]);
     assert_eq!(expected_rows(376)[0], expected_rows(377)[0]);
@@ -11646,7 +13646,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-final-closure-final-tail".to_vec())]
     );
     assert!(expected_rows(380).is_empty());
-    assert_eq!(expected_rows(381), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(381),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(382)[0], expected_rows(383)[0]);
     assert_ne!(expected_rows(382)[1], expected_rows(383)[1]);
     assert_eq!(expected_rows(383)[1], expected_rows(384)[0]);
@@ -11658,7 +13661,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-final-closure-terminal-tail".to_vec())]
     );
     assert!(expected_rows(389).is_empty());
-    assert_eq!(expected_rows(390), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(390),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(391)[0], expected_rows(392)[0]);
     assert_ne!(expected_rows(391)[1], expected_rows(392)[1]);
     assert_eq!(expected_rows(392)[1], expected_rows(393)[0]);
@@ -11674,7 +13680,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-closure-tail-three-final".to_vec())]
     );
     assert!(expected_rows(398).is_empty());
-    assert_eq!(expected_rows(399), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(399),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(400)[0], expected_rows(401)[0]);
     assert_ne!(expected_rows(400)[1], expected_rows(401)[1]);
     assert_ne!(expected_rows(401)[1], expected_rows(402)[0]);
@@ -11686,7 +13695,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         vec![(vec![5, 0], b"edge-interplay-final-tail".to_vec())]
     );
     assert!(expected_rows(407).is_empty());
-    assert_eq!(expected_rows(408), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(408),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(409)[1], expected_rows(410)[0]);
     assert_eq!(
         expected_rows(410)[0],
@@ -11699,7 +13711,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(414)[1], expected_rows(415)[0]);
     assert_eq!(expected_rows(414)[0], expected_rows(408)[0]);
     assert!(expected_rows(416).is_empty());
-    assert_eq!(expected_rows(417), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(417),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(418)[0], expected_rows(419)[0]);
     assert_ne!(expected_rows(418)[1], expected_rows(419)[1]);
     assert_eq!(expected_rows(419)[1], expected_rows(420)[0]);
@@ -11709,7 +13724,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(422)[0], expected_rows(423)[0]);
     assert_eq!(expected_rows(423)[1], expected_rows(424)[0]);
     assert!(expected_rows(425).is_empty());
-    assert_eq!(expected_rows(426), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(426),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(427)[0], expected_rows(428)[0]);
     assert_ne!(expected_rows(427)[1], expected_rows(428)[1]);
     assert_eq!(expected_rows(428)[1], expected_rows(429)[0]);
@@ -11719,7 +13737,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(430)[0], expected_rows(432)[0]);
     assert_eq!(expected_rows(432)[1], expected_rows(433)[0]);
     assert!(expected_rows(434).is_empty());
-    assert_eq!(expected_rows(435), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(435),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(436)[1], expected_rows(437)[0]);
     assert_ne!(expected_rows(436)[0], expected_rows(437)[0]);
     assert_ne!(expected_rows(437)[0], expected_rows(438)[0]);
@@ -11738,12 +13759,18 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(448)[0], expected_rows(449)[0]);
     assert_eq!(expected_rows(450)[1], expected_rows(451)[0]);
     assert!(expected_rows(452).is_empty());
-    assert_eq!(expected_rows(453), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(453),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_eq!(expected_rows(454)[0], expected_rows(455)[0]);
     assert_ne!(expected_rows(454)[1], expected_rows(455)[1]);
     assert_eq!(expected_rows(455)[1], expected_rows(456)[0]);
     assert!(expected_rows(457).is_empty());
-    assert_eq!(expected_rows(458), vec![(vec![5, 0], b"closure-edge-interplay-tail-only".to_vec())]);
+    assert_eq!(
+        expected_rows(458),
+        vec![(vec![5, 0], b"closure-edge-interplay-tail-only".to_vec())]
+    );
     assert_eq!(expected_rows(459)[0], expected_rows(453)[0]);
     assert_ne!(expected_rows(458)[0], expected_rows(459)[1]);
     assert_eq!(expected_rows(459)[0], expected_rows(460)[0]);
@@ -11763,9 +13790,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_eq!(expected_rows(472)[1], expected_rows(473)[0]);
     assert_ne!(expected_rows(473)[0], expected_rows(474)[0]);
     assert!(expected_rows(475).is_empty());
-    assert_eq!(expected_rows(476), vec![(vec![5], b"original-prefix".to_vec())]);
+    assert_eq!(
+        expected_rows(476),
+        vec![(vec![5], b"original-prefix".to_vec())]
+    );
     assert_ne!(expected_rows(477)[0], expected_rows(476)[0]);
-    assert_eq!(expected_rows(477)[0], (vec![5], b"case-closure-prefix-final".to_vec()));
+    assert_eq!(
+        expected_rows(477)[0],
+        (vec![5], b"case-closure-prefix-final".to_vec())
+    );
     assert_eq!(expected_rows(477)[0], expected_rows(478)[0]);
     assert!(expected_rows(479).is_empty());
     assert_eq!(expected_rows(480)[0], expected_rows(481)[0]);
@@ -11986,7 +14019,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(639)[0], expected_rows(640)[0]);
     assert_eq!(
         expected_rows(641)[0],
-        (vec![5], b"case-closure-edge-prefix-seventeen-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-seventeen-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(641)[0], expected_rows(642)[0]);
     assert_eq!(expected_rows(643)[1], expected_rows(644)[0]);
@@ -12038,7 +14074,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(683)[0], expected_rows(684)[0]);
     assert_eq!(
         expected_rows(685)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-one-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-one-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(685)[0], expected_rows(686)[0]);
     assert_eq!(expected_rows(687)[1], expected_rows(688)[0]);
@@ -12051,7 +14090,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(694)[0], expected_rows(695)[0]);
     assert_eq!(
         expected_rows(696)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-two-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-two-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(696)[0], expected_rows(697)[0]);
     assert_eq!(expected_rows(698)[1], expected_rows(699)[0]);
@@ -12064,7 +14106,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(705)[0], expected_rows(706)[0]);
     assert_eq!(
         expected_rows(707)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-three-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-three-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(707)[0], expected_rows(708)[0]);
     assert_eq!(expected_rows(709)[1], expected_rows(710)[0]);
@@ -12077,7 +14122,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(716)[0], expected_rows(717)[0]);
     assert_eq!(
         expected_rows(718)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-four-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-four-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(718)[0], expected_rows(719)[0]);
     assert_eq!(expected_rows(720)[1], expected_rows(721)[0]);
@@ -12090,7 +14138,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(727)[0], expected_rows(728)[0]);
     assert_eq!(
         expected_rows(729)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-five-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-five-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(729)[0], expected_rows(730)[0]);
     assert_eq!(expected_rows(731)[1], expected_rows(732)[0]);
@@ -12103,7 +14154,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(738)[0], expected_rows(739)[0]);
     assert_eq!(
         expected_rows(740)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-six-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-six-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(740)[0], expected_rows(741)[0]);
     assert_eq!(expected_rows(742)[1], expected_rows(743)[0]);
@@ -12116,7 +14170,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(749)[0], expected_rows(750)[0]);
     assert_eq!(
         expected_rows(751)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-seven-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-seven-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(751)[0], expected_rows(752)[0]);
     assert_eq!(expected_rows(753)[1], expected_rows(754)[0]);
@@ -12129,7 +14186,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(760)[0], expected_rows(761)[0]);
     assert_eq!(
         expected_rows(762)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-eight-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-eight-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(762)[0], expected_rows(763)[0]);
     assert_eq!(expected_rows(764)[1], expected_rows(765)[0]);
@@ -12142,7 +14202,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(771)[0], expected_rows(772)[0]);
     assert_eq!(
         expected_rows(773)[0],
-        (vec![5], b"case-closure-edge-prefix-twenty-nine-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-twenty-nine-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(773)[0], expected_rows(774)[0]);
     assert_eq!(expected_rows(775)[1], expected_rows(776)[0]);
@@ -12168,7 +14231,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
     assert_ne!(expected_rows(793)[0], expected_rows(794)[0]);
     assert_eq!(
         expected_rows(795)[0],
-        (vec![5], b"case-closure-edge-prefix-thirty-one-final".to_vec())
+        (
+            vec![5],
+            b"case-closure-edge-prefix-thirty-one-final".to_vec()
+        )
     );
     assert_eq!(expected_rows(795)[0], expected_rows(796)[0]);
     assert_eq!(expected_rows(797)[1], expected_rows(798)[0]);
@@ -12468,7 +14534,10 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         expected_rows(1090)[0].1,
         include_str!("fixtures/case_closure_edge_tail_fifty_eight.orna").as_bytes()
     );
-    assert_eq!(expected_rows(1091)[1].1, b"case-closure-edge-tail-fifty-eight-joint");
+    assert_eq!(
+        expected_rows(1091)[1].1,
+        b"case-closure-edge-tail-fifty-eight-joint"
+    );
     assert_eq!(expected_rows(1092)[0].1, expected_rows(1091)[1].1);
     assert!(expected_rows(1093).is_empty());
     assert_eq!(
@@ -12617,12 +14686,15 @@ async fn identical_prefix_restoration_preserves_boundary_pins() {
         expected_rows(1193)[1].1,
         include_str!("fixtures/case_closure_edge_tail_sixty_three.orna").as_bytes()
     );
-    assert_eq!(expected_rows(1194), vec![(
-        vec![5, 0],
-        include_str!("fixtures/case_closure_edge_tail_sixty_three.orna")
-            .as_bytes()
-            .to_vec()
-    )]);
+    assert_eq!(
+        expected_rows(1194),
+        vec![(
+            vec![5, 0],
+            include_str!("fixtures/case_closure_edge_tail_sixty_three.orna")
+                .as_bytes()
+                .to_vec()
+        )]
+    );
     assert_ne!(expected_rows(1194), expected_rows(1195));
     assert_eq!(expected_rows(1196).len(), 2);
     assert_eq!(expected_rows(1197).len(), 1);

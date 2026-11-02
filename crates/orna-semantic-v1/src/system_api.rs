@@ -15,9 +15,7 @@ const MAX_JSON_NESTING_DEPTH: usize = 128;
 #[cfg(not(target_arch = "wasm32"))]
 fn generated_system_api_json() -> &'static str {
     static GENERATED: OnceLock<String> = OnceLock::new();
-    GENERATED
-        .get_or_init(orna_sys_v1::system_api_json)
-        .as_str()
+    GENERATED.get_or_init(orna_sys_v1::system_api_json).as_str()
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -407,7 +405,12 @@ impl SystemApi {
                 value_type_declaration(&value.name, &value.type_parameters)?;
             validate_value_type_metadata(&value)?;
             let parameters = type_parameters.iter().cloned().collect();
-            let fields = fields(value.fields, &type_arities, &parameters, &relation_row_types)?;
+            let fields = fields(
+                value.fields,
+                &type_arities,
+                &parameters,
+                &relation_row_types,
+            )?;
             insert_descriptor(
                 &mut types,
                 name.clone(),
@@ -600,10 +603,8 @@ impl SystemApi {
             if let Some(replacement) = descriptor.replacement.as_deref() {
                 validate_path(replacement)?;
             }
-            let replacement_is_valid = descriptor
-                .replacement
-                .as_deref()
-                .is_none_or(|replacement| {
+            let replacement_is_valid =
+                descriptor.replacement.as_deref().is_none_or(|replacement| {
                     portable_path_exists(
                         replacement,
                         &singletons,
@@ -3275,9 +3276,7 @@ mod tests {
             .iter_mut()
             .find(|function| function["name"] == "sys.meta")
             .unwrap()["signature"];
-        *meta = serde_json::json!(
-            "fn sys.meta<T>(value: T): Relation<sys.ValueMetadata<T>>"
-        );
+        *meta = serde_json::json!("fn sys.meta<T>(value: T): Relation<sys.ValueMetadata<T>>");
         assert!(
             SystemApi::from_json(&generic_parameter_result.to_string()).is_ok(),
             "an in-scope type parameter can specialize a record-generic relation row"
@@ -3294,9 +3293,8 @@ mod tests {
                     .is_some_and(|signature| signature.starts_with("fn sys.history("))
             })
             .unwrap()["signature"];
-        *history = serde_json::json!(
-            "fn sys.history(object: sys.ObjectRef): Relation<sys.DiffScope>"
-        );
+        *history =
+            serde_json::json!("fn sys.history(object: sys.ObjectRef): Relation<sys.DiffScope>");
         assert_eq!(
             SystemApi::from_json(&function_result.to_string()),
             Err(SystemApiError::InvalidType),
@@ -3446,8 +3444,7 @@ mod tests {
             .as_array()
             .unwrap()
             .len();
-        singleton_function_collision["counts"]["singletons"] =
-            serde_json::json!(singleton_count);
+        singleton_function_collision["counts"]["singletons"] = serde_json::json!(singleton_count);
         assert_eq!(
             SystemApi::from_json(&singleton_function_collision.to_string()),
             Err(SystemApiError::DuplicateName),

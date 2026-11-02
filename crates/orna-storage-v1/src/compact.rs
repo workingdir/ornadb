@@ -1116,10 +1116,7 @@ impl<'a> CompactBaseFold<'a> {
             return Err(CompactBaseProjectionError::DuplicateKeyGeneration);
         }
 
-        let was_visible = self
-            .rows
-            .get(&key)
-            .is_some_and(|row| row.value.is_some());
+        let was_visible = self.rows.get(&key).is_some_and(|row| row.value.is_some());
         let role_matches_lineage = matches!(
             (role, value, was_visible),
             (CompactSegmentRole::Data, Some(_), false)
@@ -1143,10 +1140,7 @@ impl<'a> CompactBaseFold<'a> {
         Ok(())
     }
 
-    fn finish(
-        self,
-        next_generation: u64,
-    ) -> Result<CompactBaseState, CompactBaseProjectionError> {
+    fn finish(self, next_generation: u64) -> Result<CompactBaseState, CompactBaseProjectionError> {
         if next_generation == 0 || next_generation <= self.greatest_generation {
             return Err(CompactBaseProjectionError::InvalidManifestGeneration);
         }
@@ -1547,11 +1541,11 @@ impl CompactOvbProfile {
             let [field_id, _, _, role, _] = parts.as_slice() else {
                 return Err(CompactBaseProjectionError::InvalidEvolutionValue);
             };
-            let role =
-                integer_value(role).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+            let role = integer_value(role)
+                .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
             if role == 1 {
-                let field_id =
-                    uuid(field_id).map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
+                let field_id = uuid(field_id)
+                    .map_err(|_| CompactBaseProjectionError::InvalidEvolutionValue)?;
                 stored_fields.push(
                     row_fields
                         .get(&field_id)
@@ -2652,11 +2646,7 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            profile.validate_complete_row(
-                &schema,
-                &scalar_key(1),
-                &row(1, OvbRaw::Int(2.into())),
-            ),
+            profile.validate_complete_row(&schema, &scalar_key(1), &row(1, OvbRaw::Int(2.into())),),
             Err(CompactBaseProjectionError::InvalidEvolutionValue)
         );
         assert_eq!(
@@ -2829,7 +2819,10 @@ mod tests {
         let base = fold.finish(10).unwrap();
         let final_key = profile.decode_key(&key.encode().unwrap()).unwrap();
         let final_row = base.rows.get(&final_key).unwrap();
-        assert_eq!(final_row.value(), compact_fold_fixture(COMPACT_FOLD_REINSERTION).1.as_ref());
+        assert_eq!(
+            final_row.value(),
+            compact_fold_fixture(COMPACT_FOLD_REINSERTION).1.as_ref()
+        );
         assert_eq!(final_row.generation(), 8);
         assert_eq!(final_row.role(), CompactSegmentRole::Data);
         assert_eq!(base.rows().count(), 2);
@@ -4089,9 +4082,15 @@ mod tests {
         assert_eq!(plan.generation(), 8);
         assert_eq!(plan.rows().len(), 1);
         assert_eq!(plan.rows()[0].source(), crate::PhysicalPlacement::Compact);
-        assert_eq!(plan.rows()[0].destination(), crate::PhysicalPlacement::Editable);
+        assert_eq!(
+            plan.rows()[0].destination(),
+            crate::PhysicalPlacement::Editable
+        );
         assert!(plan.rows()[0].editable_path().is_some());
-        assert_eq!(plan.rows()[0].editable_bytes(), Some(EDITABLE_ROW.as_bytes()));
+        assert_eq!(
+            plan.rows()[0].editable_bytes(),
+            Some(EDITABLE_ROW.as_bytes())
+        );
         let output = plan
             .rows()
             .iter()

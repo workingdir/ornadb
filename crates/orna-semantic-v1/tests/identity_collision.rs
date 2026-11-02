@@ -11,7 +11,10 @@ fn second_declaration_under_one_name_is_rejected_as_an_identity_collision() {
         source: COLLISION_SOURCE.to_owned(),
         prelude_exports: BTreeSet::new(),
     }]);
-    assert!(!analysis.is_ok(), "two declarations named `total` must not pass");
+    assert!(
+        !analysis.is_ok(),
+        "two declarations named `total` must not pass"
+    );
     assert!(
         analysis
             .diagnostics

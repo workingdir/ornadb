@@ -32,8 +32,7 @@ use super::{
     CwdCapture, DiagnosticClass, DiagnosticCode, FaultInjector, ProtectedContentTransferEvidence,
     RuntimeActivationContext, RuntimeError, RuntimeQueryError, RuntimeState,
     RuntimeTableActivationSnapshot, RuntimeTableIdentity, SafeDiagnostic,
-    TableActivationCandidateValidator, TableActivationError, TableMutation,
-    TableSchemaIdentity,
+    TableActivationCandidateValidator, TableActivationError, TableMutation, TableSchemaIdentity,
     ValidatedTableActivationCommit, WriterLease,
 };
 use orna_repository_v1::{CwdGeneration, ProtectedContentPin};
@@ -742,7 +741,11 @@ impl<S> DraftState<S> {
     fn candidate_arc(&self) -> Result<Arc<[u8]>, EditDraftError> {
         match &self.candidate {
             Some(spool) => spool.read_all().map_err(|_| EditDraftError::BackingIo),
-            None => self.baseline.bytes.to_arc().map_err(|_| EditDraftError::BackingIo),
+            None => self
+                .baseline
+                .bytes
+                .to_arc()
+                .map_err(|_| EditDraftError::BackingIo),
         }
     }
 
@@ -755,7 +758,10 @@ impl<S> DraftState<S> {
             Some(spool) => Ok(CandidateSnapshot {
                 len: spool.len,
                 source: CandidateSource::Spool(
-                    spool.file.try_clone().map_err(|_| EditDraftError::BackingIo)?,
+                    spool
+                        .file
+                        .try_clone()
+                        .map_err(|_| EditDraftError::BackingIo)?,
                 ),
             }),
             None => self
@@ -782,10 +788,7 @@ impl<S> DraftState<S> {
     }
 
     /// Returns the private spool, creating it from the baseline on first use.
-    fn ensure_spool(
-        &mut self,
-        storage: &DraftStorage,
-    ) -> Result<&mut DraftSpool, EditDraftError> {
+    fn ensure_spool(&mut self, storage: &DraftStorage) -> Result<&mut DraftSpool, EditDraftError> {
         if self.candidate.is_none() {
             self.candidate = Some(DraftSpool::from_baseline(&self.baseline.bytes, storage)?);
         } else if self.retained_is_live() {
@@ -916,10 +919,12 @@ impl DraftQuota {
                 .checked_add(bytes)
                 .filter(|next| *next <= self.limit)
                 .ok_or(EditDraftError::QuotaExceeded)?;
-            match self
-                .used
-                .compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Acquire)
-            {
+            match self.used.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
                 Ok(_) => return Ok(()),
                 Err(observed) => current = observed,
             }
@@ -929,9 +934,11 @@ impl DraftQuota {
     fn release(&self, bytes: u64) {
         // Saturating: a release that exceeds the charged total must not wrap the
         // aggregate budget, which would admit reservations past the limit.
-        let _ = self.used.fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
-            Some(used.saturating_sub(bytes))
-        });
+        let _ = self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_sub(bytes))
+            });
     }
 }
 
@@ -1077,8 +1084,8 @@ impl DraftSpool {
         let mut buffer = vec![0; chunk];
         let mut offset = 0_u64;
         loop {
-            let count = io::Read::read(&mut reader, &mut buffer)
-                .map_err(|_| EditDraftError::BackingIo)?;
+            let count =
+                io::Read::read(&mut reader, &mut buffer).map_err(|_| EditDraftError::BackingIo)?;
             if count == 0 {
                 return Ok(spool);
             }
@@ -1140,7 +1147,8 @@ impl DraftSpool {
         if offset >= end {
             return Ok(Vec::new());
         }
-        let size = usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
+        let size =
+            usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
         let mut bytes = vec![0; size];
         self.file.read_exact_at(&mut bytes, offset)?;
         Ok(bytes)
@@ -1217,7 +1225,8 @@ impl CandidateSnapshot {
         if offset >= end {
             return Ok(Vec::new());
         }
-        let size = usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
+        let size =
+            usize::try_from(end - offset).map_err(|_| io::Error::other("range too large"))?;
         let mut bytes = vec![0; size];
         self.read_into(offset, &mut bytes)?;
         Ok(bytes)
@@ -1254,11 +1263,10 @@ pub struct CandidateReader<'a> {
 
 impl io::Read for CandidateReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let remaining = usize::try_from(self.snapshot.len.saturating_sub(self.offset))
-            .unwrap_or(usize::MAX);
+        let remaining =
+            usize::try_from(self.snapshot.len.saturating_sub(self.offset)).unwrap_or(usize::MAX);
         let size = buffer.len().min(CANDIDATE_CHUNK_BYTES).min(remaining);
-        self.snapshot
-            .read_into(self.offset, &mut buffer[..size])?;
+        self.snapshot.read_into(self.offset, &mut buffer[..size])?;
         self.offset += size as u64;
         Ok(size)
     }
@@ -1780,7 +1788,12 @@ impl<S> TemporarySave<S> {
     /// Reads `[offset, offset + length)` of the candidate; see
     /// [`EditDraft::read_range`].
     pub async fn read_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, EditDraftError> {
-        self.state.lock().await.draft.read_range(offset, length).await
+        self.state
+            .lock()
+            .await
+            .draft
+            .read_range(offset, length)
+            .await
     }
 
     pub async fn retained_invalid_draft(&self) -> Option<RetainedInvalidDraft<S>> {
@@ -2294,7 +2307,9 @@ pub fn project_field_name(text: &str) -> String {
 /// occupies. The source path keeps the name; the generated component escapes its
 /// first byte, not the schema name (profiles/vfs-1.md:31-33).
 pub fn project_colliding_table_component(text: &str) -> String {
-    project_namespaced_escaping(text, VfsNameNamespace::Key, true, || str_component_digest(text))
+    project_namespaced_escaping(text, VfsNameNamespace::Key, true, || {
+        str_component_digest(text)
+    })
 }
 
 fn project_namespaced(
@@ -2302,7 +2317,12 @@ fn project_namespaced(
     namespace: VfsNameNamespace,
     component_digest: impl FnOnce() -> [u8; 32],
 ) -> String {
-    project_namespaced_escaping(text, namespace, is_reserved_component(text), component_digest)
+    project_namespaced_escaping(
+        text,
+        namespace,
+        is_reserved_component(text),
+        component_digest,
+    )
 }
 
 fn project_namespaced_escaping(
@@ -2635,10 +2655,7 @@ pub enum VfsStoredFieldKind {
     /// file. `data.orna` names the file with `{ text: "./<file>", encoding:
     /// "utf-8" }`; the file's bytes are the stored string. `required` mirrors
     /// the schema's declaration, as for a Blob (VFS-013).
-    Text {
-        length: u64,
-        required: bool,
-    },
+    Text { length: u64, required: bool },
 }
 
 /// The captured Blob descriptor of one stored content field, as the shared
@@ -3742,26 +3759,26 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
         self.commit_durable_temporary_save(
-                scratch,
-                runtime,
-                save,
-                move |coordinates, bytes| async move {
-                    let binding = capture_vfs_blob_replacement(
-                        capture,
-                        &bytes,
-                        expected_identity,
-                        media_type,
-                        suffix,
-                    )
-                    .map_err(VfsSaveAdmissionError::BlobCapture)?;
-                    let candidate = admit(coordinates, bytes, binding)
-                        .await
-                        .map_err(VfsSaveAdmissionError::Activation)?;
-                    Ok(candidate)
-                },
-                faults,
-            )
-            .await
+            scratch,
+            runtime,
+            save,
+            move |coordinates, bytes| async move {
+                let binding = capture_vfs_blob_replacement(
+                    capture,
+                    &bytes,
+                    expected_identity,
+                    media_type,
+                    suffix,
+                )
+                .map_err(VfsSaveAdmissionError::BlobCapture)?;
+                let candidate = admit(coordinates, bytes, binding)
+                    .await
+                    .map_err(VfsSaveAdmissionError::Activation)?;
+                Ok(candidate)
+            },
+            faults,
+        )
+        .await
     }
 
     /// Adopts one complete VFS row-document save through the same durable
@@ -4799,7 +4816,11 @@ mod tests {
         assert!(!old_handle.projection_is_current().await.unwrap());
         assert!(handle.projection_is_current().await.unwrap());
         assert_eq!(
-            target.open_read().await.read_at(0, accepted_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, accepted_bytes.len())
+                .unwrap(),
             accepted_bytes.as_bytes()
         );
 
@@ -4837,7 +4858,11 @@ mod tests {
             TemporaryRenameOutcome::Rejected { .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, accepted_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, accepted_bytes.len())
+                .unwrap(),
             accepted_bytes.as_bytes()
         );
         assert_eq!(
@@ -4960,7 +4985,10 @@ mod tests {
             "a sparse 256 MiB candidate allocated {allocated} bytes on disk"
         );
         let mut last = [0u8; 1];
-        spool.file.read_exact_at(&mut last, BOUND as u64 - 1).unwrap();
+        spool
+            .file
+            .read_exact_at(&mut last, BOUND as u64 - 1)
+            .unwrap();
         assert_eq!(last, [0x58]);
     }
 
@@ -5031,7 +5059,10 @@ mod tests {
         drop(state);
         assert_eq!(quota.used.load(Ordering::Acquire), len);
         let disk = QuotaCharge::reserve(&quota, HEADER + len);
-        assert!(disk.is_ok(), "the disk record of the refused candidate must fit");
+        assert!(
+            disk.is_ok(),
+            "the disk record of the refused candidate must fit"
+        );
     }
 
     /// Several drafts edited at once stay within the 1 GiB default limit when
@@ -5044,7 +5075,10 @@ mod tests {
         let mut drafts = Vec::new();
         for index in 0..8u8 {
             let draft = EditDraft::open(fixture_image(), BOUND, storage.clone());
-            draft.write_at(BOUND as u64 - 1, &[index + 1]).await.unwrap();
+            draft
+                .write_at(BOUND as u64 - 1, &[index + 1])
+                .await
+                .unwrap();
             drafts.push(draft);
         }
         assert_eq!(quota.used.load(Ordering::Acquire), 8 * BOUND as u64);
@@ -5104,7 +5138,8 @@ mod tests {
     #[test]
     fn runtime_root_draft_spool_directory_is_private() {
         use std::os::unix::fs::PermissionsExt as _;
-        let root = std::env::temp_dir().join(format!("orna-spool-root-{}", Uuid::new_v4().simple()));
+        let root =
+            std::env::temp_dir().join(format!("orna-spool-root-{}", Uuid::new_v4().simple()));
         fs::create_dir_all(&root).unwrap();
         let _cache = VfsRepositoryCache::in_runtime_root(&root).unwrap();
         let mode = fs::metadata(root.join(DRAFT_SPOOL_DIRECTORY))
@@ -5184,7 +5219,10 @@ mod tests {
 
         let retained = draft.retained_invalid_draft().await.unwrap();
         assert_eq!(retained.diagnostic(), rejected());
-        assert_ne!(retained.replacement_bytes().unwrap(), &fixture_image().bytes.to_arc().unwrap()[..]);
+        assert_ne!(
+            retained.replacement_bytes().unwrap(),
+            &fixture_image().bytes.to_arc().unwrap()[..]
+        );
 
         let second = draft
             .fsync_with(|_| {
@@ -5223,7 +5261,10 @@ mod tests {
 
         assert_eq!(*new_handle.pin().snapshot(), 8);
         assert_eq!(*old_handle.pin().snapshot(), 7);
-        assert_ne!(old_handle.read_at(0, 1).unwrap(), new_handle.read_at(0, 1).unwrap());
+        assert_ne!(
+            old_handle.read_at(0, 1).unwrap(),
+            new_handle.read_at(0, 1).unwrap()
+        );
         let repeated_calls = AtomicUsize::new(0);
         let repeated = draft
             .fsync_with(|_| {
@@ -5534,7 +5575,11 @@ mod tests {
         assert_eq!(scratch_syncs.load(Ordering::SeqCst), 1);
         assert_eq!(target.cache_generation().await, 0);
         assert_eq!(
-            target.open_read().await.read_at(0, old_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, old_bytes.len())
+                .unwrap(),
             old_bytes
         );
 
@@ -5818,7 +5863,10 @@ mod tests {
         // image, so it is not stale and it commits instead of being refused.
         let next = target.open_draft(1 << 20).await;
         assert_eq!(
-            next.baseline().await.read_at(0, accepted_bytes.len()).unwrap(),
+            next.baseline()
+                .await
+                .read_at(0, accepted_bytes.len())
+                .unwrap(),
             accepted_bytes.as_bytes()
         );
         next.write_at(0, &[0x5A]).await.unwrap();
@@ -5909,7 +5957,11 @@ mod tests {
         // The REPL change is still what the row holds, and the read handle
         // still reads the version it captured.
         assert_eq!(
-            target.open_read().await.read_at(0, repl_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, repl_bytes.len())
+                .unwrap(),
             repl_bytes.as_bytes()
         );
         assert_eq!(
@@ -5939,7 +5991,11 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 2, .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, draft_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, draft_bytes.len())
+                .unwrap(),
             draft_bytes.as_bytes()
         );
     }
@@ -6035,13 +6091,8 @@ mod tests {
         let stale_for_validation = stale_fixture.clone();
         let scratch = target.begin_temporary_replacement(1 << 20).await;
         scratch.write_at(0, &accepted_for_admit).await.unwrap();
-        let save = VfsDurableSave::new(
-            [4; 16],
-            schema.clone(),
-            identity.clone(),
-            key.clone(),
-        )
-        .with_expected_baseline_row(None);
+        let save = VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
+            .with_expected_baseline_row(None);
         let identity_for_admit = identity.clone();
         let accepted_for_validation = accepted_for_admit.clone();
         let applied = target
@@ -6081,13 +6132,8 @@ mod tests {
             .commit_durable_temporary_rename(
                 &scratch,
                 &state,
-                VfsDurableSave::new(
-                    [4; 16],
-                    schema.clone(),
-                    identity.clone(),
-                    key.clone(),
-                )
-                .with_expected_baseline_row(None),
+                VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
+                    .with_expected_baseline_row(None),
                 |_, _| async { panic!("an accepted temp rename must replay its outcome") },
                 &crate::NoFault,
             )
@@ -6114,13 +6160,8 @@ mod tests {
             .commit_durable_temporary_rename(
                 &identical_scratch,
                 &state,
-                VfsDurableSave::new(
-                    [4; 16],
-                    schema.clone(),
-                    identity.clone(),
-                    key.clone(),
-                )
-                .with_expected_baseline_row(None),
+                VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
+                    .with_expected_baseline_row(None),
                 move |coordinates, bytes| async move {
                     let replacement = VfsTableRowReplacement::new(
                         [12; 16],
@@ -6161,13 +6202,8 @@ mod tests {
             .commit_durable_temporary_rename(
                 &stale_scratch,
                 &state,
-                VfsDurableSave::new(
-                    [4; 16],
-                    schema.clone(),
-                    identity.clone(),
-                    key.clone(),
-                )
-                .with_expected_baseline_row(Some(b"not-current".to_vec())),
+                VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
+                    .with_expected_baseline_row(Some(b"not-current".to_vec())),
                 move |coordinates, bytes| async move {
                     let replacement = VfsTableRowReplacement::new(
                         [8; 16],
@@ -6206,13 +6242,8 @@ mod tests {
             .commit_durable_temporary_rename(
                 &stale_scratch,
                 &state,
-                VfsDurableSave::new(
-                    [4; 16],
-                    schema.clone(),
-                    identity.clone(),
-                    key.clone(),
-                )
-                .with_expected_baseline_row(Some(accepted_baseline.clone())),
+                VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone())
+                    .with_expected_baseline_row(Some(accepted_baseline.clone())),
                 move |coordinates, bytes| async move {
                     let replacement = VfsTableRowReplacement::new(
                         [9; 16],
@@ -6244,12 +6275,7 @@ mod tests {
 
         let mut failed_lookup = VfsSaveAdmission::<u64>::begin(
             &state,
-            VfsDurableSave::new(
-                [4; 16],
-                schema.clone(),
-                identity.clone(),
-                key.clone(),
-            ),
+            VfsDurableSave::new([4; 16], schema.clone(), identity.clone(), key.clone()),
             &crate::NoFault,
         )
         .await
@@ -6349,9 +6375,16 @@ mod tests {
             scratch.fsync_scratch_with(|_, bytes| {
                 let expected_bytes = replacement_bytes.as_slice();
                 async move {
-                    assert_eq!(bytes.read_range(0, expected_bytes.len()).unwrap(), expected_bytes);
                     assert_eq!(
-                        scratch_for_persist.candidate_bytes().await.unwrap().as_ref(),
+                        bytes.read_range(0, expected_bytes.len()).unwrap(),
+                        expected_bytes
+                    );
+                    assert_eq!(
+                        scratch_for_persist
+                            .candidate_bytes()
+                            .await
+                            .unwrap()
+                            .as_ref(),
                         expected_bytes
                     );
                     Ok::<_, ()>(())
@@ -6372,7 +6405,11 @@ mod tests {
             None,
         );
         assert_eq!(
-            target.open_read().await.read_at(0, old_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, old_bytes.len())
+                .unwrap(),
             old_bytes,
             "scratch flush leaves new opens on the accepted image"
         );
@@ -6446,7 +6483,10 @@ mod tests {
         let replacement_for_flush = replacement_bytes.clone();
         scratch
             .fsync_scratch_with(move |_, bytes| async move {
-                assert_eq!(bytes.read_range(0, replacement_for_flush.len()).unwrap(), replacement_for_flush.as_slice());
+                assert_eq!(
+                    bytes.read_range(0, replacement_for_flush.len()).unwrap(),
+                    replacement_for_flush.as_slice()
+                );
                 Ok::<_, ()>(())
             })
             .await
@@ -6545,8 +6585,7 @@ mod tests {
         let target_for_admit = Arc::clone(&target);
         let scratch_for_admit = &scratch;
         let state_for_admit = &state;
-        let nested_save =
-            VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone());
+        let nested_save = VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone());
         let nested_document_save =
             VfsDurableSave::new(owner_id, schema.clone(), table.clone(), key.clone())
                 .with_expected_baseline_row(None);
@@ -6566,7 +6605,11 @@ mod tests {
                 move |coordinates, _, encoded_blob| async move {
                     assert_eq!(cache_for_admit.generation().await, 0);
                     assert_eq!(
-                        target_for_admit.open_read().await.read_at(0, PIXEL.len()).unwrap(),
+                        target_for_admit
+                            .open_read()
+                            .await
+                            .read_at(0, PIXEL.len())
+                            .unwrap(),
                         PIXEL
                     );
                     assert_eq!(
@@ -6651,7 +6694,11 @@ mod tests {
             TemporaryRenameOutcome::Applied { generation: 1, .. }
         ));
         assert_eq!(
-            target.open_read().await.read_at(0, replacement_bytes.len()).unwrap(),
+            target
+                .open_read()
+                .await
+                .read_at(0, replacement_bytes.len())
+                .unwrap(),
             replacement_bytes
         );
         assert_eq!(

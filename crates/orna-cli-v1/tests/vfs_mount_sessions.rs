@@ -35,12 +35,12 @@ use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::{Raw, Value};
 use tempfile::TempDir;
 
+#[path = "support/editor_mount.rs"]
+mod editor_mount;
 #[path = "support/format3.rs"]
 mod format3;
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[path = "support/editor_mount.rs"]
-mod editor_mount;
 
 use editor_mount::{
     MountedProcess, clear_retained_draft_store_filler, fill_retained_draft_store,
@@ -147,7 +147,9 @@ fn await_draft_guard(mountpoint: &Path, expected: u8, context: &str) {
 /// Every text field of the row the runtime stores for `key` now.
 async fn stored_fields(repository: &Repository, relation_id: [u8; 16], key: &str) -> Vec<Raw> {
     let (identity, digest) = format3::cli_runtime_identity(repository);
-    let state = RuntimeState::open(repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(repository, identity, digest)
+        .await
+        .unwrap();
     let table = RuntimeTableIdentity::new("Music", TableObjectId::new(relation_id)).unwrap();
     let snapshot = state
         .begin_admitted_table_activation(std::slice::from_ref(&table))
@@ -186,7 +188,9 @@ async fn commit_unvalidated_runtime_row(
     fields: Raw,
 ) {
     let (identity, digest) = format3::cli_runtime_identity(repository);
-    let state = RuntimeState::open(repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(repository, identity, digest)
+        .await
+        .unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let request_identity = RequestIdentity {
         session_id: [0x7b; 16],
@@ -221,7 +225,9 @@ async fn commit_unvalidated_runtime_row(
             [0x7f; 32],
             TerminalOutcome::new(vec![0x80]).unwrap(),
             &NoFault,
-            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
         )
         .await
         .unwrap();
@@ -346,12 +352,8 @@ async fn rows_first_opened_after_a_save_stay_readable_and_editable() {
     if !require_fuse_or_skip() {
         return;
     }
-    let mut session = Session::start(&[
-        ("london", "London"),
-        ("paris", "Paris"),
-        ("tokyo", "Tokyo"),
-    ])
-    .await;
+    let mut session =
+        Session::start(&[("london", "London"), ("paris", "Paris"), ("tokyo", "Tokyo")]).await;
     assert!(session.read("london").contains("London"));
     write_and_sync(&session.document("london"), &music_row("London saved"))
         .expect("the first save is accepted");
@@ -416,7 +418,10 @@ fn listed_draft_id(status: &str) -> String {
         .and_then(|rest| rest.split_once(": "))
         .map(|(id, _)| id)
         .unwrap_or_default();
-    assert!(!id.is_empty() && id != "-", "a retained draft id is listed: {listing}");
+    assert!(
+        !id.is_empty() && id != "-",
+        "a retained draft id is listed: {listing}"
+    );
     id.to_owned()
 }
 
@@ -465,15 +470,18 @@ async fn stale_save_fields_xattr_carries_code_and_draft_id() {
     let length = rustix::fs::getxattr(&mountpoint, name, &mut [])
         .expect("probe the draft fields xattr size");
     let mut fields = vec![0_u8; length];
-    let length = rustix::fs::getxattr(&mountpoint, name, &mut fields)
-        .expect("read the draft fields xattr");
+    let length =
+        rustix::fs::getxattr(&mountpoint, name, &mut fields).expect("read the draft fields xattr");
     let fields = String::from_utf8_lossy(&fields[..length]).into_owned();
     let line = fields
         .lines()
         .find(|line| line.starts_with("Music/london/data.orna\tsys.vfs.stale_edit\t"))
         .unwrap_or_else(|| panic!("the fields xattr carries the code: {fields}"));
     let draft_id = line.split('\t').nth(2).unwrap_or_default();
-    assert!(!draft_id.is_empty() && draft_id != "-", "a draft id is carried: {line}");
+    assert!(
+        !draft_id.is_empty() && draft_id != "-",
+        "a draft id is carried: {line}"
+    );
 }
 
 /// ORNA-VFS-011/024: `mount status --json` carries the writable mount, the draft
@@ -485,15 +493,30 @@ async fn stale_save_status_json_flags_the_fields_source() {
     }
     let session = stale_save_session().await;
     let draft_id = {
-        let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
+        let json = orna(
+            session.repository_directory.path(),
+            &["mount", "status", "--json"],
+        );
         assert_success(&json, "orna mount status --json");
         let json = String::from_utf8_lossy(&json.stdout).into_owned();
         let after = json
-            .split_once("\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"").map_or_else(|| panic!("the JSON status lists the london draft code: {json}"), |(_, rest)| rest.to_owned());
+            .split_once(
+                "\"path\":\"Music/london/data.orna\",\"code\":\"sys.vfs.stale_edit\",\"draft\":\"",
+            )
+            .map_or_else(
+                || panic!("the JSON status lists the london draft code: {json}"),
+                |(_, rest)| rest.to_owned(),
+            );
         after.split('"').next().unwrap_or_default().to_owned()
     };
-    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is in the JSON");
-    let json = orna(session.repository_directory.path(), &["mount", "status", "--json"]);
+    assert!(
+        !draft_id.is_empty() && draft_id != "-",
+        "a retained draft id is in the JSON"
+    );
+    let json = orna(
+        session.repository_directory.path(),
+        &["mount", "status", "--json"],
+    );
     assert_success(&json, "orna mount status --json");
     let json = String::from_utf8_lossy(&json.stdout);
     assert!(
@@ -525,7 +548,10 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
         String::from_utf8_lossy(&refused.stdout),
         String::from_utf8_lossy(&refused.stderr)
     );
-    assert!(!refused.status.success(), "unmount must refuse an unresolved draft");
+    assert!(
+        !refused.status.success(),
+        "unmount must refuse an unresolved draft"
+    );
     assert!(
         refusal.contains("Music/london/data.orna") && refusal.contains("sys.vfs.stale_edit"),
         "unmount names the unresolved draft and its cause: {refusal}"
@@ -536,9 +562,16 @@ async fn stale_document_save_refreshes_the_row_instead_of_trapping_unmount() {
         session.read("london").contains("Edited elsewhere"),
         "after a stale save the mount shows the current row"
     );
-    write_and_sync(&session.document("london"), &music_row("Saved after refresh"))
-        .expect("a save against the current row is accepted");
-    await_draft_guard(&session.mountpoint(), b'0', "the accepted save resolves the draft");
+    write_and_sync(
+        &session.document("london"),
+        &music_row("Saved after refresh"),
+    )
+    .expect("a save against the current row is accepted");
+    await_draft_guard(
+        &session.mountpoint(),
+        b'0',
+        "the accepted save resolves the draft",
+    );
     assert!(session.read("paris").contains("Paris"));
 
     session.finish();
@@ -567,7 +600,8 @@ async fn stale_scratch_rename_can_be_removed_and_is_retained() {
         .create_new(true)
         .open(&scratch)
         .expect("create a temp file");
-    file.write_all(music_row("Stale scratch").as_bytes()).unwrap();
+    file.write_all(music_row("Stale scratch").as_bytes())
+        .unwrap();
     file.sync_all().expect("fsync persists the scratch");
     drop(file);
     session.edit_elsewhere("paris", &music_row("Paris elsewhere"));
@@ -687,11 +721,18 @@ async fn full_recovery_store_keeps_mount_up_on_sigterm_until_the_draft_is_kept()
         EDQUOT,
         "a refused save that a full recovery store cannot keep fails with EDQUOT",
     );
-    await_draft_guard(&session.mountpoint(), b'1', "the unkept draft holds the guard");
+    await_draft_guard(
+        &session.mountpoint(),
+        b'1',
+        "the unkept draft holds the guard",
+    );
 
     signal(session.mounted.pid(), "TERM");
     assert!(
-        session.mounted.wait_for_exit(Duration::from_secs(2)).is_none(),
+        session
+            .mounted
+            .wait_for_exit(Duration::from_secs(2))
+            .is_none(),
         "SIGTERM keeps the mount running while its draft cannot be kept: {}",
         session.mounted.stderr_text(),
     );
@@ -700,7 +741,10 @@ async fn full_recovery_store_keeps_mount_up_on_sigterm_until_the_draft_is_kept()
         "SIGTERM does not unmount over an unkept draft",
     );
     assert!(
-        session.mounted.stderr_text().contains("already holds 256 drafts"),
+        session
+            .mounted
+            .stderr_text()
+            .contains("already holds 256 drafts"),
         "the stop names the full recovery store: {}",
         session.mounted.stderr_text(),
     );
@@ -746,11 +790,18 @@ async fn full_recovery_store_second_stop_signal_ends_the_wait_and_names_lost_dra
         EDQUOT,
         "a refused save that a full recovery store cannot keep fails with EDQUOT",
     );
-    await_draft_guard(&session.mountpoint(), b'1', "the unkept draft holds the guard");
+    await_draft_guard(
+        &session.mountpoint(),
+        b'1',
+        "the unkept draft holds the guard",
+    );
 
     signal(session.mounted.pid(), "TERM");
     assert!(
-        session.mounted.wait_for_exit(Duration::from_secs(1)).is_none(),
+        session
+            .mounted
+            .wait_for_exit(Duration::from_secs(1))
+            .is_none(),
         "the first SIGTERM waits on the unkept draft: {}",
         session.mounted.stderr_text(),
     );
@@ -760,7 +811,10 @@ async fn full_recovery_store_second_stop_signal_ends_the_wait_and_names_lost_dra
         .wait_for_exit(Duration::from_secs(5))
         .expect("a second stop signal ends the wait");
     let stderr = session.mounted.stderr_text();
-    assert!(!status.success(), "the escaped stop is not a success: {stderr}");
+    assert!(
+        !status.success(),
+        "the escaped stop is not a success: {stderr}"
+    );
     assert!(
         stderr.contains("will be lost"),
         "the escaped stop names the drafts that will be lost: {stderr}"
@@ -804,7 +858,10 @@ async fn full_recovery_store_replies_quota_to_refused_rename_and_removal() {
         EDQUOT,
         "removing a refused scratch a full recovery store cannot keep fails with EDQUOT",
     );
-    assert!(scratch.exists(), "a scratch that could not be kept is not removed");
+    assert!(
+        scratch.exists(),
+        "a scratch that could not be kept is not removed"
+    );
 
     clear_retained_draft_store_filler(&session.repository);
     fs::remove_file(&scratch).expect("the refused scratch is removed once it can be kept");
@@ -850,7 +907,10 @@ async fn unmount_during_mount_start_up_leaves_no_unregistered_mount() {
                 mounted.stderr_text()
             );
         }
-        assert!(Instant::now() < deadline, "the mount never recorded its view");
+        assert!(
+            Instant::now() < deadline,
+            "the mount never recorded its view"
+        );
         thread::sleep(Duration::from_millis(1));
     }
     assert!(
@@ -918,7 +978,11 @@ async fn unmount_and_remount_recover_after_sigkill() {
     session.mounted.release_mountpoint();
 
     session.remount("london");
-    assert!(session.read("london").contains("Acknowledged before SIGKILL"));
+    assert!(
+        session
+            .read("london")
+            .contains("Acknowledged before SIGKILL")
+    );
     assert_eq!(
         fs::read_to_string(&scratch).expect("the fsynced scratch survives SIGKILL"),
         music_row("Scratch before SIGKILL")
@@ -998,7 +1062,9 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
         let capture = format!(
             "sys.blob.annotate(sys.blob.capture_file({root}, \"{key}.mp3\", 65536), \"audio/mpeg\")"
         );
-        documents.push(format!("{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"));
+        documents.push(format!(
+            "{{\n    title: \"{title}\",\n    content: {capture},\n}}\n"
+        ));
         captures.push(capture);
     }
     let (repository_directory, repository, relation_id, format_context) =
@@ -1026,13 +1092,15 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
         .zip(&blob_fields)
         .zip(&documents)
         .zip(0xa0_u16..)
-        .map(|(((&(key, _, _), fields), document), ordinal)| media_commit::SourceCaptureRow {
-            key,
-            blob_fields: fields,
-            source_row: document,
-            ordinal,
-            insert_only: true,
-        })
+        .map(
+            |(((&(key, _, _), fields), document), ordinal)| media_commit::SourceCaptureRow {
+                key,
+                blob_fields: fields,
+                source_row: document,
+                ordinal,
+                insert_only: true,
+            },
+        )
         .collect::<Vec<_>>();
     media_commit::commit_source_captures_for_table(
         &repository,
@@ -1051,7 +1119,9 @@ async fn media_session(rows: &[(&str, &str, &[u8])]) -> (Session, TempDir) {
 }
 
 fn media_row(title: &str, path: &str, media_type: &str) -> String {
-    format!("{{\n    title: \"{title}\",\n    content: {{ path: \"{path}\", media_type: \"{media_type}\" }},\n}}\n")
+    format!(
+        "{{\n    title: \"{title}\",\n    content: {{ path: \"{path}\", media_type: \"{media_type}\" }},\n}}\n"
+    )
 }
 
 /// A15-04, ORNA-VFS-004/012 and "missing stored fields fail": Blob descriptor
@@ -1138,7 +1208,11 @@ async fn blob_descriptor_edits_are_refused_instead_of_dropped() {
         &media_row("London final", descriptor, "audio/mpeg"),
     )
     .expect("a corrected save is accepted");
-    await_draft_guard(&session.mountpoint(), b'0', "the corrected save resolves london");
+    await_draft_guard(
+        &session.mountpoint(),
+        b'0',
+        "the corrected save resolves london",
+    );
     assert_eq!(
         fs::read(session.row("london").join("content.mp3")).unwrap(),
         b"london-mp3-bytes",
@@ -1160,7 +1234,10 @@ async fn blob_write_open_is_accepted_and_leaves_accepted_bytes_unchanged() {
         media_session(&[("london", "London", b"london-mp3-bytes".as_slice())]).await;
     let blob = session.row("london").join("content.mp3");
     let write_open = OpenOptions::new().write(true).open(&blob);
-    assert!(write_open.is_ok(), "a Blob write-open is accepted: {write_open:?}");
+    assert!(
+        write_open.is_ok(),
+        "a Blob write-open is accepted: {write_open:?}"
+    );
     drop(write_open);
     let mut trunc_open = OpenOptions::new()
         .write(true)

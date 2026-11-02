@@ -18,8 +18,13 @@ fn published_markdown_digest(root: &Path) -> String {
         let (digest, name) = line.split_once("  ")?;
         (name == MARKDOWN).then(|| digest.to_owned())
     });
-    let digest = entries.next().expect("SHA256SUMS lists the canonical markdown");
-    assert!(entries.next().is_none(), "SHA256SUMS lists the canonical markdown once");
+    let digest = entries
+        .next()
+        .expect("SHA256SUMS lists the canonical markdown");
+    assert!(
+        entries.next().is_none(),
+        "SHA256SUMS lists the canonical markdown once"
+    );
     digest
 }
 

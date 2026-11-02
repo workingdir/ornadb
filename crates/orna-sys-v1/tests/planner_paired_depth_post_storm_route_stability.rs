@@ -2,10 +2,9 @@ use std::collections::BTreeMap;
 
 use orna_sys_v1::{
     DisjunctStormBranchDescription, DisjunctStormCascadeDescription,
-    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapScopeSegment,
-    PlanByteCapHandoffRoute, PlanDetail, PlanNodeKind, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
-    explain_query_with_disjunct_storm_branch_limit_chains,
+    DisjunctStormLimitRebindDescription, ExpressionRef, ObjectRef, PlanByteCapHandoffRoute,
+    PlanByteCapScopeSegment, PlanDetail, PlanNodeKind, QueryPlanDescription, QuerySourceStatistics,
+    SnapshotRef, explain_query_with_disjunct_storm_branch_limit_chains,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_depth_post_storm_route_stability.orna");
@@ -119,10 +118,7 @@ fn routes_for_stage(
     }
 }
 
-fn typed_route_summary(
-    routes: &[PlanByteCapHandoffRoute],
-    include_input_scope: bool,
-) -> String {
+fn typed_route_summary(routes: &[PlanByteCapHandoffRoute], include_input_scope: bool) -> String {
     let mut by_depth = BTreeMap::<usize, Vec<String>>::new();
     for route in routes {
         let input_bytes = route
@@ -136,9 +132,10 @@ fn typed_route_summary(
         } else {
             route.output_scope.clone()
         };
-        by_depth.entry(route.depth).or_default().push(format!(
-            "{scope}={input_bytes}>{output_bytes}"
-        ));
+        by_depth
+            .entry(route.depth)
+            .or_default()
+            .push(format!("{scope}={input_bytes}>{output_bytes}"));
     }
     by_depth
         .iter()
@@ -174,7 +171,10 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
     for (stage, prefix) in [
         (1, "root/storm1/"),
         (2, "root/storm1/storm_stage_output1/storm2/"),
-        (3, "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"),
+        (
+            3,
+            "root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/",
+        ),
     ] {
         let filter = explained
             .nodes()
@@ -209,8 +209,9 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
         for depth in route_summary.split(';') {
             let (_, handoffs) = depth.split_once(':').expect("depth route entry");
             for handoff in handoffs.split(',') {
-                let (input_scope, output) =
-                    handoff.split_once("=>").expect("handoff input/output scopes");
+                let (input_scope, output) = handoff
+                    .split_once("=>")
+                    .expect("handoff input/output scopes");
                 let (output_scope, _) = output.split_once('=').expect("handoff output scope");
                 assert!(
                     input_scope.starts_with(prefix),
@@ -307,8 +308,16 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.input_path[..post_storm_prefix.len()],
             post_storm_prefix
         );
-        assert!(route.input_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
-        assert!(route.output_scope.starts_with("root/storm1/storm_stage_output1/storm2/"));
+        assert!(
+            route
+                .input_scope
+                .starts_with("root/storm1/storm_stage_output1/storm2/")
+        );
+        assert!(
+            route
+                .output_scope
+                .starts_with("root/storm1/storm_stage_output1/storm2/")
+        );
     }
     assert_eq!(
         post_storm_routes[2].input_scope,
@@ -334,12 +343,16 @@ fn paired_depth_routes_are_stable_across_nested_and_post_storm_ancestry() {
             &route.output_path[..third_stage_prefix.len()],
             third_stage_prefix
         );
-        assert!(route
-            .input_scope
-            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
-        assert!(route
-            .output_scope
-            .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/"));
+        assert!(
+            route
+                .input_scope
+                .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/")
+        );
+        assert!(
+            route
+                .output_scope
+                .starts_with("root/storm1/storm_stage_output1/storm2/storm_stage_output2/storm3/")
+        );
     }
     assert_eq!(
         third_stage_routes[2].input_scope,
@@ -468,10 +481,7 @@ fn unknown_byte_handoffs_retain_prior_stage_output_paths() {
             Some(PlanDetail::Text(scopes)) => scopes,
             other => panic!("expected typed handoff scopes, got {other:?}"),
         };
-        assert_eq!(
-            scope_summary,
-            &format!("1:{}=?>?", routes[0].output_scope)
-        );
+        assert_eq!(scope_summary, &format!("1:{}=?>?", routes[0].output_scope));
         let route_summary = match filter
             .details()
             .get("limit_chain_rebind_byte_cap_handoff_routes_by_depth")

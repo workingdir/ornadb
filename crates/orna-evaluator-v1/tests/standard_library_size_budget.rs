@@ -183,14 +183,8 @@ fn slicing(size: usize) {
                     text(&"a".repeat(half))
                 ),
             ),
-            check(
-                "take",
-                format!("take(xs, {half}) == {}", ints(0..half)),
-            ),
-            check(
-                "drop",
-                format!("drop(xs, {half}) == {}", ints(half..size)),
-            ),
+            check("take", format!("take(xs, {half}) == {}", ints(0..half))),
+            check("drop", format!("drop(xs, {half}) == {}", ints(half..size))),
         ],
     );
 }
@@ -235,10 +229,7 @@ fn text_split(size: usize) {
             ),
             check(
                 "text.split separator",
-                format!(
-                    "count(text.split(page, \"\\n\")) == {}",
-                    lines + 1
-                ),
+                format!("count(text.split(page, \"\\n\")) == {}", lines + 1),
             ),
             check(
                 "text.lines.count",

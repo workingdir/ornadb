@@ -278,13 +278,7 @@ fn int_pages(pages: &[Vec<i64>]) -> CanonicalValue {
     CanonicalValue::new(Raw::Array(
         pages
             .iter()
-            .map(|page| {
-                Raw::Array(
-                    page.iter()
-                        .map(|value| Raw::Int((*value).into()))
-                        .collect(),
-                )
-            })
+            .map(|page| Raw::Array(page.iter().map(|value| Raw::Int((*value).into())).collect()))
             .collect(),
     ))
     .unwrap()
@@ -1170,7 +1164,12 @@ fn divergent_paired_module_projects() -> (TempDir, [LoadedProject; 4], [String; 
 fn paired_divergence_pin_restoration_projects()
 -> (TempDir, [LoadedProject; 6], [String; 6], [String; 6]) {
     let (directory, projects, pins) = divergent_paired_module_projects();
-    let [base_project, math_project, collection_project, paired_project] = projects;
+    let [
+        base_project,
+        math_project,
+        collection_project,
+        paired_project,
+    ] = projects;
     let project_path = directory.path().join("project");
 
     // Re-select the previously captured collection-only and baseline pins after the paired fold.
@@ -1189,7 +1188,9 @@ fn paired_divergence_pin_restoration_projects()
     let loader = ProjectLoader::default();
     let load = |parent: &str| {
         let snapshot = repository.resolve_snapshot(parent).unwrap();
-        loader.load_committed_snapshot(&repository, &snapshot).unwrap()
+        loader
+            .load_committed_snapshot(&repository, &snapshot)
+            .unwrap()
     };
     let collection_restoration_project = load(&collection_restoration_parent);
     let baseline_restoration_project = load(&baseline_restoration_parent);
@@ -1247,7 +1248,10 @@ fn paired_divergence_closure_restoration_projects()
         &standard_path,
         &["merge", "--no-ff", "--no-commit", pins[2].as_str()],
     );
-    commit_directory(&standard_path, "merge paired divergence pins for closure restoration");
+    commit_directory(
+        &standard_path,
+        "merge paired divergence pins for closure restoration",
+    );
     let paired_pin = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
     git_output_at(
         &standard_path,
@@ -1264,7 +1268,10 @@ fn paired_divergence_closure_restoration_projects()
         .expect("baseline project snapshot must pin the captured paired base")
         .to_owned();
 
-    git_output_at(&project_path, &["checkout", "--detach", base_parent.as_str()]);
+    git_output_at(
+        &project_path,
+        &["checkout", "--detach", base_parent.as_str()],
+    );
     fs::write(
         project_path.join("main.orna"),
         include_str!("fixtures/module-upgrade-divergence-closure-project-main.orna"),
@@ -1303,7 +1310,10 @@ fn paired_divergence_closure_restoration_projects()
         &pins[1],
         "capture changed closure app with math divergence",
     );
-    git_output_at(&project_path, &["branch", "math-closure-app-pin", math_parent.as_str()]);
+    git_output_at(
+        &project_path,
+        &["branch", "math-closure-app-pin", math_parent.as_str()],
+    );
 
     git_output_at(
         &project_path,
@@ -1321,18 +1331,31 @@ fn paired_divergence_closure_restoration_projects()
     );
     git_output_at(
         &project_path,
-        &["branch", "collection-closure-app-pin", collection_parent.as_str()],
+        &[
+            "branch",
+            "collection-closure-app-pin",
+            collection_parent.as_str(),
+        ],
     );
 
-    git_output_at(&project_path, &["checkout", "--detach", math_parent.as_str()]);
+    git_output_at(
+        &project_path,
+        &["checkout", "--detach", math_parent.as_str()],
+    );
     let paired_parent = capture_standard_gitlink(
         &project_path,
         &paired_pin,
         "capture changed closure app with paired divergence",
     );
-    git_output_at(&project_path, &["branch", "paired-closure-app-pin", paired_parent.as_str()]);
+    git_output_at(
+        &project_path,
+        &["branch", "paired-closure-app-pin", paired_parent.as_str()],
+    );
 
-    git_output_at(&project_path, &["checkout", "--detach", paired_parent.as_str()]);
+    git_output_at(
+        &project_path,
+        &["checkout", "--detach", paired_parent.as_str()],
+    );
     git_output_at(
         &project_path,
         &[
@@ -1349,7 +1372,11 @@ fn paired_divergence_closure_restoration_projects()
     );
     git_output_at(
         &project_path,
-        &["branch", "paired-closure-restoration", closure_restored_parent.as_str()],
+        &[
+            "branch",
+            "paired-closure-restoration",
+            closure_restored_parent.as_str(),
+        ],
     );
     let baseline_restored_parent = capture_standard_gitlink(
         &project_path,
@@ -1361,7 +1388,9 @@ fn paired_divergence_closure_restoration_projects()
     let loader = ProjectLoader::default();
     let load = |parent: &str| {
         let snapshot = repository.resolve_snapshot(parent).unwrap();
-        loader.load_committed_snapshot(&repository, &snapshot).unwrap()
+        loader
+            .load_committed_snapshot(&repository, &snapshot)
+            .unwrap()
     };
     let projects = [
         load(&baseline_closure_parent),
@@ -1562,32 +1591,38 @@ fn paired_divergence_project_pin_fold_projects()
     let standard_path = project_path.join("stdlib/std");
     let repository = Repository::discover(&project_path).unwrap();
 
-    let base_parent = git_output_at(
-        &project_path,
-        &["rev-list", "--all", "--reverse"],
-    )
-    .lines()
-    .find(|commit| {
-        git_output_at(&project_path, &["ls-tree", commit, "stdlib/std"])
-            .split_whitespace()
-            .nth(2)
-            == Some(pins[0].as_str())
-    })
-    .expect("base project snapshot must pin the paired module base")
-    .to_owned();
+    let base_parent = git_output_at(&project_path, &["rev-list", "--all", "--reverse"])
+        .lines()
+        .find(|commit| {
+            git_output_at(&project_path, &["ls-tree", commit, "stdlib/std"])
+                .split_whitespace()
+                .nth(2)
+                == Some(pins[0].as_str())
+        })
+        .expect("base project snapshot must pin the paired module base")
+        .to_owned();
 
     let math_parent = {
-        git_output_at(&project_path, &["checkout", "--detach", base_parent.as_str()]);
+        git_output_at(
+            &project_path,
+            &["checkout", "--detach", base_parent.as_str()],
+        );
         let parent = capture_standard_gitlink(
             &project_path,
             &pins[1],
             "capture math divergence for paired project fold",
         );
-        git_output_at(&project_path, &["branch", "math-project-pin", parent.as_str()]);
+        git_output_at(
+            &project_path,
+            &["branch", "math-project-pin", parent.as_str()],
+        );
         parent
     };
     let collection_parent = {
-        git_output_at(&project_path, &["checkout", "--detach", base_parent.as_str()]);
+        git_output_at(
+            &project_path,
+            &["checkout", "--detach", base_parent.as_str()],
+        );
         let parent = capture_standard_gitlink(
             &project_path,
             &pins[2],
@@ -1659,8 +1694,18 @@ fn paired_divergence_project_pin_fold_projects()
     let folded_project = load(&folded_parent);
     (
         directory,
-        [base_project, math_project, collection_project, folded_project],
-        [pins[0].clone(), pins[1].clone(), pins[2].clone(), folded_pin],
+        [
+            base_project,
+            math_project,
+            collection_project,
+            folded_project,
+        ],
+        [
+            pins[0].clone(),
+            pins[1].clone(),
+            pins[2].clone(),
+            folded_pin,
+        ],
         [base_parent, math_parent, collection_parent, folded_parent],
     )
 }
@@ -4754,9 +4799,9 @@ fn captured_nested_closures_keep_paired_pin_identity_across_divergence_folds() {
         [50, 5, 55, 50, 5, 55, 10_014, 10_015],
     ];
     let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
-    let nested_closure = include_str!("fixtures/module-upgrade-divergence-fold-nested-closure.orna");
-    let replay =
-        include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-replay.orna");
+    let nested_closure =
+        include_str!("fixtures/module-upgrade-divergence-fold-nested-closure.orna");
+    let replay = include_str!("fixtures/module-upgrade-divergence-fold-nested-closure-replay.orna");
 
     assert!(pins.windows(2).all(|pair| pair[0] != pair[1]));
     let mut sessions = Vec::with_capacity(projects.len());
@@ -4834,11 +4879,20 @@ fn captured_snapshot_identity_survives_paired_divergence_closure_restoration_fol
     let project_path = directory.path().join("project");
     let call_app = include_str!("fixtures/module-upgrade-call-app.orna");
 
-    assert!(project_parents.iter().enumerate().all(|(index, parent)| {
-        !project_parents[..index].contains(parent)
-    }));
-    assert_eq!(pins[4], pins[3], "closure restoration retains the paired pin");
-    assert_eq!(pins[5], pins[0], "the final restoration selects the baseline pin");
+    assert!(
+        project_parents
+            .iter()
+            .enumerate()
+            .all(|(index, parent)| { !project_parents[..index].contains(parent) })
+    );
+    assert_eq!(
+        pins[4], pins[3],
+        "closure restoration retains the paired pin"
+    );
+    assert_eq!(
+        pins[5], pins[0],
+        "the final restoration selects the baseline pin"
+    );
     assert_eq!(
         projects[3].standard_profile().unwrap().snapshot(),
         projects[4].standard_profile().unwrap().snapshot(),
@@ -4892,7 +4946,11 @@ fn captured_snapshot_identity_survives_paired_divergence_closure_restoration_fol
         &["rev-list", "--parents", "-n", "1", pins[3].as_str()],
     );
     let paired_ancestry = paired_ancestry.split_whitespace().collect::<Vec<_>>();
-    assert_eq!(paired_ancestry.len(), 3, "paired standard pin has both divergence parents");
+    assert_eq!(
+        paired_ancestry.len(),
+        3,
+        "paired standard pin has both divergence parents"
+    );
     assert_eq!(paired_ancestry[1], pins[1]);
     assert_eq!(paired_ancestry[2], pins[2]);
 
@@ -5037,7 +5095,11 @@ fn captured_snapshot_identity_survives_paired_divergence_restoration_folds() {
             ],
         );
         let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(ancestry.len(), 2, "each restoration snapshot has one parent");
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "each restoration snapshot has one parent"
+        );
         assert_eq!(
             ancestry[1], project_parents[previous_index],
             "project restoration snapshots preserve the paired fold chain"
@@ -5099,8 +5161,7 @@ fn captured_snapshot_identity_survives_paired_divergence_restoration_folds() {
 
 #[test]
 fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds() {
-    let (directory, projects, pins, project_parents) =
-        paired_divergence_pin_restoration_projects();
+    let (directory, projects, pins, project_parents) = paired_divergence_pin_restoration_projects();
     let expected = [
         [40, 4, 44, 40, 4, 44, 1_014, 1_015],
         [50, 4, 54, 50, 4, 54, 10_014, 10_015],
@@ -5174,7 +5235,11 @@ fn captured_snapshot_identity_survives_paired_divergence_pin_restoration_folds()
             ],
         );
         let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(ancestry.len(), 2, "each pin restoration has one project parent");
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "each pin restoration has one project parent"
+        );
         assert_eq!(
             ancestry[1], project_parents[previous_index],
             "project pin restoration must continue the paired fold history"
@@ -5258,8 +5323,14 @@ fn captured_iteration_identity_survives_paired_pin_restoration_folds() {
     let closure = include_str!("fixtures/module-upgrade-divergence-iteration-closure.orna");
     let replay = include_str!("fixtures/module-upgrade-divergence-iteration-replay.orna");
 
-    assert_eq!(pins[4], pins[2], "the first fold restores the captured collection-only pin");
-    assert_eq!(pins[5], pins[0], "the second fold restores the captured baseline pin");
+    assert_eq!(
+        pins[4], pins[2],
+        "the first fold restores the captured collection-only pin"
+    );
+    assert_eq!(
+        pins[5], pins[0],
+        "the second fold restores the captured baseline pin"
+    );
     assert_ne!(project_parents[4], project_parents[2]);
     assert_ne!(project_parents[5], project_parents[0]);
 
@@ -5346,7 +5417,11 @@ fn captured_overflow_identity_survives_paired_restoration_folds() {
             "overflow restoration fold {fold} must capture the selected pin"
         );
         let snapshot = repository.resolve_snapshot(&parent).unwrap();
-        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        projects.push(
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
         project_parents.push(parent);
         selected_pin_indices.push(pin_index);
     }
@@ -5384,9 +5459,7 @@ fn captured_overflow_identity_survives_paired_restoration_folds() {
     ];
     let imports = include_str!("fixtures/module-upgrade-paired-divergence-use.orna");
     let closure = include_str!("fixtures/module-upgrade-divergence-iteration-closure.orna");
-    let replay = include_str!(
-        "fixtures/module-upgrade-divergence-overflow-iteration-replay.orna"
-    );
+    let replay = include_str!("fixtures/module-upgrade-divergence-overflow-iteration-replay.orna");
     let selected_pins = selected_pin_indices
         .iter()
         .map(|index| pins[*index].clone())
@@ -5474,7 +5547,11 @@ fn captured_reorder_identity_survives_paired_restoration_folds() {
             "reorder restoration fold {fold} must capture the selected pin"
         );
         let snapshot = repository.resolve_snapshot(&parent).unwrap();
-        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        projects.push(
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
         project_parents.push(parent);
         selected_pin_indices.push(pin_index);
     }
@@ -5583,7 +5660,11 @@ fn captured_alias_identity_survives_paired_restoration_folds() {
             "alias restoration fold {fold} must capture the selected pin"
         );
         let snapshot = repository.resolve_snapshot(&parent).unwrap();
-        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        projects.push(
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
         project_parents.push(parent);
         selected_pin_indices.push(pin_index);
     }
@@ -5689,7 +5770,11 @@ fn captured_nested_identity_survives_paired_restoration_folds() {
             "nested restoration fold {fold} must capture the selected pin"
         );
         let snapshot = repository.resolve_snapshot(&parent).unwrap();
-        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        projects.push(
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
         project_parents.push(parent);
         selected_pin_indices.push(pin_index);
     }
@@ -5712,7 +5797,8 @@ fn captured_nested_identity_survives_paired_restoration_folds() {
         [50, 5, 55, 10_025, 50, 5, 10_026],
     ];
     let imports = include_str!("fixtures/module-upgrade-divergence-nested-restoration-use.orna");
-    let closure = include_str!("fixtures/module-upgrade-divergence-nested-restoration-closure.orna");
+    let closure =
+        include_str!("fixtures/module-upgrade-divergence-nested-restoration-closure.orna");
     let replay = include_str!("fixtures/module-upgrade-divergence-nested-restoration-replay.orna");
     let selected_pins = selected_pin_indices
         .iter()
@@ -5789,7 +5875,11 @@ fn captured_pagination_identity_survives_paired_restoration_folds() {
             &["rev-list", "--parents", "-n", "1", parent.as_str()],
         );
         let ancestry = ancestry.split_whitespace().collect::<Vec<_>>();
-        assert_eq!(ancestry.len(), 2, "each pagination fold must have one parent");
+        assert_eq!(
+            ancestry.len(),
+            2,
+            "each pagination fold must have one parent"
+        );
         assert_eq!(
             ancestry[1],
             project_parents.last().unwrap(),
@@ -5802,7 +5892,11 @@ fn captured_pagination_identity_survives_paired_restoration_folds() {
             "pagination restoration fold {fold} must capture the selected pin"
         );
         let snapshot = repository.resolve_snapshot(&parent).unwrap();
-        projects.push(loader.load_committed_snapshot(&repository, &snapshot).unwrap());
+        projects.push(
+            loader
+                .load_committed_snapshot(&repository, &snapshot)
+                .unwrap(),
+        );
         project_parents.push(parent);
         selected_pin_indices.push(pin_index);
     }
@@ -5818,14 +5912,26 @@ fn captured_pagination_identity_survives_paired_restoration_folds() {
     assert_eq!(pins[5], pins[0]);
     let expected = [
         vec![vec![1_008, 1_009], vec![1_010, 1_011], vec![1_012], vec![]],
-        vec![vec![10_008, 10_009], vec![10_010, 10_011], vec![10_012], vec![]],
+        vec![
+            vec![10_008, 10_009],
+            vec![10_010, 10_011],
+            vec![10_012],
+            vec![],
+        ],
         vec![vec![1_009, 1_010], vec![1_011, 1_012], vec![1_013], vec![]],
-        vec![vec![10_009, 10_010], vec![10_011, 10_012], vec![10_013], vec![]],
+        vec![
+            vec![10_009, 10_010],
+            vec![10_011, 10_012],
+            vec![10_013],
+            vec![],
+        ],
     ];
     let imports =
         include_str!("fixtures/module-upgrade-divergence-pagination-restoration-use.orna");
-    let closure = include_str!("fixtures/module-upgrade-divergence-pagination-restoration-closure.orna");
-    let replay = include_str!("fixtures/module-upgrade-divergence-pagination-restoration-replay.orna");
+    let closure =
+        include_str!("fixtures/module-upgrade-divergence-pagination-restoration-closure.orna");
+    let replay =
+        include_str!("fixtures/module-upgrade-divergence-pagination-restoration-replay.orna");
     let selected_pins = selected_pin_indices
         .iter()
         .map(|index| pins[*index].clone())

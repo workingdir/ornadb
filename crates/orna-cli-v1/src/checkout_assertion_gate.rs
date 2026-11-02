@@ -92,8 +92,7 @@ assert every(row => row.title != \"\");\n}\n";
     /// a source written outside the commit gate reaches a branch (precedent:
     /// `tests/repl_table_assert.rs` `commit_asserting_source_outside_the_gate`).
     fn commit_asserting_source(root: &Path) {
-        std::fs::write(root.join("main.orna"), ASSERTING_BOOK)
-            .expect("write the asserting source");
+        std::fs::write(root.join("main.orna"), ASSERTING_BOOK).expect("write the asserting source");
         format3::git(root, &["add", "main.orna"]);
         format3::git(root, &["commit", "-m", "asserting source outside the gate"]);
     }
@@ -101,8 +100,8 @@ assert every(row => row.title != \"\");\n}\n";
     /// Plans the `target` branch from a freshly opened repository and runs the
     /// gated checkout, as a new invocation would.
     fn checkout_target(root: &Path) -> Result<(), RepositoryError> {
-        let repository = Repository::discover(root.to_str().expect("UTF-8 path"))
-            .expect("the fixture reopens");
+        let repository =
+            Repository::discover(root.to_str().expect("UTF-8 path")).expect("the fixture reopens");
         let plan = repository
             .plan_checkout("target", RuntimeGeneration::new(0))
             .expect("the target resolves");
@@ -157,7 +156,11 @@ assert every(row => row.title != \"\");\n}\n";
             format3::format3_repository_with_tables(PLAIN_BOOK, &["Book"], &[]);
         let root = directory.path().to_path_buf();
         format3::git(&root, &["switch", "-c", "target"]);
-        write_and_publish(repository, "main.Book.insert({ id: 2, title: \"Dune\" })", "2");
+        write_and_publish(
+            repository,
+            "main.Book.insert({ id: 2, title: \"Dune\" })",
+            "2",
+        );
         commit_asserting_source(&root);
         let target = git_stdout(&root, &["rev-parse", "HEAD"]);
         format3::git(&root, &["switch", "-"]);

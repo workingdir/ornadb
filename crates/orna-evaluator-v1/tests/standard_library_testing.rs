@@ -14,8 +14,12 @@ fn pinned_test_expectations_are_importable_and_core_assertions_need_no_std() {
         with_std.submit(include_str!("fixtures/stdlib-use-test-fqjge.orna")),
         Ok(None)
     );
-    let expectations = with_std.submit(include_str!("fixtures/stdlib-test-expectations-fqjge.orna"));
-    let expectation_error = expectations.as_ref().err().map(|error| error.code().to_owned());
+    let expectations =
+        with_std.submit(include_str!("fixtures/stdlib-test-expectations-fqjge.orna"));
+    let expectation_error = expectations
+        .as_ref()
+        .err()
+        .map(|error| error.code().to_owned());
     assert_eq!(
         expectations,
         Ok(Some(bool_value(true))),
@@ -25,11 +29,18 @@ fn pinned_test_expectations_are_importable_and_core_assertions_need_no_std() {
 
     let mut without_std = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        without_std.submit(include_str!("fixtures/stdlib-core-assertion-function-without-test-fqjge.orna")),
+        without_std.submit(include_str!(
+            "fixtures/stdlib-core-assertion-function-without-test-fqjge.orna"
+        )),
         Ok(None)
     );
-    let core_result = without_std.submit(include_str!("fixtures/stdlib-core-assertion-call-without-test-fqjge.orna"));
-    let core_error = core_result.as_ref().err().map(|error| error.code().to_owned());
+    let core_result = without_std.submit(include_str!(
+        "fixtures/stdlib-core-assertion-call-without-test-fqjge.orna"
+    ));
+    let core_error = core_result
+        .as_ref()
+        .err()
+        .map(|error| error.code().to_owned());
     assert_eq!(
         core_result,
         Ok(Some(bool_value(true))),
@@ -38,13 +49,17 @@ fn pinned_test_expectations_are_importable_and_core_assertions_need_no_std() {
     );
     assert_eq!(
         without_std
-            .submit(include_str!("fixtures/stdlib-use-test-without-snapshot-fqjge.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-use-test-without-snapshot-fqjge.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(
-        without_std.submit(include_str!("fixtures/stdlib-core-assertion-call-without-test-fqjge.orna")),
+        without_std.submit(include_str!(
+            "fixtures/stdlib-core-assertion-call-without-test-fqjge.orna"
+        )),
         Ok(Some(bool_value(true)))
     );
 }
