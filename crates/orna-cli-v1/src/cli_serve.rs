@@ -65,7 +65,7 @@ const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
 /// Bound on how long DELETE waits for the socket workers it cancelled to
 /// exit before it reports orderly termination. A cancelled worker finishes
 /// its in-flight step, sends a Close frame and exits.
-const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_mins(1);
 /// Longest the accept loop waits for a refused connection's request head.
 const REFUSAL_HEAD_TIMEOUT: StdDuration = StdDuration::from_millis(250);
 /// Default for [`ServeOptions::max_connections`].
@@ -285,7 +285,7 @@ impl ServeState {
     }
 }
 
-/// Socket workers that own attached or attaching WebSockets, keyed by
+/// Socket workers that own attached or attaching `WebSockets`, keyed by
 /// attachment identity, so the transport's retirements reach them.
 #[derive(Default)]
 struct WebSocketWorkers {
@@ -952,15 +952,12 @@ impl ConnectionSlot {
                 (active < limit).then_some(active + 1)
             })
             .ok()?;
-        match stream.try_clone() {
-            Ok(socket) => Some(Self {
-                state: Arc::clone(state),
-                socket,
-            }),
-            Err(_) => {
-                state.connections.fetch_sub(1, Ordering::AcqRel);
-                None
-            }
+        if let Ok(socket) = stream.try_clone() { Some(Self {
+            state: Arc::clone(state),
+            socket,
+        }) } else {
+            state.connections.fetch_sub(1, Ordering::AcqRel);
+            None
         }
     }
 }
@@ -2009,11 +2006,10 @@ fn run_git_http_backend(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(protocol) = request_header(request, "git-protocol") {
-        if protocol == "version=2" {
+    if let Some(protocol) = request_header(request, "git-protocol")
+        && protocol == "version=2" {
             command.env("GIT_PROTOCOL", protocol);
         }
-    }
     // Only reached after the operator enabled push with `serve --allow-push`.
     // Git's ordinary receive-pack checks (including checked-out-branch
     // protection) still apply.
@@ -2049,8 +2045,8 @@ fn run_git_http_backend(
 /// The CGI child inherits only this allow-list: PATH to run git, HOME and
 /// TMPDIR for git's own state, and locale. Server tokens, proxy settings and
 /// ambient GIT_* routing or config variables never reach it. Git locates its
-/// exec path itself (compiled-in or RUNTIME_PREFIX), so GIT_EXEC_PATH is not
-/// forwarded; XDG_CONFIG_HOME is not forwarded, so only ~/.gitconfig applies.
+/// exec path itself (compiled-in or `RUNTIME_PREFIX`), so `GIT_EXEC_PATH` is not
+/// forwarded; `XDG_CONFIG_HOME` is not forwarded, so only ~/.gitconfig applies.
 /// Requires git >= 2.30 (`commit_optional` relies on `rev-parse --end-of-options`).
 fn clear_cgi_environment(command: &mut Command) {
     command.env_clear();
@@ -3221,6 +3217,7 @@ mod tests {
         assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
     }
 
+#[allow(clippy::too_many_lines)]
     #[test]
     fn smart_http_clones_and_pushes_the_selected_clones_head() {
         for (index, branch, dirty) in [(0_u8, "http-left", false), (1_u8, "http-right", true)] {

@@ -86,8 +86,8 @@ fn automatic_ids_survive_delete_reset_checkout_and_branch_switch() {
     // older commits recorded stay what they were.
     assert_eq!(git(&root, &["cat-file", "-p", &allocator]), "6");
     for branch in ["elsewhere", "HEAD"] {
-        let tree = git(&root, &["ls-tree", "-r", "--name-only", branch]);
-        assert!(!tree.contains("refs/orna"), "{tree}");
+        let listing = git(&root, &["ls-tree", "-r", "--name-only", branch]);
+        assert!(!listing.contains("refs/orna"), "{listing}");
     }
     assert_eq!(recorded(&three), "3");
     assert_eq!(recorded(&declared), "0");

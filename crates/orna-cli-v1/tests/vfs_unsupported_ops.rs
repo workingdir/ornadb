@@ -91,6 +91,7 @@ fn fuse_available() -> bool {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 #[tokio::test]
 /// ORNA-VFS-014: link, special-node, and writable shared-mmap operations fail explicitly.
@@ -188,7 +189,7 @@ async fn unsupported_vfs_operations_return_explicit_errors() {
         String::from_utf8_lossy(&device_output.stderr)
     );
 
-    let mmap_probe = r#"import mmap, os, sys
+    let mmap_probe = r"import mmap, os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
 try:
     mapping = mmap.mmap(fd, 1, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
@@ -197,7 +198,7 @@ except OSError as error:
     sys.exit(1)
 else:
     mapping.close()
-    sys.exit(0)"#;
+    sys.exit(0)";
     let mmap_output = Command::new("python3")
         .args(["-c", mmap_probe])
         .arg(&document)
@@ -368,8 +369,7 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
     // syscalls are driven through their standard binaries. Each must exit
     // non-zero with the EPERM strerror (ORNA-VFS-014, profiles/vfs-1.md:138-140).
     let device_path = row_directory.join("device-node");
-    assert_errno_eperm(
-        std::process::Command::new("mknod")
+    assert_errno_eperm(&std::process::Command::new("mknod")
             .arg(&device_path)
             .args(["c", "1", "3"])
             .output()
@@ -380,8 +380,7 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
 
     // xattr: no application record is written through extended attributes, so
     // setxattr and removexattr on a row document are unsupported mutations (EPERM).
-    assert_errno_eperm(
-        std::process::Command::new("python3")
+    assert_errno_eperm(&std::process::Command::new("python3")
             .arg("-c")
             .arg("import os, sys; os.setxattr(sys.argv[1], 'user.orna.probe', b'1')")
             .arg(&document)
@@ -389,8 +388,7 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
             .expect("python3 is available on Linux"),
         "setxattr",
     );
-    assert_errno_eperm(
-        std::process::Command::new("python3")
+    assert_errno_eperm(&std::process::Command::new("python3")
             .arg("-c")
             .arg("import os, sys; os.removexattr(sys.argv[1], 'user.orna.probe')")
             .arg(&document)
@@ -400,9 +398,10 @@ async fn unsupported_mutations_follow_vfs1_errno_table() {
     );
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Asserts a command failed with the EPERM strerror, the errno the VFS-1 table
 /// specifies for an unsupported mutation.
-fn assert_errno_eperm(output: std::process::Output, operation: &str) {
+fn assert_errno_eperm(output: &std::process::Output, operation: &str) {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!output.status.success(), "{operation} must be refused");
     assert!(
@@ -411,6 +410,7 @@ fn assert_errno_eperm(output: std::process::Output, operation: &str) {
     );
  }
 
+#[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 #[tokio::test]
 /// ORNA-VFS-015: `edit --row` admits a row while retaining its owned Blob binding.

@@ -14,7 +14,7 @@
 //! context, so the comparison is one pair of immutable reads taken from the
 //! local repository alone: no fetch, no remote, and no media payload.
 
-use super::*;
+use super::{Diagnostic, Digest, Endpoint, local_project_path, cli_row_key};
 
 use orna_repository_v1::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
@@ -60,6 +60,7 @@ struct HistoryOptions<'a> {
     diff: Option<(&'a str, &'a str)>,
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut at = None;
@@ -210,19 +211,16 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // here; the row map, the read and the revision walk all come from the
     // commit it named, so a branch that advances during the read never changes
     // the answer. Without `--at` the walk starts at the current HEAD.
-    let (format, start) = match options.at {
-        Some(selector) => {
-            // One guard, one resolution: `pin_snapshot` refuses an ambiguous
-            // name before it resolves, so `--at` and `--diff` cannot disagree.
-            let (start, format) = pin_snapshot(&repository, path, selector)?;
-            (format, start.as_str().to_owned())
-        }
-        None => {
-            let format = repository.open_format_context().map_err(|error| {
-                history_error("Format context could not be opened", format!("{error:?}"))
-            })?;
-            (format, "HEAD".to_owned())
-        }
+    let (format, start) = if let Some(selector) = options.at {
+        // One guard, one resolution: `pin_snapshot` refuses an ambiguous
+        // name before it resolves, so `--at` and `--diff` cannot disagree.
+        let (start, format) = pin_snapshot(&repository, path, selector)?;
+        (format, start.as_str().to_owned())
+    } else {
+        let format = repository.open_format_context().map_err(|error| {
+            history_error("Format context could not be opened", format!("{error:?}"))
+        })?;
+        (format, "HEAD".to_owned())
     };
     // A format-1/2 pin is a read-only compatibility input: it carries no
     // native `.orna/store`, so it has no row map to walk. Say so instead of
@@ -333,6 +331,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 /// One revision as a JSON object: commit, root tree, presence, author and the
 /// commit time in seconds since the Unix epoch, plus the migration coordinate
 /// when the commit is the journalled migration commit.
@@ -696,6 +695,7 @@ fn row_changed(before: &HistoryRow, after: &HistoryRow) -> bool {
     content_changed(before, after) || annotations_changed(before, after)
 }
 
+#[allow(clippy::too_many_lines)]
 /// Reports what changed in one relation between two named snapshots.
 ///
 /// Both endpoints are pinned through the same repository-owned historical
@@ -775,12 +775,10 @@ fn run_diff(
         || after_schema.source_commit() != &to_commit
         || before_schema.table_object_id() != TableObjectId::new(relation)
         || after_schema.table_object_id() != TableObjectId::new(relation)
-        || !before_format
-            .database_id()
-            .is_some_and(|id| before_schema.database_id() == id.as_bytes())
-        || !after_format
-            .database_id()
-            .is_some_and(|id| after_schema.database_id() == id.as_bytes())
+        || before_format
+            .database_id().is_none_or(|id| before_schema.database_id() != id.as_bytes())
+        || after_format
+            .database_id().is_none_or(|id| after_schema.database_id() != id.as_bytes())
         || before_schema.snapshot_id() != &before_format.snapshot_pin().snapshot_id()
         || after_schema.snapshot_id() != &after_format.snapshot_pin().snapshot_id()
     {
@@ -802,14 +800,14 @@ fn run_diff(
             .into_iter()
             .map(|(before, after)| RowChange::Rekeyed { before, after }),
     );
-    let (added, changed, removed, rekeyed) = counts(&changes);
+    let (added, updated, removed, rekeyed) = counts(&changes);
     match format {
         HistoryFormat::Human => {
             for change in &changes {
                 println!("{}", human_change(change));
             }
             println!(
-                "{added} added; {changed} changed; {removed} removed; {rekeyed} rekeyed; {} rows in {to_label}",
+                "{added} added; {updated} changed; {removed} removed; {rekeyed} rekeyed; {} rows in {to_label}",
                 changes
                     .iter()
                     .filter(|change| !matches!(change, RowChange::Removed(_)))
@@ -827,7 +825,7 @@ fn run_diff(
                     "from": from_label,
                     "to": to_label,
                     "added": added,
-                    "changed": changed,
+                    "changed": updated,
                     "removed": removed,
                     "rekeyed": rekeyed,
                     "media_payload_bytes_read": payload_bytes_read,
@@ -1079,14 +1077,11 @@ fn pair_rekeys(
     let mut vacated = BTreeSet::<Vec<u8>>::new();
     let mut reused = BTreeSet::<Vec<u8>>::new();
     for (old, new) in moves {
-        let origin = match origins.remove(old) {
-            Some(origin) => origin,
-            None => {
-                if vacated.contains(old) {
-                    reused.insert(old.clone());
-                }
-                old.clone()
+        let origin = if let Some(origin) = origins.remove(old) { origin } else {
+            if vacated.contains(old) {
+                reused.insert(old.clone());
             }
+            old.clone()
         };
         vacated.insert(old.clone());
         origins.insert(new.clone(), origin);

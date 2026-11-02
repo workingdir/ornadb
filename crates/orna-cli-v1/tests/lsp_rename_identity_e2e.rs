@@ -1,4 +1,4 @@
-//! A table renamed through the language server keeps its ObjectId through
+//! A table renamed through the language server keeps its `ObjectId` through
 //! `orna commit` (ORNA-OBJECT-003, ORNA-EVOL-001; Gate A "identities survive
 //! rename"). The real `orna-lsp` binary is driven over stdio: `initialize`,
 //! `textDocument/didOpen`, `textDocument/rename` of a table, the returned
@@ -234,6 +234,7 @@ impl Client {
 
     /// Sends a request and returns its `result`, collecting any
     /// `window/showMessage` notifications that arrive first.
+    #[allow(clippy::needless_pass_by_value)]
     fn request(&mut self, method: &str, params: Value) -> Value {
         let id = self.next_id;
         self.next_id += 1;
@@ -256,6 +257,7 @@ impl Client {
         }
     }
 
+    #[allow(clippy::needless_pass_by_value)]
     fn notify(&mut self, method: &str, params: Value) {
         self.send(&json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
@@ -276,9 +278,12 @@ fn apply_edits(source: &str, edits: &[Value]) -> String {
     let mut ordered: Vec<&Value> = edits.iter().collect();
     ordered.sort_by_key(|edit| std::cmp::Reverse(edit["range"]["start"]["character"].as_u64()));
     for edit in ordered {
-        let line = edit["range"]["start"]["line"].as_u64().unwrap() as usize;
-        let start = edit["range"]["start"]["character"].as_u64().unwrap() as usize;
-        let end = edit["range"]["end"]["character"].as_u64().unwrap() as usize;
+        let offset_of = |position: &Value| {
+            usize::try_from(position.as_u64().expect("a JSON position")).expect("position fits usize")
+        };
+        let line = offset_of(&edit["range"]["start"]["line"]);
+        let start = offset_of(&edit["range"]["start"]["character"]);
+        let end = offset_of(&edit["range"]["end"]["character"]);
         let offset = text
             .split_inclusive('\n')
             .take(line)

@@ -17,7 +17,7 @@ use orna_repository_v1::{Repository, TypedKey, relation_admission::CommittedReke
 mod format3;
 use format3::*;
 
-const RELOCATE_SOURCE: &str = r#"pub table media(id: Str) {
+const RELOCATE_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
 }
 
@@ -25,9 +25,9 @@ pub fn add(id: Str, title: Str) =
     media.insert({ id: id, title: title });
 
 pub fn relocate(old: Str, new: Str) = media.rekey(old, new);
-"#;
+";
 
-const RELOCATE_BLOB_SOURCE: &str = r#"pub table media(id: Str) {
+const RELOCATE_BLOB_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
     content: Blob,
 }
@@ -36,7 +36,7 @@ pub fn add(id: Str, title: Str, content: Blob) =
     media.insert({ id: id, title: title, content: content });
 
 pub fn relocate(old: Str, new: Str) = media.rekey(old, new);
-"#;
+";
 
 fn run_repl(directory: &Path, input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
@@ -98,10 +98,12 @@ fn head(directory: &Path) -> String {
 }
 
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    relation_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in relation_id {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// The `orna history --diff` JSON report between two snapshots.

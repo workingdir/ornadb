@@ -3,25 +3,25 @@
 //! (trusted REPL submission -> admitted REPL transaction -> runtime commit),
 //! then published by the CLI and read back from the committed format-3 graph.
 
+use std::io::Write as _;
 use std::{
     path::Path,
     process::{Command, Output, Stdio},
 };
 
 use orna_repository_v1::TypedKey;
-use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
 mod format3;
 use format3::*;
 
-const BROWSER_SOURCE: &str = r#"pub table media(id: Str) {
+const BROWSER_SOURCE: &str = r"pub table media(id: Str) {
     content: Blob,
 }
 
 pub fn store_profile(id: Str, content: Blob) =
     media.insert({ id: id, content: content });
-"#;
+";
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 const BROWSER_PROFILE_BLOB: &[u8] = include_bytes!("fixtures/media/pixel.png");
 
@@ -34,7 +34,6 @@ fn run_repl(directory: &Path, input: &str) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("Orna REPL process");
-    use std::io::Write as _;
     child
         .stdin
         .take()

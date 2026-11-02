@@ -90,7 +90,7 @@ assert every(row => row.title != \"\");\n}\n";
 
     /// Commits the asserting source on the checked-out branch with plain Git, as
     /// a source written outside the commit gate reaches a branch (precedent:
-    /// tests/repl_table_assert.rs `commit_asserting_source_outside_the_gate`).
+    /// `tests/repl_table_assert.rs` `commit_asserting_source_outside_the_gate`).
     fn commit_asserting_source(root: &Path) {
         std::fs::write(root.join("main.orna"), ASSERTING_BOOK)
             .expect("write the asserting source");

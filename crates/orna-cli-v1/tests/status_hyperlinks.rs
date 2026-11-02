@@ -78,8 +78,7 @@ fn status_hyperlinks_are_emitted_only_for_supported_terminal_stdout() {
     );
     assert!(
         terminal_cli_stderr.is_empty(),
-        "terminal CLI stderr: {:?}",
-        terminal_cli_stderr
+        "terminal CLI stderr: {terminal_cli_stderr:?}"
     );
     assert!(
         terminal.stderr.is_empty(),
