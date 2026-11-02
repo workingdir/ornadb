@@ -131,9 +131,16 @@ fn harness_reports_vector_suites_apart_from_adapter_evidence() {
 
 /// Each executed suite really runs its cases: one disagreeing published case
 /// fails that suite and names the case.
+/// One vector mutation: the file it edits, the edit, and the case name it breaks.
+type VectorMutation = (
+    &'static str,
+    fn(&mut serde_json::Value),
+    &'static str,
+);
+
 #[test]
 fn a_disagreeing_vector_fails_its_suite() {
-    let mutations: [(&str, fn(&mut serde_json::Value), &str); 4] = [
+    let mutations: [VectorMutation; 4] = [
         (
             "value-vectors.json",
             |vectors| vectors[0]["canonical_roundtrip"] = json!(false),
