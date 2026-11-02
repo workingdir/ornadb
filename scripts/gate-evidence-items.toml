@@ -186,10 +186,11 @@ id = "C2"
 title = "Indexed point and range queries, missing keys, unindexed scan and concurrent writes in cold and warm partial clones"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:partial_clone_publication_race" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_publication_race" },
 ]
 limitations = [
-  "Concurrent publication is raced on a local repository only (orp1_production_publication_race). The cold and warm partial-clone concurrent writes (exercise_concurrent_writes) compute the row index on two threads and never publish; that driver runs only in the ignored one-million-row test (ornadb-mmsa.13, ornadb-px4m).",
+  "Concurrent publication is raced three ways: two publishers on one local repository (orp1_production_publication_race), and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, and that driver runs only in the ignored one-million-row test (ornadb-mmsa.13).",
 ]
 
 [[item]]
