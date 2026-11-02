@@ -207,10 +207,11 @@ id = "C4"
 title = "Prepend, delete, rekey and large-row cases measure index churn separately from media reuse"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
+  { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_index_churn_multi_page" },
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
-  "The large row is a 7.7 KB inline row, and index maintenance rebuilds the whole table (ornadb-5il1.129). The overflow row (above a mirrored 8,192-byte inline bound) is measured on the write side only and is not read back by this harness.",
+  "The large row is a 7.7 KB inline row. The overflow row (above a mirrored 8,192-byte inline bound) is measured on the write side only and is not read back by this harness.",
 ]
 
 [[item]]
