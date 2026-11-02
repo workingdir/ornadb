@@ -17,7 +17,12 @@ The remaining entry points share one implementation chain and are covered:
 | `RuntimePublicationCoordinator::publish` | Delegates to `publish_candidate_with_stage_hook` | No separate write path; `req_publication_cas.rs` drives it through CAS races, `req_upgrade.rs` through migration, `publication_crash_matrix.rs` through kill and recovery |
 | `RuntimePublicationCoordinator::publish_with_stage_hook` | Same | Same delegation; the stage hook is exercised by every kill-boundary test in `publication_crash_matrix.rs` |
 
-Legacy rejection for the ordinary path is enforced before any of these run: `orna publish` calls `refuse_legacy_head` before recovery, runtime access or a freeze, and the coordinator's `prepare_*` constructors require a format-3 context. That ordering is covered by the Gate A item whose selector is `test:publish_format3_orp_only` and by `req_upgrade.rs`.
+Legacy rejection for the ordinary path happens before any of these run. `orna publish` calls `refuse_legacy_head` before it reads the recovery journal, opens runtime state or takes a freeze, and that ordering is asserted at the product level in `publish_legacy_read_only.rs`:
+
+- `publish_refuses_a_legacy_head_without_writing` runs both `publish` and `--debug publish` against a format-1 and a format-2 snapshot that carry a pending row. It asserts exit 1, empty stdout, the `E2300` diagnostic with its remedy, and then that the git state, the publication journal, the runtime state files and the worktree are all unchanged, and that the pending row survives a reopen.
+- `runtime_writes_are_refused_on_a_legacy_head` asserts the same ordering for runtime admission: a format-1/2 `HEAD` is refused with a typed `LegacyHeadReadOnly` before any runtime state opens, even when the worktree metadata alone would admit a format-3 runtime.
+
+`publish_in_a_prepared_migration_copy_names_the_unactivated_candidate` covers the one refusal that names a candidate instead, which is what a worktree with a prepared `orna migrate copy` gets.
 
 ## Conclusion
 
