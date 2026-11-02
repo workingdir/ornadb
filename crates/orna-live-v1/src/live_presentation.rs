@@ -436,8 +436,9 @@ mod tests {
     }
 
     fn text(value: &str) -> Vec<u8> {
-        assert!(value.len() < 24);
-        let mut encoded = vec![0x60 + value.len() as u8];
+        let length = u8::try_from(value.len()).expect("a short text length fits in u8");
+        assert!(length < 24);
+        let mut encoded = vec![0x60 + length];
         encoded.extend(value.as_bytes());
         encoded
     }
@@ -447,8 +448,9 @@ mod tests {
     }
 
     fn map(entries: Vec<(Vec<u8>, Vec<u8>)>) -> Vec<u8> {
-        assert!(entries.len() < 24);
-        let mut encoded = vec![0xa0 + entries.len() as u8];
+        let count = u8::try_from(entries.len()).expect("a short map count fits in u8");
+        assert!(count < 24);
+        let mut encoded = vec![0xa0 + count];
         for (key, value) in entries {
             encoded.extend(key);
             encoded.extend(value);
@@ -462,35 +464,40 @@ mod tests {
         encoded
     }
 
+    /// One CBOR byte string with the shortest length prefix that holds `value`.
+    /// Each branch is chosen by a range check on `value`, so the per-byte
+    /// conversions are the only place a width can be lost; `try_from` keeps that
+    /// visible instead of a silent `as`.
     fn bytes_with_len(value: usize) -> Vec<u8> {
+        fn byte(value: u64) -> u8 {
+            u8::try_from(value & 0xff).expect("a masked byte is in range")
+        }
         let mut encoded = if value <= 23 {
-            vec![value as u8]
-        } else if value <= u8::MAX as usize {
-            vec![0x58, value as u8]
-        } else if value <= u16::MAX as usize {
-            let length = value as u16;
-            vec![0x59, (length >> 8) as u8, length as u8]
-        } else if value <= u32::MAX as usize {
-            let length = value as u32;
+            vec![byte(u64::try_from(value).expect("a small length fits in u64"))]
+        } else if let Ok(small) = u8::try_from(value) {
+            vec![0x58, small]
+        } else if let Ok(length) = u16::try_from(value) {
+            vec![0x59, byte(u64::from(length >> 8)), byte(u64::from(length))]
+        } else if let Ok(length) = u32::try_from(value) {
             vec![
                 0x5a,
-                (length >> 24) as u8,
-                (length >> 16) as u8,
-                (length >> 8) as u8,
-                length as u8,
+                byte(u64::from(length >> 24)),
+                byte(u64::from(length >> 16)),
+                byte(u64::from(length >> 8)),
+                byte(u64::from(length)),
             ]
         } else {
-            let length = value as u64;
+            let length = u64::try_from(value).expect("a usize length fits in u64");
             vec![
                 0x5b,
-                (length >> 56) as u8,
-                (length >> 48) as u8,
-                (length >> 40) as u8,
-                (length >> 32) as u8,
-                (length >> 24) as u8,
-                (length >> 16) as u8,
-                (length >> 8) as u8,
-                length as u8,
+                byte(length >> 56),
+                byte(length >> 48),
+                byte(length >> 40),
+                byte(length >> 32),
+                byte(length >> 24),
+                byte(length >> 16),
+                byte(length >> 8),
+                byte(length),
             ]
         };
         encoded.extend(vec![3; value]);
@@ -595,7 +602,9 @@ mod tests {
     }
 
     fn array(values: Vec<Vec<u8>>) -> Vec<u8> {
-        let mut out = vec![0x80 + values.len() as u8];
+        let count = u8::try_from(values.len()).expect("a short array count fits in u8");
+        assert!(count < 24);
+        let mut out = vec![0x80 + count];
         for value in values {
             out.extend(value);
         }
