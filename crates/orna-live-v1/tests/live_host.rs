@@ -2685,6 +2685,7 @@ fn http_create_and_resume_negotiate_and_replace_connections() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn running_status_snapshot_survives_successive_http_reconnects_after_eval_completion() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -2985,6 +2986,7 @@ fn create_transport_session_with_socket(
     (token, WebSocketState::new(attachment))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resume_transport_session_with_socket(
     transport: &mut LiveTransport,
     issuer: &mut Issuer,
@@ -3033,6 +3035,7 @@ fn terminal_failure_status_snapshot_survives_successive_http_reconnects() {
     terminal_status_snapshot_survives_http_reconnect_with(UnitEvalOutcome::SemanticFailure);
 }
 
+#[allow(clippy::too_many_lines)]
 fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalOutcome) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
@@ -3219,6 +3222,7 @@ fn terminal_status_snapshot_survives_http_reconnect_with(eval_outcome: UnitEvalO
     assert_eq!(application.calls, 1);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn unknown_status_snapshot_survives_successive_http_reconnects_and_target_id_reuse() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -3457,6 +3461,7 @@ fn status_snapshots_survive_failure_reconnect_storm() {
     status_snapshots_survive_reconnect_storm(UnitEvalOutcome::SemanticFailure);
 }
 
+#[allow(clippy::too_many_lines)]
 fn status_snapshots_survive_reconnect_storm(eval_outcome: UnitEvalOutcome) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
     const RECONNECTS: u8 = 8;
@@ -3687,6 +3692,7 @@ fn status_snapshots_survive_reconnect_storm(eval_outcome: UnitEvalOutcome) {
     assert_eq!(application.calls, 1);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn unknown_snapshot_survives_reconnect_storm_before_target_id_reuse() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -4117,6 +4123,7 @@ fn websocket_replacement_queues_retirement_and_close_is_idempotent() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
     let mut transport = LiveTransport::new(host(), TransportLimits::default()).unwrap();
@@ -4695,6 +4702,7 @@ fn synchronous_event_diagnostic_replays_after_watch_closure() {
     assert_eq!(replay.response, Some(diagnostic));
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
     let (root, repository) = durable_repository();
@@ -4842,6 +4850,7 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch() {
     let (root, repository) = durable_repository();
@@ -5146,6 +5155,7 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
     let (root, repository) = durable_repository();
@@ -5293,6 +5303,7 @@ fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers() {
     let (root, repository) = durable_repository();
@@ -5493,9 +5504,11 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
+    const HANDOFFS: u8 = 8;
 
     let (root, repository) = durable_repository();
     let runtime = open_durable_state(&repository);
@@ -5653,7 +5666,7 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
         .unwrap()
         .response
         .expect("a fresh query sees the completed target");
-        let expected_body = ResultBody::from_result(&result, Limits::default().protocol).unwrap();
+        let expected_body = ResultBody::from_result(result, Limits::default().protocol).unwrap();
         assert!(matches!(
             &fresh.message,
             Message::RequestStatusResult {
@@ -5709,7 +5722,6 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     drop(host);
     drop(updater);
 
-    const HANDOFFS: u8 = 8;
     let mut current_owner = owner;
     for handoff in 0..HANDOFFS {
         let replacement_id = [76 + handoff; 16];
@@ -5834,6 +5846,7 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_running_status_snapshot_survives_session_handoff() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -5969,6 +5982,7 @@ fn durable_running_status_snapshot_survives_session_handoff() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_status_snapshots_survive_repeated_owner_handoffs() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -6148,6 +6162,7 @@ fn durable_terminal_failure_snapshots_survive_repeated_owner_handoffs() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     eval_outcome: UnitEvalOutcome,
 ) {
@@ -6517,6 +6532,7 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_unknown_status_snapshots_survive_reconnect_handoff_storm_and_target_reuse() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -6724,6 +6740,7 @@ fn durable_unknown_status_snapshots_survive_reconnect_handoff_storm_and_target_r
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
     let (root, repository) = durable_repository();
@@ -6909,6 +6926,7 @@ fn durable_request_status_identity_is_scoped_when_sessions_reuse_target_ids() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_unknown_status_retry_survives_orphan_resolution() {
     let (root, repository) = durable_repository();
@@ -9503,6 +9521,7 @@ fn rejected_requests_retain_failure_identity_and_do_not_reexecute() {
     assert_eq!(application.calls, 1);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let (root, repository) = durable_repository();
@@ -9925,9 +9944,8 @@ fn pure_rejected_and_rolled_back_events_preserve_their_watch() {
             &mut application,
         ));
         match mode {
-            WatchEventMode::Pure => assert!(event_result.is_ok()),
+            WatchEventMode::Pure | WatchEventMode::Denied => assert!(event_result.is_ok()),
             WatchEventMode::Rejected => assert_eq!(event_result, Err(Error::ApplicationRejected)),
-            WatchEventMode::Denied => assert!(event_result.is_ok()),
             WatchEventMode::Rollback => assert_eq!(event_result, Err(Error::RuntimeUnavailable)),
             WatchEventMode::Commit => unreachable!("commit is covered by the invalidation test"),
         }
@@ -12162,6 +12180,7 @@ fn deletion_failure_closes_fail_closed_without_sensitive_diagnostics() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn delete_cancels_durable_session_work_before_returning_success() {
     let (root, repository) = durable_repository();
@@ -12453,6 +12472,7 @@ fn delete_cancels_durable_session_work_before_returning_success() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -12662,7 +12682,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             if status.state == orna_runtime_v1::RequestState::Completed
                 && status.fingerprint == closed_sibling_target_query_fingerprint
     ));
-    assert!(matches!(
+    assert!(
         block_on(open_durable_state(&repository).request_status(
             RequestIdentity {
                 session_id: [1; 16],
@@ -12670,9 +12690,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             },
             second_fingerprint,
         ))
-        .unwrap(),
-        None
-    ));
+        .unwrap()
+        .is_none()
+    );
     assert!(matches!(
         block_on(open_durable_state(&repository).request_status(first_identity, first_fingerprint))
             .unwrap(),
@@ -13800,11 +13820,11 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
             result: None,
         } if *target == [96; 16]
     ));
-    assert!(matches!(
+    assert!(
         block_on(open_durable_state(&repository).request_status_for_identity(eighth_identity))
-            .unwrap(),
-        None
-    ));
+            .unwrap()
+            .is_none()
+    );
     for (session_id, expected_fingerprint) in [
         ([1; 16], closed_sibling_target_query_fingerprint),
         ([3; 16], third_query_fingerprint),
@@ -14622,6 +14642,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn mismatch_query_replay_survives_colliding_eval_completion() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -14820,6 +14841,7 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -17319,6 +17341,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -18494,6 +18517,7 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
     remove_test_repository(&root);
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn second_status_identity_keeps_pinned_unknown_snapshot_through_terminal_eval_retry() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
@@ -18816,6 +18840,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion() 
         .expect("the fixture-backed retry proof completes");
 }
 
+#[allow(clippy::too_many_lines)]
 fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_body() {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
