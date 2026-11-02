@@ -928,6 +928,11 @@ impl ActionAuthorityRegistry {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns [`ActionRegistrationError::ZeroHandle`] for a zero action handle
+    /// and [`ActionRegistrationError::DuplicateBinding`] when the binding is
+    /// already registered.
     pub fn register<H: ActionHandler + 'static>(
         &mut self,
         binding: ActionBinding,
@@ -945,6 +950,12 @@ impl ActionAuthorityRegistry {
 
     /// Registers an explicitly allocated opaque handle with the descriptor
     /// and provenance that produced it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the descriptor's own validation error, or the errors of
+    /// [`Self::register`] when the handle is zero or the binding is already
+    /// registered.
     pub fn register_descriptor<H: ActionHandler + 'static>(
         &mut self,
         binding: ActionBinding,
@@ -1133,6 +1144,11 @@ pub trait LiveApplication {
     /// Dispatches an admitted page action under the same host-owned runtime
     /// transaction seam as Eval. Existing applications inherit a pure result;
     /// action-capable adapters may return staged table mutations.
+    // The arity belongs to this public trait: a live application receives the
+    // activation context even when it ignores it, so an implementor that needs
+    // it is not forced onto a separate method. Narrowing the parameter list is
+    // a trait change, not a lint fix.
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_event_with_work<'a>(
         &'a mut self,
         session: [u8; 16],
@@ -1280,16 +1296,20 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
     {
         Box::pin(async move {
             let invocation_id = admin_invocation_id(self.request);
+            // The runtime call is a large future; pin it inside the closure so
+            // this administration path stays small on the caller's stack.
             let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
-                self.runtime
-                    .pause_stream_reference_at_capture_with_invocation_id(
-                        self.lease,
-                        stream,
-                        reason,
-                        context.capture(),
-                        invocation_id,
-                    )
-                    .await
+                Box::pin(
+                    self.runtime
+                        .pause_stream_reference_at_capture_with_invocation_id(
+                            self.lease,
+                            stream,
+                            reason,
+                            context.capture(),
+                            invocation_id,
+                        ),
+                )
+                .await
             })
             .await
             .map_err(|error| admin_failure_code(&error))?;
@@ -1310,15 +1330,19 @@ impl LiveAdminEffectDispatcher for RuntimeAdminEffectDispatcher {
     {
         Box::pin(async move {
             let invocation_id = admin_invocation_id(self.request);
+            // Same as `pause_stream`: pin the runtime call rather than carrying
+            // its future inline through this path.
             let outcome = with_terminal_admin_effect(&self.runtime, self.lease, || async {
-                self.runtime
-                    .resume_stream_reference_at_capture_with_invocation_id(
-                        self.lease,
-                        stream,
-                        context.capture(),
-                        invocation_id,
-                    )
-                    .await
+                Box::pin(
+                    self.runtime
+                        .resume_stream_reference_at_capture_with_invocation_id(
+                            self.lease,
+                            stream,
+                            context.capture(),
+                            invocation_id,
+                        ),
+                )
+                .await
             })
             .await
             .map_err(|error| admin_failure_code(&error))?;
@@ -1386,6 +1410,28 @@ fn admin_failure_code(error: &RuntimeError) -> String {
         .to_owned()
 }
 
+/// Refuses a transaction the transport may not commit: the transaction must
+/// belong to the request being committed, and only a successful protocol result
+/// may be made durable. Both checks fail closed, so a mismatch never writes.
+fn check_commitable_transaction(
+    identity: RequestIdentity,
+    transaction: &LiveEvalTransaction,
+    response: &Envelope,
+) -> Result<()> {
+    if transaction.request_identity != Some(identity)
+        || !matches!(
+            &response.message,
+            Message::Result {
+                status: ResultStatus::Success,
+                ..
+            }
+        )
+    {
+        return Err(Error::ApplicationRejected);
+    }
+    Ok(())
+}
+
 impl LiveSessionChildren for LiveApplicationWorkSupervisor {
     fn cancel_and_join_session<'a>(
         &'a mut self,
@@ -1405,7 +1451,9 @@ impl LiveSessionChildren for LiveApplicationWorkSupervisor {
 pub struct LiveApplicationTicket {
     session: [u8; 16],
     request: [u8; 16],
-    message: Message,
+    // The envelope message is the largest part of the ticket. Boxed so the
+    // ticket, and every enum that carries it, stays small on the stack.
+    message: Box<Message>,
     watch: Option<[u8; 16]>,
     fingerprint: [u8; 32],
     eval_context: Option<RuntimeActivationContext>,
@@ -1429,6 +1477,9 @@ pub enum ApplicationPreparation {
     Completed(DispatchOutcome),
 }
 
+// Boxing `WebSocketOutput` would touch 171 references across the transport for a
+// 424-byte value that never outlives one poll; measured here so the exception is
+// explicit rather than a blanket allowance.
 #[allow(clippy::large_enum_variant)]
 pub enum WebSocketApplicationPreparation {
     Pending,
@@ -1487,7 +1538,7 @@ impl LiveApplicationTicket {
         application: &mut impl LiveApplication,
     ) -> LiveApplicationCompletion {
         let response = if self.invoke_callback {
-            if matches!(self.message, Message::Eval { .. }) {
+            if matches!(&*self.message, Message::Eval { .. }) {
                 let session = self.session;
                 let request = self.request;
                 let message = &self.message;
@@ -1511,7 +1562,7 @@ impl LiveApplicationTicket {
                 } else {
                     execute().await
                 }
-            } else if matches!(self.message, Message::Event { .. }) {
+            } else if matches!(&*self.message, Message::Event { .. }) {
                 application
                     .dispatch_event_with_work(
                         self.session,
@@ -2843,7 +2894,7 @@ impl LiveHost {
         Ok(ApplicationPreparation::Work(LiveApplicationTicket {
             session,
             request,
-            message: envelope.message,
+            message: Box::new(envelope.message),
             watch: envelope.watch,
             fingerprint,
             eval_context,
@@ -2885,6 +2936,7 @@ impl LiveHost {
             cancel_target,
             ..
         } = ticket;
+        let message = *message;
         let mut work = work;
         work.complete();
         let response = match response {
@@ -2942,8 +2994,10 @@ impl LiveHost {
                 };
                 let committed = self
                     .commit_eval_transaction(
-                        session,
-                        request,
+                        RequestIdentity {
+                            session_id: session,
+                            request_id: request,
+                        },
                         fingerprint,
                         watch,
                         context,
@@ -3774,8 +3828,10 @@ impl LiveHost {
                     validate_result_response(request, fingerprint, response, self.limits.protocol)?;
                 let response = validated.response.ok_or(Error::ApplicationRejected)?;
                 self.commit_eval_transaction(
-                    session,
-                    request,
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
                     fingerprint,
                     None,
                     context.as_ref().ok_or(Error::UnsupportedOperation)?,
@@ -3831,8 +3887,10 @@ impl LiveHost {
                     validate_result_response(request, fingerprint, response, self.limits.protocol)?;
                 let response = validated.response.ok_or(Error::ApplicationRejected)?;
                 self.commit_eval_transaction(
-                    session,
-                    request,
+                    RequestIdentity {
+                        session_id: session,
+                        request_id: request,
+                    },
                     fingerprint,
                     watch,
                     context.as_ref().ok_or(Error::UnsupportedOperation)?,
@@ -4414,30 +4472,14 @@ impl LiveHost {
 
     async fn commit_eval_transaction(
         &mut self,
-        session: [u8; 16],
-        request: [u8; 16],
+        identity: RequestIdentity,
         fingerprint: [u8; 32],
         watch: Option<[u8; 16]>,
         context: &RuntimeActivationContext,
         response: Envelope,
         transaction: LiveEvalTransaction,
     ) -> Result<Envelope> {
-        let identity = RequestIdentity {
-            session_id: session,
-            request_id: request,
-        };
-        if transaction.request_identity != Some(identity) {
-            return Err(Error::ApplicationRejected);
-        }
-        if !matches!(
-            &response.message,
-            Message::Result {
-                status: ResultStatus::Success,
-                ..
-            }
-        ) {
-            return Err(Error::ApplicationRejected);
-        }
+        check_commitable_transaction(identity, &transaction, &response)?;
         let mutating = !transaction.mutations.is_empty();
         let LiveEvalTransaction {
             mutations,
@@ -4516,14 +4558,18 @@ impl LiveHost {
         let response = self.decode(retained.as_bytes())?;
         self.validate_recovered_response(&committed.request, &response)
             .await?;
-        let response =
-            validate_result_response(request, fingerprint, response, self.limits.protocol)?
-                .response
-                .ok_or(Error::ApplicationRejected)?;
-        if mutating {
-            if let Some(watch) = watch {
-                self.close_watch(session, watch)?;
-            }
+        let response = validate_result_response(
+            identity.request_id,
+            fingerprint,
+            response,
+            self.limits.protocol,
+        )?
+        .response
+        .ok_or(Error::ApplicationRejected)?;
+        if mutating
+            && let Some(watch) = watch
+        {
+            self.close_watch(identity.session_id, watch)?;
         }
         Ok(response)
     }
@@ -4877,9 +4923,16 @@ impl LiveHost {
     }
 
     fn validate_session_runtime_context(&self, session: [u8; 16], message: &Message) -> Result<()> {
-        let database_context = match message {
-            Message::Eval { database, .. } | Message::Watch { database, .. } => database,
-            _ => return Ok(()),
+        let (Message::Eval {
+            database: database_context,
+            ..
+        }
+        | Message::Watch {
+            database: database_context,
+            ..
+        }) = message
+        else {
+            return Ok(());
         };
         let Some(bound) = self.session_runtime_contexts.get(&session) else {
             // Direct LiveHost users can supply their own application authority
@@ -6638,7 +6691,7 @@ impl LiveTransport {
         let envelope = Envelope {
             request: Some(completion.ticket.request),
             watch: completion.ticket.watch,
-            message: completion.ticket.message.clone(),
+            message: (*completion.ticket.message).clone(),
             extensions: BTreeMap::new(),
         };
         match self.host.complete_application(completion).await {
@@ -11120,8 +11173,7 @@ mod tests {
                 committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
             });
             let result = futures::executor::block_on(host.commit_eval_transaction(
-                identity.session_id,
-                identity.request_id,
+                identity,
                 fingerprint,
                 None,
                 &context,
@@ -11275,8 +11327,7 @@ mod tests {
             after_commit_flag.store(true, std::sync::atomic::Ordering::SeqCst);
         });
         let result = futures::executor::block_on(host.commit_eval_transaction(
-            identity.session_id,
-            identity.request_id,
+            identity,
             fingerprint,
             None,
             &context,
@@ -11377,8 +11428,7 @@ mod tests {
                 committed_on_success.store(true, std::sync::atomic::Ordering::SeqCst);
             });
             let result = futures::executor::block_on(host.commit_eval_transaction(
-                identity.session_id,
-                identity.request_id,
+                identity,
                 [30; 32],
                 None,
                 &context,
