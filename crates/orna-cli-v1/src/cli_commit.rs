@@ -18,7 +18,7 @@ use orna_repository_v1::{
 };
 
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
-use super::*;
+use super::{Diagnostic, Cow, Exit, semantic_catalogue, Digest, Endpoint, local_project_path, runtime_identity, RuntimeState};
 
 fn usage() -> Diagnostic {
     Diagnostic::usage(
@@ -124,6 +124,7 @@ fn relation_failure(error: RelationAdmissionError, title: &'static str) -> Diagn
     }
 }
 
+#[allow(clippy::too_many_lines)]
 /// Admits every table of the staged source into the staged `.orna/store` and
 /// returns one line per table this commit admits, for printing once the
 /// commit exists.
@@ -197,9 +198,7 @@ fn stage_store(
     })?;
     let table_name = |relation: &[u8; 16]| {
         staged_relations
-            .table_name(relation)
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
+            .table_name(relation).map_or_else(|| {
                 // A removed table keeps its name in the retired inventory record.
                 previous
                     .as_ref()
@@ -210,7 +209,7 @@ fn stage_store(
                         })
                     })
                     .map_or_else(String::new, |record| record.qualified_name().to_owned())
-            })
+            }, str::to_owned)
     };
     let admission = repository
         .stage_store_admission(

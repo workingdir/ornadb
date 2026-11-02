@@ -7,7 +7,7 @@
 
 use orna_repository_v1::{CandidateAssertionGate, CandidateAssertionRefusal, PrivateCommit};
 
-use super::*;
+use super::{BTreeMap, semantic_catalogue, admitted_project_tables, Digest, table_identities_from_manifest, BTreeSet, stage_outcome_cause, Diagnostic, Exit};
 
 /// The candidate assertion gate that `orna commit` and `orna publish` run
 /// before any ref, pin or journal names a candidate (ORNA-ASSERT-042,

@@ -46,7 +46,6 @@ fn manifest_after_deleting_the_only_row_has_no_row_and_no_orphan_media() {
     // No orphan payload is left behind for the deleted row.
     let media_dir = after.join("media");
     let leftover = std::fs::read_dir(&media_dir)
-        .map(|entries| entries.count())
-        .unwrap_or(0);
+        .map_or(0, std::iter::Iterator::count);
     assert_eq!(leftover, 0, "a deleted row left a payload behind");
 }

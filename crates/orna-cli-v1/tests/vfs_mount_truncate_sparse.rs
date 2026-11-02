@@ -11,10 +11,8 @@ use std::{
     os::unix::fs::FileExt,
 };
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
@@ -28,7 +26,7 @@ use editor_mount::{
 /// profiles/vfs-1 errno table: EINVAL for malformed candidates.
 const EINVAL: i32 = 22;
 
-/// Compact-profile per-file bound (COMPACT_FILE_BOUND_BYTES); the mounted draft
+/// Compact-profile per-file bound (`COMPACT_FILE_BOUND_BYTES`); the mounted draft
 /// quota must enforce it.
 const FILE_QUOTA_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -279,7 +277,7 @@ async fn quota_rejected_write_is_not_retained_across_unmount_restart() {
     }
     let fixture = start_editor_mount(false).await;
     let accepted = fresh_view(&fixture);
-    let mut file = open_rw(&fixture);
+    let file = open_rw(&fixture);
     assert_errno(
         file.write_at(b"x", FILE_QUOTA_BYTES).map(|_| ()),
         &[ENOSPC, EDQUOT],
@@ -288,9 +286,9 @@ async fn quota_rejected_write_is_not_retained_across_unmount_restart() {
     drop(file);
 
     let EditorMount {
-        _mounted: previous_mount,
-        _mount_parent: mount_parent,
-        _repository_directory: repository_directory,
+        mounted: previous_mount,
+        mount_parent,
+        repository_directory,
         ..
     } = fixture;
     drop(previous_mount);

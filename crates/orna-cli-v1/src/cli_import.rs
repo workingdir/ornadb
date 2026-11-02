@@ -214,13 +214,10 @@ impl Resources {
         // not to a temporary path, so its temporary-storage bound is zero. The
         // only working set above the index metadata is the fixed verification
         // buffer the offline copy declares (ORNA-BLOB-007, ORNA-BLOB-010).
-        let note = match self.metadata_only {
-            true => "metadata only: no payload file opened".to_owned(),
-            false => format!(
-                "verification buffer {} bytes",
-                self.verification_buffer_bytes
-            ),
-        };
+        let note = if self.metadata_only { "metadata only: no payload file opened".to_owned() } else { format!(
+            "verification buffer {} bytes",
+            self.verification_buffer_bytes
+        ) };
         format!(
             "resources: {rss}; {io}; media payload read {} bytes of {} bytes in the bundle; temp storage bound 0 bytes ({note})",
             self.media_read_bytes, self.bundle_payload_bytes,
@@ -250,17 +247,14 @@ fn dry_run_report(
     // Every row is verified even when the report is limited, and the payloads
     // are hashed from a fixed buffer rather than retained (CAPTURE-3 step 2).
     // A metadata-only run never opens a payload file at all.
-    let verified = match metadata_only {
-        true => None,
-        false => Some(
-            copy.import_summary_with_progress(total, |step| {
-                if progress {
-                    eprintln!("{step}");
-                }
-            })
-            .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?,
-        ),
-    };
+    let verified = if metadata_only { None } else { Some(
+        copy.import_summary_with_progress(total, |step| {
+            if progress {
+                eprintln!("{step}");
+            }
+        })
+        .map_err(|error| import_error("Bundle could not be verified", format!("{error:?}")))?,
+    ) };
     let rows: Vec<ReportRow<'_>> = match &verified {
         Some(summary) => summary.rows[..reported]
             .iter()
@@ -288,10 +282,7 @@ fn dry_run_report(
     // payload actually read is the whole bundle's even when fewer rows are
     // reported. Nothing is read at all in metadata-only mode.
     let bundle_payload_bytes: u64 = copy.rows().iter().map(|row| row.length).sum();
-    let media_read_bytes = match metadata_only {
-        true => 0,
-        false => bundle_payload_bytes,
-    };
+    let media_read_bytes = if metadata_only { 0 } else { bundle_payload_bytes };
     let resources = Resources {
         start_peak_rss_bytes,
         end_peak_rss_bytes: peak_rss_bytes(),
@@ -299,18 +290,12 @@ fn dry_run_report(
         process_written_bytes: process_io.map(|(_, written)| written),
         media_read_bytes,
         bundle_payload_bytes,
-        verification_buffer_bytes: match metadata_only {
-            true => 0,
-            false => PAYLOAD_BUFFER_BYTES as u64,
-        },
+        verification_buffer_bytes: if metadata_only { 0 } else { PAYLOAD_BUFFER_BYTES as u64 },
         metadata_only,
     };
     let reported_payload_bytes: u64 = rows.iter().map(|row| row.length).sum();
     let typed = media_type.map_or(String::new(), |media_type| format!(" as {media_type}"));
-    let counted = match metadata_only {
-        true => format!("{reported_payload_bytes} promised payload bytes unread"),
-        false => format!("{reported_payload_bytes} payload bytes"),
-    };
+    let counted = if metadata_only { format!("{reported_payload_bytes} promised payload bytes unread") } else { format!("{reported_payload_bytes} payload bytes") };
     let summary_line = format!(
         "dry run: {reported} of {total} rows{typed}, {counted}, {history_entries} history entries; nothing written"
     );

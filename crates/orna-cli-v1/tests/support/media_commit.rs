@@ -6,11 +6,13 @@
 //! publication projects rows into the native store by it, so a harness that
 //! omits it stages a row no store root can address.
 
+// Included by path from several integration targets, each of which uses the
+// part of the capture fixture it needs.
+#![allow(dead_code)]
+
 use std::{collections::BTreeMap, sync::Arc};
 
-use orna_conformance_v1::{
-    DurableTransactionalEvaluator, transactional_loaded_project_candidate_validator,
-};
+use orna_conformance_v1::transactional_loaded_project_candidate_validator;
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_project_v1::{
     KeyComponentText, ObjectIdentityManifest, ObjectKind, ProjectLoader,
@@ -46,6 +48,8 @@ fn vfs_key_component(key: &str) -> (String, KeyComponentText) {
     )
 }
 
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
 /// Commits one captured media row and publishes it, so the row is durable in
 /// the store before the caller reads it.
 pub async fn commit_capture(
@@ -74,6 +78,8 @@ pub async fn commit_capture(
     .await;
 }
 
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
 pub async fn commit_capture_for_table(
     repository: &Repository,
     state: &RuntimeState,
@@ -102,6 +108,8 @@ pub async fn commit_capture_for_table(
     .await;
 }
 
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
 /// Commits one captured media row and leaves the range pending, so a caller can
 /// publish it with the CLI verb exactly as a production run does.
 pub async fn commit_capture_pending(
@@ -131,6 +139,8 @@ pub async fn commit_capture_pending(
     .await;
 }
 
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments)]
 async fn commit_capture_inner(
     repository: &Repository,
     state: &RuntimeState,
@@ -166,7 +176,7 @@ async fn commit_capture_inner(
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         bindings,
     )
@@ -210,7 +220,7 @@ pub fn source_row_id_for_ordinal(ordinal: u16) -> [u8; 16] {
         ordinal < 0x8000,
         "fixture ordinal {ordinal} exceeds the 15-bit source id encoding"
     );
-    let mut id = [ordinal as u8; 16];
+    let mut id = [u8::try_from(ordinal & 0x00ff).expect("low byte of a 15-bit ordinal"); 16];
     id[0] = 1 | (((ordinal >> 8) as u8) << 1);
     id
 }
@@ -251,6 +261,8 @@ pub async fn commit_source_captures(
     .await;
 }
 
+/// One capture write: the repository, the state, the rows and the pins.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 /// Captures and commits complete source-owned rows for a source table.
 pub async fn commit_source_captures_for_table(
     repository: &Repository,
@@ -286,7 +298,7 @@ pub async fn commit_source_captures_for_table(
         for (field_name, expression) in capture.blob_fields {
             let value = evaluate_expression_ovb2_with_effects(
                 expression,
-                &Default::default(),
+                &BTreeMap::default(),
                 Limits::default(),
                 bindings,
             )
@@ -300,7 +312,7 @@ pub async fn commit_source_captures_for_table(
         let admitted = admit_source_row_with_owner_fields(
             &project,
             &logical_path,
-            &row_source,
+            row_source,
             &schema,
             format_context,
             blob_fields,
@@ -362,7 +374,7 @@ pub async fn commit_source_captures_for_table(
         retained_sources.push(source_bindings);
         mutations.push(mutation);
     }
-    let ordinal = captures[0].ordinal as u8;
+    let ordinal = u8::try_from(captures[0].ordinal & 0x00ff).expect("low byte of the ordinal");
     let mut request_id = [ordinal; 16];
     request_id[0] = 0xA5;
     let request_identity = RequestIdentity {
@@ -410,6 +422,8 @@ pub async fn commit_source_captures_for_table(
     drop(retained_sources);
 }
 
+/// One capture request: the repository, the runtime state and the rows it writes.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 /// Replaces one captured source row through the save admission the mount's
 /// durable save uses, and leaves it unpublished: the runtime holds the
 /// replacement while the repository head still commits the previous row.
@@ -471,7 +485,7 @@ pub async fn commit_source_replacement_through_save_admission(
     for (field_name, expression) in capture.blob_fields {
         let value = evaluate_expression_ovb2_with_effects(
             expression,
-            &Default::default(),
+            &BTreeMap::default(),
             Limits::default(),
             bindings,
         )
@@ -485,7 +499,7 @@ pub async fn commit_source_replacement_through_save_admission(
     let admitted = admit_source_row_with_owner_fields(
         &project,
         &logical_path,
-        &row_source,
+        row_source,
         &schema,
         format_context,
         blob_fields,
@@ -528,7 +542,7 @@ pub async fn commit_source_replacement_through_save_admission(
     }
     let content_transfers = pins
         .iter()
-        .map(|pin| pin.transfer_record())
+        .map(orna_repository_v1::ProtectedContentPin::transfer_record)
         .collect::<Vec<_>>();
     let replacement_bytes = mutation
         .value()

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
@@ -105,6 +106,7 @@ struct MediaListing {
     hydrated: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn song_and_image_import_commit_through_capture_and_list_without_payloads() {
     let (directory, repository, relation_id) = empty_format3_repository();
@@ -137,7 +139,7 @@ async fn song_and_image_import_commit_through_capture_and_list_without_payloads(
         ("song", "tone.wav", 0x70_u8),
         ("image", "pixel.png", 0x80_u8),
     ];
-    for (key, file, ordinal) in imports {
+    for (key, _file, ordinal) in imports {
         // Both imports run from committed .orna fixtures.
         let fixture = match key {
             "image" => IMAGE_IMPORT_FIXTURE,
@@ -285,14 +287,14 @@ async fn history_pages_cover_every_revision_once_across_imported_rows() {
         let revisions = graph.list_row_revisions(row, "HEAD", 64, &scope).unwrap();
         assert_eq!(revisions[0].commit().to_hex(), head, "{key}: head first");
         // One revision per page: every page is exactly the next commit.
-        let pages = revision_pages(
+        let page_plan = revision_pages(
             |max| graph.list_row_revisions(row, "HEAD", max, &scope).unwrap(),
             1,
             revisions.len(),
         );
-        assert_eq!(pages.len(), revisions.len(), "{key}: one page per revision");
-        assert!(pages.iter().all(|page| page.len() == 1), "{key}: page size");
-        assert_eq!(pages.concat(), revisions, "{key}: pages cover the walk once");
+        assert_eq!(page_plan.len(), revisions.len(), "{key}: one page per revision");
+        assert!(page_plan.iter().all(|page| page.len() == 1), "{key}: page size");
+        assert_eq!(page_plan.concat(), revisions, "{key}: pages cover the walk once");
     }
     drop(directory);
 }
@@ -574,7 +576,12 @@ fn assert_history_refused(output: &std::process::Output, what: &str) {
 
 /// The 16-byte relation id as the 32-digit hex the `orna history` CLI takes.
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    relation_id.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in relation_id {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// Runs `orna history` with `arguments` as a child process inside the repository
@@ -666,6 +673,7 @@ fn import_expression(fixture: &str, root: &Path) -> String {
     fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root)
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Captures one file through `sys.blob.capture_file` and commits its row in an
 /// admitted request. The row stores the annotated Blob reference.
 async fn import_media(
@@ -701,7 +709,7 @@ async fn import_media(
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         bindings,
     )
@@ -1447,6 +1455,7 @@ fn song_revisions_limited_to(
     graph.list_row_revisions(song, "HEAD", max_commits, &scope).unwrap()
 }
 
+#[allow(clippy::too_many_lines)]
 /// ORNA-MEDIA-001: Blob length and content identity are reported without a payload read.
 /// ORNA-APP-013: Blob summaries are metadata-only.
 /// QUERY: `orna query RELATION` answers the Blob metadata of committed media
@@ -1628,6 +1637,7 @@ async fn query_lists_committed_media_metadata_and_charges_no_payload_bytes() {
     drop(directory);
 }
 
+#[allow(clippy::too_many_lines)]
 /// QUERY `--at`: a listing read at a pinned commit returns that commit's own
 /// rows and not the workspace `HEAD`'s, and the pinned read charges no media
 /// payload byte.
@@ -1876,6 +1886,7 @@ async fn zero_limit_history_walk_returns_no_revisions() {
     drop(directory);
 }
 
+#[allow(clippy::too_many_lines)]
 /// QUERY PREDICATE: an annotation predicate over the stored coordinate
 /// (kind/suffix/length) is evaluated from the rows' own annotations, the plan
 /// reports the coordinates it used, and the whole evaluation charges zero
@@ -2143,7 +2154,7 @@ impl<R: std::io::Read> std::io::Read for CountingReader<R> {
 fn write_high_entropy_fixture(path: &Path) -> [u8; 32] {
     let mut random = File::open("/dev/urandom").expect("open operating-system random source");
     let mut output = File::create(path).expect("create disposable high-entropy fixture");
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut remaining = GATE_B_LARGE_PAYLOAD_BYTES;
     let mut digest = Sha256::new();
     while remaining != 0 {
@@ -2209,6 +2220,7 @@ fn git_object_count(root: &Path) -> usize {
         .count()
 }
 
+#[allow(clippy::too_many_arguments)]
 #[cfg(target_os = "linux")]
 async fn commit_captured_binding(
     repository: &Repository,
@@ -2268,6 +2280,7 @@ async fn commit_captured_binding(
     publish_media_row(repository, state, key, ordinal + 0x10).await;
 }
 
+#[allow(clippy::too_many_lines)]
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata() {

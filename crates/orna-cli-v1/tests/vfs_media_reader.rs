@@ -24,13 +24,10 @@ use rustix::fs::{Advice, fadvise};
 use tempfile::TempDir;
 
 #[path = "support/editor_mount.rs"]
-#[allow(dead_code, unused_imports)]
 mod editor_mount;
 #[path = "support/format3.rs"]
-#[allow(dead_code, unused_imports)]
 mod format3;
 #[path = "support/media_commit.rs"]
-#[allow(dead_code, unused_imports)]
 mod media_commit;
 
 use editor_mount::MountedProcess;
@@ -150,7 +147,7 @@ fn mount_blob(captured: &Captured, mount_parent: &Path) -> (MountedProcess, Path
 fn unmount(captured: &Captured, mounted: &mut MountedProcess) {
     editor_mount::run_orna_unmount(captured.repository_directory.path(), mounted.mountpoint());
     let status = mounted
-        .wait_for_exit(Duration::from_secs(60))
+        .wait_for_exit(Duration::from_mins(1))
         .expect("mount exits after unmount");
     assert!(
         status.success(),
@@ -311,7 +308,7 @@ async fn cwd_mount_64_mib_wav_blob_serves_media_reader_patterns_byte_exact() {
         entropy = next_entropy(entropy);
         let len = 1 + ((entropy >> 40) as usize % MIB);
         entropy = next_entropy(entropy);
-        let offset = (entropy as usize) % (BLOB_LEN - len);
+        let offset = usize::try_from(entropy % (BLOB_LEN as u64 - len as u64)).expect("bounded offset");
         assert_range(&mut file, &original, offset, len);
     }
 
@@ -365,7 +362,8 @@ async fn cwd_mount_concurrent_readers_get_exact_ranges_from_one_blob() {
                     entropy = next_entropy(entropy);
                     let len = 1 + ((entropy >> 40) as usize % (256 * 1024));
                     entropy = next_entropy(entropy);
-                    let offset = (entropy as usize) % (original.len() - len);
+                    let span = (original.len() - len) as u64;
+                    let offset = usize::try_from(entropy % span).expect("bounded offset");
                     let mut range = vec![0u8; len];
                     file.read_exact_at(&mut range, offset as u64).unwrap();
                     assert_bytes_eq(

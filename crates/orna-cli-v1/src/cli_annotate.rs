@@ -339,7 +339,7 @@ mod tests {
         std::fs::File::open(&path)
             .unwrap()
             .set_times(
-                std::fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(60)),
+                std::fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_mins(1)),
             )
             .unwrap();
 

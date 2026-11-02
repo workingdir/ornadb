@@ -1,6 +1,19 @@
 //! Entries for the retained oracles behind the §39 mandatory behavioural
 //! scenarios.
 
+// The scenario oracles are linear transcripts: each file replays one release
+// scenario step by step, indexes fixture lengths it just bounded, and builds
+// diagnostic strings for comparison. Those properties are the fixture, so the
+// lints that describe them are allowed here and nowhere else.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::format_collect
+)]
+
 use std::{
     io::{Read, Write},
     net::TcpStream,
@@ -425,7 +438,7 @@ fn kill_publication_at(db: &mut Db, boundary: &str) -> Check {
 }
 
 fn wait_for_marker(child: &mut Child, marker: &Path) -> Check {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while Instant::now() < deadline {
         if marker.exists() {
             return Ok(());
@@ -568,7 +581,7 @@ pub fn watches_receive_no_update(db: &mut Db) -> Probe {
         ],
     )?;
     socket.send_binary(&watch_envelope(&database, "main.notes()")?)?;
-    let first = match socket.read_message(Duration::from_secs(60))? {
+    let first = match socket.read_message(Duration::from_mins(1))? {
         Received::Message(bytes) => bytes,
         Received::Idle => {
             return Err(Failure::Harness(
@@ -707,7 +720,7 @@ impl WatchSocket {
         let mut stream = TcpStream::connect(("127.0.0.1", port))
             .map_err(|error| Failure::Harness(format!("connect: {error}")))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(60)))
+            .set_read_timeout(Some(Duration::from_mins(1)))
             .map_err(|error| Failure::Harness(format!("socket timeout: {error}")))?;
         let extra: String = headers
             .iter()

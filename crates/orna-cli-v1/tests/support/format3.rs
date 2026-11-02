@@ -2,8 +2,13 @@
 //! tests that exercise the capture path. Included by test binaries with
 //! `#[path = "support/format3.rs"] mod format3;`.
 
+// Each integration test target includes this file by path and uses the part of
+// the fixture builder it needs, so a helper unused by one target is live in
+// another. The allow belongs here rather than on every inclusion.
+#![allow(dead_code)]
+
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     io::Write,
     path::Path,
     process::{Command, Stdio},
@@ -147,7 +152,7 @@ pub async fn publish_media_row(
             state,
             [ordinal; 16],
             &checkpoint,
-            |mutation| LoosePath::for_key(mutation.table(), &[logical_key.clone()]),
+            |mutation| LoosePath::for_key(mutation.table(), std::slice::from_ref(&logical_key)),
             &format!("orna: publish {key}"),
         )
         .await
@@ -190,7 +195,7 @@ pub fn capture_failure(
     max_bytes: u64,
 ) -> String {
     let source = format!("sys.blob.capture_file({root:?}, {path:?}, {max_bytes})");
-    evaluate_expression_ovb2_with_effects(&source, &Default::default(), Limits::default(), bindings)
+    evaluate_expression_ovb2_with_effects(&source, &BTreeMap::default(), Limits::default(), bindings)
         .unwrap_err()
         .code()
         .to_owned()
@@ -229,6 +234,8 @@ pub fn object_source_row(media_root: &Path, key: &str) -> String {
 
 /// Adds one admitted source row to the native Format-3 graph and commits a
 /// canonical graph snapshot. History reads the immutable native graph.
+/// The length is the graph record this fixture writes, step by step.
+#[allow(clippy::too_many_lines)]
 pub fn commit_source_row_to_native_graph(
     root: &Path,
     repository: &Repository,
@@ -356,6 +363,8 @@ pub fn commit_source_row_to_native_graph(
     commit
 }
 
+/// Builds one fixture repository; the length is the record it writes.
+#[allow(clippy::too_many_lines)]
 fn collect_row_dependencies(raw: &Raw, dependencies: &mut BTreeSet<String>) {
     match raw {
         Raw::Tag(ROV3_BLOB_TAG, payload) => {
@@ -451,6 +460,8 @@ struct FixtureRelation {
 /// Commits a format-3 repository whose `main.orna` declares each name in
 /// `declaration_names`, with one relation per declared table and no rows.
 /// Returns the relations in declaration order and the store root's object ID.
+/// Builds one fixture repository; the length is the record it writes.
+#[allow(clippy::too_many_lines)]
 fn format3_repository_parts(
     media_source: &str,
     declaration_names: &[&str],
@@ -577,13 +588,13 @@ fn format3_repository_parts(
     append_cbor_bytes(&mut store_root, &git_oid_bytes(&relation_map_oid));
     let store_root_oid =
         native_fixture_node(root, &store_root, &[(relation_map_oid.as_str(), "tree")]);
-    let database_oid = git_object(root, "blob", database.as_bytes());
+    let database_file_oid = git_object(root, "blob", database.as_bytes());
     let manifest_oid = git_object(root, "blob", &manifest_bytes);
     let source_oid = git_object(root, "blob", media_source.as_bytes());
     let orna_tree = git_tree(
         root,
         &format!(
-            "100644 blob {database_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
+            "100644 blob {database_file_oid}\tdatabase.orna\n100644 blob {manifest_oid}\tobject-identities.cbor\n040000 tree {store_root_oid}\tstore\n"
         ),
     );
     let mut module_root = ModuleDirectory::default();
@@ -770,12 +781,12 @@ impl ModuleDirectory {
     fn entries(&self, path: &Path) -> String {
         let mut entries = String::new();
         for (name, oid) in &self.files {
-            entries.push_str(&format!("100644 blob {oid}\t{name}\n"));
+            entries.extend([format!("100644 blob {oid}\t{name}\n")]);
         }
-        for (name, directory) in &self.directories {
+        entries.extend(self.directories.iter().map(|(name, directory)| {
             let tree = git_tree(path, &directory.entries(path));
-            entries.push_str(&format!("040000 tree {tree}\t{name}\n"));
-        }
+            format!("040000 tree {tree}\t{name}\n")
+        }));
         entries
     }
 }
@@ -794,27 +805,39 @@ pub fn native_fixture_node(path: &Path, data: &[u8], dependencies: &[(&str, &str
     let refs_oid = if dependencies.is_empty() {
         None
     } else {
-        let refs = dependencies
-            .iter()
-            .map(|(oid, kind)| {
-                let mode = if *kind == "tree" { "40000" } else { "100644" };
-                format!("{mode} {kind} {oid}\t{oid}\n")
-            })
-            .collect::<String>();
+        let mut refs = String::new();
+        for (oid, kind) in &dependencies {
+            let mode = if *kind == "tree" { "40000" } else { "100644" };
+            refs.extend([format!("{mode} {kind} {oid}\t{oid}\n")]);
+        }
         Some(git_tree(path, &refs))
     };
     let mut envelope = format!("100644 blob {data_oid}\tdata\n");
     if let Some(refs_oid) = refs_oid {
-        envelope.push_str(&format!("40000 tree {refs_oid}\trefs\n"));
+        envelope.extend([format!("40000 tree {refs_oid}\trefs\n")]);
     }
     git_tree(path, &envelope)
 }
 
+/// Lowercase hex of a byte slice.
+pub fn hex_encode(bytes: &[u8]) -> String {
+    const DIGITS: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(DIGITS[usize::from(byte >> 4)] as char);
+        out.push(DIGITS[usize::from(byte & 0x0f)] as char);
+    }
+    out
+}
+
 pub fn append_cbor_head(output: &mut Vec<u8>, major: u8, value: usize) {
-    let prefix = major << 5;
+    let prefix = major << 5_u8;
     match value {
-        0..=23 => output.push(prefix | value as u8),
-        24..=255 => output.extend_from_slice(&[prefix | 24, value as u8]),
+        0..=23 => output.push(prefix | u8::try_from(value).expect("value fits the direct form")),
+        24..=255 => output.extend_from_slice(&[
+            prefix | 0x18,
+            u8::try_from(value).expect("value fits the one-byte form"),
+        ]),
         _ => panic!("fixture CBOR value is unexpectedly large"),
     }
 }

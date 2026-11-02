@@ -1,6 +1,7 @@
 //! Line-anchored 1.0 audit coverage:
 //! - `source/17-repl.md:13,29,64,115` (`ORNA-REPL-001/002/003/005`).
 //! - `source/18-cli.md:74,110,112` (`ORNA-DIAG-001`, `ORNA-UX-003/004`).
+//!
 //! The REPL and diagnostic commands below load only checked-in `.orna` fixtures.
 
 use std::{

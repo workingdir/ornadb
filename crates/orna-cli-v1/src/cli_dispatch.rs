@@ -239,7 +239,7 @@ pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
 /// review and nothing is committed: the worktree module and its staged copy
 /// get the same declaration-name edit, and the inventory is restaged in the
 /// same index update, so the next `orna commit` keeps the table and field
-/// ObjectIds and with them the table's relation. Other unstaged edits stay
+/// `ObjectIds` and with them the table's relation. Other unstaged edits stay
 /// unstaged. A run interrupted after the source write resumes from the
 /// renamed source.
 #[allow(
@@ -395,8 +395,8 @@ fn run_mv(
             )
         })?;
 
-    if let Some(original_source) = original_source.as_deref() {
-        if write_source_atomically(
+    if let Some(original_source) = original_source.as_deref()
+        && write_source_atomically(
             &source_path,
             original_source.as_bytes(),
             modules[module_index].source.as_bytes(),
@@ -416,7 +416,6 @@ fn run_mv(
                 "check source-file permissions and retry mv",
             ));
         }
-    }
 
     let staged_sources = staged_rename
         .as_deref()
@@ -468,10 +467,11 @@ const RENAMEABLE_KINDS: [orna_project_v1::ObjectKind; 7] = [
     orna_project_v1::ObjectKind::Unit,
 ];
 
+#[allow(clippy::too_many_lines)]
 /// `orna mv OLD NEW` over the identity inventory a format-3 index stages
 /// in `.orna/store` (ORNA-OBJECT-003): renames one table, field, type,
 /// variant, type or variant field, or unit declaration in its source file and
-/// moves its ObjectId to the new name in the staged inventory, so the next
+/// moves its `ObjectId` to the new name in the staged inventory, so the next
 /// `orna commit` keeps the identity and evolves the stored rows by it. Like
 /// `git mv`, the rename is staged for review and nothing is committed: the
 /// worktree module and its staged copy get the same declaration-name edit,
@@ -522,22 +522,19 @@ fn run_store_mv(
     let mut modules = project.modules().to_vec();
     // After an interrupted run the worktree already declares the new name:
     // the source is left as it is and only the index is staged.
-    let (module_index, original_source) = match declaration_name_span(&modules, kind, old) {
-        Some((module_index, span)) => {
-            let original_source = std::mem::take(&mut modules[module_index].source);
-            modules[module_index].source = renamed_name_source(&original_source, &span, new_leaf);
-            (module_index, Some(original_source))
-        }
-        None => {
-            let (module_index, _) = declaration_name_span(&modules, kind, new).ok_or_else(|| {
-                Diagnostic::target(
-                    "E2101",
-                    "the declaration to rename was not found in the worktree source",
-                    "restore the declaration under its committed name, then retry `orna mv`",
-                )
-            })?;
-            (module_index, None)
-        }
+    let (module_index, original_source) = if let Some((module_index, span)) = declaration_name_span(&modules, kind, old) {
+        let original_source = std::mem::take(&mut modules[module_index].source);
+        modules[module_index].source = renamed_name_source(&original_source, &span, new_leaf);
+        (module_index, Some(original_source))
+    } else {
+        let (module_index, _) = declaration_name_span(&modules, kind, new).ok_or_else(|| {
+            Diagnostic::target(
+                "E2101",
+                "the declaration to rename was not found in the worktree source",
+                "restore the declaration under its committed name, then retry `orna mv`",
+            )
+        })?;
+        (module_index, None)
     };
     let catalogue = semantic_catalogue(&project)?;
     if !orna_semantic_v1::analyze_with_catalogue(&modules, &catalogue).is_ok() {
@@ -578,8 +575,8 @@ fn run_store_mv(
         }
     };
     let rename = orna_project_v1::ObjectIdentityRename::new(kind, old, new);
-    if let Some(original_source) = original_source.as_deref() {
-        if write_source_atomically(
+    if let Some(original_source) = original_source.as_deref()
+        && write_source_atomically(
             &source_path,
             original_source.as_bytes(),
             modules[module_index].source.as_bytes(),
@@ -599,7 +596,6 @@ fn run_store_mv(
                 "check source-file permissions and retry `orna mv`",
             ));
         }
-    }
     let staged_sources = staged_edit
         .as_deref()
         .map(|updated| (logical_path.as_str(), updated.as_bytes()))
@@ -618,15 +614,14 @@ fn run_store_mv(
             color_enabled,
         ),
         failed => {
-            if let Some(original_source) = original_source.as_deref() {
-                if !restore_source_after_failed_write(
+            if let Some(original_source) = original_source.as_deref()
+                && !restore_source_after_failed_write(
                     &source_path,
                     original_source.as_bytes(),
                     modules[module_index].source.as_bytes(),
                 ) {
                     return Err(mv_partial_update_error());
                 }
-            }
             Err(match failed {
                 Err(error) => identity_error(error),
                 Ok(_) => identity_error(orna_project_v1::ObjectIdentityError::MissingIdentity),
@@ -644,6 +639,7 @@ fn renamed_name_source(source: &str, span: &orna_syntax_v1::SyntaxSpan, new_leaf
     updated
 }
 
+#[allow(clippy::too_many_lines)]
 /// The module and byte span of the name in the declaration `qualified`
 /// names: a table, type, enum or unit declaration, or a table field or key,
 /// an enum variant, a type field or a variant payload field.
@@ -821,7 +817,7 @@ fn mv_staged_source_error(title: &'static str) -> Diagnostic {
 fn split_qualified_name(name: &str) -> Option<(&str, &str)> {
     let (namespace, leaf) = name.rsplit_once('.').unwrap_or(("", name));
     if leaf.is_empty()
-        || name.split('.').any(|part| part.is_empty())
+        || name.split('.').any(str::is_empty)
         || !name.split('.').all(is_identifier)
     {
         return None;
@@ -1072,6 +1068,7 @@ fn migration_source_admission_diagnostic(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_migrate(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let usage = || {
         Diagnostic::usage(
