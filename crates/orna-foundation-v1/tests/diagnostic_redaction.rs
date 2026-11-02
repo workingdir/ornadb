@@ -3439,7 +3439,6 @@ fn parent_replacement_closures_keep_captured_diagnostic_snapshots_local() {
         ),
     ];
     let after_growth = replace_and_snapshot(&grown);
-    drop(replace_and_snapshot);
 
     assert_eq!(destination, grown);
     assert_eq!(
@@ -4913,12 +4912,10 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
         .with_cause(untrusted("ORNA-E-PARENT-NEW-R0", "parent new right raw child"))
         .with_cause(admitted("ORNA-E-PARENT-NEW-R1", "parent new right nested admission"))
         .with_cause(untrusted("ORNA-E-PARENT-NEW-R2", "parent new right tail secret"));
-    let source_snapshots = vec![
-        old_left.clone(),
+    let source_snapshots = [old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone(),
-    ];
+        new_right.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5127,12 +5124,10 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
         untrusted("ORNA-E-NEST-NEW-RIGHT-CAUSE", "nested new right cause secret")
             .with_cause(admitted("ORNA-E-NEST-NEW-RIGHT-LEAF", "nested new right leaf")),
     );
-    let source_snapshots = vec![
-        old_left.clone(),
+    let source_snapshots = [old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone(),
-    ];
+        new_right.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5351,7 +5346,7 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
             untrusted("ORNA-E-CAUSE-NEW-RIGHT", "new sibling right cause secret")
                 .with_cause(admitted("ORNA-E-CAUSE-NEW-R0", "new sibling right leaf admission")),
         );
-    let source_snapshots = vec![old_parent.clone(), new_parent.clone()];
+    let source_snapshots = [old_parent.clone(), new_parent.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5568,7 +5563,7 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
                 .with_cause(admitted("ORNA-E-EMPTY-NEW-A1", "empty edge new leaf one admission")),
         )
         .with_cause(untrusted("ORNA-E-EMPTY-NEW-B", "empty edge new empty sibling secret"));
-    let source_snapshots = vec![old_parent.clone(), new_parent.clone()];
+    let source_snapshots = [old_parent.clone(), new_parent.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5774,7 +5769,7 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
                     .with_cause(untrusted("ORNA-E-ZERO-LEAF-0", "zero cause leaf secret")),
             )
             .with_cause(untrusted("ORNA-E-ZERO-CHILD-1", "zero cause sibling secret"));
-    let source_snapshots = vec![empty_generation.clone(), populated_generation.clone()];
+    let source_snapshots = [empty_generation.clone(), populated_generation.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5972,12 +5967,10 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
     let old_right = untrusted("ORNA-E-EMPTY-OLD-RIGHT", "empty sibling old right secret");
     let new_left = untrusted("ORNA-E-EMPTY-NEW-LEFT", "empty sibling new left secret");
     let new_right = admitted("ORNA-E-EMPTY-NEW-RIGHT", "empty sibling new right admission");
-    let source_snapshots = vec![
-        old_left.clone(),
+    let source_snapshots = [old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone(),
-    ];
+        new_right.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -6172,7 +6165,7 @@ fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
     let new_parent = untrusted("ORNA-E-ADMIT-NEW-PARENT", "new parent raw secret")
         .with_cause(new_untrusted_sibling.clone())
         .with_cause(new_admitted_sibling.clone());
-    let source_snapshots = vec![old_parent.clone(), new_parent.clone()];
+    let source_snapshots = [old_parent.clone(), new_parent.clone()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -6393,7 +6386,7 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
         };
         move || root.clone().with_cause(new_untrusted()).with_cause(new_admitted())
     };
-    let source_snapshots = vec![old_parent_factory(), new_parent_factory()];
+    let source_snapshots = [old_parent_factory(), new_parent_factory()];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -6449,8 +6442,6 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
         let right_old = right_old_generation.clone();
         let left_crossed = left_crossed_generation.clone();
         let right_crossed = right_crossed_generation.clone();
-        let old_parent_factory = old_parent_factory;
-        let new_parent_factory = new_parent_factory;
         move || {
             admitted("ORNA-E-ACLOSE-OUTER", "closure admission outer")
                 .with_cause(left_new.clone())
@@ -6642,9 +6633,6 @@ fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
         let right_admitted = right_admitted.clone();
         let left_admitted = left_admitted.clone();
         let right_revoked = right_revoked.clone();
-        let capture_admitted = capture_admitted;
-        let capture_revoked = capture_revoked;
-        let capture_raw = capture_raw;
         move || {
             admitted("ORNA-E-REVOKE-OUTER", "revocation closure outer admission")
                 .with_cause(left_revoked.clone())
@@ -6811,9 +6799,6 @@ fn mixed_trust_empty_cause_closures_keep_pre_revocation_admission_after_readmiss
     let compose_captured_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_pre_revocation = capture_pre_revocation;
-        let capture_revoked = capture_revoked;
-        let capture_readmitted = capture_readmitted;
         move || {
             admitted("ORNA-E-PREREVOKE-OUTER", "pre-revocation outer admission")
                 .with_cause(left.clone())
@@ -6990,10 +6975,6 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
     let compose_captured_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_initial = capture_initial;
-        let capture_first_revoked = capture_first_revoked;
-        let capture_readmitted = capture_readmitted;
-        let capture_second_revoked = capture_second_revoked;
         move || {
             admitted("ORNA-E-READMIT-OUTER", "readmission closure outer admission")
                 .with_cause(left.clone())
@@ -7178,8 +7159,6 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
     let compose_captured_parent_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_initial = capture_initial;
-        let capture_readmitted = capture_readmitted;
         move || {
             admitted("ORNA-E-EDGE-OUTER", "edge closure outer admission")
                 .with_cause(left.clone())
@@ -7380,9 +7359,6 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
     let compose_captured_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_initial = capture_initial;
-        let capture_readmitted = capture_readmitted;
-        let capture_parent = capture_parent;
         move || {
             admitted("ORNA-E-RECURSIVE-OUTER", "nested outer admission")
                 .with_cause(left.clone())
@@ -7553,8 +7529,6 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
     let compose_captured_snapshots = {
         let left = left.clone();
         let right = right.clone();
-        let capture_old = capture_old;
-        let capture_revoked = capture_revoked;
         move || {
             admitted("ORNA-E-SNAPSHOT-OUTER", "snapshot closure outer admission")
                 .with_cause(left.clone())
@@ -7742,8 +7716,6 @@ fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
     let compose_captured_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_old = capture_old;
-        let capture_revoked = capture_revoked;
         move || {
             admitted("ORNA-E-RESIZE-OUTER", "resize closure outer admission")
                 .with_cause(left.clone())
@@ -7969,7 +7941,6 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
     let compose_captured_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_empty = capture_empty;
         move || {
             admitted("ORNA-E-EMPTY-GROWTH-OUTER", "empty growth outer admission")
                 .with_cause(left.clone())
@@ -8193,10 +8164,6 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
     let compose_captured_stages = {
         let left = left.clone();
         let right = right.clone();
-        let capture_empty = capture_empty;
-        let capture_partial = capture_partial;
-        let capture_full = capture_full;
-        let capture_revoked = capture_revoked;
         move || {
             admitted("ORNA-E-GROWTH-STAGED-OUTER", "staged growth outer admission")
                 .with_cause(left.clone())
@@ -8433,13 +8400,6 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
     let compose_captured_stages = {
         let left = left.clone();
         let right = right.clone();
-        let capture_empty = capture_empty;
-        let capture_stage_one = capture_stage_one;
-        let capture_old_full = capture_old_full;
-        let capture_regrown = capture_regrown;
-        let capture_revoked = capture_revoked;
-        let capture_old_tail = capture_old_tail;
-        let capture_new_tail = capture_new_tail;
         move || {
             admitted("ORNA-E-GROWTH-EDGE-OUTER", "growth edge outer admission")
                 .with_cause(left.clone())
@@ -8707,12 +8667,6 @@ fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
     let compose_captured_trust_generations = {
         let left = left.clone();
         let right = right.clone();
-        let capture_short = capture_short;
-        let capture_old_full = capture_old_full;
-        let capture_replacement = capture_replacement;
-        let capture_revoked = capture_revoked;
-        let capture_old_tail = capture_old_tail;
-        let capture_replacement_tail = capture_replacement_tail;
         move || {
             admitted("ORNA-E-TRUST-TAIL-OUTER", "tail trust outer admission")
                 .with_cause(left.clone())
@@ -8911,10 +8865,6 @@ fn decoded_chain_tail_recovers_after_resize_without_inheriting_admission() {
     );
 
     let compose_recoveries = {
-        let capture_initial_full = capture_initial_full;
-        let capture_shrunk = capture_shrunk;
-        let capture_restored = capture_restored;
-        let capture_readmitted = capture_readmitted;
         move || {
             admitted("ORNA-E-RECOVERY-OUTER", "recovery chain outer admission")
                 .with_cause(capture_initial_full())
@@ -9105,14 +9055,6 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
     );
 
     let compose_generations = {
-        let capture_initial = capture_initial;
-        let capture_original = capture_original;
-        let capture_shrunk = capture_shrunk;
-        let capture_replacement = capture_replacement;
-        let capture_regrown = capture_regrown;
-        let capture_admitted = capture_admitted;
-        let capture_revoked = capture_revoked;
-        let capture_short = capture_short;
         move || {
             admitted("ORNA-E-ROUNDTRIP-OUTER", "roundtrip closure outer admission")
                 .with_cause(capture_initial())
@@ -9302,11 +9244,6 @@ fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
     }
 
     let compose_generations = {
-        let capture_initial = capture_initial;
-        let capture_shrunk = capture_shrunk;
-        let capture_restored = capture_restored;
-        let capture_admitted_empty = capture_admitted_empty;
-        let capture_final_full = capture_final_full;
         move || {
             admitted("ORNA-E-EMPTY-RECOVERY-OUTER", "empty recovery outer admission")
                 .with_cause(capture_initial())
@@ -9697,11 +9634,6 @@ fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
     assert_eq!(cause_shape(&empty_projection), [0]);
 
     let compose_generations = {
-        let capture_initial_full = capture_initial_full;
-        let capture_empty_parent = capture_empty_parent;
-        let capture_restored_full = capture_restored_full;
-        let capture_admitted_empty = capture_admitted_empty;
-        let capture_final_full = capture_final_full;
         move || {
             admitted("ORNA-E-EMPTY-OUTER", "empty parent closure admission")
                 .with_cause(capture_initial_full())
@@ -9894,12 +9826,6 @@ fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
     }
 
     let compose_generations = {
-        let capture_initial_old = capture_initial_old;
-        let capture_deep_empty = capture_deep_empty;
-        let capture_deep_new = capture_deep_new;
-        let capture_old_restored = capture_old_restored;
-        let capture_readmitted_empty = capture_readmitted_empty;
-        let capture_final_new = capture_final_new;
         move || {
             admitted("ORNA-E-DEEPER-OUTER", "deeper recovery outer admission")
                 .with_cause(capture_initial_old())
@@ -10121,12 +10047,6 @@ fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
     }
 
     let compose_generations = {
-        let capture_initial_full = capture_initial_full;
-        let capture_empty_tail = capture_empty_tail;
-        let capture_new_tail = capture_new_tail;
-        let capture_restored_full = capture_restored_full;
-        let capture_readmitted_empty = capture_readmitted_empty;
-        let capture_final_new = capture_final_new;
         move || {
             admitted("ORNA-E-DEEP-OUTER", "deep recovery outer admission")
                 .with_cause(capture_initial_full())
@@ -10310,14 +10230,6 @@ fn decoded_parent_chains_cross_empty_sibling_replacements_without_tail_leaks() {
     assert_eq!(capture_right_restored(), new_recovery);
 
     let compose_sibling_generations = {
-        let capture_left_initial = capture_left_initial;
-        let capture_right_initial = capture_right_initial;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_empty = capture_right_empty;
-        let capture_left_crossed = capture_left_crossed;
-        let capture_right_crossed = capture_right_crossed;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_restored = capture_right_restored;
         move || {
             admitted("ORNA-E-PARENT-OUTER", "parent chain outer admission")
                 .with_cause(capture_left_initial())
@@ -10539,12 +10451,6 @@ fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
     assert_redacted_tree(&readmitted_projection["causes"][0]);
 
     let compose_generations = {
-        let capture_initial_full = capture_initial_full;
-        let capture_empty_nested = capture_empty_nested;
-        let capture_replaced_tail = capture_replaced_tail;
-        let capture_restored_full = capture_restored_full;
-        let capture_admitted_empty = capture_admitted_empty;
-        let capture_final_replacement = capture_final_replacement;
         move || {
             admitted("ORNA-E-NESTED-RECOVERY-OUTER", "nested recovery outer admission")
                 .with_cause(capture_initial_full())
@@ -10771,16 +10677,6 @@ fn deep_parent_sibling_recovery_preserves_crossed_closure_edges() {
     assert_eq!(capture_right_new_again(), new_recovery);
 
     let compose_generations = {
-        let capture_left_old = capture_left_old;
-        let capture_right_new = capture_right_new;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_empty = capture_right_empty;
-        let capture_left_crossed = capture_left_crossed;
-        let capture_right_crossed = capture_right_crossed;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_restored = capture_right_restored;
-        let capture_left_empty_again = capture_left_empty_again;
-        let capture_right_new_again = capture_right_new_again;
         move || {
             admitted("ORNA-E-DEEP-OUTER", "deep sibling outer admission")
                 .with_cause(capture_left_old())
@@ -11046,16 +10942,6 @@ fn shared_deep_parent_codes_preserve_unequal_tail_recovery_generations() {
     assert_eq!(capture_right_new_again(), new_recovery);
 
     let compose_generations = {
-        let capture_left_old = capture_left_old;
-        let capture_right_new = capture_right_new;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_empty = capture_right_empty;
-        let capture_left_crossed = capture_left_crossed;
-        let capture_right_crossed = capture_right_crossed;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_restored = capture_right_restored;
-        let capture_left_empty_again = capture_left_empty_again;
-        let capture_right_new_again = capture_right_new_again;
         move || {
             admitted("ORNA-E-SHARED-DEEP-OUTER", "shared deep outer admission")
                 .with_cause(capture_left_old())
@@ -11313,16 +11199,6 @@ fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
     assert_eq!(capture_right_new_again(), new_recovery);
 
     let compose_generations = {
-        let capture_left_old = capture_left_old;
-        let capture_right_new = capture_right_new;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_empty = capture_right_empty;
-        let capture_left_crossed = capture_left_crossed;
-        let capture_right_crossed = capture_right_crossed;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_restored = capture_right_restored;
-        let capture_left_empty_again = capture_left_empty_again;
-        let capture_right_new_again = capture_right_new_again;
         move || {
             admitted("ORNA-E-REUSED-DEEP-OUTER", "reused deep outer admission")
                 .with_cause(capture_left_old())
@@ -11599,16 +11475,6 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
     assert_eq!(capture_right_new_again(), new_recovery);
 
     let compose_generations = {
-        let capture_left_old = capture_left_old;
-        let capture_right_new = capture_right_new;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_empty = capture_right_empty;
-        let capture_left_crossed = capture_left_crossed;
-        let capture_right_crossed = capture_right_crossed;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_restored = capture_right_restored;
-        let capture_left_empty_again = capture_left_empty_again;
-        let capture_right_new_again = capture_right_new_again;
         move || {
             admitted("ORNA-E-DUPLICATE-OUTER", "duplicate recovery outer admission")
                 .with_cause(capture_left_old())
@@ -11873,14 +11739,6 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
     assert_eq!(capture_right_empty(), empty_recovery);
 
     let compose_generations = {
-        let capture_left_initial = capture_left_initial;
-        let capture_right_initial = capture_right_initial;
-        let capture_left_empty = capture_left_empty;
-        let capture_right_replacement = capture_right_replacement;
-        let capture_left_replacement = capture_left_replacement;
-        let capture_right_restored = capture_right_restored;
-        let capture_left_restored = capture_left_restored;
-        let capture_right_empty = capture_right_empty;
         move || {
             admitted("ORNA-E-DUPLICATE-DEEP-OUTER", "duplicate closure outer admission")
                 .with_cause(capture_left_initial())
@@ -17095,9 +16953,11 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
             assert_redacted_tree(cause);
         }
     }
-    fn nested_alias_shape(
-        diagnostic: &serde_json::Value,
-    ) -> Vec<Vec<Vec<(String, Vec<String>)>>> {
+    /// The nested alias shape a redacted diagnostic keeps: branch, terminal and
+    /// their tail codes, three levels deep as the diagnostic nests them.
+    type NestedAliasShape = Vec<Vec<Vec<(String, Vec<String>)>>>;
+
+    fn nested_alias_shape(diagnostic: &serde_json::Value) -> NestedAliasShape {
         let siblings = diagnostic["causes"].as_array().unwrap();
         assert_eq!(siblings.len(), 2);
         siblings
@@ -17388,7 +17248,7 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
 
     // ORNA-SECRET-002 leaves equal-code sibling and tail order unspecified;
     // retain construction order and identify each cloned tail by its appended leaf.
-    let shared_inner = vec![vec!["ORNA-E-NESTED-CLONED-ALIAS-SHARED-LEAF".to_owned()]];
+    let shared_inner = [vec!["ORNA-E-NESTED-CLONED-ALIAS-SHARED-LEAF".to_owned()]];
     let aliased_shape = |side: &str, slot: &str| {
         vec![
             shared_inner[0].clone(),
@@ -21982,7 +21842,7 @@ fn diagnostic_reload_storm_keeps_latest_alias_bindings_in_wire_order() {
             let mut cause = diagnostic(&format!("ORNA-E-STORM-{generation}-{label}"));
             if let Some(reference) = reference {
                 let prefix = format!("ORNA-E-STORM-{generation}-{label}");
-                let (left, right) = if generation % 2 == 0 {
+                let (left, right) = if generation.is_multiple_of(2) {
                     (format!("{prefix}-LEFT"), format!("{prefix}-RIGHT"))
                 } else {
                     (format!("{prefix}-RIGHT"), format!("{prefix}-LEFT"))
@@ -22184,7 +22044,7 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
             assert_eq!(cause["message"], "<redacted>");
             let nested = cause["causes"].as_array().unwrap();
             if reference.is_some() {
-                let expected = if generation % 2 == 0 {
+                let expected = if generation.is_multiple_of(2) {
                     ["LEFT", "RIGHT"]
                 } else {
                     ["RIGHT", "LEFT"]
@@ -22204,16 +22064,14 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
     }
 
     let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
-    let rounds = vec![
-        vec![Some(0x11), Some(0x22), Some(0x11)],
+    let rounds = [vec![Some(0x11), Some(0x22), Some(0x11)],
         vec![Some(0x22), Some(0x11), Some(0x22)],
         vec![None, Some(0x11), Some(0x22), Some(0x11)],
         vec![Some(0x22), None, Some(0x22)],
         vec![Some(0x11), Some(0x11), None, Some(0x22)],
         vec![Some(0x22), Some(0x11), Some(0x22), None],
         vec![Some(0x11), None, Some(0x22), Some(0x11)],
-        vec![Some(0x22), Some(0x22), Some(0x11)],
-    ];
+        vec![Some(0x22), Some(0x22), Some(0x11)]];
     let mut wires = Vec::with_capacity(rounds.len());
     for (generation, references) in rounds.iter().enumerate() {
         let mut root = diagnostic(&format!("ORNA-E-CONCURRENT-ROOT-{generation}"), fixture);
@@ -22339,7 +22197,7 @@ fn diagnostic_alias_storms_keep_each_synchronized_reload_snapshot_ordered() {
             assert_eq!(cause["message"], "<redacted>");
             let nested = cause["causes"].as_array().unwrap();
             if alias.is_some() {
-                let children = if generation % 2 == 0 {
+                let children = if generation.is_multiple_of(2) {
                     ["LEFT", "RIGHT"]
                 } else {
                     ["RIGHT", "LEFT"]
