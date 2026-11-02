@@ -11,7 +11,7 @@
 //! (profiles/vfs-1.md states no cross-handle trigger). The sync trigger's errno
 //! reports only the trigger's own candidate, never another module's refusal.
 
-use super::{DRAFT_FILE_BOUND_BYTES, WorkspaceFilesystem, NodeKind, Arc, MountWriter, OpenFile, DraftState, Errno, Ordering, DocumentCommitError, worst_retention_errno, Path, checked_project_source_path, BTreeMap, Digest, write_source_atomically, restore_source_after_failed_write, RetentionError};
+use super::{DRAFT_FILE_BOUND_BYTES, WorkspaceFilesystem, NodeKind, Arc, MountWriter, OpenFile, DraftState, Errno, Ordering, DocumentCommitError, worst_retention_errno, Path, checked_project_source_path, BTreeMap, write_source_atomically, restore_source_after_failed_write, RetentionError};
 
 /// Refusal causes recorded with a retained source candidate (ORNA-VFS-009). The
 /// `sys.vfs.*` names follow the document causes in `DocumentCommitError::cause`.

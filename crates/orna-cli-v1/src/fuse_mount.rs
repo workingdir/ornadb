@@ -3692,7 +3692,11 @@ impl WorkspaceFilesystem {
             .directory_mut(parent)
             .is_some_and(|directory| directory.rename_entry(name, newname));
         if !renamed {
-            eprintln!("mounted Blob rename: {name:?} could not take the name {newname:?} in its directory");
+            eprintln!(
+                "mounted Blob rename: \"{name}\" could not take the name \"{newname}\" in its directory",
+                name = name.to_string_lossy(),
+                newname = newname.to_string_lossy(),
+            );
         }
         if let Some(NodeKind::Blob {
             candidate: Some(candidate),
@@ -3779,7 +3783,10 @@ impl WorkspaceFilesystem {
             .and_then(|directory| directory.remove_entry(name))
             .is_none()
         {
-            eprintln!("mounted Blob unlink: {name:?} had already left its directory");
+            eprintln!(
+                "mounted Blob unlink: \"{name}\" had already left its directory",
+                name = name.to_string_lossy(),
+            );
         }
         // Open handles keep reading the captured bytes until their last release (profiles/vfs-1.md).
         state.retire_node(inode);
@@ -5238,7 +5245,7 @@ impl Filesystem for WorkspaceFilesystem {
     }
 
     fn removexattr(&self, _request: &Request, _inode: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        reply.error(refuse_unsupported(&format!("removexattr {name:?}")));
+        reply.error(refuse_unsupported(&format!("removexattr \"{name}\"", name = name.to_string_lossy())));
     }
 
     fn mknod(
@@ -6026,7 +6033,7 @@ impl Filesystem for WorkspaceFilesystem {
             Ok(accepted) => accepted,
             Err(error) => {
                 eprintln!("mounted replacement failed: {error}");
-                let stale = matches!(error, DocumentCommitError::Stale);
+                let commit_was_stale = matches!(error, DocumentCommitError::Stale);
                 let path = self
                     .state
                     .lock()
@@ -6043,7 +6050,7 @@ impl Filesystem for WorkspaceFilesystem {
                     &path,
                     error,
                 );
-                if stale {
+                if commit_was_stale {
                     let mut state = self
                         .state
                         .lock()
@@ -8102,7 +8109,8 @@ impl FsBuilder {
                 .is_some_and(|entry| !self.is_text_node(entry.inode));
             if collides {
                 return Err(format!(
-                    "the projected text file {name:?} collides with a sibling"
+                    "the projected text file \"{name}\" collides with a sibling",
+                    name = name.to_string_lossy(),
                 ));
             }
         }
