@@ -1709,6 +1709,7 @@ dependencies = [
  "orna-foundation-v1",
  "orna-repository-v1",
  "orna-runtime-v1",
+ "orna-storage-v1",
  "orna-syntax-v1",
  "orna-value-v1",
  "parquet",
