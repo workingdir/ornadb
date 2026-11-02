@@ -14,20 +14,24 @@ use std::{
     fmt,
 };
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 use orna_evolution_v1::{MigrationOperation, MigrationPlan};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor, compare_primary_keys};
 use orna_repository_v1::{
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry, CompactSegmentRole,
 };
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 use orna_runtime_v1::{
     PublicationFreeze, PublicationMutationState, PublicationRowEncoding, PublicationValueEncoding,
 };
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 use sha2::{Digest, Sha256};
 
 /// Immutable profile coordinates used at this exact-key boundary.
 pub const COMPACT_STORAGE_PROFILE: &str = "compact-storage-v1";
 pub const OVB_PROFILE: &str = "OVB-1";
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Typed mutation state accepted by the compact writer boundary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompactWriterMutationState {
@@ -35,6 +39,7 @@ pub enum CompactWriterMutationState {
     Deletion,
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// One schema-validated, ordered mutation ready for compact encoding.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterMutation {
@@ -44,6 +49,7 @@ pub struct CompactWriterMutation {
     pub state: CompactWriterMutationState,
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Deterministic, inspectable input for a compact writer.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterInput {
@@ -56,6 +62,7 @@ pub struct CompactWriterInput {
     pub candidate_digest: [u8; 32],
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// One authoritative, base-aware row operation ready for physical encoding.
 /// Replacement values are complete canonical rows; deletions carry no value.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -65,6 +72,7 @@ pub struct CompactWriterRow {
     role: CompactSegmentRole,
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 impl CompactWriterRow {
     pub fn key(&self) -> &[u8] {
         &self.key
@@ -79,6 +87,7 @@ impl CompactWriterRow {
     }
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Output of consuming one ordered freeze against its authoritative base.
 /// It carries no digest witness or sequence-based precedence.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +98,7 @@ pub struct CompactWriterBatch {
     rows: Vec<CompactWriterRow>,
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 impl CompactWriterBatch {
     pub const fn table_id(&self) -> [u8; 16] {
         self.table_id
@@ -214,6 +224,7 @@ impl HybridBaseState {
     /// authority callback must hold the editable path lease and prove the
     /// destination is representable and portable before an editable move is
     /// returned.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn apply_evolution_plan(
         &self,
         profile: &CompactOvbProfile,
@@ -424,6 +435,7 @@ pub struct CompactEditableRekey {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub struct CompactHybridEvolution {
     pub compact_writer_input: Option<CompactWriterInput>,
     pub editable_moves: Vec<CompactEditableRekey>,
@@ -449,6 +461,7 @@ impl CompactBaseState {
         self.rows.values()
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Folds a digest-verified ordered candidate against this committed base.
     ///
     /// A final deletion is omitted only when the verified base proves the key
@@ -492,6 +505,7 @@ impl CompactBaseState {
         Ok(folded)
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Folds frozen mutations by logical key and classifies their final
     /// physical roles against this verified base. Absent insert-then-delete
     /// mutations disappear; deletion output is key-only.
@@ -547,6 +561,7 @@ impl CompactBaseState {
         })
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Consumes generated writer input at the schema/generation boundary used
     /// by the committed base provider.
     pub fn consume_writer_input(
@@ -556,6 +571,7 @@ impl CompactBaseState {
         self.validate_writer_input(input)
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Applies the final folded mutations to the verified base so a published
     /// candidate can be checked against its actual decoded rows before the
     /// runtime consumes the frozen prefix.
@@ -590,6 +606,7 @@ impl CompactBaseState {
         Ok(expected)
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Applies the role-classified physical writer batch to this base. Role
     /// claims are checked against actual key presence so a caller cannot
     /// publish an insert as a replacement or a replacement as new data.
@@ -657,6 +674,7 @@ impl CompactBaseState {
                 .filter_map(|(key, row)| row.value.as_ref().map(|value| (key, value))))
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     fn validate_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -671,6 +689,7 @@ impl CompactBaseState {
         Ok(())
     }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
     fn validate_writer_input_identity(
         &self,
         input: &CompactWriterInput,
@@ -767,6 +786,7 @@ fn complete_writer_row_fields<'a>(
 /// Applies an already-authorized evolution plan to the verified compact base.
 /// Schema operations without a physical projection are rejected; rekeys retain
 /// the complete canonical row value and emit typed writer mutations.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub fn apply_migration_plan_to_compact(
     profile: &CompactOvbProfile,
     base: &CompactBaseState,
@@ -873,6 +893,7 @@ pub fn apply_migration_plan_to_compact(
     Ok(input)
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 fn rewrite_rekey_row_value(
     profile: &CompactOvbProfile,
     old_key: &CompactKeyIdentity,
@@ -1140,6 +1161,7 @@ impl<'a> CompactBaseFold<'a> {
 
 /// Fail-closed validation errors at the runtime-to-compact boundary.
 #[derive(Debug, Eq, PartialEq)]
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub enum CompactLoweringError {
     EmptyMutations,
     EmptyTable,
@@ -1159,6 +1181,7 @@ pub enum CompactLoweringError {
     CandidateDigestMismatch,
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 impl fmt::Display for CompactLoweringError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -1194,8 +1217,10 @@ impl fmt::Display for CompactLoweringError {
     }
 }
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 impl std::error::Error for CompactLoweringError {}
 
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Validates and lowers one runtime freeze into deterministic writer input.
 ///
 /// The runtime freeze is the sole source of mutation order and candidate
