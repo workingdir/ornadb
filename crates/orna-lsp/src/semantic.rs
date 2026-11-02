@@ -90,7 +90,7 @@ static TOKEN_TYPES: LazyLock<TokenTypes> = LazyLock::new(|| {
 /// LSP token legend supported by this server.
 pub fn legend() -> Vec<SemanticTokenType> {
     editor::legend_token_types()
-        .map(|token_type| SemanticTokenType::new(token_type))
+        .map(SemanticTokenType::new)
         .collect()
 }
 
