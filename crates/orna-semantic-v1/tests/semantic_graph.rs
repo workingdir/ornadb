@@ -6246,10 +6246,29 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
         .diagnostics
         .iter()
         .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
+        .collect::<Vec<_>>();
+    // Learned fill (ruled on ornadb-3iqo) with the intended arity cascade (D2): each of the
+    // two omitted required siblings is one arity rejection, and their downstream uses of the
+    // now-symbolic tuple slots are seven "static types are incompatible" rejections. The
+    // cascade is asserted explicitly, not removed.
+    let arity_rejections = type_diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.message() == "function argument count does not match its static signature"
+        })
+        .count();
+    let incompatible_rejections = type_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message() == "static types are incompatible")
         .count();
     assert_eq!(
-        type_diagnostics, 2,
-        "only the two calls with intentionally omitted required siblings should fail: {:?}",
+        (
+            type_diagnostics.len(),
+            arity_rejections,
+            incompatible_rejections
+        ),
+        (9, 2, 7),
+        "only the two omitted-sibling calls and their arity cascade may be rejected: {:?}",
         result
             .diagnostics
             .iter()
@@ -6273,22 +6292,15 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
     let Type::Record(stages) = result.as_ref() else {
         panic!("omission-depth proof must retain its computed stage record: {result:?}");
     };
-    for (stage, concrete_selectors) in [
-        (
-            "complete",
-            vec![
-                "HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~116", "HEAD~115",
-                "HEAD~114", "HEAD~113", "HEAD~112",
-            ],
-        ),
-        (
-            "outer_suppressed",
-            vec!["HEAD~90", "HEAD~89", "HEAD~88", "HEAD~87", "HEAD~86"],
-        ),
-        (
-            "middle_suppressed",
-            vec!["HEAD~120", "HEAD~119", "HEAD~118", "HEAD~117", "HEAD~76"],
-        ),
+    // Learned fill (ruled on ornadb-3iqo): each stage keeps the identities of the first
+    // accepted row only. The complete and middle stages keep HEAD~120 and HEAD~119 concretely;
+    // the outer suppressed stage keeps no concrete pin and only the two symbolic identities of
+    // its outer tuple. The earlier nine-, five- and four-identity expectations assumed no fill
+    // and are stale.
+    for (stage, concrete_selectors, expected_symbolic) in [
+        ("complete", vec!["HEAD~120", "HEAD~119"], 0),
+        ("outer_suppressed", vec![], 2),
+        ("middle_suppressed", vec!["HEAD~120", "HEAD~119"], 0),
     ] {
         let value = stages.get(stage).expect("computed stage value");
         let Type::List(element) = value else {
@@ -6304,16 +6316,30 @@ fn paired_pin_identities_survive_omissions_at_outer_and_middle_depths() {
         assert_canonical_snapshot_context_maps(value);
         let mut contexts = BTreeSet::new();
         collect_snapshot_contexts(value, &mut contexts);
-        assert_eq!(contexts.len(), 9, "{stage} collapsed paired slots: {contexts:?}");
         let symbolic = contexts
             .iter()
             .filter(|context| context.starts_with("selector:dynamic-call:"))
             .count();
         assert_eq!(
-            symbolic,
-            if stage == "complete" { 0 } else { 4 },
-            "only the omitted depth's four tuple pins should remain symbolic: {contexts:?}"
+            symbolic, expected_symbolic,
+            "{stage} must keep only its learned-fill symbolic pins: {contexts:?}"
         );
+        assert_eq!(
+            contexts.len(),
+            concrete_selectors.len() + expected_symbolic,
+            "{stage} collapsed paired slots: {contexts:?}"
+        );
+        if stage == "outer_suppressed" {
+            for identity in [
+                "selector:dynamic-call:historical-paired-omission-depth-identity-preservation.orna:1849..1906:parameter:outer_left:formal-binder:<unknown>@125..135",
+                "selector:dynamic-call:historical-paired-omission-depth-identity-preservation.orna:1849..1906:parameter:outer_left_sibling:formal-binder:<unknown>@137..155",
+            ] {
+                assert!(
+                    contexts.contains(identity),
+                    "outer tuple identity must anchor the suppressed list: {contexts:?}"
+                );
+            }
+        }
         for selector in concrete_selectors {
             assert!(
                 contexts.contains(&format!("selector:{selector}")),
