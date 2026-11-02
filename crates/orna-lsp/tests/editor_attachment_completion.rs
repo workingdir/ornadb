@@ -785,14 +785,11 @@ qa!
     let _ = fs::remove_file(result_path.with_extension("json.errors"));
     let result = result.unwrap_or_else(|error| {
         panic!(
-            "Vim did not write completion evidence (exit {:?}): {error}\n{}\n{}",
+            "Vim did not write completion evidence (exit {:?}): {error}\n{}\n{}\n{}",
             output.status.code(),
             String::from_utf8_lossy(&output.stdout),
-            format!(
-                "{}\n{}",
-                String::from_utf8_lossy(&output.stderr),
-                vim_errors.as_deref().unwrap_or("")
-            ),
+            String::from_utf8_lossy(&output.stderr),
+            vim_errors.as_deref().unwrap_or(""),
         )
     });
     assert!(
