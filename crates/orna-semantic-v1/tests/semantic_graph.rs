@@ -7659,10 +7659,27 @@ fn sparse_paired_rebind_chains_preserve_identity_across_omitted_rows() {
         ],
         "omitted rows do not erase sparse slot history or fabricate the failed slot's value"
     );
+    // Ruling (ornadb-3iqo): learned fill is intended, and a rejected split
+    // rolls back only itself. The pair rebind at HEAD~4000 fills both slots, the
+    // sparse row at HEAD~4020 rebinds only the left lane, the split at HEAD~4040
+    // and HEAD~4041 is rejected and contributes nothing, and the pair at
+    // HEAD~4050 joins both slots. Neither slot falls back to the empty tuple of
+    // the row that omitted the pins, because the accepted rebinds before the
+    // rejected split are the accumulated value the reset restores.
     assert_eq!(
         pin_slots("rejects_sparse_rebind_split_after_omitted_pair_rows"),
-        [BTreeSet::new(), BTreeSet::new()],
-        "a later pair split rolls both slots back to the originally omitted tuple"
+        [
+            BTreeSet::from([
+                "selector:HEAD~4000".into(),
+                "selector:HEAD~4020".into(),
+                "selector:HEAD~4050".into(),
+            ]),
+            BTreeSet::from([
+                "selector:HEAD~4000".into(),
+                "selector:HEAD~4050".into(),
+            ]),
+        ],
+        "a rejected sparse split rolls back only itself; accepted rebinds and the later re-pair stay"
     );
     assert_eq!(
         witness_contexts("rejects_sparse_rebind_split_after_omitted_pair_rows"),
