@@ -7,6 +7,12 @@
 //! `?`. Every operation has a fixed work budget and fails with
 //! [`RegexError::LimitExhausted`] instead of returning a partial result.
 
+// Nothing calls this engine yet: `std.regex` in the standard library still
+// reports ORNA-EVAL-UNSUPPORTED from its native entry points, so the binding
+// between the dialect and this crate is missing rather than the engine. The
+// allow is scoped to this module so the gap stays visible in one place.
+#![allow(dead_code)]
+
 use icu_properties::props::{Alphabetic, GeneralCategory, WhiteSpace};
 use icu_properties::{CodePointMapData, CodePointSetData};
 
@@ -577,10 +583,7 @@ impl Regex {
     pub fn find_all(&self, text: &[char]) -> Result<Vec<Match>, RegexError> {
         let mut found = Vec::new();
         let mut position = 0;
-        loop {
-            let Some(next) = self.find_from(text, position)? else {
-                break;
-            };
+        while let Some(next) = self.find_from(text, position)? {
             let (start, end) = (next.start, next.end);
             found.push(next);
             if end > start {

@@ -4108,9 +4108,8 @@ fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
         evaluate(include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna")),
         Value::int(1.into())
     );
-    for expression in [
-        include_str!("fixtures/evaluator_source_e1ba4fa7c3937d2c.orna"),
-    ] {
+    {
+        let expression = include_str!("fixtures/evaluator_source_e1ba4fa7c3937d2c.orna");
         assert_eq!(
             code(evaluate_expression(
                 expression,
@@ -4257,7 +4256,7 @@ fn std_collection_float_min_and_max_use_total_order_and_ordinary_equality_separa
     let expected_max = Value::option(Some(positive_zero.clone())).unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
         for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::FloatZero, name) {
-            assert_eq!(evaluate(&expression), expected, "{expression}");
+            assert_eq!(evaluate(expression), expected, "{expression}");
         }
     }
 
@@ -4318,7 +4317,7 @@ fn std_collection_float_min_and_max_propagate_nan_and_return_empty_identity() {
     for (name, expected) in [("min", expected.clone()), ("max", expected)] {
         for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Rows, name) {
             assert_eq!(
-                evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
+                evaluate_expression(expression, &environment, Limits::default()).unwrap(),
                 expected,
                 "{expression}"
             );
@@ -4414,7 +4413,7 @@ fn std_collection_date_min_and_max_accept_all_call_forms_and_preserve_order() {
     .unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
         for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Dates, name) {
-            assert_eq!(evaluate(&expression), expected, "{expression}");
+            assert_eq!(evaluate(expression), expected, "{expression}");
         }
     }
 
@@ -4457,7 +4456,7 @@ fn std_collection_instant_min_and_max_use_normalized_utc_order() {
     .unwrap();
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
         for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Instants, name) {
-            assert_eq!(evaluate(&expression), expected, "{expression}");
+            assert_eq!(evaluate(expression), expected, "{expression}");
         }
     }
 
@@ -4531,7 +4530,7 @@ fn std_collection_min_and_max_accept_integer_lists_in_all_call_forms() {
 
     for (name, expected) in [("min", expected_min), ("max", expected_max)] {
         for expression in min_max_source_fixtures(MinMaxSourceFixtureProfile::Integers, name) {
-            assert_eq!(evaluate(&expression), expected, "{expression}");
+            assert_eq!(evaluate(expression), expected, "{expression}");
         }
     }
 
@@ -4830,13 +4829,13 @@ fn std_collection_min_and_max_debit_steps_for_each_scanned_value() {
         for (name, expected) in [("min", expected_min), ("max", expected_max)] {
             let expression = min_max_source_fixtures(MinMaxSourceFixtureProfile::Rows, name)[0];
             assert_eq!(
-                evaluate_expression(&expression, &environment, Limits::default()).unwrap(),
+                evaluate_expression(expression, &environment, Limits::default()).unwrap(),
                 expected,
                 "{kind} {expression}"
             );
             assert_eq!(
                 code(evaluate_expression(
-                    &expression,
+                    expression,
                     &environment,
                     Limits {
                         // The call and its rows binding consume the setup
@@ -9279,7 +9278,7 @@ fn std_stats_percentile_requires_bounded_probability_and_named_supported_interpo
             Value::decimal(5.into(), 0.into()).unwrap(),
         ),
     ] {
-        assert_eq!(evaluate(&expression), expected, "{expression}");
+        assert_eq!(evaluate(expression), expected, "{expression}");
     }
     for expression in [
         include_str!("fixtures/evaluator_source_874ed7ee373c2e4d.orna"),

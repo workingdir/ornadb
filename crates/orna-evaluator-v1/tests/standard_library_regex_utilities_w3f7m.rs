@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 
 use orna_evaluator_v1::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalVariant,
