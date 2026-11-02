@@ -410,6 +410,8 @@ impl crate::GitCommitRef {
 #[derive(Clone, Debug)]
 pub struct SchemaRootPin {
     snapshot: RepositorySnapshotPin,
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     oid: NativeOid,
 }
 
@@ -875,6 +877,8 @@ impl RepositoryFormatContext {
         Ok(())
     }
 
+    /// The parameters describe one record; each caller passes them straight through.
+    #[allow(clippy::too_many_arguments)]
     /// Binds a qualified source table and its expected schema to this exact
     /// repository UUID and committed snapshot. The caller supplies the module
     /// namespace and repository-relative path from project analysis; the
@@ -1098,6 +1102,8 @@ impl HistoricalFormatContext {
             .resolve_committed_table_by_relation_id(relation_id)
     }
 
+    /// The parameters describe one record; each caller passes them straight through.
+    #[allow(clippy::too_many_arguments)]
     pub fn bind_committed_table(
         &self,
         module_name: &str,
@@ -3505,7 +3511,8 @@ mod graph_bridge_tests {
                 }],
             },
         );
-        let schema_oid = write_native_node(
+        
+        write_native_node(
             directory,
             algorithm,
             &NodeData::Schema {
@@ -3513,8 +3520,7 @@ mod graph_bridge_tests {
                 schema_digest,
                 byte_root,
             },
-        );
-        schema_oid
+        )
     }
 
     fn graph_bridge_test_relation_id(context: &RepositoryFormatContext) -> [u8; 16] {
@@ -3592,7 +3598,7 @@ mod graph_bridge_tests {
         let (schema_oid, schema_digest) = schema_node_for_relation(directory, context, relation_id);
         let semantic_digest: [u8; 32] = Sha256::digest(overflow_bytes).into();
         let stored_digest = semantic_digest_override.unwrap_or(semantic_digest);
-        let chunk_oid = write_git_object(directory, algorithm, "blob", &overflow_bytes);
+        let chunk_oid = write_git_object(directory, algorithm, "blob", overflow_bytes);
         let byte_root = write_native_node(
             directory,
             algorithm,

@@ -31,6 +31,8 @@ use orna_value_v1::{
 use sha2::{Digest, Sha256};
 
 
+/// Dead code: no caller yet; kept for the store surface it specifies.
+#[allow(dead_code)]
 pub const REPOSITORY_FORMAT: u8 = 3;
 pub const NODE_DATA_LIMIT: usize = 65_536;
 pub const MAX_REFS: usize = 256;
@@ -3235,16 +3237,14 @@ impl NativeGraphContext {
             Ok(prepared) => Ok(prepared),
             Err(graph) => {
                 let mut cleanup_failures = Vec::new();
-                if let Some(candidate_cleanup) = candidate_cleanup.as_mut() {
-                    if let Err(failure) = candidate_cleanup.cleanup_with_identity() {
+                if let Some(candidate_cleanup) = candidate_cleanup.as_mut()
+                    && let Err(failure) = candidate_cleanup.cleanup_with_identity() {
                         cleanup_failures.push(failure);
                     }
-                }
-                if let Some(pin_cleanup) = pin_cleanup.as_mut() {
-                    if let Err(failure) = pin_cleanup.cleanup_with_identity() {
+                if let Some(pin_cleanup) = pin_cleanup.as_mut()
+                    && let Err(failure) = pin_cleanup.cleanup_with_identity() {
                         cleanup_failures.push(failure);
                     }
-                }
                 if cleanup_failures.is_empty() {
                     Err(ProtectedBlobRowPreparationError::Graph(graph))
                 } else {
@@ -3395,14 +3395,13 @@ impl NativeGraphContext {
         if length == 0 && identity.sha256() != crate::blob_store::digest_bytes(&[]).sha256() {
             return Err(GraphError::InvalidEmptyBlob);
         }
-        if let Some(root) = &byte_root {
-            if root.algorithm() != self.algorithm {
+        if let Some(root) = &byte_root
+            && root.algorithm() != self.algorithm {
                 return Err(GraphError::InvalidOidWidth {
                     expected: self.algorithm.width(),
                     actual: root.as_bytes().len(),
                 });
             }
-        }
         Ok(VerifiedBlobDescriptor {
             descriptor_oid: descriptor_oid.clone(),
             identity,
@@ -3486,6 +3485,8 @@ impl NativeGraphContext {
         )
     }
 
+    /// The parameters describe one record; each caller passes them straight through.
+    #[allow(clippy::too_many_arguments)]
     fn read_index_range(
         &self,
         oid: &NativeOid,
@@ -3621,6 +3622,8 @@ impl NativeGraphContext {
         Ok(objects.oids)
     }
 
+    /// The parameters describe one record; each caller passes them straight through.
+    #[allow(clippy::too_many_arguments)]
     fn walk_full_index(
         &self,
         oid: &NativeOid,
@@ -3827,6 +3830,8 @@ impl NativeGraphContext {
         self.write_capture_envelope(node, written, object_limit)
     }
 
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     /// Writes one complete OGS-1 node envelope (its canonical `data` blob, its
     /// `refs` tree when the node has dependencies, and the envelope tree that
     /// names both) into the repository's single object store.
@@ -4709,9 +4714,12 @@ pub(crate) fn reclaim_dead_owner_pin_refs(
 /// lock. The journal check and each owner's deletions all run while that lock
 /// is held, so a publisher cannot journal a root between owners. A pass that
 /// cannot take the lock deletes nothing.
+/// One departed owner and the pin candidates its transaction accepted.
+type DepartedOwnerPins<'a> = ([u8; 16], &'a BTreeMap<[u8; 16], NativeOid>);
+
 pub(crate) fn reclaim_departed_owner_pin_refs(
     repository: &crate::Repository,
-    departed: &[([u8; 16], &BTreeMap<[u8; 16], NativeOid>)],
+    departed: &[DepartedOwnerPins<'_>],
 ) -> Result<usize, GraphError> {
     let _coordination_lock = NativeGraphCoordinationLock::acquire(repository)?;
     if repository
@@ -5591,6 +5599,8 @@ impl ProtectedContentPin {
         }
     }
 
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     pub(crate) fn protected_ref(&self) -> &str {
         &self.protected_ref
     }
@@ -5779,6 +5789,8 @@ pub struct Pub3ReleaseReceipt {
 }
 
 impl Pub3ReleaseReceipt {
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     pub(crate) fn issue_after_pub3(
         repository_id: [u8; 32],
         pin_id: [u8; 16],
@@ -5969,6 +5981,8 @@ impl ObjectStats {
     }
 }
 
+/// Dead code: no caller yet; kept for the store surface it specifies.
+#[allow(dead_code)]
 /// Help text for the exit codes of `ogs stats`. Each line names one code the
 /// stats exit with; the codes come from [`ObjectStats::exit_code`] and
 /// [`GraphError::exit_code`].
@@ -6422,6 +6436,8 @@ pub(crate) struct ValidatedRepositoryContext {
 }
 
 impl ValidatedRepositoryContext {
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     pub(crate) const fn algorithm(self) -> GitHashAlgorithm {
         self.algorithm
     }
@@ -6507,11 +6523,10 @@ pub(crate) fn validate_native_node(
     let dependencies = data.dependencies()?;
     let mut expected = BTreeMap::new();
     for dependency in &dependencies {
-        if let Some(kind) = expected.insert(dependency.oid.clone(), dependency.kind) {
-            if kind != dependency.kind {
+        if let Some(kind) = expected.insert(dependency.oid.clone(), dependency.kind)
+            && kind != dependency.kind {
                 return Err(GraphError::WrongReferenceKind);
             }
-        }
     }
     let mut actual = BTreeMap::new();
     for entry in &envelope.refs {
@@ -6895,6 +6910,8 @@ impl PinnedNativeGraphReader {
         Ok(output)
     }
 
+    /// Dead code: no caller yet; kept for the store surface it specifies.
+    #[allow(dead_code)]
     fn verify_full_byte_index(
         &mut self,
         root: &NativeObjectId,
@@ -7108,6 +7125,8 @@ fn find_ordered_entry_with(
     }
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 fn replace_ordered_entry_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     write_node: &mut impl FnMut(&NodeData) -> Result<NativeOid, GraphError>,
@@ -7209,6 +7228,8 @@ fn replace_ordered_entry_with(
     }
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 /// Collects every node object of one ordered index (root, branches and leaves)
 /// plus every stored-value payload object its entries reference, validating
 /// each node against its parent's claims on the way down.
@@ -7645,6 +7666,8 @@ fn maintain_row_map(
     })
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 fn collect_ordered_range_with(
     read_node: &mut impl FnMut(&NativeOid) -> Result<NodeData, GraphError>,
     node: NodeData,
@@ -8211,7 +8234,8 @@ mod persisted_orp_tests {
         let snapshot = crate::row_store::RowMapSnapshot::issue(version, [0x34; 32], Vec::new())
             .expect("sealed empty fixture row map");
         let repository = crate::Repository::discover(root).expect("discover capture repository");
-        let graph = NativeGraphContext::issue(
+        
+        NativeGraphContext::issue(
             repository,
             [0x35; 32],
             [0x36; 32],
@@ -8223,8 +8247,7 @@ mod persisted_orp_tests {
             schema_digest,
             snapshot,
         )
-        .expect("issue graph context after verifying fixture schema");
-        graph
+        .expect("issue graph context after verifying fixture schema")
     }
 
     #[test]
@@ -8436,7 +8459,7 @@ mod persisted_orp_tests {
             Err(GraphError::NonCanonicalData)
         ));
 
-        let descriptor_oid = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
+        let descriptor_oid = NativeObjectId::new(algorithm, [0x44; 20]).unwrap();
         let mut blob_reference = Vec::new();
         cbor_head(&mut blob_reference, 6, 60111);
         array(&mut blob_reference, 5);
@@ -8472,7 +8495,7 @@ mod persisted_orp_tests {
             Err(GraphError::InvalidOidWidth { .. })
         ));
 
-        let overflow_oid = NativeObjectId::new(algorithm, &[0x77; 20]).unwrap();
+        let overflow_oid = NativeObjectId::new(algorithm, [0x77; 20]).unwrap();
         let mut overflow_value = Vec::new();
         cbor_head(&mut overflow_value, 6, 60113);
         array(&mut overflow_value, 1);
@@ -8495,7 +8518,7 @@ mod persisted_orp_tests {
         for index in 0..=MAX_REFS {
             let mut bytes = [0u8; 20];
             bytes[16..].copy_from_slice(&(index as u32).to_be_bytes());
-            over_fanout.push(NativeObjectId::new(algorithm, &bytes).unwrap());
+            over_fanout.push(NativeObjectId::new(algorithm, bytes).unwrap());
         }
         assert!(matches!(
             NodeData::DependencyIndex {
@@ -8549,8 +8572,8 @@ mod persisted_orp_tests {
             Err(GraphError::NonCanonicalData)
         ));
 
-        let first = NativeObjectId::new(GitHashAlgorithm::Sha1, &[0x41; 20]).unwrap();
-        let second = NativeObjectId::new(GitHashAlgorithm::Sha1, &[0x42; 20]).unwrap();
+        let first = NativeObjectId::new(GitHashAlgorithm::Sha1, [0x41; 20]).unwrap();
+        let second = NativeObjectId::new(GitHashAlgorithm::Sha1, [0x42; 20]).unwrap();
         let branch = NodeData::OrderedBranch {
             domain: domain.clone(),
             height: 1,
@@ -11646,7 +11669,7 @@ mod persisted_orp_tests {
         let scope = graph.open_read_scope().expect("owner read scope");
         let admitted_version = graph.row_snapshot.version();
         let foreign_root =
-            NativeObjectId::new(graph.algorithm, &[0x55; 20]).expect("foreign root OID");
+            NativeObjectId::new(graph.algorithm, [0x55; 20]).expect("foreign root OID");
         let foreign_version = crate::row_store::RowMapVersion::issue(
             *admitted_version.database_id(),
             *admitted_version.relation_id(),
@@ -13113,8 +13136,8 @@ mod persisted_orp_tests {
     #[test]
     fn row_dependencies_recurse_into_typed_value_payloads() {
         let algorithm = GitHashAlgorithm::Sha1;
-        let descriptor = NativeObjectId::new(algorithm, &[0x44; 20]).unwrap();
-        let overflow = NativeObjectId::new(algorithm, &[0x55; 20]).unwrap();
+        let descriptor = NativeObjectId::new(algorithm, [0x44; 20]).unwrap();
+        let overflow = NativeObjectId::new(algorithm, [0x55; 20]).unwrap();
         let uuid = |byte: u8| CborValue::Tag(37, Box::new(CborValue::Bytes(vec![byte; 16])));
         let blob = CborValue::Tag(
             60111,
@@ -13848,9 +13871,12 @@ const NODE_CACHE_MAX_ENTRIES: usize = 512;
 /// read still passes the caller's admission check before its bytes are
 /// returned, so the cache changes where bytes come from, never what is
 /// admitted.
+/// A cached object's payload and the recency stamp it was admitted at.
+type CachedObject = (u64, Arc<Vec<u8>>);
+
 #[derive(Debug, Default)]
 struct NodeCache {
-    entries: HashMap<(NativeObjectKind, NativeOid), (u64, Arc<Vec<u8>>)>,
+    entries: HashMap<(NativeObjectKind, NativeOid), CachedObject>,
     recency: BTreeMap<u64, (NativeObjectKind, NativeOid)>,
     bytes: usize,
     clock: u64,
