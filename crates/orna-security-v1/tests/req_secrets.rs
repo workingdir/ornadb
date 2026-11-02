@@ -13,7 +13,7 @@ use tempfile::TempDir;
 /// It fails if the temp directory is non-empty or if the ciphertext input lies inside it.
 fn snapshotting_sops(directory: &Path, plaintext_temps: &Path, marker: &Path) -> PathBuf {
     let body = format!(
-        r##"#!/bin/sh
+        r#"#!/bin/sh
 set -eu
 action="$1"
 shift
@@ -29,7 +29,7 @@ case "$action" in
     tail -c +6 "$input" | rev ;;
   *) exit 2 ;;
 esac
-"##,
+"#,
         marker = marker.display(),
         temps = plaintext_temps.display(),
     );

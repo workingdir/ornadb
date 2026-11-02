@@ -245,11 +245,16 @@ fn wipe_plaintext(file: &mut NamedTempFile) -> std::io::Result<()> {
     file.seek(SeekFrom::Start(0))?;
 
     let zeros = [0_u8; 4096];
+    // The zero chunk is the only loop bound, so its length decides the write
+    // size. Converting through `try_from` keeps a 32-bit target honest instead
+    // of truncating a `u64` length into a `usize`.
+    let chunk = u64::try_from(zeros.len()).expect("the zero chunk length fits in u64");
     let mut remaining = length;
     while remaining > 0 {
-        let count = remaining.min(zeros.len() as u64) as usize;
+        let count = usize::try_from(remaining.min(chunk))
+            .expect("the write size is bounded by the zero chunk length");
         file.write_all(&zeros[..count])?;
-        remaining -= count as u64;
+        remaining -= u64::try_from(count).expect("the write size did not exceed the chunk");
     }
     file.set_len(0)?;
     file.sync_all()
