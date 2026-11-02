@@ -338,6 +338,10 @@ pub(crate) fn symbol_for_item(item: &Item, text: &str, tokens: &[Token]) -> Opti
     Some(symbol)
 }
 
+/// The four signature values are the parts of one declaration header, and the
+/// ten call sites below pass them straight from the parsed member they handle,
+/// so they stay positional rather than moving into a struct built at each arm.
+#[allow(clippy::too_many_arguments)]
 fn symbol_from_scope(
     name: &str,
     kind: EditorSymbolKind,
@@ -979,7 +983,6 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
 
 #[derive(Debug)]
 struct CallSite {
-    name: String,
     callee: Expr,
     span: SourceSpan,
     arguments: Vec<Argument>,
@@ -1014,9 +1017,8 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             arguments,
             span,
         } => {
-            if let Some(name) = expression_name(callee) {
+            if expression_name(callee).is_some() {
                 output.push(CallSite {
-                    name,
                     callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),
@@ -1033,9 +1035,8 @@ fn collect_calls(expression: &Expr, output: &mut Vec<CallSite>) {
             span,
             ..
         } => {
-            if let Some(name) = expression_name(callee) {
+            if expression_name(callee).is_some() {
                 output.push(CallSite {
-                    name,
                     callee: callee.as_ref().clone(),
                     span: span.clone(),
                     arguments: arguments.clone(),

@@ -231,20 +231,6 @@ impl ServerState {
         }
     }
 
-    /// Shows the client an error the user must see, as `window/showMessage`.
-    fn show_error(&self, message: &str) {
-        if let Some(client) = &self.client {
-            let params = lsp_types::ShowMessageParams {
-                typ: lsp_types::MessageType::ERROR,
-                message: message.to_owned(),
-            };
-            client(Message::Notification(Notification {
-                method: "window/showMessage".to_owned(),
-                params: serde_json::to_value(params).unwrap_or_default(),
-            }));
-        }
-    }
-
     /// Opens or replaces one document version.
     fn set_document(&mut self, document: Document, home: Option<ProjectHome>) {
         Arc::make_mut(&mut self.context.documents).insert(
@@ -754,7 +740,7 @@ fn request_code_actions(
 }
 
 fn requests_quickfix(only: Option<&[CodeActionKind]>) -> bool {
-    only.map_or(true, |kinds| {
+    only.is_none_or(|kinds| {
         kinds
             .iter()
             .any(|kind| kind.as_str() == CodeActionKind::QUICKFIX.as_str())
@@ -806,7 +792,7 @@ fn missing_semicolon_position(
     }
 
     let mut repaired_source = document.text.clone();
-    repaired_source.insert_str(previous.span.end, ";");
+    repaired_source.insert(previous.span.end, ';');
     let repaired_parse = orna_syntax_v1::parse_module(&repaired_source);
     let diagnostic_count = |parse: &analysis::EditorParse| {
         parse

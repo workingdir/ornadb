@@ -63,7 +63,7 @@ fn apply(source: &str, edits: &[Value]) -> String {
             )
         })
         .collect::<Vec<_>>();
-    spans.sort_by(|left, right| right.0.cmp(&left.0));
+    spans.sort_by_key(|span| std::cmp::Reverse(span.0));
     let mut text = source.to_owned();
     for (start, end, replacement) in spans {
         text.replace_range(start..end, replacement);

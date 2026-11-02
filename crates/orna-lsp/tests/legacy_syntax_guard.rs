@@ -83,11 +83,11 @@ fn scanned_files(directory: &Path, files: &mut Vec<PathBuf>) {
         } else if name == "legacy_syntax_guard.rs" {
             // This file names the legacy patterns it rejects.
             continue;
-        } else if name == "Cargo.toml" || path.extension().is_some_and(|ext| ext == "rs") {
-            files.push(path);
-        } else if path
-            .components()
-            .any(|component| component.as_os_str() == "editors")
+        } else if name == "Cargo.toml"
+            || path.extension().is_some_and(|ext| ext == "rs")
+            || path
+                .components()
+                .any(|component| component.as_os_str() == "editors")
         {
             files.push(path);
         }
