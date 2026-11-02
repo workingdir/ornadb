@@ -68,10 +68,3 @@ test = "clippy"
 bead = "ornadb-5il1.256"
 reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."
 
-[[failure]]
-package = "orna-semantic-v1"
-target = "test:semantic_graph"
-test = "sparse_paired_rebind_chains_preserve_identity_across_omitted_rows"
-bead = "ornadb-3iqo"
-reason = "Listed in scripts/semantic-known-red.txt: product question: a rejected split's rollback target (accumulated tuple vs empty tuple) is outside the learned-fill ruling (clause b); restored originally-omitted-tuple assertion is not stale. Passes on main only because the assertion was weakened; fails with the restored assertion in this PR, and the pull-request path skips it via scripts/semantic-known-red.txt. Fix owner tracked by the bead."
-
