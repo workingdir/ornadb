@@ -63,15 +63,14 @@ impl ReplContext {
         }
         let mut modules = analysis.modules.clone();
         let main_namespace = Namespace(vec!["main".into()]);
-        if !modules.contains_key(&main_namespace) {
-            if let Some(mut root) = modules.get(&Namespace(Vec::new())).cloned() {
+        if !modules.contains_key(&main_namespace)
+            && let Some(mut root) = modules.get(&Namespace(Vec::new())).cloned() {
                 // The trusted REPL walkthrough addresses root functions as `main.add`.
                 // A source module named `main` remains authoritative when present.
                 root.namespace = main_namespace.clone();
                 root.implicit = true;
                 modules.insert(main_namespace, root);
             }
-        }
         Ok(Self {
             identity: Arc::new(()),
             revision: 0,
