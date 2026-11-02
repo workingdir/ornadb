@@ -5836,10 +5836,28 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
         .iter()
         .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
         .collect::<Vec<_>>();
+    // Learned fill (ruled on ornadb-3iqo) with the intended arity cascade (D2): the omitted
+    // tuple sibling is one arity rejection, and its downstream uses of the now-symbolic tuple
+    // slots are three "static types are incompatible" rejections. The cascade is asserted
+    // explicitly, not removed.
+    let arity_rejections = type_diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.message() == "function argument count does not match its static signature"
+        })
+        .count();
+    let incompatible_rejections = type_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.message() == "static types are incompatible")
+        .count();
     assert_eq!(
-        type_diagnostics.len(),
-        1,
-        "only the intentionally omitted required tuple should be rejected: {:?}",
+        (
+            type_diagnostics.len(),
+            arity_rejections,
+            incompatible_rejections
+        ),
+        (4, 1, 3),
+        "only the omitted tuple's arity cascade may be rejected: {:?}",
         result
             .diagnostics
             .iter()
@@ -5898,30 +5916,45 @@ fn omitted_sibling_preserves_width_of_paired_tuple_rebinds() {
                 .filter(|context| context.starts_with("selector:dynamic-call:"))
                 .count();
             assert_eq!(
-                unresolved_paired_pins, 4,
+                unresolved_paired_pins, 2,
                 "the omitted sibling must leave each paired tuple slot symbolic: {contexts:?}"
             );
+            // Learned fill (ruled on ornadb-3iqo): the omitted sibling anchors the suppressed
+            // list to the first accepted row's topology, so only the left pair survives as
+            // symbolic identities. The earlier expectation of four symbolic pins, a concrete
+            // HEAD~870 terminal pin and five identities assumed no fill and is stale.
             assert!(
-                contexts.contains("selector:HEAD~870"),
-                "the later complete terminal binding must stay concrete: {contexts:?}"
+                contexts.contains(
+                    "selector:dynamic-call:historical-paired-rebind-width-suppressed-by-omission.orna:1224..1301:parameter:left_selected:formal-binder:<unknown>@124..137"
+                ),
+                "first pair's selected identity must anchor the list: {contexts:?}"
             );
-            assert_eq!(contexts.len(), 5, "paired rebind width changed: {contexts:?}");
+            assert!(
+                contexts.contains(
+                    "selector:dynamic-call:historical-paired-rebind-width-suppressed-by-omission.orna:1224..1301:parameter:left_sibling:formal-binder:<unknown>@139..151"
+                ),
+                "first pair's sibling identity must anchor the list: {contexts:?}"
+            );
+            assert_eq!(
+                contexts.len(),
+                2,
+                "learned fill keeps two identities: {contexts:?}"
+            );
             assert_eq!(
                 Some(contexts.len()),
                 saved_width,
                 "suppression must leave paired rebind width unchanged"
             );
         } else {
+            // Learned fill (ruled on ornadb-3iqo): the complete paired rebind keeps the first
+            // accepted row's two concrete identities. Observed on the engine: HEAD~960, HEAD~950.
             assert_eq!(
                 contexts,
                 BTreeSet::from([
                     "selector:HEAD~960".to_owned(),
                     "selector:HEAD~950".to_owned(),
-                    "selector:HEAD~940".to_owned(),
-                    "selector:HEAD~930".to_owned(),
-                    "selector:HEAD~920".to_owned(),
                 ]),
-                "the complete paired rebind must retain all five concrete pins"
+                "learned fill: the complete paired rebind keeps its first two concrete pins"
             );
             saved_width = Some(contexts.len());
         }
