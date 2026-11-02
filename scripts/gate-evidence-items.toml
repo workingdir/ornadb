@@ -68,8 +68,9 @@ limitations = ["Real 1.0 records are rejected as malformed rather than read (orn
 gate = "A"
 id = "A4"
 title = "Old commits decode under old rules"
+select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" }]
 limitations = [
-  "No test decodes a legacy commit; the CLI tests assert that an invented format-1 marker is refused (ornadb-5il1.192, ornadb-5il1.191).",
+  "Key-only rows from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; stored columns and row values beyond the key-only record shape are not asserted; Blob compact encoding is excluded (ornadb-5il1.192, ornadb-5il1.191).",
 ]
 
 [[item]]
