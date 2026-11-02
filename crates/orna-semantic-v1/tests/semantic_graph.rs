@@ -8254,19 +8254,60 @@ fn paired_boundary_depth_topology_accumulates_through_selector_storms() {
         };
         element.as_ref()
     };
-    let Type::Function { result, .. } =
-        &module.symbols["rejects_late_paired_boundary_depth_drift_after_omission_storm"].ty
-    else {
-        panic!("rejected storm must retain its computed result");
+    // ornadb-3iqo ruling: a conflicting later row folds each slot to the union of its stable
+    // labels through the shared engine path of
+    // multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions. It is not a
+    // whole-record rollback to the first row, which came from the superseded #7161 generation.
+    // Observed at 5b73047d7: left [{901,902,903},{921}], right [{911,912,913},{921}].
+    let rejected =
+        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm");
+    let Type::Record(rejected_boundaries) = rejected else {
+        panic!("rejected fold element must remain a record: {rejected:?}");
     };
-    let Type::Record(fields) = result.as_ref() else {
-        panic!("rejected storm must return its source rows: {result:?}");
-    };
-    assert_eq!(
-        folded_element("rejects_late_paired_boundary_depth_drift_after_omission_storm"),
-        fields.get("first").expect("first source row"),
-        "a topology conflict must roll back every promoted selector to the first row"
-    );
+    for (boundary, expected) in [
+        (
+            "left",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~901".to_owned(),
+                    "selector:HEAD~902".to_owned(),
+                    "selector:HEAD~903".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~921".to_owned()]),
+            ],
+        ),
+        (
+            "right",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~911".to_owned(),
+                    "selector:HEAD~912".to_owned(),
+                    "selector:HEAD~913".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~921".to_owned()]),
+            ],
+        ),
+    ] {
+        let Type::Record(depths) = &rejected_boundaries[boundary] else {
+            panic!("rejected {boundary} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &depths["pins"] else {
+            panic!("rejected {boundary} depth labels must retain the tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts,
+            expected,
+            "rejected {boundary} selectors must fold to the union of stable labels"
+        );
+    }
 
     let Type::Function { result, .. } =
         &module.symbols["accepts_stable_paired_boundary_depths_after_omission_storm"].ty
