@@ -139,7 +139,7 @@ fn frozen_introduction_fallback_cannot_be_revised() {
     let case = case("frozen_fallback");
     let initial = plan(&schema(&case["from"]), &schema(&case["to"]), &request()).unwrap();
     assert!(matches!(
-        &initial.operations()[..],
+        initial.operations(),
         [MigrationOperation::AddRequiredFieldWithFallback { field, .. }]
             if field.introduction_fallback.is_some()
     ));

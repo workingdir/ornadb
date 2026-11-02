@@ -127,6 +127,9 @@ impl ProcessProvider {
     #[sys_host_operation(
         r###"{"name":"std.io.process.run","version":{"major":1,"minor":0},"signature":"fn std.io.process.run(executable: Str, arguments: [Str], working_directory: Str, environment: [(Str, Str)], input: Blob?, timeout: Duration?, max_output_bytes: Int): (Int?, Blob, Blob)","effects":["invoke"],"preconditions":["executable resolves to an exact host-allowlisted binary","working_directory resolves below an allowlisted root","child environment names are explicitly allowlisted","timeout and combined output are within provider limits"],"failures":["sys.host.process.denied","sys.host.process.invalid_request","sys.host.process.timeout","sys.host.process.output_limit","sys.host.process.unavailable"],"role":"host.std.io.process@1.0","provider":"orna.sys.host.process.v1","implementation":"run"}"###
     )]
+    /// The parameter list is the registry-declared operation signature above;
+    /// it mirrors the `#[sys_host_operation]` attribute field for field.
+    #[allow(clippy::too_many_arguments)]
     pub fn run(
         &self,
         executable: &str,
@@ -286,11 +289,10 @@ impl ProcessProvider {
         kill_process_tree(&mut child);
         join_reader(stdout_thread);
         join_reader(stderr_thread);
-        if let Some(writer) = input_thread {
-            if !matches!(writer.join(), Ok(Ok(()))) {
+        if let Some(writer) = input_thread
+            && !matches!(writer.join(), Ok(Ok(()))) {
                 return Err(ProcessProviderError::Unavailable);
             }
-        }
         let mut capture = capture
             .lock()
             .expect("process capture mutex is not poisoned");

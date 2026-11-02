@@ -9,6 +9,9 @@ use orna_sys_v1::{
 
 const FIXTURE: &str = include_str!("fixtures/planner_paired_limit_pushdown_anchor_fold_oabpa.orna");
 
+/// One expected limit-pushdown stage: chain position and the three limits.
+type LimitPushdownStage = (u64, Option<u64>, Option<u64>, Option<u64>);
+
 fn object(reference: &str) -> ObjectRef {
     ObjectRef::descriptive(reference)
 }
@@ -152,7 +155,7 @@ fn integer(node: &PlanNode, key: &str) -> u64 {
     }
 }
 
-fn joins_by_source<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_source(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)
@@ -243,7 +246,7 @@ fn paired_limit_pushdown_folds_follow_sparse_anchors_and_ordered_chains() {
             })
             .collect::<Vec<_>>();
         stages.sort_by_key(|node| integer(node, "limit_pushdown_chain_position"));
-        let expected_stages: &[(u64, Option<u64>, Option<u64>, Option<u64>)] = match source {
+        let expected_stages: &[LimitPushdownStage] = match source {
             "table:Small" => &[
                 (15, Some(15), Some(1_500), Some(30)),
                 (10, Some(10), Some(1_000), Some(15)),

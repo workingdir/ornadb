@@ -22,6 +22,7 @@
 //!   unverified against the 1.0.0 key-schema text.
 //! - ORNA-UPGRADE-008 fail-closed behaviour is NOT asserted by this test.
 
+use std::fmt::Write as _;
 use std::{path::Path, process::Command};
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
@@ -58,15 +59,18 @@ fn encoded_keys(keys: &[CanonicalValue]) -> Vec<Vec<u8>> {
     encoded
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     let parent = TempDir::new().unwrap();
     let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE);
-    let digest = Sha256::digest(std::fs::read(&bundle).unwrap())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    assert_eq!(digest, BUNDLE_SHA256, "committed legacy bundle digest changed");
+    let bytes = std::fs::read(&bundle).unwrap();
+    let digest = Sha256::digest(&bytes);
+    let mut digest_hex = String::with_capacity(64);
+    for byte in &digest {
+        write!(digest_hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    assert_eq!(digest_hex, BUNDLE_SHA256, "committed legacy bundle digest changed");
 
     let source = parent.path().join("source");
     let clone = Command::new("git")

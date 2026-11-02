@@ -2642,12 +2642,11 @@ impl Harness {
                 if !fixture_matches {
                     continue;
                 }
-                if let Some(subject) = test.get("subject") {
-                    if subject.as_str() != Some(entry.requirement.as_str()) {
+                if let Some(subject) = test.get("subject")
+                    && subject.as_str() != Some(entry.requirement.as_str()) {
                         saw_malformed_link = true;
                         continue;
                     }
-                }
                 let stage_values = match evidence_test_stages(test) {
                     Ok(Some(stages)) => stages,
                     Ok(None) => {

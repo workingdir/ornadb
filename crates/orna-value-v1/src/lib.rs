@@ -423,6 +423,9 @@ impl NativeOid {
         }
     }
 
+    /// Digest width in bytes. A `NativeOid` always holds a full digest, so the
+    /// width is never zero and there is no meaningful emptiness predicate.
+    #[allow(clippy::len_without_is_empty)]
     pub const fn len(&self) -> usize {
         match self {
             Self::Sha1(_) => 20,
@@ -734,6 +737,10 @@ impl Format3Context {
     /// repository/runtime. The caller must bind the pin and native roots to the
     /// same persisted snapshot and provide a resolver that enforces that pin;
     /// untrusted OIDs or user-selected roots must not be used here.
+    /// The nine values are one persisted format-3 record, and every caller reads
+    /// them from the same stored metadata, so they stay positional here rather
+    /// than moving into a wrapper struct that only this constructor would use.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_persisted(
         database_uuid: [u8; 16],
         pin: Snapshot,
@@ -843,10 +850,10 @@ fn validate_format3_metadata(
     {
         return Err(Error::InvalidContext);
     }
-    if let Snapshot::Commit { algorithm, oid, .. } = pin {
-        if *algorithm != git_oid_algorithm || oid.len() != git_oid_algorithm.oid_width() {
-            return Err(Error::InvalidContext);
-        }
+    if let Snapshot::Commit { algorithm, oid, .. } = pin
+        && (*algorithm != git_oid_algorithm || oid.len() != git_oid_algorithm.oid_width())
+    {
+        return Err(Error::InvalidContext);
     }
     Ok(())
 }
@@ -1259,11 +1266,11 @@ impl Blob {
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit();
         let mut digest = Sha256::new();
-        if self.length() == 0 {
-            if let BlobContent::Reference(reference) = &self.content {
-                let bytes = read_reference_range(reference, 0, 0)?;
-                result.extend_from_slice(&bytes);
-            }
+        if self.length() == 0
+            && let BlobContent::Reference(reference) = &self.content
+        {
+            let bytes = read_reference_range(reference, 0, 0)?;
+            result.extend_from_slice(&bytes);
         }
         while offset < self.length() {
             let size = (self.length() - offset).min(chunk_limit);
@@ -1298,10 +1305,10 @@ impl Blob {
     pub fn verify(&self) -> Result<()> {
         let chunk_limit = self.read_chunk_limit();
         let mut digest = Sha256::new();
-        if self.length() == 0 {
-            if let BlobContent::Reference(reference) = &self.content {
-                read_reference_range(reference, 0, 0)?;
-            }
+        if self.length() == 0
+            && let BlobContent::Reference(reference) = &self.content
+        {
+            read_reference_range(reference, 0, 0)?;
         }
         let mut offset = 0_u64;
         while offset < self.length() {
@@ -1469,7 +1476,7 @@ impl Blob {
         suffix: &[u8],
         encoded_len: u64,
     ) -> Result<u64> {
-        writer.write_all(&prefix).map_err(|_| Error::SinkFailed)?;
+        writer.write_all(prefix).map_err(|_| Error::SinkFailed)?;
         let mut digest = Sha256::new();
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit();
@@ -1503,7 +1510,7 @@ impl Blob {
         if digest.finalize()[..] != self.identity.sha256 {
             return Err(Error::ContentDigestMismatch);
         }
-        writer.write_all(&suffix).map_err(|_| Error::SinkFailed)?;
+        writer.write_all(suffix).map_err(|_| Error::SinkFailed)?;
         Ok(encoded_len)
     }
 }
@@ -1847,10 +1854,10 @@ pub fn normalize_media_type(media_type: &str) -> Result<String> {
             return Err(Error::InvalidMediaType);
         }
         parameters.push((name, value));
-        if let Some((name, value)) = parameters.last_mut() {
-            if name == "charset" {
-                *value = value.to_ascii_lowercase();
-            }
+        if let Some((name, value)) = parameters.last_mut()
+            && name == "charset"
+        {
+            *value = value.to_ascii_lowercase();
         }
     }
     parameters.sort_by(|left, right| left.0.cmp(&right.0));
@@ -4283,7 +4290,7 @@ pub fn base64_encode(bytes: &[u8]) -> String {
 /// Whitespace, URL-safe aliases, malformed padding and nonzero unused
 /// trailing bits are rejected before any bytes are returned.
 pub fn base64_decode(input: &str) -> Result<Vec<u8>> {
-    if input.len() % 4 != 0 {
+    if !input.len().is_multiple_of(4) {
         return Err(Error::InvalidValue);
     }
     let capacity = (input.len() / 4).checked_mul(3).ok_or(Error::Limit)?;
@@ -4616,10 +4623,10 @@ fn validate_schema_stored_key(
     validate_stored_key_value(&key, &key_types, definitions)
 }
 
-fn schema_stored_key_types<'a>(
-    schema: &'a Raw,
+fn schema_stored_key_types(
+    schema: &Raw,
     relation_id: [u8; 16],
-) -> Result<(Vec<&'a Raw>, &'a [Raw], &'a [Raw])> {
+) -> Result<(Vec<&Raw>, &[Raw], &[Raw])> {
     let mut schema_map = BTreeMap::new();
     for (key, value) in map(schema)? {
         schema_map.insert(int_u64(key)?, value);

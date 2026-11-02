@@ -300,7 +300,7 @@ fn several_false_module_assertions_reject_the_write_and_keep_the_store() {
 }
 
 /// ORNA-ASSERT-039: a declaration assertion whose value reads a table through
-/// a helper call carries a TableRead effect, so the checker refuses the
+/// a helper call carries a `TableRead` effect, so the checker refuses the
 /// declaration. No such dependency reaches the store in an admitted program.
 const HELPER_CALL_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
 pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
@@ -330,7 +330,7 @@ fn helper_value_table_read_is_refused_with_its_spec_code() {
     assert!(output.contains("ORNA-A091-007"), "{output}");
 }
 
-/// A table read inside a range bound (`count()`) is a TableRead effect, so
+/// A table read inside a range bound (`count()`) is a `TableRead` effect, so
 /// ORNA-ASSERT-039 refuses the declaration.
 const RANGE_BOUND_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n\n\
 pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\

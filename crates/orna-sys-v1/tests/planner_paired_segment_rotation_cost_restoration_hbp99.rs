@@ -284,7 +284,7 @@ fn join_by_source<'a>(plan: &'a orna_sys_v1::ExplainedPlan, source: &str) -> &'a
         .expect("join is present for its resolved right input")
 }
 
-fn joins_by_pair<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_pair(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)

@@ -1,4 +1,12 @@
+// The binary's `repl` module is included by path, and it loads `table_schema`
+// from `src` itself; the test's own copy and the module's copy never interact.
+#![allow(clippy::duplicate_mod)]
+
+// `repl` is the binary's own module, included here so the watch command can be
+// driven without a terminal; it loads `table_schema` from `src` itself.
 #[path = "../src/repl.rs"]
+#[allow(clippy::duplicate_mod)]
+#[allow(dead_code)]
 mod repl;
 
 use std::collections::VecDeque;
@@ -39,7 +47,7 @@ impl WatchFrameSource for FrameSource {
         self.subscriptions.push(source.to_owned());
         self.active_watch = self.watch_ids.pop_front().unwrap_or(WATCH);
         self.active_frames = self.frames.pop_front().unwrap_or_default();
-        WatchPresentation::new(self.active_watch, Default::default())
+        WatchPresentation::new(self.active_watch, orna_protocol_v1::Limits::default())
             .map_err(|_| "invalid negotiated limits")
     }
 
@@ -88,7 +96,7 @@ fn envelope_for(watch: [u8; 16], code: u8, body: Vec<u8>) -> Vec<u8> {
 
 fn text(value: &str) -> Vec<u8> {
     assert!(value.len() < 24);
-    let mut bytes = vec![0x60 + value.len() as u8];
+    let mut bytes = vec![0x60 + u8::try_from(value.len()).expect("fixture text stays under 24 bytes")];
     bytes.extend(value.as_bytes());
     bytes
 }

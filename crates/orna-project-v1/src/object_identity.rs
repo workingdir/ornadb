@@ -858,10 +858,10 @@ impl ObjectIdentityManifest {
         let parent = path.parent().ok_or(ObjectIdentityError::Io)?;
         fs::create_dir_all(parent).map_err(|_| ObjectIdentityError::Io)?;
         crate::ensure_no_symlink_ancestors(root, &path).map_err(|_| ObjectIdentityError::Io)?;
-        if let Ok(metadata) = fs::symlink_metadata(&path) {
-            if metadata.file_type().is_symlink() || !metadata.is_file() {
-                return Err(ObjectIdentityError::Io);
-            }
+        if let Ok(metadata) = fs::symlink_metadata(&path)
+            && (metadata.file_type().is_symlink() || !metadata.is_file())
+        {
+            return Err(ObjectIdentityError::Io);
         }
         let bytes = self.encode()?;
         let temp = temporary_path(parent, &path);

@@ -11,11 +11,9 @@ use std::{
 use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
 
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
@@ -27,6 +25,7 @@ use editor_mount::{
     start_editor_mount, start_editor_mount_with_source, write_and_sync,
 };
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn editor_saves_use_the_validated_vfs_row_path() {
     if !require_fuse_or_skip() {
@@ -37,13 +36,13 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     let relation_id = fixture.relation_id;
     let row_directory = &fixture.row_directory;
     let data_path = &fixture.data_path;
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
+    assert!(std::fs::read_to_string(data_path).unwrap().contains("Original"));
     let mut private_writer = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&data_path)
+        .open(data_path)
         .unwrap();
-    let mut observer = File::open(&data_path).unwrap();
+    let mut observer = File::open(data_path).unwrap();
     private_writer
         .write_all(b"{ title: \"Private draft\", artist: \"Kieran\", }\n")
         .unwrap();
@@ -56,22 +55,22 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     assert!(observer_view.contains("Original"));
     drop(private_writer);
     drop(observer);
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Original"));
+    assert!(std::fs::read_to_string(data_path).unwrap().contains("Original"));
     write_and_sync(
-        &data_path,
+        data_path,
         "{ title: \"In place\", artist: \"Kieran\", }\n",
     )
     .expect("in-place editor save must validate and sync");
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("In place"));
+    assert!(std::fs::read_to_string(data_path).unwrap().contains("In place"));
 
 
     // 41-vfs.md:67: an unknown file inside a row directory is private scratch, not a column.
     // Its create succeeds, leaves the row document unchanged, and it can be unlinked.
     let arbitrary = row_directory.join("unrelated");
-    let document_before = std::fs::read(&data_path).unwrap();
+    let document_before = std::fs::read(data_path).unwrap();
     File::create(&arbitrary).expect("an unknown row-directory name is private scratch");
     assert_eq!(
-        std::fs::read(&data_path).unwrap(),
+        std::fs::read(data_path).unwrap(),
         document_before,
         "arbitrary scratch must not change the row document",
     );
@@ -89,16 +88,16 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     stale_file.sync_all().unwrap();
     drop(stale_file);
     write_and_sync(
-        &data_path,
+        data_path,
         "{ title: \"New baseline\", artist: \"Kieran\", }\n",
     )
     .expect("later row save advances the baseline");
     assert!(
-        std::fs::rename(&stale_temporary, &data_path).is_err(),
+        std::fs::rename(&stale_temporary, data_path).is_err(),
         "rename must reject a scratch whose captured row baseline is stale",
     );
     assert!(
-        std::fs::read_to_string(&data_path).unwrap().contains("New baseline"),
+        std::fs::read_to_string(data_path).unwrap().contains("New baseline"),
         "stale rename must preserve the newer accepted row",
     );
     let temporary = row_directory.join(".data.orna.editor-tmp");
@@ -111,14 +110,14 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
         .unwrap();
     file.sync_all().expect("editor syncs temporary file");
     drop(file);
-    std::fs::rename(&temporary, &data_path).expect("editor atomically replaces data.orna");
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Renamed"));
+    std::fs::rename(&temporary, data_path).expect("editor atomically replaces data.orna");
+    assert!(std::fs::read_to_string(data_path).unwrap().contains("Renamed"));
 
-    let durable_before_rejection = format3::committed_store_rows(&repository, relation_id);
+    let durable_before_rejection = format3::committed_store_rows(repository, relation_id);
     let mut invalid = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(&data_path)
+        .open(data_path)
         .expect("open row document for invalid edit");
     invalid.set_len(0).unwrap();
     invalid
@@ -130,8 +129,8 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
     invalid.read_to_string(&mut rejected_draft).unwrap();
     assert!(rejected_draft.contains("title: 123"));
     drop(invalid);
-    assert!(std::fs::read_to_string(&data_path).unwrap().contains("Renamed"));
-    let durable_after_rejection = format3::committed_store_rows(&repository, relation_id);
+    assert!(std::fs::read_to_string(data_path).unwrap().contains("Renamed"));
+    let durable_after_rejection = format3::committed_store_rows(repository, relation_id);
     assert_eq!(
         durable_after_rejection, durable_before_rejection,
         "rejected editor draft must leave the durable row unchanged",
@@ -142,7 +141,7 @@ async fn editor_saves_use_the_validated_vfs_row_path() {
 /// holding its runtime owner lock and writer lease, the mount is only a
 /// secondary participant and cannot submit an edit.
 #[tokio::test]
-async fn editor_saves_reject_a_foreign_writer_lease() {
+async fn editor_saves_reject_aforeign_writer_lease() {
     if !require_fuse_or_skip() {
         return;
     }
@@ -171,7 +170,7 @@ async fn editor_saves_reject_a_foreign_writer_lease() {
     // handle may read them; a fresh open is Secondary (ORNA-TURSO-005).
     let (runtime_identity, _) = format3::cli_runtime_identity(&fixture.repository);
     let foreign = fixture
-        ._foreign_writer
+        .foreign_writer
         .as_ref()
         .expect("the fixture keeps the live foreign writer");
     assert!(matches!(
@@ -250,7 +249,7 @@ async fn real_editors_save_through_the_mounted_linux_vfs() {
         return;
     }
     let fixture = start_editor_mount(false).await;
-    assert!(mountinfo_contains(fixture._mounted.mountpoint()));
+    assert!(mountinfo_contains(fixture.mounted.mountpoint()));
 
     let (runtime_identity, initial_digest) = format3::cli_runtime_identity(&fixture.repository);
     let engine_state = RuntimeState::open(&fixture.repository, runtime_identity, initial_digest)
@@ -295,7 +294,7 @@ async fn fsynced_temporary_scratch_survives_mount_restart() {
     let head_before_restart = fixture.repository.head().unwrap().unwrap();
     let repository = fixture.repository.clone();
     let relation_id = fixture.relation_id;
-    assert!(mountinfo_contains(fixture._mounted.mountpoint()));
+    assert!(mountinfo_contains(fixture.mounted.mountpoint()));
     let scratch_path = fixture.row_directory.join(".data.orna.persisted-scratch");
     let expected = b"durable editor scratch, not an accepted row";
     let mut scratch = OpenOptions::new()
@@ -310,9 +309,9 @@ async fn fsynced_temporary_scratch_survives_mount_restart() {
     drop(scratch);
 
     let EditorMount {
-        _mounted: previous_mount,
-        _mount_parent: mount_parent,
-        _repository_directory: repository_directory,
+        mounted: previous_mount,
+        mount_parent,
+        repository_directory,
         ..
     } = fixture;
     drop(previous_mount);
@@ -368,9 +367,9 @@ async fn unlinked_fsynced_temporary_scratch_is_gone_after_mount_restart() {
     std::fs::remove_file(&scratch_path).expect("unlink persisted scratch");
 
     let EditorMount {
-        _mounted: previous_mount,
-        _mount_parent: mount_parent,
-        _repository_directory: repository_directory,
+        mounted: previous_mount,
+        mount_parent,
+        repository_directory,
         ..
     } = fixture;
     drop(previous_mount);
@@ -409,9 +408,9 @@ async fn stale_persisted_temporary_scratch_is_skipped_at_mount_start() {
         .join(SCRATCH_DIRECTORY);
 
     let EditorMount {
-        _mounted: previous_mount,
-        _mount_parent: mount_parent,
-        _repository_directory: source_directory,
+        mounted: previous_mount,
+        mount_parent,
+        repository_directory: source_directory,
         ..
     } = fixture;
     drop(previous_mount);
@@ -568,14 +567,14 @@ async fn editor_mount_rejects_unsupported_links_devices_and_shared_mmap() {
     let mmap_output = Command::new("python3")
         .arg("-c")
         .arg(
-            r#"import mmap, os, sys
+            r"import mmap, os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
 try:
     mmap.mmap(fd, 1, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ | mmap.PROT_WRITE)
 except OSError as error:
     print(error.errno)
 else:
-    print(0)"#,
+    print(0)",
         )
         .arg(&fixture.data_path)
         .output()
@@ -668,7 +667,7 @@ async fn speculative_source_writes_validate_on_sync_and_reject_stale_generation(
         &editor_directory,
         "{ title: \"External commit\", artist: \"Kieran\", }\n",
     );
-    let external = run_row_edit(&fixture._repository_directory, &external_editor);
+    let external = run_row_edit(&fixture.repository_directory, &external_editor);
     assert!(
         external.status.success(),
         "non-VFS orna edit --row failed: {}; initial row={:?}",

@@ -686,6 +686,7 @@ struct MountSignalHandler {
 
 #[cfg(target_os = "linux")]
 impl MountSignalHandler {
+    #[allow(clippy::items_after_statements)]
     fn new() -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -711,6 +712,8 @@ impl MountSignalHandler {
         })
     }
 
+    #[allow(clippy::items_after_statements)]
+#[allow(clippy::too_many_lines)]
     /// Waits for the FUSE session to end. A termination signal, or the loss of
     /// the registered view, stops the mount: unresolved drafts are retained and
     /// reported first (ORNA-VFS-024), then the mount is unmounted.
@@ -740,14 +743,14 @@ impl MountSignalHandler {
                     break None;
                 }
                 ticks = ticks.wrapping_add(1);
-                if ticks % VIEW_CHECK_TICKS == 0 && !registered() {
+                if ticks.is_multiple_of(VIEW_CHECK_TICKS) && !registered() {
                     break Some(VIEW_DETACHED);
                 }
                 tokio::select! {
                     Some(()) = interrupt.recv() => break Some("SIGINT"),
                     Some(()) = terminate.recv() => break Some("SIGTERM"),
                     Some(()) = hangup.recv() => break Some("SIGHUP"),
-                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
+                    () = tokio::time::sleep(std::time::Duration::from_millis(25)) => {}
                 }
             };
 
@@ -874,6 +877,7 @@ pub(super) fn run_mount_cwd(_endpoint: &Endpoint, _mountpoint: &Path) -> Result<
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
     #[cfg(target_os = "linux")]
@@ -886,7 +890,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
         if let Some(mount_identity) = mounted_mount_for_path(&mountpoint)? {
             let filesystem = mount_identity.filesystem.as_str();
             let source = mount_identity.source.as_str();
-            if !filesystem.starts_with("fuse") || !is_orna_mount_source(&source) {
+            if !filesystem.starts_with("fuse") || !is_orna_mount_source(source) {
                 return Err(mount_error(
                     "Unmount was refused",
                     format!("mountpoint belongs to {filesystem} {source}, not an Orna FUSE mount"),
@@ -1056,7 +1060,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
             status.snapshot_hex(),
         )
         .map_err(|_| stdout_error())?;
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_os = "linux"))]
@@ -1075,6 +1079,7 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
     }
 }
 
+#[allow(clippy::too_many_lines)]
 /// Refuses an unmount that would discard unresolved drafts (ORNA-VFS-024),
 /// naming each draft, its state and its cause code on stderr first, so the
 /// remedy applies to known files (W15-03).
@@ -1556,7 +1561,7 @@ fn escape_json(value: &str) -> String {
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             control if control < ' ' => {
-                escaped.push_str(&format!("\\u{:04x}", control as u32));
+                escaped.extend([format!("\\u{:04x}", u32::from(control))]);
             }
             other => escaped.push(other),
         }

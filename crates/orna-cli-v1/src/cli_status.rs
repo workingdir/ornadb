@@ -37,7 +37,7 @@ pub(super) fn encode_status_json(branch: &[u8], porcelain: &[u8]) -> Option<Vec<
     Some(json.into_bytes())
 }
 
-pub(super) fn branch_name<'a>(symbolic_ref_succeeded: bool, stdout: &'a [u8]) -> &'a [u8] {
+pub(super) fn branch_name(symbolic_ref_succeeded: bool, stdout: &[u8]) -> &[u8] {
     if symbolic_ref_succeeded {
         stdout.strip_suffix(b"\n").unwrap_or(stdout)
     } else {

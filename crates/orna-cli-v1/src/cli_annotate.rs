@@ -171,6 +171,7 @@ pub(super) fn run(arguments: &[String]) -> Result<(), Diagnostic> {
     Ok(())
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
     let metadata = std::fs::symlink_metadata(path).map_err(|error| {
         source_error(
@@ -231,6 +232,7 @@ fn open_source(path: &Path) -> Result<CaptureFileStream, Diagnostic> {
         .map_err(|error| source_error(path, error, String::new()))
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn verify_source_before_install(
     path: &Path,
     source: &CaptureFileStream,
@@ -243,6 +245,7 @@ fn verify_source_before_install(
     Ok(output)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn source_error(path: &Path, error: CaptureFileError, detail: String) -> Diagnostic {
     let code_detail = format!("{}: {}", path.display(), error.failure_code());
     let detail = if detail.is_empty() {
@@ -339,7 +342,7 @@ mod tests {
         std::fs::File::open(&path)
             .unwrap()
             .set_times(
-                std::fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_secs(60)),
+                std::fs::FileTimes::new().set_modified(SystemTime::now() + Duration::from_mins(1)),
             )
             .unwrap();
 

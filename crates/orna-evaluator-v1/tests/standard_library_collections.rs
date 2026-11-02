@@ -236,10 +236,8 @@ fn list_backed_stream_replays_values_and_returns_unit_after_each_callback() {
 #[test]
 fn set_edge_cases_hold_for_duplicates_absent_values_and_empty_operands() {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    for import in [include_str!("fixtures/stdlib-use-set-i7bat.orna")] {
-        let imported = session.submit(import);
-        assert!(imported.is_ok(), "{}", imported.unwrap_err().code());
-    }
+    let imported = session.submit(include_str!("fixtures/stdlib-use-set-i7bat.orna"));
+    assert!(imported.is_ok(), "{}", imported.unwrap_err().code());
     let declared = session.submit(include_str!("fixtures/stdlib-set-edge-contract-ogcs1.orna"));
     assert!(declared.is_ok(), "{:#?}", declared.as_ref().err());
     let evaluated = session.submit(include_str!(

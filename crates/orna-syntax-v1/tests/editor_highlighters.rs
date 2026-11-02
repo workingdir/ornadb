@@ -639,9 +639,14 @@ fn tree_sitter_grammar_and_highlights_classify_the_shared_sample() {
     let line_lengths = SAMPLE.lines().map(str::len).collect::<Vec<_>>();
     let width = |((start_row, start_column), (end_row, end_column)): ((usize, usize), (usize, usize))| {
         let mut bytes = 0;
-        for row in start_row..=end_row {
+        for (row, line_length) in line_lengths
+            .iter()
+            .enumerate()
+            .take(end_row + 1)
+            .skip(start_row)
+        {
             let from = if row == start_row { start_column } else { 0 };
-            let to = if row == end_row { end_column } else { line_lengths[row] + 1 };
+            let to = if row == end_row { end_column } else { line_length + 1 };
             bytes += to.saturating_sub(from);
         }
         bytes

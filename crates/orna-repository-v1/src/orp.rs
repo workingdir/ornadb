@@ -404,11 +404,12 @@ mod tests {
 
     /// Every object of one node's OGS-1 envelope: its `data` blob, its `refs`
     /// tree when it names dependencies, and the envelope tree, whose ID comes
+    /// One node's envelope: the tree id that comes first, and every object the
+    /// envelope holds as `(id, kind, bytes)`.
+    type EnvelopeObjects = (NativeOid, Vec<(NativeOid, &'static str, Vec<u8>)>);
+
     /// first. The tree layout is store-format-3 §1.
-    fn envelope_objects(
-        algorithm: GitHashAlgorithm,
-        node: &NodeData,
-    ) -> (NativeOid, Vec<(NativeOid, &'static str, Vec<u8>)>) {
+    fn envelope_objects(algorithm: GitHashAlgorithm, node: &NodeData) -> EnvelopeObjects {
         let envelope = NativeNodeEnvelope::from_node(node).expect("a canonical node");
         let data = object_id(algorithm, "blob", &envelope.data);
         let mut tree = tree_entry("100644", "data", &data);

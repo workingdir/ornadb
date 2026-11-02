@@ -26,10 +26,13 @@ fn fixture(relative: &str) -> std::path::PathBuf {
 }
 
 fn sha256_hex(path: &Path) -> String {
-    Sha256::digest(std::fs::read(path).unwrap())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(std::fs::read(path).unwrap());
+    let mut out = String::with_capacity(64);
+    for byte in &digest {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 #[test]
