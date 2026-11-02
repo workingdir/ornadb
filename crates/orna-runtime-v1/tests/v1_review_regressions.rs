@@ -406,7 +406,7 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
         candidate_generation: checkpoint.generation,
     };
     let freeze = state
-        .freeze_compact([73; 16], &checkpoint, &[identity.clone()])
+        .freeze_compact([73; 16], &checkpoint, std::slice::from_ref(&identity))
         .await
         .expect("freeze compact candidate");
     assert_eq!(freeze.checkpoint, checkpoint);

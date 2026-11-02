@@ -65,7 +65,7 @@ const SESSION_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(1);
 /// Bound on how long DELETE waits for the socket workers it cancelled to
 /// exit before it reports orderly termination. A cancelled worker finishes
 /// its in-flight step, sends a Close frame and exits.
-const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_secs(60);
+const SESSION_TERMINATION_TIMEOUT: StdDuration = StdDuration::from_mins(1);
 /// Longest the accept loop waits for a refused connection's request head.
 const REFUSAL_HEAD_TIMEOUT: StdDuration = StdDuration::from_millis(250);
 /// Default for [`ServeOptions::max_connections`].
@@ -285,7 +285,7 @@ impl ServeState {
     }
 }
 
-/// Socket workers that own attached or attaching WebSockets, keyed by
+/// Socket workers that own attached or attaching `WebSockets`, keyed by
 /// attachment identity, so the transport's retirements reach them.
 #[derive(Default)]
 struct WebSocketWorkers {
@@ -905,9 +905,8 @@ fn peek_is_orna_route(stream: &TcpStream, deadline: Instant) -> bool {
                 return is_orna_request_line(&probe[..read]);
             }
             // Nothing, or only part of the line so far: wait briefly for more.
-            Ok(0) => return false,
+            Ok(0) | Err(_) => return false,
             Ok(_) => std::thread::sleep(StdDuration::from_micros(200)),
-            Err(_) => return false,
         }
     }
 }
@@ -952,15 +951,12 @@ impl ConnectionSlot {
                 (active < limit).then_some(active + 1)
             })
             .ok()?;
-        match stream.try_clone() {
-            Ok(socket) => Some(Self {
-                state: Arc::clone(state),
-                socket,
-            }),
-            Err(_) => {
-                state.connections.fetch_sub(1, Ordering::AcqRel);
-                None
-            }
+        if let Ok(socket) = stream.try_clone() { Some(Self {
+            state: Arc::clone(state),
+            socket,
+        }) } else {
+            state.connections.fetch_sub(1, Ordering::AcqRel);
+            None
         }
     }
 }
@@ -1573,6 +1569,7 @@ struct TreeChild {
     kind: TreeChildKind,
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn tree_children(
     entries: &[orna_repository_v1::CommittedTreeEntry],
     directory: &str,
@@ -1620,6 +1617,7 @@ fn tree_children(
     children
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
     match kind {
         TreeChildKind::Directory => 0,
@@ -1629,6 +1627,7 @@ const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn tree_child_node(commit: &GitCommitRef, directory: &str, child: &TreeChild) -> InspectionNode {
     let path = if directory.is_empty() {
         child.name.clone()
@@ -2009,11 +2008,10 @@ fn run_git_http_backend(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    if let Some(protocol) = request_header(request, "git-protocol") {
-        if protocol == "version=2" {
+    if let Some(protocol) = request_header(request, "git-protocol")
+        && protocol == "version=2" {
             command.env("GIT_PROTOCOL", protocol);
         }
-    }
     // Only reached after the operator enabled push with `serve --allow-push`.
     // Git's ordinary receive-pack checks (including checked-out-branch
     // protection) still apply.
@@ -2049,8 +2047,8 @@ fn run_git_http_backend(
 /// The CGI child inherits only this allow-list: PATH to run git, HOME and
 /// TMPDIR for git's own state, and locale. Server tokens, proxy settings and
 /// ambient GIT_* routing or config variables never reach it. Git locates its
-/// exec path itself (compiled-in or RUNTIME_PREFIX), so GIT_EXEC_PATH is not
-/// forwarded; XDG_CONFIG_HOME is not forwarded, so only ~/.gitconfig applies.
+/// exec path itself (compiled-in or `RUNTIME_PREFIX`), so `GIT_EXEC_PATH` is not
+/// forwarded; `XDG_CONFIG_HOME` is not forwarded, so only ~/.gitconfig applies.
 /// Requires git >= 2.30 (`commit_optional` relies on `rev-parse --end-of-options`).
 fn clear_cgi_environment(command: &mut Command) {
     command.env_clear();
@@ -2061,6 +2059,7 @@ fn clear_cgi_environment(command: &mut Command) {
     }
 }
 
+#[allow(clippy::assigning_clones)]
 fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
     let header_end = output
         .windows(4)
@@ -2337,6 +2336,7 @@ fn read_request_body(
     Ok(body)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Writes `response`, all of it within `budget`.
 fn write_response(
     stream: &mut TcpStream,
@@ -2348,6 +2348,7 @@ fn write_response(
     write_before(stream, &[&head, &response.body], deadline)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Writes `parts` in order, all of them by `deadline`. Every blocked write
 /// is bounded by the time left, so a peer that stops reading, or reads a few
 /// bytes at a time, cannot hold the connection past the deadline.
@@ -2458,6 +2459,7 @@ fn json_string(value: &str) -> String {
     output
 }
 
+#[allow(clippy::items_after_statements)]
 fn format_uuid(bytes: [u8; 16]) -> String {
     let mut output = String::with_capacity(36);
     for (index, byte) in bytes.into_iter().enumerate() {
@@ -2470,6 +2472,7 @@ fn format_uuid(bytes: [u8; 16]) -> String {
     output
 }
 
+#[allow(clippy::items_after_statements)]
 fn now_ms() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -3221,6 +3224,7 @@ mod tests {
         assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
     }
 
+#[allow(clippy::too_many_lines)]
     #[test]
     fn smart_http_clones_and_pushes_the_selected_clones_head() {
         for (index, branch, dirty) in [(0_u8, "http-left", false), (1_u8, "http-right", true)] {
@@ -4748,10 +4752,10 @@ mod tests {
         {
             frame.push(0x80 | length);
         } else if let Ok(length) = u16::try_from(payload.len()) {
-            frame.push(0x80 | 126);
+            frame.push(0x80 | 0x7e);
             frame.extend_from_slice(&length.to_be_bytes());
         } else {
-            frame.push(0x80 | 127);
+            frame.push(0x80 | 0x7f);
             let length = u64::try_from(payload.len()).expect("frame length");
             frame.extend_from_slice(&length.to_be_bytes());
         }
@@ -4802,7 +4806,7 @@ mod tests {
     /// Reads until the server ends the connection, by end of stream or reset.
     fn read_until_closed(stream: &mut TcpStream) -> Vec<u8> {
         let mut received = Vec::new();
-        let mut chunk = [0; 64 * 1024];
+        let mut chunk = vec![0; 64 * 1024];
         loop {
             match stream.read(&mut chunk) {
                 Ok(0) => return received,

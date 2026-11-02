@@ -81,10 +81,12 @@ fn import_expression(fixture: &str, root: &Path) -> String {
 
 /// The 16-byte relation id as the 32-digit hex the CLI takes.
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    relation_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in relation_id {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// The committed row whose canonical key is `key`.
@@ -192,6 +194,7 @@ fn assert_self_contained(copy: &Path) {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
     let (directory, repository, relation_id) = empty_format3_repository();

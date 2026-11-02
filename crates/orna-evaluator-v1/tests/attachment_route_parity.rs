@@ -858,7 +858,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         .unwrap(),
     ];
     let first_stage = resolver
-        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .extend_nested_terminal_pair_chain(&fresh_route, std::slice::from_ref(&first_pair))
         .unwrap_or_else(|error| panic!("first nested pair failed: {error:?}"));
     assert_eq!(first_stage.retained_wave(0).unwrap().len(), 2);
     let saved_handoff = first_stage.handoff_checkpoint(0, 0).unwrap();
@@ -896,7 +896,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
 
     let chained = resolver
-        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .extend_nested_terminal_pair_chain(&first_stage, std::slice::from_ref(&second_pair))
         .unwrap_or_else(|error| panic!("continued nested pair failed: {error:?}"));
 
     let mut evaluator = AdmittedReplSession::from_attached_database_session(
@@ -1076,7 +1076,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
 
     let independent_first_stage = resolver
-        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .extend_nested_terminal_pair_chain(&fresh_route, std::slice::from_ref(&first_pair))
         .unwrap_or_else(|error| panic!("independent nested pair failed: {error:?}"));
     let same_pin_foreign_label = independent_first_stage.retained_depth_label(0, 0).unwrap();
     let attached_pin_route = |session: &AttachedDatabaseSession| {
@@ -1248,7 +1248,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
 
     let later_cascade = resolver
-        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .extend_nested_terminal_pair_chain(&first_stage, std::slice::from_ref(&second_pair))
         .unwrap_or_else(|error| panic!("later nested pair cascade failed: {error:?}"));
     let checkpoint_storm = resolver
         .extend_nested_terminal_pair_storm_from_checkpoint(
@@ -1860,10 +1860,10 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
         PinnedDatabase::resolve(aliases[4], package_repository, &leaf_second, loader).unwrap(),
     ];
     let first_stage = resolver
-        .extend_nested_terminal_pair_chain(&fresh_route, &[first_pair.clone()])
+        .extend_nested_terminal_pair_chain(&fresh_route, std::slice::from_ref(&first_pair))
         .unwrap();
     let nested_rebinds = resolver
-        .extend_nested_terminal_pair_chain(&first_stage, &[second_pair.clone()])
+        .extend_nested_terminal_pair_chain(&first_stage, std::slice::from_ref(&second_pair))
         .unwrap();
     let first_label = first_stage.retained_depth_label(0, 0).unwrap();
     let second_label = nested_rebinds.retained_depth_label(2, 1).unwrap();
@@ -2997,7 +2997,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         .unwrap(),
     ];
     let first_stage = resolver
-        .extend_nested_terminal_pair_chain(&initial_route, &[first_pair.clone()])
+        .extend_nested_terminal_pair_chain(&initial_route, std::slice::from_ref(&first_pair))
         .unwrap();
     let outer_label = first_stage.retained_depth_label(0, 0).unwrap();
     let nested_label = first_stage.retained_depth_label(0, 1).unwrap();

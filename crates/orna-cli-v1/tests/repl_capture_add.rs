@@ -4,18 +4,18 @@ use std::{
 };
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
-use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
+use orna_runtime_v1::RuntimeState;
 use orna_semantic_v1::{Catalogue, ModuleInput};
 use orna_value_v1::{Blob, ContextValue, Raw, ValueFormat};
 
-const MUSIC_SOURCE: &str = r#"pub table media(id: Str) {
+const MUSIC_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
     content: Blob,
 }
 
 pub fn add(id: Str, title: Str, content: Blob) =
     media.insert({ id: id, title: title, content: content });
-"#;
+";
 
 fn run_repl(directory: &std::path::Path, input: &str) -> Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
@@ -129,9 +129,20 @@ async fn committed_media_row(
     relation_id: [u8; 16],
     key: &str,
 ) -> Option<Vec<u8>> {
+    /// Lowercase hex of a relation id, as the committed table key spells it.
+    fn hex_encode(bytes: &[u8; 16]) -> String {
+        use std::fmt::Write as _;
+        let mut out = String::with_capacity(32);
+        for byte in bytes {
+            write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        out
+    }
+
     let logical_key = key.as_bytes();
+    let table_oid = hex_encode(&relation_id);
     state
-        .committed_table_rows(&format!("oid:{}", relation_id.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        .committed_table_rows(&format!("oid:{table_oid}"))
         .await
         .expect("read CWD media rows")
         .into_iter()
@@ -139,6 +150,7 @@ async fn committed_media_row(
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_commit() {
     let (directory, repository, relation_id) = format3_repository(MUSIC_SOURCE);
     let root = directory.path();
@@ -199,22 +211,19 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let mut blob_field_count = 0;
     let mut blob_field = None;
     for field in fields {
-        match field {
-            Raw::Text(title) => {
-                title_field_count += 1;
-                assert_eq!(
-                    title.as_str(),
-                    "Live in London",
-                    "stored Music title matches the inserted row"
-                );
-            }
-            _ => {
-                let value = ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
-                    .expect("construct stored Music row content field");
-                value.blob().expect("stored Music content field is a Blob");
-                blob_field_count += 1;
-                blob_field = Some(field.clone());
-            }
+        if let Raw::Text(title) = field {
+            title_field_count += 1;
+            assert_eq!(
+                title.as_str(),
+                "Live in London",
+                "stored Music title matches the inserted row"
+            );
+        } else {
+            let value = ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
+                .expect("construct stored Music row content field");
+            value.blob().expect("stored Music content field is a Blob");
+            blob_field_count += 1;
+            blob_field = Some(field.clone());
         }
     }
     assert_eq!(

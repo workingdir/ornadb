@@ -1833,6 +1833,8 @@ struct AdmittedRelations {
     removed: Vec<RemovedRelation>,
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 /// Merges `relations` into the validated `base` relation entries of the
 /// staged store. `committed` maps each relation `HEAD` commits to its schema
 /// node. A committed relation keeps its rows and evolves when its descriptor

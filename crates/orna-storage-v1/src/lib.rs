@@ -890,7 +890,6 @@ fn committed_projection_schema(
 /// key must already be canonical. Stored-field arrays pass through byte-exact,
 /// while a scalar is wrapped byte-exactly only for a one-field committed
 /// schema. The descriptor comes from the row map at the pinned expected head.
-
 fn project_runtime_key(
     schema: &CommittedProjectionSchema,
     relation_id: [u8; 16],
@@ -948,14 +947,14 @@ fn project_runtime_mutation(
             {
                 bytes.to_vec()
              } else if schema.stored_field_count == 1 {
-                 let fields = ContextValue::new_in_context(
+                 
+                 ContextValue::new_in_context(
                      value_context,
                      ValueFormat::Rov3,
                      Raw::Array(vec![decoded.raw().clone()]),
                  )
                  .and_then(|value| value.encode())
-                 .map_err(|_| Error::RepositoryUnavailable)?;
-                 fields
+                 .map_err(|_| Error::RepositoryUnavailable)?
              } else {
                 bytes.to_vec()
              };
@@ -1012,7 +1011,7 @@ fn build_frozen_publication_store_root(
             .table_object_id()
             .ok_or(Error::RepositoryUnavailable)?
             .bytes();
-        if !relation_bases.contains_key(&relation_id) {
+        if let std::collections::btree_map::Entry::Vacant(e) = relation_bases.entry(relation_id) {
             let rows = format
                 .load_row_map(relation_id)
                 .map_err(repository_format_error)?;
@@ -1029,7 +1028,7 @@ fn build_frozen_publication_store_root(
             let value_context = format
                 .open_value_context(relation_id)
                 .map_err(|_| Error::RepositoryUnavailable)?;
-            relation_bases.insert(relation_id, (rows, graph, schema, value_context));
+            e.insert((rows, graph, schema, value_context));
         }
         let (_, _, schema, value_context) = relation_bases
             .get(&relation_id)

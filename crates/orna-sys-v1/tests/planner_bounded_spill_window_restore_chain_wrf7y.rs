@@ -98,6 +98,8 @@ fn restore_chain(
     }
 }
 
+/// Each planner fixture helper assembles one plan shape from its parts.
+#[allow(clippy::too_many_arguments)]
 fn plan(
     first_memory_budget: u64,
     restore_checkpoint_identity: &str,

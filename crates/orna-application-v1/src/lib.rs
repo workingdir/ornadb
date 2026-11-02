@@ -1178,6 +1178,17 @@ impl AsyncApplicationEffectDispatcher for LiveEffectAdapter<'_> {
     }
 }
 
+/// The value, mutations, snapshot generation, row schemas, retained blob pins
+/// and effect report that one staged activation transfers to its caller.
+type ActivationParts = (
+    CanonicalValue,
+    Vec<TableMutation>,
+    Option<[u8; 32]>,
+    Vec<SourceRowSchemaProvenance>,
+    Vec<RetainedSourceBlobPin>,
+    ActivationEffectReport,
+);
+
 impl StagedActivation {
     /// The effect report this activation declared when it was evaluated.
     #[must_use]
@@ -1208,16 +1219,7 @@ impl StagedActivation {
 
     /// Consumes the activation so callers can transfer pins without cloning.
     #[must_use]
-    pub fn into_parts(
-        self,
-    ) -> (
-        CanonicalValue,
-        Vec<TableMutation>,
-        Option<[u8; 32]>,
-        Vec<SourceRowSchemaProvenance>,
-        Vec<RetainedSourceBlobPin>,
-        ActivationEffectReport,
-    ) {
+    pub fn into_parts(self) -> ActivationParts {
         (
             self.value,
             self.mutations,
@@ -1444,6 +1446,9 @@ impl SourceMutationEffectHandler {
             .collect()
     }
 
+    /// Only the name-only admission test builds a handler directly; the live
+    /// path goes through `with_publication_rows_and_table_object_ids`.
+    #[cfg(test)]
     fn with_publication_rows(
         tables: BTreeMap<String, TableSchema>,
         publication_rows: RuntimePublicationMetadataRows,
@@ -2271,13 +2276,10 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
         arguments: &[CanonicalValue],
         budget: &mut StepBudget,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        self.handle(callee, arguments).map(|result| {
-            // The existing synchronous table handler does not debit
-            // additional work; runtime dispatch remains bounded by its
-            // own operation budget.
-            let _ = budget;
-            result
-        })
+        // The existing synchronous table handler does not debit additional
+        // work; runtime dispatch remains bounded by its own operation budget.
+        let _ = budget;
+        self.handle(callee, arguments)
     }
 
     fn scan_relation_page(
@@ -2784,7 +2786,7 @@ fn automatic_id_counters(tables: &BTreeMap<String, TableSchema>) -> BTreeMap<Str
                 .admission
                 .as_ref()
                 .is_some_and(|admission| admission.automatic_key)
-                .then(|| (name.clone(), BigInt::from(1_u8)))
+                .then_some((name.clone(), BigInt::from(1_u8)))
         })
         .collect()
 }
@@ -2982,6 +2984,13 @@ impl From<ApplicationError> for LiveError {
 }
 
 /// Mutable evaluator and admission state isolated to one remote REPL session.
+/// Every admitted watch this host is tracking, keyed by session and watch id.
+type Watches = Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>;
+
+/// The state of every admitted REPL session this host is tracking, keyed by
+/// session identity.
+type ReplSessions = Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>;
+
 #[derive(Clone, Debug)]
 struct ApplicationReplSession {
     repl: AdmittedReplSession,
@@ -3003,9 +3012,9 @@ pub struct ApplicationLiveAdapter {
     authority: ApplicationAuthority,
     project: Option<LoadedProject>,
     eval_module: Option<EvalModule>,
-    sessions: Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>,
+    sessions: ReplSessions,
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
-    watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
+    watches: Watches,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
 }

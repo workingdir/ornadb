@@ -202,8 +202,7 @@ fn cost_fold_identity_follows_pair_results_across_sparse_reordered_chains() {
         &reversed_descriptors,
     );
 
-    let expected_results = vec![
-        (
+    let expected_results = [(
             "pair:small",
             "table:Small",
             Some(50),
@@ -224,8 +223,7 @@ fn cost_fold_identity_follows_pair_results_across_sparse_reordered_chains() {
             Some(3_975_000),
             Some(400),
         ),
-        ("pair:unknown", "table:Unknown", None, None, None),
-    ];
+        ("pair:unknown", "table:Unknown", None, None, None)];
     for observed in [folds(&first), folds(&second)] {
         assert_eq!(observed.len(), expected_results.len());
         for (fold, (pair_id, source, rows, bytes, work)) in

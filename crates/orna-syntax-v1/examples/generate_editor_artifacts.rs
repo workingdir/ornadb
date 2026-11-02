@@ -61,7 +61,7 @@ fn main() -> ExitCode {
         .filter(|artifact| artifact.path.starts_with("editors/"))
         .map(|artifact| artifact.path.to_owned())
         .collect::<BTreeSet<_>>();
-    match editor_files(&root.join("editors"), &root) {
+    match editor_files(&root.join("editors"), root) {
         Ok(actual) if actual == expected => {
             println!(
                 "verified complete editor artifact set ({} files)",

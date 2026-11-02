@@ -4,6 +4,12 @@
 //! module only accepts already typed, snapshot-pinned inputs and turns them
 //! into deterministic, bounded `sys.Plan` and `sys.Dependency` projections.
 
+// Every `explain_*` entry point takes its own combination of chain inputs: the
+// pin pairs, windows, checkpoints, spills and rotation chains that one explain
+// shape folds. The parameter count is the shape's API, and its callers pass the
+// inputs from the plan they were handed, so the list stays positional.
+#![allow(clippy::too_many_arguments)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
@@ -2583,9 +2589,9 @@ fn explain_query_with_predicate_pressure_and_branch_limits(
     )
 }
 
-fn disjunct_storm_cascade_shape_counts<'a>(
-    storms: &'a [DisjunctStormCascadeDescription],
-) -> Result<(usize, usize, Vec<&'a ExpressionRef>), ExplainError> {
+fn disjunct_storm_cascade_shape_counts(
+    storms: &[DisjunctStormCascadeDescription],
+) -> Result<(usize, usize, Vec<&ExpressionRef>), ExplainError> {
     let mut pending = storms.iter().map(|storm| (storm, 1usize)).collect::<Vec<_>>();
     let mut operators = 0usize;
     let mut expressions = 0usize;
@@ -4955,7 +4961,7 @@ fn explain_query_core_with_wal_rotation_chains(
                     paired_aggregate_spill_fold.is_some(),
                     paired_aggregate_spill_fold
                         .as_ref()
-                        .and_then(|_| paired_window_cost_restoration_pair_identity.as_deref()),
+                        .and(paired_window_cost_restoration_pair_identity.as_deref()),
                 );
             }
         }
@@ -5938,7 +5944,7 @@ fn explain_query_core_with_wal_rotation_chains(
                 paired_aggregate_spill_fold.is_some(),
                 paired_aggregate_spill_fold
                     .as_ref()
-                    .and_then(|_| paired_window_cost_restoration_pair_identity.as_deref()),
+                    .and(paired_window_cost_restoration_pair_identity.as_deref()),
             );
         }
         if let (Some(fold), Some(transition)) = (
@@ -6673,7 +6679,7 @@ fn explain_query_core_with_wal_rotation_chains(
             work,
         );
         current_cardinality = cardinality;
-        if post_expansion_conjunct.is_some() {
+        if let Some(conjunct) = post_expansion_conjunct {
             for limit in limits_between_disjunct_and_conjunct {
                 let cardinality = limit_cardinality(current_cardinality, *limit);
                 let work = current_cardinality.rows;
@@ -6716,11 +6722,7 @@ fn explain_query_core_with_wal_rotation_chains(
                 &mut operators,
                 current,
                 PlanNodeKind::Filter,
-                Some(
-                    post_expansion_conjunct
-                        .expect("nested disjunct limits require a conjunct predicate")
-                        .clone(),
-                ),
+                Some(conjunct.clone()),
                 details,
                 cardinality,
                 work,
@@ -9398,7 +9400,7 @@ struct QueryPairedSegmentRotationCostRestorationFold {
     rotation_count: u64,
     nested_checkpoint_fold_count: u64,
     branch_scopes: BTreeSet<(String, u64)>,
-    source_streams: BTreeSet<(String, String, u64, u64)>,
+    source_streams: BTreeSet<RestoreKey>,
     overflowed: bool,
 }
 
@@ -9412,7 +9414,7 @@ struct QueryPairedStreamCompactionCostRestorationFold {
     nested_checkpoint_fold_count: u64,
     nested_rotation_fold_count: u64,
     branch_scopes: BTreeSet<(String, u64)>,
-    source_streams: BTreeSet<(String, String, u64, u64)>,
+    source_streams: BTreeSet<RestoreKey>,
     overflowed: bool,
 }
 
@@ -9430,12 +9432,36 @@ struct QueryPairedCheckpointSpillCostRestorationFold {
     both_sides_absent_occurrence_count: u64,
     nested_stream_fold_count: u64,
     branch_scopes: BTreeSet<(String, u64)>,
-    restores: BTreeSet<(String, String, u64, u64)>,
+    restores: BTreeSet<RestoreKey>,
     spills: BTreeSet<(String, String, u64, u64, u64, String)>,
-    source_streams: BTreeSet<(String, String, u64, u64, u64, String, u64, String)>,
-    compactions: BTreeSet<(String, String, u64, u64, u64, String, u64, String, u64)>,
+    source_streams: BTreeSet<SourceStreamKey>,
+    compactions: BTreeSet<CompactionKey>,
     overflowed: bool,
 }
+
+/// A merge identity: name, sides and the counts that identify it.
+type MergeKey = (String, String, u64, u64, u64, u64, u64, u64);
+
+/// A WAL compaction identity: name, sides and the counts that identify it.
+type WalCompactionKey = (String, String, u64, u64, u64, u64, u64);
+
+/// A stream identity: name, sides and the counts that identify it.
+type StreamKey = (String, String, u64, u64, u64, u64);
+
+/// A handoff identity: name, sides and the counts that identify it.
+type HandoffKey = (String, String, u64, u64, u64);
+
+/// A restore identity: name, sides and the two counts that identify it.
+type RestoreKey = (String, String, u64, u64);
+
+/// A source stream identity: name, side and the counts that identify it.
+type SourceStreamKey = (String, String, u64, u64, u64, String, u64, String);
+
+/// A compaction identity: name, sides and the counts that identify it.
+type CompactionKey = (String, String, u64, u64, u64, String, u64, String, u64);
+
+/// A stream rotation identity: name, sides and the per-stage counts.
+type StreamRotationKey = (String, String, u64, String, u64, String, u64, String, u64, u64);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QueryPairedStreamRotationCostRestorationFold {
@@ -9450,7 +9476,7 @@ struct QueryPairedStreamRotationCostRestorationFold {
     nested_spill_fold_count: u64,
     branch_scopes: BTreeSet<(String, u64)>,
     source_streams: BTreeSet<(String, String, u64, u64, String)>,
-    rotations: BTreeSet<(String, String, u64, String, u64, String, u64, String, u64, u64)>,
+    rotations: BTreeSet<StreamRotationKey>,
     overflowed: bool,
 }
 
@@ -9471,11 +9497,11 @@ struct QueryPairedWalRotationCostRestorationFold {
     segment_identity_count: u64,
     nested_stream_rotation_fold_count: u64,
     branch_scopes: BTreeSet<(String, u64)>,
-    restores: BTreeSet<(String, String, u64, u64)>,
-    handoffs: BTreeSet<(String, String, u64, u64, u64)>,
-    streams: BTreeSet<(String, String, u64, u64, u64, u64)>,
-    compactions: BTreeSet<(String, String, u64, u64, u64, u64, u64)>,
-    merges: BTreeSet<(String, String, u64, u64, u64, u64, u64, u64)>,
+    restores: BTreeSet<RestoreKey>,
+    handoffs: BTreeSet<HandoffKey>,
+    streams: BTreeSet<StreamKey>,
+    compactions: BTreeSet<WalCompactionKey>,
+    merges: BTreeSet<MergeKey>,
     overflowed: bool,
 }
 
@@ -16424,8 +16450,8 @@ fn query_paired_window_cost_restoration_fold(
     ) = (
         previous.and_then(|fold| fold.cost_window_restore_envelope_chain_fold_identity.as_deref()),
         cost_window_restore_envelope_chain_fold_identity.as_deref(),
-    ) {
-        if previous_identity != current_identity {
+    )
+        && previous_identity != current_identity {
             let mut transition_hash = Sha256::new();
             transition_hash.update(
                 b"orna.sys.query-paired-window-cost-restoration-distinct-composite-transition.v1\0",
@@ -16437,7 +16463,6 @@ fn query_paired_window_cost_restoration_fold(
                 hex(&transition_hash.finalize())
             ));
         }
-    }
     let cost_window_restore_envelope_chain_distinct_transition_count =
         u64::try_from(cost_window_restore_envelope_chain_distinct_transitions.len())
             .unwrap_or_else(|_| {
@@ -17583,9 +17608,9 @@ fn disjunction_conjunct_cardinality_and_work(
     }
 
     let remaining_stages = conjunct_count - explicit_stages;
-    if remaining_stages > 0 {
-        if let Some(rows_per_stage) = cardinality.rows {
-            if let Some(total) = work {
+    if remaining_stages > 0
+        && let Some(rows_per_stage) = cardinality.rows
+            && let Some(total) = work {
                 match rows_per_stage
                     .checked_mul(remaining_stages)
                     .and_then(|tail_work| total.checked_add(tail_work))
@@ -17597,8 +17622,6 @@ fn disjunction_conjunct_cardinality_and_work(
                     }
                 }
             }
-        }
-    }
 
     if overflowed {
         work = None;
@@ -17625,13 +17648,12 @@ fn conjunctive_disjunction_cardinality_and_work(
     // at most 64 stages. Remaining one-row conjuncts are added in one checked
     // operation rather than iterating over an untrusted count.
     let remaining_stages = conjunct_count_per_disjunct - explicit_stages;
-    if remaining_stages > 0 {
-        if let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
+    if remaining_stages > 0
+        && let (Some(total), Some(rows)) = (branch_work, branch_cardinality.rows) {
             branch_work = rows
                 .checked_mul(remaining_stages)
                 .and_then(|tail_work| total.checked_add(tail_work));
         }
-    }
 
     let work = branch_work.and_then(|per_disjunct| per_disjunct.checked_mul(disjunct_count));
     let rows = input.rows.map(|rows| {
@@ -18115,7 +18137,7 @@ fn scale_count(value: u64, numerator: u64, denominator: u64) -> Option<u64> {
 }
 
 fn ceil_div(value: u64, divisor: u64) -> u64 {
-    value / divisor + u64::from(value % divisor != 0)
+    value / divisor + u64::from(!value.is_multiple_of(divisor))
 }
 
 fn sort_work(rows: u64) -> Option<u64> {

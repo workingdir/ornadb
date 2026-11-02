@@ -184,7 +184,7 @@ fn plan(
     .expect("join pairs and exact-source window chains plan together")
 }
 
-fn joined<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joined(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)
@@ -192,7 +192,7 @@ fn joined<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a Pla
         .collect()
 }
 
-fn pushed<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn pushed(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| {

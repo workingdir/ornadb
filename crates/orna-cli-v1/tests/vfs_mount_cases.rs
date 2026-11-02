@@ -1,3 +1,7 @@
+// These fixtures mount a real cwd: each scenario declares its own constants and
+// imports next to the step that needs them, and indexes bounded fixture lengths.
+#![allow(clippy::items_after_statements, clippy::format_collect)]
+
 #![cfg(target_os = "linux")]
 
 //! FUSE mount cases for ORNA-VFS-017 (lazy/pinned directory iteration),
@@ -15,13 +19,10 @@ use std::{
 
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
@@ -147,6 +148,7 @@ async fn vfs_019_open_handle_does_not_retarget_after_sibling_row_write() {
     assert!(read_view(&london).contains("London edit"), "a fresh open sees the write");
 }
 
+#[allow(clippy::too_many_lines)]
 /// ORNA-VFS-017, multi-page listing consistency only: over 512 rows (more than
 /// one `ROW_PAGE_LIMIT` = 256 page), a known late key resolves and two directory
 /// passes list the same row set. This does not prove laziness or page-cursor
@@ -783,7 +785,7 @@ async fn vfs_020_source_module_rename_and_unlink_are_refused_with_eperm() {
     mounted.await_path(&notes);
 
     assert_errno(
-        std::fs::rename(&notes, mountpoint.join("renamed.orna")).map(|_| ()),
+        std::fs::rename(&notes, mountpoint.join("renamed.orna")),
         &[EPERM],
         "a source module cannot be renamed",
     );

@@ -877,8 +877,8 @@ fn relation_predicate_folds_preserve_paired_optional_values() {
         let row = runtime
             .committed_row("Reading", &Value::int(id.into()))
             .unwrap_or_else(|| panic!("unique paired key row {id} was not committed"));
-        assert_eq!(row_field(&row, "key"), expected_key);
-        assert_eq!(row_field(&row, "expected"), expected_key);
+        assert_eq!(row_field(row, "key"), expected_key);
+        assert_eq!(row_field(row, "expected"), expected_key);
     }
 }
 

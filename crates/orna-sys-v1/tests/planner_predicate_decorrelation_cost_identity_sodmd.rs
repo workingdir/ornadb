@@ -181,7 +181,7 @@ fn explain_cascade(
         .expect("each exact resolver pair selects its own partial-index input")
 }
 
-fn joins_by_label<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_label(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     let nodes = plan
         .nodes()
         .iter()

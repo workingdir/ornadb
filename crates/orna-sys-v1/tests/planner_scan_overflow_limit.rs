@@ -20,7 +20,7 @@ fn first_remainder_byte_crosses_the_scan_work_max_through_limit() {
         [(4_096, Some(u64::MAX), false), (4_097, None, true)]
     {
         let explained = explain_query(&QueryPlanDescription {
-            snapshot: SnapshotRef::descriptive(&format!("snapshot:first-byte-limit-{bytes}")),
+            snapshot: SnapshotRef::descriptive(format!("snapshot:first-byte-limit-{bytes}")),
             source: obj("table:ByteWorkThreeScanSource"),
             source_statistics: Some(QuerySourceStatistics {
                 estimated_rows: Some(rows),
@@ -72,7 +72,7 @@ fn local_scan_overflow_remains_a_plan_overflow_under_zero_bounded_and_max_limits
     let rows = u64::MAX - 1;
     for (limit, expected_rows) in [(0, 0), (10, 10), (u64::MAX, rows)] {
         let explained = explain_query(&QueryPlanDescription {
-            snapshot: SnapshotRef::descriptive(&format!("snapshot:scan-overflow-limit-{limit}")),
+            snapshot: SnapshotRef::descriptive(format!("snapshot:scan-overflow-limit-{limit}")),
             source: obj("table:ByteWorkThreeScanSource"),
             source_statistics: Some(QuerySourceStatistics {
                 estimated_rows: Some(rows),

@@ -390,7 +390,7 @@ fn an_update_to_a_large_table_rewrites_only_the_page_holding_the_row() {
 /// The same update with a body one byte longer. Pages close on their byte
 /// size as well as their entry count (`NODE_DATA_LIMIT`, `closes_before`), so
 /// a grown row can move a page boundary into the next page; the complete
-/// build moves it the same way (native_graph's append-maintenance test pins
+/// build moves it the same way (`native_graph`'s append-maintenance test pins
 /// that equality). The bound is the page holding the row and at most the
 /// neighbour it pushes.
 #[test]

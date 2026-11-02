@@ -47,12 +47,10 @@ fn cited(args: Vec<std::ffi::OsString>) -> ExitCode {
         Ok(report) => report,
         Err(error) => { eprintln!("citation count failed: {error}"); return ExitCode::FAILURE; }
     };
-    if let Some(path) = cited_output {
-        if let Err(error) = write_json(&path, &report.cited_ids) { eprintln!("cannot write cited IDs to {}: {error}", path.display()); return ExitCode::FAILURE; }
-    }
-    if let Some(path) = locations_output {
-        if let Err(error) = write_json(&path, &report.locations) { eprintln!("cannot write citation locations to {}: {error}", path.display()); return ExitCode::FAILURE; }
-    }
+    if let Some(path) = cited_output
+        && let Err(error) = write_json(&path, &report.cited_ids) { eprintln!("cannot write cited IDs to {}: {error}", path.display()); return ExitCode::FAILURE; }
+    if let Some(path) = locations_output
+        && let Err(error) = write_json(&path, &report.locations) { eprintln!("cannot write citation locations to {}: {error}", path.display()); return ExitCode::FAILURE; }
     for (chapter, counts) in &report.chapters { println!("{chapter}: cited={}, uncited={}", counts.cited, counts.uncited); }
     println!("total: cited={}, uncited={}", report.cited_ids.len(), report.uncited_ids.len());
     println!("cited IDs (deterministic JSON):");

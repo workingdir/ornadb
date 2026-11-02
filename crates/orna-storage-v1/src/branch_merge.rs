@@ -6,6 +6,14 @@
 //! three versions differ. No plan is returned on a conflict or budget stop,
 //! so callers cannot partially apply this operation to the CWD.
 
+// Every fallible function here returns `BranchMergeError`, whose conflict and
+// budget variants carry the full `BranchMergeReport`: the tables, ranges and
+// checkpoints a rejected merge touched. That report is what lets a caller
+// explain the rejection, and 234 test assertions match those variants
+// structurally, so boxing them would reshape a public error type to save an
+// allocation on a path that ends in an error.
+#![allow(clippy::result_large_err)]
+
 use orna_evolution_v1::{
     CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
     RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
@@ -47,11 +55,10 @@ impl KeyRange {
             let value = CanonicalValue::decode(bound).ok()?;
             compare_primary_keys(&value, &value).ok()?;
         }
-        if let (Some(start), Some(end)) = (&start, &end) {
-            if compare_encoded_primary_keys(start, end)? != Ordering::Less {
+        if let (Some(start), Some(end)) = (&start, &end)
+            && compare_encoded_primary_keys(start, end)? != Ordering::Less {
                 return None;
             }
-        }
         Some(Self { start, end })
     }
 
@@ -13052,7 +13059,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_identity_across_h
     for (restore_fold_ordinal, restore_fold) in restore_folds.iter().enumerate() {
         let fold_streams = restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_compaction_and_handoff_identity(
             known_checkpoint_ids,
-            &[restore_fold.handoffs.clone()],
+            std::slice::from_ref(&restore_fold.handoffs),
         )
         .map_err(|source| {
             BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldError::RestoreFold {
@@ -13103,7 +13110,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_rewind_identity_across_compa
     for (restore_fold_ordinal, restore_fold) in restore_folds.iter().enumerate() {
         let fold_streams = restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_compaction_and_handoff_identity(
             known_checkpoint_ids,
-            &[restore_fold.handoffs.clone()],
+            std::slice::from_ref(&restore_fold.handoffs),
         )
         .map_err(|source| {
             BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldError::RestoreFold {
@@ -16926,7 +16933,7 @@ impl BranchMergeTombstoneHistory {
                         waves
                             .iter()
                             .any(|wave| wave.fragments.is_some())
-                            .then(|| BranchMergeColumnRestoreLadderTimelineSnapshot {
+                            .then_some(BranchMergeColumnRestoreLadderTimelineSnapshot {
                                 table: timeline.table,
                                 column: timeline.column,
                                 waves,
@@ -19615,10 +19622,7 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
         let b = base.tables.get(&table);
         let l = left.tables.get(&table);
         let r = right.tables.get(&table);
-        match merge_table(table, b, l, r, rows, budget, &mut conflicts, &mut report)? {
-            Some(table_plan) => { merged_tables.insert(table, table_plan); }
-            None => {}
-        }
+        if let Some(table_plan) = merge_table(table, b, l, r, rows, budget, &mut conflicts, &mut report)? { merged_tables.insert(table, table_plan); }
     }
 
     // If the bounded row phase stops early, do not mix checkpoint impacts
@@ -19682,6 +19686,9 @@ fn merge_checkpoint_phase(
     Ok(checkpoints)
 }
 
+/// The table, its three side manifests and the row source are one merge
+/// request; the two callers build it from a single diff entry.
+#[allow(clippy::too_many_arguments)]
 fn merge_table<R: BranchRowSource>(
     table: ObjectId,
     base: Option<&TableManifest>,
@@ -19858,6 +19865,9 @@ struct MergedRangeRows {
     tombstones: Vec<CanonicalValue>,
 }
 
+/// The three side row maps and the tombstones are one range's three-way
+/// inputs, passed together from the range walk.
+#[allow(clippy::too_many_arguments)]
 fn merge_range_rows(
     table: ObjectId,
     range: KeyRange,

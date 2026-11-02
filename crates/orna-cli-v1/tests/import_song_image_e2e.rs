@@ -37,6 +37,7 @@ fn blob_count(root: &Path) -> usize {
         .count()
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn one_import_commits_song_and_image_and_a_reimport_adds_no_object() {
     let (directory, repository, relation_id) = empty_format3_repository();

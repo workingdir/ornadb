@@ -255,7 +255,7 @@ fn boolean(node: &PlanNode, key: &str) -> bool {
     }
 }
 
-fn joins_by_pair<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_pair(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)
@@ -263,9 +263,9 @@ fn joins_by_pair<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, 
         .collect()
 }
 
-fn aggregates_by_identity<'a>(
-    plan: &'a orna_sys_v1::ExplainedPlan,
-) -> BTreeMap<&'a str, &'a PlanNode> {
+fn aggregates_by_identity(
+    plan: &orna_sys_v1::ExplainedPlan,
+) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| {

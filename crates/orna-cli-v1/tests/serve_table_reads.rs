@@ -223,12 +223,12 @@ fn serve_that_writes_a_table_is_refused_without_committing() {
     let root = committed_project(&directory, WRITE_SOURCE);
     insert_note(&root, "one", "first");
     publish(&root);
-    let (_server, address) = start_server(&root);
+    let (server, address) = start_server(&root);
     let (status, body) = http_get(&address, "/").expect("GET /");
     assert_eq!(status, 500, "body: {body}");
     assert!(body.contains("serve.write_refused"), "body: {body}");
     // The serving process owns the runtime; the count runs once it has exited.
-    drop(_server);
+    drop(server);
     let counted = orna_repl(&root, "main.Note | count()");
     assert_success(&counted, "REPL count");
     assert!(

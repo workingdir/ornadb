@@ -4529,6 +4529,11 @@ struct AdminInvocationDescriptor {
     redacted: bool,
 }
 
+/// One admin operation's outcome. The stream outcome carries the full
+/// administration record and the checkpoint outcome is a bare pin, so the two
+/// variants differ in size. The value is built once per admin call and matched
+/// by reference on a cold path, so the enum stays unboxed and readable.
+#[allow(clippy::large_enum_variant)]
 enum AdminOperationResult {
     Stream(StreamAdministrationOutcome),
     Checkpoint(StreamCheckpoint),
@@ -5075,6 +5080,7 @@ impl RuntimeState {
     /// Resolves, checks the registry-declared preconditions, and dispatches
     /// one native operation through the generated system table. The selected
     /// contract and failure vocabulary come from the same registry entry.
+    #[allow(clippy::result_large_err)]
     pub fn dispatch_system_operation<T>(
         &self,
         operation: &str,
@@ -5087,6 +5093,7 @@ impl RuntimeState {
     /// Runs the registry-declared preconditions before a native operation is
     /// allowed to proceed. Any failure code returned by the checker is also
     /// checked against that operation's declared vocabulary.
+    #[allow(clippy::result_large_err)]
     pub fn check_system_operation_preconditions(
         &self,
         operation: &str,
@@ -5097,6 +5104,7 @@ impl RuntimeState {
 
     /// Prevents a host or provider failure outside an operation's declared
     /// vocabulary from crossing the runtime boundary.
+    #[allow(clippy::result_large_err)]
     pub fn validate_system_failure(
         &self,
         operation: &str,
@@ -6443,12 +6451,12 @@ impl RuntimeState {
             let current_capture = capture_tx(&transaction).await?;
             let observed_generation = admin_observed_generation(&current_capture)?;
             admitted_generation = Some(observed_generation);
-            if let Some(expected_capture) = expected_capture {
-                if &current_capture != expected_capture {
-                    return Err(RuntimeError::StaleCapture {
-                        current: Box::new(current_capture),
-                    });
-                }
+            if let Some(expected_capture) = expected_capture
+                && &current_capture != expected_capture
+            {
+                return Err(RuntimeError::StaleCapture {
+                    current: Box::new(current_capture),
+                });
             }
             let result =
                 apply_admin_operation_tx(&transaction, &operation, observed_generation).await?;
@@ -7260,7 +7268,7 @@ impl RuntimeState {
                         &transfer.repository_id()[..],
                         &transfer.database_id()[..],
                         oid_algorithm,
-                        &transfer.descriptor_oid().as_bytes()[..],
+                        transfer.descriptor_oid().as_bytes(),
                         content_length,
                         &identity.sha256()[..],
                         &writer.owner_id[..],
@@ -10850,7 +10858,7 @@ impl RuntimeState {
         // retained failure.  The writer fence prevents the old owner from
         // committing after this point, but it is not authority to reinterpret
         // malformed attempt state as an interrupted callback.
-        validate_recoverable_stream_attempts(&transaction).await?;
+        validate_recoverable_stream_attempts(transaction).await?;
         transaction
             .execute("DELETE FROM stream_lease", ())
             .await
@@ -16831,11 +16839,10 @@ async fn apply_admin_operation_tx(
             let result =
                 apply_stream_intent_tx(connection, CommitIntent::Pause { key: key.clone() })
                     .await?;
-            if stream_pause_changed(&result) {
-                if let Some(reason) = reason {
-                    store_stream_pause_reason(connection, stream_pause_key(&result)?, reason)
-                        .await?;
-                }
+            if stream_pause_changed(&result)
+                && let Some(reason) = reason
+            {
+                store_stream_pause_reason(connection, stream_pause_key(&result)?, reason).await?;
             }
             sync_stream_observation_tx(connection, &result).await?;
             Ok(AdminOperationResult::Stream(stream_administration_outcome(
@@ -20523,10 +20530,10 @@ fn validate_admitted_table_identities(
     mutations: &[TableMutation],
 ) -> Result<(), RuntimeError> {
     for mutation in mutations {
-        if let Some(admitted) = context.table_object_ids().get(mutation.table()) {
-            if mutation.table_object_id() != Some(*admitted) {
-                return Err(RuntimeError::InvalidTableMutation);
-            }
+        if let Some(admitted) = context.table_object_ids().get(mutation.table())
+            && mutation.table_object_id() != Some(*admitted)
+        {
+            return Err(RuntimeError::InvalidTableMutation);
         }
     }
     Ok(())
@@ -25972,7 +25979,7 @@ mod tests {
             parsed.is_ok(),
             "the in-crate query fixture must parse: {source}"
         );
-        let result = orna_evaluator_v1::invoke_named_with_effects(
+        orna_evaluator_v1::invoke_named_with_effects(
             "query",
             &orna_evaluator_v1::Functions::from([(
                 "query".into(),
@@ -25985,8 +25992,7 @@ mod tests {
             &BTreeMap::new(),
             orna_evaluator_v1::Limits::default(),
             effects,
-        );
-        result
+        )
     }
 
     fn query_test_key(value: u8) -> Vec<u8> {

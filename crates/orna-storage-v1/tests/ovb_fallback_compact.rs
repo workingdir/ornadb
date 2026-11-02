@@ -161,11 +161,11 @@ fn parquet(profile: &CompactOvbProfile, physical_ids: &[[u8; 16]], values: &[Vec
     let schema = Arc::new(parse_message_type(&message).unwrap());
     let logical_names = physical_ids
         .iter()
-        .map(|id| match id {
-            &STR => "Str",
-            &UUID => "Uuid",
-            &DATE => "Date",
-            &INSTANT => "Instant",
+        .map(|id| match *id {
+            STR => "Str",
+            UUID => "Uuid",
+            DATE => "Date",
+            INSTANT => "Instant",
             _ => panic!("unknown fixture field"),
         })
         .collect::<Vec<_>>();

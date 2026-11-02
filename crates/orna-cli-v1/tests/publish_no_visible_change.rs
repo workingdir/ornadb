@@ -11,13 +11,14 @@
 //! rows are committed through the real durable request path, and every
 //! publication is the real `orna` binary, so this proves the verb's exit
 //! status and output rather than a library call.
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeIdentity, RuntimeState, TableMutation,
+    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation,
     TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
@@ -70,6 +71,8 @@ fn head(directory: &Path) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+/// One publication fixture: the capture it commits and the state it runs on.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 /// Commits one captured media row durably without publishing it, so the next
 /// `orna publish` sees exactly one frozen runtime range.
 async fn commit_capture(
@@ -104,7 +107,7 @@ async fn commit_capture(
 
     let value = evaluate_expression_ovb2_with_effects(
         expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         bindings,
     )
@@ -354,6 +357,8 @@ async fn publish_stores_a_new_format3_row_from_its_typed_key_without_source_look
     );
 }
 
+/// One publication fixture: the capture it commits and the state it runs on.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tokio::test]
 async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit() {
     let source = TempDir::new().unwrap();
@@ -505,6 +510,8 @@ async fn publishing_a_range_with_no_visible_change_consumes_it_without_a_commit(
     drop(directory);
 }
 
+/// One publication fixture: the capture it commits and the state it runs on.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[tokio::test]
 async fn publish_recovers_ref_advanced_journal_before_selecting_pending_tail() {
     let source = TempDir::new().unwrap();

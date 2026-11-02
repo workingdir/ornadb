@@ -123,6 +123,8 @@ fn spill_chains() -> Vec<QueryPairedCheckpointSpillRestoreChainDescription> {
     .collect()
 }
 
+/// Each planner fixture helper assembles one plan shape from its parts.
+#[allow(clippy::too_many_arguments)]
 fn rotation(
     checkpoint: &str,
     identity: &str,

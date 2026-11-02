@@ -18,7 +18,7 @@
 //! as requiring an explicit decode.
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
-use super::*;
+use super::{Diagnostic, Endpoint, local_project_path};
 use crate::cli_row_key::{
     check_bound_type, check_point_key_type, composite_bound_error, key_candidates,
 };
@@ -54,6 +54,7 @@ struct QueryOptions<'a> {
     has_predicate: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
@@ -278,6 +279,7 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
@@ -523,6 +525,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 /// Reads every row in `[from, until)` in ordered pages, so a predicate sees
 /// each candidate rather than only the first page.
 fn scan_all_rows(
@@ -677,7 +680,6 @@ fn render_bytes(bytes: &[u8]) -> String {
 /// The canonical keys one `--key` spelling names, in the order a lookup tries
 /// them: the text spelling, then the same spelling's own bytes, then the bytes
 /// a `0x` hex spelling names.
-
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -846,7 +848,7 @@ mod tests {
                     .cloned()
                     .collect())
             },
-            |key| key.clone(),
+            std::clone::Clone::clone,
         )
     }
 

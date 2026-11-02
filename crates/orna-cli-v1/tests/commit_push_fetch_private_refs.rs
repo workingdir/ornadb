@@ -30,14 +30,14 @@ mod format3;
 
 const CONTACT_SOURCE: &str = "pub table Contact(id: Str) {\n    name: Str,\n}\n";
 
-const MEDIA_SOURCE: &str = r#"pub table media(id: Str) {
+const MEDIA_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
     content: Blob,
 }
 
 pub fn add(id: Str, title: Str, content: Blob) =
     media.insert({ id: id, title: title, content: content });
-"#;
+";
 
 /// Inherited variables that would let the caller's environment, rather than
 /// the repository under test, route Git or supply an identity.

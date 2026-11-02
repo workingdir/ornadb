@@ -38,12 +38,11 @@ fn check(project: &TempDir) -> Output {
 
 #[test]
 fn check_rejects_unlinked_sys_callables_with_version_incompatible() {
-    for (source, member) in [
-        (
+    {
+        let (source, member) = (
             "pub fn head() = sys.snapshot(\"HEAD~1\");\n",
             "`sys.snapshot(Str)`",
-        ),
-    ] {
+        );
         let project = project(source);
         let output = check(&project);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -67,7 +66,7 @@ fn check_admits_the_linked_blob_annotation() {
 }
 
 /// `sys.rt.info()` has a linked production provider, so the project checks clean:
-/// ORNA-SYS-006 requires the runtime to expose the RuntimeInfo coordinates
+/// ORNA-SYS-006 requires the runtime to expose the `RuntimeInfo` coordinates
 /// (source/15-system.md:46).
 #[test]
 fn check_admits_the_linked_runtime_info() {

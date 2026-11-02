@@ -104,6 +104,8 @@ enum Physical {
     Fixed(usize),
 }
 
+/// The four Parquet parts are one decimal fragment being encoded.
+#[allow(clippy::too_many_arguments)]
 fn decimal_parquet(
     profile: &CompactOvbProfile,
     physical: Physical,
@@ -254,6 +256,7 @@ fn decimal_dictionary_parquet(profile: &CompactOvbProfile, values: &[i32]) -> Ve
     with_page_checksums(bytes)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn corrupt_dictionary_page_offset(bytes: Vec<u8>, offset_delta: i64) -> Vec<u8> {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
     let metadata = reader.metadata().clone();
