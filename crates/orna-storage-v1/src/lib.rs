@@ -684,13 +684,20 @@ pub use branch_merge::{
 };
 
 pub use compact::{
-    apply_migration_plan_to_compact, fold_compact_committed_base, lower_publication_freeze,
-    CompactBaseProjectionError, CompactBaseRow, CompactBaseState, CompactEditableRekey,
-    CompactExactKeyIndex, CompactExactKeySource, CompactHybridEvolution, CompactHybridRekey,
+    fold_compact_committed_base, CompactBaseProjectionError, CompactBaseRow, CompactBaseState,
+    CompactEditableRekey, CompactExactKeyIndex, CompactExactKeySource, CompactHybridRekey,
     CompactKeyError, CompactKeyIdentity, CompactLogicalKeyError, CompactLogicalReader,
-    CompactLoweringError, CompactOvbProfile, CompactWriterInput, CompactWriterMutation,
-    CompactWriterMutationState, CompactWriterBatch, CompactWriterRow, COMPACT_STORAGE_PROFILE,
-    EditableBaseRow, HybridBaseState, OVB_PROFILE,
+    CompactOvbProfile, COMPACT_STORAGE_PROFILE, EditableBaseRow, HybridBaseState, OVB_PROFILE,
+};
+// Retired compact and loose row writers. Nothing in production reaches them:
+// publication writes ORP rows and a legacy HEAD is refused before any freeze
+// (ORNA-UPGRADE-003). Test crates that need the writer boundary to build a
+// base enable `compact-writer-fixtures`.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
+pub use compact::{
+    apply_migration_plan_to_compact, lower_publication_freeze, CompactHybridEvolution,
+    CompactLoweringError, CompactWriterBatch, CompactWriterInput, CompactWriterMutation,
+    CompactWriterMutationState, CompactWriterRow,
 };
 pub use compact_parquet::{CompactParquetError, CompactParquetKeySource};
 pub use maintenance::{

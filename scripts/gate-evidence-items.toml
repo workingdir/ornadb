@@ -51,7 +51,7 @@ id = "A2"
 title = "New format has exactly one writer"
 select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:publish_format3_orp_only" }]
 limitations = [
-  "Shows only that publication writes ORP rows; no test asserts that the compact and loose writers are unreachable (ornadb-5il1.111, ornadb-5il1.99).",
+  "The select shows publication writes ORP rows, and a legacy HEAD is refused before any freeze (publish_legacy_read_only). The retired compact writer boundary is now compiled out of the shipped crate: its mutation, input, row and batch types, the freeze lowering, fold, consume, apply and migration-plan entry points, and their imports all sit behind the compact-writer-fixtures feature, which only test crates enable. The default-feature rlib carries no apply_writer_input or prepare_writer_batch symbol (18 with the feature, 0 without, checked by hand). The loose writer is already gone from the crate, which keeps only the loose and compact readers and the journal refusals (ornadb-5il1.99). What is still not shown: an automated check that fails when a retired writer symbol reappears in the shipped crate.",
 ]
 
 [[item]]

@@ -6,6 +6,13 @@ rust-version = "1.95"
 license = "Apache-2.0"
 description = "Format-3 publication coordinator and legacy compact readers for Orna"
 
+[features]
+# Test-only writers for the retired compact and loose row formats. The shipped
+# crate keeps the readers and refuses the retired journals; publication writes
+# ORP rows only. Enabled by test crates that need to build a compact base from
+# the writer boundary, in the same style as legacy-fixture-writer.
+compact-writer-fixtures = []
+
 [dependencies]
 base64 = "0.22.1"
 bytes = "1.10.1"
@@ -18,6 +25,9 @@ parquet = { version = "59.3.0", default-features = false, features = ["crc", "zs
 sha2 = "0.10.9"
 
 [dev-dependencies]
+# The crate's own integration tests exercise the retired writer boundary, so
+# they enable the fixture feature for the library they link against.
+orna-storage-v1 = { path = ".", features = ["compact-writer-fixtures"] }
 orna-repository-v1 = { path = "../orna-repository-v1", features = ["legacy-fixture-writer"] }
 orna-syntax-v1 = { path = "../orna-syntax-v1" }
 tempfile = "3.23.0"
