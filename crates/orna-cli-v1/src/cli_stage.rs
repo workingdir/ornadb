@@ -38,7 +38,7 @@ fn matches_key_path(components: &[String], key: &str) -> bool {
         })
 }
 
-/// Normalises a KEY_TEXT argument: a JSON string literal is decoded, any other
+/// Normalises a `KEY_TEXT` argument: a JSON string literal is decoded, any other
 /// text is taken verbatim.
 fn key_text(key: &str) -> String {
     serde_json::from_str::<String>(key).unwrap_or_else(|_| key.to_owned())

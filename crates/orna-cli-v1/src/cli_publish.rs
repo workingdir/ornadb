@@ -23,7 +23,7 @@ use orna_storage_v1::RuntimePublicationCoordinator;
 use orna_repository_v1::{CandidateAssertionGate, publication_crash_barrier};
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 
-use super::*;
+use super::{Diagnostic, Exit, Digest, Endpoint, local_project_path, runtime_identity, BTreeMap};
 
 const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
@@ -101,6 +101,7 @@ fn refuse_legacy_head(repository: &orna_repository_v1::Repository) -> Result<(),
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 /// Validates format-3 mutations against the pinned graph and committed source
 /// binding. Format-3 keys remain independent of host filename rules
 /// (ORNA-KEY-004).
@@ -487,13 +488,13 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         coordinator
             .publish_with_stage_hook(&repository, |stage| match stage {
                 orna_repository_v1::PublicationJournalStage::Prepared => {
-                    publication_crash_barrier("prepared")
+                    publication_crash_barrier("prepared");
                 }
                 orna_repository_v1::PublicationJournalStage::RefAdvanced => {
-                    publication_crash_barrier("ref-cas")
+                    publication_crash_barrier("ref-cas");
                 }
                 orna_repository_v1::PublicationJournalStage::IndexReconciled => {
-                    publication_crash_barrier("index")
+                    publication_crash_barrier("index");
                 }
                 _ => {}
             })
@@ -554,6 +555,7 @@ enum Publication {
     NoVisibleChange(BTreeMap<String, usize>),
 }
 
+#[allow(clippy::too_many_lines)]
 /// Rows per table in the frozen batch, in table order. A mutation that was
 /// folded away by an earlier mutation of the same key is already collapsed by
 /// the lowering step, so this counts the frozen range's final mutations.
@@ -721,7 +723,7 @@ mod tests {
         }));
     }
 
-    /// Runs the MANAGED_EDIT_HELP discard sequence literally against a skip-worktree
+    /// Runs the `MANAGED_EDIT_HELP` discard sequence literally against a skip-worktree
     /// store payload in a real Git repository: discard must restore HEAD bytes.
     #[test]
     fn managed_edit_help_discard_sequence_restores_head_on_skip_worktree_store_path() {

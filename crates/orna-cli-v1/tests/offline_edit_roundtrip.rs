@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -42,7 +43,7 @@ fn edited_catalogue_exports_offline_and_reimports_identically() {
     let expression = fixture.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
     let value = evaluate_expression_ovb2_with_effects(
         &expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )

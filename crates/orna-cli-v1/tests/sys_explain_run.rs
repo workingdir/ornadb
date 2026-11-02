@@ -8,7 +8,6 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::RuntimeState;
 
 #[path = "support/format3.rs"]
-#[allow(dead_code)]
 mod format3;
 
 fn orna(directory: &std::path::Path, arguments: &[&str]) -> std::process::Output {

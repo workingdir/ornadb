@@ -18,8 +18,8 @@ use orna_value_v1::{
     Error as BlobError, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
     ValueFormat, decode_rov3_blob_metadata,
 };
-use tempfile::TempDir;
 
+#[allow(clippy::too_many_lines)]
 /// Exercises capture through the runtime into a format-3 row reference: the
 /// captured value is a lazy ROV-3 reference in its capture context, raw
 /// identity survives annotated OVB-2/ROV-3 conversion and metadata conversion
@@ -312,7 +312,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         transfer.content_identity().sha256()
     );
     assert_eq!(
-        committed_blob.descriptor_oid().map(|oid| oid.as_bytes()),
+        committed_blob.descriptor_oid().map(orna_value_v1::NativeOid::as_bytes),
         Some(transfer.descriptor_oid().as_bytes())
     );
     assert_eq!(

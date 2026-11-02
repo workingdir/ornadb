@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::{io::Write, path::Path, process::{Command, Output, Stdio}};
 
 use orna_application_v1::{ApplicationAuthority, CommittedTableIdentity};
@@ -132,6 +133,7 @@ async fn repl_update() {
     let decoded = orna_value_v1::decode_canonical_storage_value(fields).unwrap();
     assert!(format!("{decoded:?}").contains("New title"), "updated title was not persisted: {decoded:?}; REPL stdout={stdout}; stderr={}", stderr(&updated));
 }
+#[allow(clippy::too_many_lines)]
 /// ORNA-ROW-004: committed media rows retain annotated Blob references while bytes remain graph objects.
 #[tokio::test]
 async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
@@ -167,24 +169,24 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
     );
     let captured = evaluate_expression_ovb2_with_effects(
         &capture,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     ).unwrap();
-    let content = bindings.accept_captured_blob_for_row(&captured).unwrap();
+    let audio_binding = bindings.accept_captured_blob_for_row(&captured).unwrap();
     let cover_capture = format!(
         "sys.blob.annotate(sys.blob.capture_file({root}, \"cover.png\", 65536), \"image/png\")"
     );
     let captured_cover = evaluate_expression_ovb2_with_effects(
         &cover_capture,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     ).unwrap();
     let cover = bindings.accept_captured_blob_for_row(&captured_cover).unwrap();
     let value_context = format3_context_for_database(&commit, *schema.database_id());
-    assert_eq!(content.transfer_record().database_id(), schema.database_id());
-    ContextValue::decode_in_context(content.encoded_value(), ValueFormat::Rov3, &value_context)
+    assert_eq!(audio_binding.transfer_record().database_id(), schema.database_id());
+    ContextValue::decode_in_context(audio_binding.encoded_value(), ValueFormat::Rov3, &value_context)
         .expect("captured Blob must decode under the committed database context");
     // The original content-only path admits a typed null cover on its own row.
     let null_cover_row = admit_source_row(
@@ -193,7 +195,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         r#"{ title: "Field recording", artist: "Kieran", cover: null, }"#,
         &schema,
         &value_context,
-        vec![("content".to_owned(), content)],
+        vec![("content".to_owned(), audio_binding)],
         [0x32; 16],
     )
     .expect("a content-bound Music row admits its explicit null cover");
@@ -201,7 +203,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
 
     let cover_content_capture = evaluate_expression_ovb2_with_effects(
         &capture,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )
@@ -279,7 +281,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         "sys.blob.annotate(sys.blob.capture_file({root}, \"module.bin\", 1024), \"text/javascript\")"
     );
     let default_script = evaluate_expression_ovb2_with_effects(
-        &default_script_expr, &Default::default(), Limits::default(), &mut bindings,
+        &default_script_expr, &BTreeMap::default(), Limits::default(), &mut bindings,
     ).unwrap();
     let default_script_blob = default_script.blob().unwrap();
     assert_eq!(default_script_blob.suffix(), None);
@@ -291,7 +293,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         "sys.blob.annotate(sys.blob.capture_file({root}, \"module.bin\", 1024), \"text/javascript\", \"mjs\")"
     );
     let module = evaluate_expression_ovb2_with_effects(
-        &module_expr, &Default::default(), Limits::default(), &mut bindings,
+        &module_expr, &BTreeMap::default(), Limits::default(), &mut bindings,
     ).unwrap();
     let module_blob = module.blob().unwrap();
     assert_eq!(module_blob.media_type(), "text/javascript");
@@ -304,7 +306,7 @@ async fn music_walkthrough_captures_queries_publishes_and_exports_offline() {
         &format!(
             "sys.blob.annotate(sys.blob.capture_file({root}, \"recording.mp3\", 65536), \"audio/mpeg\", \"mp2\")"
         ),
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     ).unwrap();

@@ -135,7 +135,7 @@ impl WatchCommandState {
         self.presentation
             .as_ref()?
             .published()
-            .map(|published| published.revision())
+            .map(orna_live_v1::live_presentation::PublishedPresentation::revision)
     }
 
     pub fn watch(&self) -> Option<[u8; 16]> {
@@ -781,15 +781,12 @@ fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
     let Some(request) = binding.state.take_resync_request() else {
         return Ok(true);
     };
-    match binding.source.request_resync(request) {
-        Ok(()) => {
-            binding.state.acknowledge_resync_request(request);
-            Ok(true)
-        }
-        Err(_) => {
-            write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
-            Ok(false)
-        }
+    if let Ok(()) = binding.source.request_resync(request) {
+        binding.state.acknowledge_resync_request(request);
+        Ok(true)
+    } else {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+        Ok(false)
     }
 }
 fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(

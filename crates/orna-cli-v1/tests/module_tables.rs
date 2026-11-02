@@ -4,7 +4,7 @@
 //! different modules keep separate rows under their own identities, and module
 //! paths resolve through `use` bindings and full namespace paths
 //! (ORNA-NS-001, ORNA-NS-002, ORNA-IMPORT-001..004, ORNA-ROW-001; 08-relations:
-//! row values compare table ObjectId).
+//! row values compare table `ObjectId`).
 
 use std::{
     path::Path,

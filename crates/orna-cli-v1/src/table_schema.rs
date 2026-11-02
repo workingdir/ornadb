@@ -41,11 +41,10 @@ impl LiveTableSchemaIdentity {
     /// resolved. The save treats `None` as a mismatch and refuses the save.
     pub fn read(&mut self, repository: &Repository) -> Option<TableSchemaIdentity> {
         let head = committed_head(repository).ok()?;
-        if let Some((resolved_head, identity)) = &self.resolved {
-            if *resolved_head == head {
+        if let Some((resolved_head, identity)) = &self.resolved
+            && *resolved_head == head {
                 return Some(identity.clone());
             }
-        }
         let identity = resolve_at(repository, &head, self.table).ok()?;
         self.resolved = Some((head, identity.clone()));
         Some(identity)

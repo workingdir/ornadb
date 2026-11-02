@@ -16,13 +16,10 @@ use orna_repository_v1::TypedKey;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
@@ -50,7 +47,12 @@ fn sorted_names(directory: &Path) -> Vec<String> {
 }
 
 fn hex_lower(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// profiles/vfs-1.md Row/key directory mapping and bead ornadb-5il1.464: a
@@ -113,7 +115,7 @@ async fn key_components_escape_utf8_percent_and_tilde_per_profile() {
     let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
     expected.sort();
     assert_eq!(sorted_names(&music), expected, "every escaped key directory is listed");
-    for (key, encoded) in keys.iter() {
+    for (key, encoded) in &keys {
         let data = music.join(encoded).join("data.orna");
         let view = read_view(&data);
         assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
@@ -150,7 +152,7 @@ async fn reserved_key_components_escape_first_byte() {
     let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
     expected.sort();
     assert_eq!(sorted_names(&music), expected, "every reserved key has one directory");
-    for (key, encoded) in keys.iter() {
+    for (key, encoded) in &keys {
         let view = read_view(&music.join(encoded).join("data.orna"));
         assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
     }
@@ -193,7 +195,7 @@ async fn reserved_spelling_beyond_vfs_1_text_is_conservative() {
     let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
     expected.sort();
     assert_eq!(sorted_names(&music), expected, "every conservative key has one directory");
-    for (key, encoded) in keys.iter() {
+    for (key, encoded) in &keys {
         let view = read_view(&music.join(encoded).join("data.orna"));
         assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
     }
@@ -485,6 +487,7 @@ fn nested_row(label: &str, rank: u32, tags: &str) -> String {
 
 const NESTED_TAGS: &str = "[\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\", \"j\", \"k\"]";
 
+#[allow(clippy::too_many_lines)]
 /// profiles/vfs-1.md:71-75: a record field projects as an escaped directory of its fields, and a
 /// list projects as a directory of decimal positions under the captured containing version. A
 /// handle never retargets to a new element at the same position (profiles/vfs-1.md:74), so handles
@@ -668,7 +671,7 @@ const EPERM: i32 = 1;
 const EAGAIN: i32 = 11;
 
 /// Replaces `Music/<key>` through `orna edit` on the repository path: a writer
-/// outside the mount, as in vfs_mount_sessions.rs `edit_elsewhere`.
+/// outside the mount, as in `vfs_mount_sessions.rs` `edit_elsewhere`.
 fn edit_outside_mount(repository: &Path, key: &str, document: &str) {
     let scripts = TempDir::new().unwrap();
     let editor = scripts.path().join("edit-outside");
@@ -693,7 +696,7 @@ fn edit_outside_mount(repository: &Path, key: &str, document: &str) {
     );
 }
 
-/// profiles/vfs-1.md:71-74 and the stale-save refresh (fuse_mount
+/// profiles/vfs-1.md:71-74 and the stale-save refresh (`fuse_mount`
 /// `refresh_stale_document`): after another writer changes a row, a stale save of
 /// `data.orna` is refused with EAGAIN and new opens show the current row. The
 /// nested directories are replaced with it, so `meta/label` matches the row, and a

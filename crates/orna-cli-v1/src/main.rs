@@ -282,6 +282,7 @@ struct DiagnosticDocumentation {
     help: &'static str,
 }
 
+#[allow(clippy::too_many_lines)]
 fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
     Some(match code {
         "ORNA-S010-IMPORT" => DiagnosticDocumentation {
@@ -1526,12 +1527,7 @@ fn write_short_status<W: io::Write>(
                 || code[1] == b'U'
                 || matches!(
                     (code[0], code[1]),
-                    (b'D', b'D')
-                        | (b'A', b'A')
-                        | (b'A', b'U')
-                        | (b'U', b'A')
-                        | (b'D', b'U')
-                        | (b'U', b'D')
+                    (b'D' | b'U', b'D') | (b'A' | b'U', b'A') | (b'A' | b'D', b'U')
                 )
             {
                 AnsiColor::Red
@@ -1983,6 +1979,7 @@ fn run_project_stream_invocation(
         color_enabled,
     )
 }
+#[allow(clippy::too_many_lines)]
 fn run_project_invocation_with_arguments(
     endpoint: &Endpoint,
     root_entry: &str,
@@ -2062,23 +2059,20 @@ fn run_project_invocation_with_arguments(
         .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => Err(match published_runtime_failure(&diagnostic) {
-            Some(mut published) => {
-                published.detail = Some(
-                    "the project transaction failed atomically; no partial changes were committed"
-                        .into(),
-                );
-                published
-            }
-            None => {
-                let mut rejection = Diagnostic::target(
-                    "E2200",
-                    "durable project invocation was rejected",
-                    "the project transaction failed atomically; no partial changes were committed",
-                );
-                rejection.detail = Some(failure_detail(&diagnostic));
-                rejection
-            }
+        StageOutcome::Failed(diagnostic) => Err(if let Some(mut published) = published_runtime_failure(&diagnostic) {
+            published.detail = Some(
+                "the project transaction failed atomically; no partial changes were committed"
+                    .into(),
+            );
+            published
+        } else {
+            let mut rejection = Diagnostic::target(
+                "E2200",
+                "durable project invocation was rejected",
+                "the project transaction failed atomically; no partial changes were committed",
+            );
+            rejection.detail = Some(failure_detail(&diagnostic));
+            rejection
         }),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
@@ -2235,6 +2229,7 @@ fn multi_module_declares_tables(project: &orna_project_v1::LoadedProject) -> boo
         })
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_pure_invocation(
     endpoint: &Endpoint,
     target: &str,
@@ -2853,7 +2848,7 @@ fn committed_rows_at(
         repository,
         &format,
         commit,
-        &schemas,
+        schemas,
         &table_ids,
         orna_application_v1::ApplicationAuthority::committed_read_limits(),
     )
@@ -2873,6 +2868,7 @@ fn committed_rows_at(
     Ok((rows, storage_orders))
 }
 
+#[allow(clippy::too_many_lines)]
 /// One-shot `run` of a single admitted module that declares tables and reads
 /// them. Tables bind to their committed identities at `HEAD`, so reads see the
 /// same committed rows as the REPL. The sys host context and publication
@@ -3356,6 +3352,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_repl_input(
     repository: Option<&orna_repository_v1::Repository>,
     transactions: Option<&mut ReplTransactions>,
@@ -3426,7 +3423,7 @@ fn run_repl_input(
         if transactions
             .state
             .as_ref()
-            .is_some_and(|state| state.holds_runtime_owner_lock())
+            .is_some_and(orna_runtime_v1::RuntimeState::holds_runtime_owner_lock)
         {
             let capability = transactions
                 .format_context
@@ -3561,15 +3558,11 @@ fn run_repl_input(
             repl_effect_uncertain(settlement_cause(&original))
         }
     };
-    let admission = match transactions
+    let admission = if let Ok((_, Some(admission))) = transactions
         .runtime
-        .block_on(state.reserve_request_with_admission(request, fingerprint))
-    {
-        Ok((_, Some(admission))) => admission,
-        _ => {
-            finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
-            return Err("ORNA-REPL-EFFECT".to_owned().into());
-        }
+        .block_on(state.reserve_request_with_admission(request, fingerprint)) { admission } else {
+        finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
+        return Err("ORNA-REPL-EFFECT".to_owned().into());
     };
     if transactions
         .runtime
@@ -3949,9 +3942,7 @@ fn run_repl(
     let repository = runtime.repository.as_ref();
     let host_bindings = runtime
         .transactions
-        .as_ref()
-        .map(|transactions| transactions.host_bindings.clone())
-        .unwrap_or_else(|| Rc::new(RefCell::new(None)));
+        .as_ref().map_or_else(|| Rc::new(RefCell::new(None)), |transactions| transactions.host_bindings.clone());
     let mut transactions = runtime.transactions.as_mut();
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
         run_repl_input(repository, transactions.as_deref_mut(), session, source)
@@ -4120,11 +4111,10 @@ fn run_fetch(
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
         .map_err(|error| fetch_failure(&error))?;
-    if let Some(continuity) = report.continuity() {
-        if let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
+    if let Some(continuity) = report.continuity()
+        && let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
             return Err(diagnostic);
         }
-    }
     let fetched = report.ordinary().first().ok_or_else(|| {
         Diagnostic::target(
             "E2100",
@@ -4169,6 +4159,7 @@ fn run_fetch(
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 /// Publishes the checked-out branch together with the continuity refs an
 /// ordinary push synchronizes (`ORNA-GIT-008`).
 ///
@@ -6283,8 +6274,7 @@ mod repl_request_effect_tests {
             &mut session,
             "1 / 0",
         )
-        .err()
-        .expect("the division by zero fails");
+        .expect_err("the division by zero fails");
         assert_eq!(
             failure.code, "ORNA-EVAL-DIVIDE-BY-ZERO",
             "a failure with no external effect keeps the evaluator code"
@@ -6337,8 +6327,7 @@ mod repl_request_effect_tests {
             &mut session,
             r#"main.Counter.insert({ id: "zero", n: 1 / 0 })"#,
         )
-        .err()
-        .expect("the division by zero fails before any write");
+        .expect_err("the division by zero fails before any write");
         assert_ne!(
             failure.code, "ORNA-REPL-EFFECT-UNCERTAIN",
             "no external binding ran, so the failure is not uncertain"
@@ -6381,8 +6370,7 @@ mod repl_request_effect_tests {
             &mut session,
             r#"main.Task.insert({ level: main.Level.low, title: "Ship" })"#,
         )
-        .err()
-        .expect("the enum-keyed write is refused before it is published");
+        .expect_err("the enum-keyed write is refused before it is published");
         assert_eq!(failure.code, "ORNA-REPL-EFFECT");
         let state = transactions
             .state

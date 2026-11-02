@@ -51,7 +51,12 @@ fn import_expression(root: &Path) -> String {
 }
 
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    relation_id.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in relation_id {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 fn stderr(output: &Output) -> String {
@@ -69,7 +74,7 @@ async fn publish_format3_orp_only() {
     )
     .unwrap();
     let key = "k".repeat(512);
-    assert!(LoosePath::for_key("media", &[key.clone()]).is_err());
+    assert!(LoosePath::for_key("media", std::slice::from_ref(&key)).is_err());
 
     let (identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, initial_digest)

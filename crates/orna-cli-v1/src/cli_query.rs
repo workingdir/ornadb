@@ -18,7 +18,7 @@
 //! as requiring an explicit decode.
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
-use super::*;
+use super::{Diagnostic, Digest, Endpoint, local_project_path};
 use crate::cli_row_key::{
     check_bound_type, check_point_key_type, composite_bound_error, key_candidates,
 };
@@ -54,6 +54,7 @@ struct QueryOptions<'a> {
     has_predicate: bool,
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_options(arguments: &[String]) -> Result<QueryOptions<'_>, Diagnostic> {
     let mut positional = Vec::new();
     let mut key = None;
@@ -523,6 +524,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 /// Reads every row in `[from, until)` in ordered pages, so a predicate sees
 /// each candidate rather than only the first page.
 fn scan_all_rows(
@@ -846,7 +848,7 @@ mod tests {
                     .cloned()
                     .collect())
             },
-            |key| key.clone(),
+            std::clone::Clone::clone,
         )
     }
 

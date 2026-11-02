@@ -15,7 +15,6 @@ use orna_runtime_v1::RuntimeState;
 use tempfile::TempDir;
 
 #[path = "support/format3.rs"]
-#[allow(dead_code)]
 mod format3;
 
 const RUNTIME_INFO_SOURCE: &str = r#"pub table RuntimeEvidence(id: Int) {
@@ -63,17 +62,17 @@ pub fn main() {
 }
 "#;
 
-const LANGUAGE_SOURCE: &str = r#"pub fn language(): Str {
+const LANGUAGE_SOURCE: &str = r"pub fn language(): Str {
     sys.rt.info().language_version
 }
-"#;
+";
 
 /// The format-3 fixture analyzes the bare declared surface without the system
 /// catalogue, so the REPL table uses standard field types only.
-const REPL_TABLE_SOURCE: &str = r#"pub table RuntimeEvidence(id: Int) {
+const REPL_TABLE_SOURCE: &str = r"pub table RuntimeEvidence(id: Int) {
     language_version: Str,
 }
-"#;
+";
 
 fn initialized(source: &str) -> TempDir {
     let directory = tempfile::tempdir().expect("project directory");

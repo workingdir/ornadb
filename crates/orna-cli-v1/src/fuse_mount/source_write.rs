@@ -11,7 +11,7 @@
 //! (profiles/vfs-1.md states no cross-handle trigger). The sync trigger's errno
 //! reports only the trigger's own candidate, never another module's refusal.
 
-use super::*;
+use super::{DRAFT_FILE_BOUND_BYTES, WorkspaceFilesystem, NodeKind, Arc, MountWriter, OpenFile, DraftState, Errno, Ordering, DocumentCommitError, worst_retention_errno, Path, checked_project_source_path, BTreeMap, Digest, write_source_atomically, restore_source_after_failed_write, RetentionError};
 
 /// Refusal causes recorded with a retained source candidate (ORNA-VFS-009). The
 /// `sys.vfs.*` names follow the document causes in `DocumentCommitError::cause`.
@@ -163,7 +163,7 @@ impl WorkspaceFilesystem {
         let baseline_len = match draft_state.source_drafts.get(&inode) {
             Some(draft) if !(rebase && !draft.dirty) => draft.baseline.len(),
             _ => self
-                .with_source_committed(inode, |bytes| bytes.len())
+                .with_source_committed(inode, <[u8]>::len)
                 .ok_or(Errno::EBADF)?,
         };
         if others + baseline_len + candidate_len > SOURCE_DRAFT_TOTAL_BOUND_BYTES {
@@ -393,6 +393,7 @@ impl WorkspaceFilesystem {
         })
     }
 
+#[allow(clippy::too_many_lines)]
     /// The commit itself, run under the commit gate. `trigger` is the inode of the
     /// handle that asked for the sync. Its errno reports only its own candidate.
     fn source_group_commit(&self, trigger: u64) -> Result<(), DocumentCommitError> {
@@ -569,36 +570,30 @@ impl WorkspaceFilesystem {
         if still_open {
             return;
         }
-        let (dirty, refused) = match draft_state.source_drafts.get(&inode) {
-            Some(draft) => (draft.dirty, draft.refusal.is_some()),
-            None => {
-                eprintln!(
-                    "[vfs] source module {inode}: closed with no candidate; nothing to retain"
-                );
-                return;
-            }
+        let (dirty, refused) = if let Some(draft) = draft_state.source_drafts.get(&inode) { (draft.dirty, draft.refusal.is_some()) } else {
+            eprintln!(
+                "[vfs] source module {inode}: closed with no candidate; nothing to retain"
+            );
+            return;
         };
         if !dirty && !refused {
             draft_state.source_drafts.remove(&inode);
             return;
         }
         if dirty && !refused {
-            match (self.source_writer(), self.source_path(inode)) {
-                (Some(writer), Some(path)) => {
-                    self.refuse_source(draft_state, &writer, inode, &path, SOURCE_UNSYNCED, true);
-                }
-                _ => {
-                    // Nothing can keep the candidate, so it is recorded as refused and unretained.
-                    eprintln!(
-                        "[vfs] source module {inode}: not retained at release (no writer or path)"
-                    );
-                    if let Some(draft) = draft_state.source_drafts.get_mut(&inode) {
-                        draft.dirty = false;
-                        draft.refusal = Some(SourceRefusal {
-                            cause: SOURCE_UNSYNCED,
-                            draft: None,
-                        });
-                    }
+            if let (Some(writer), Some(path)) = (self.source_writer(), self.source_path(inode)) {
+                self.refuse_source(draft_state, &writer, inode, &path, SOURCE_UNSYNCED, true);
+            } else {
+                // Nothing can keep the candidate, so it is recorded as refused and unretained.
+                eprintln!(
+                    "[vfs] source module {inode}: not retained at release (no writer or path)"
+                );
+                if let Some(draft) = draft_state.source_drafts.get_mut(&inode) {
+                    draft.dirty = false;
+                    draft.refusal = Some(SourceRefusal {
+                        cause: SOURCE_UNSYNCED,
+                        draft: None,
+                    });
                 }
             }
         }
