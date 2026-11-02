@@ -24467,7 +24467,8 @@ fn checkpoint_pin_map_widths_match(left: &Type, right: &Type) -> bool {
     if is_snapshot_context_type(left) || is_snapshot_context_type(right) {
         return is_snapshot_context_map_shape(left)
             && is_snapshot_context_map_shape(right)
-            && snapshot_context_map_cardinality(left) == snapshot_context_map_cardinality(right);
+            && (snapshot_context_map_cardinality(left) == snapshot_context_map_cardinality(right)
+                || snapshot_context_selectors_narrow(left, right));
     }
 
     match (left, right) {
@@ -25043,6 +25044,38 @@ fn snapshot_context_map_cardinality(ty: &Type) -> Option<usize> {
             if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
         {
             Some(arguments.len())
+        }
+        _ => None,
+    }
+}
+
+/// A pin set may narrow across a rebind only by dropping selectors that the
+/// wider side already pins. Growth stays a width mismatch.
+fn snapshot_context_selectors_narrow(wide: &Type, narrow: &Type) -> bool {
+    let (Some(wide_names), Some(narrow_names)) = (
+        snapshot_context_selector_names(wide),
+        snapshot_context_selector_names(narrow),
+    ) else {
+        return false;
+    };
+    narrow_names.len() < wide_names.len()
+        && narrow_names
+            .iter()
+            .all(|selector| wide_names.contains(selector))
+}
+
+fn snapshot_context_selector_names(ty: &Type) -> Option<Vec<&str>> {
+    match ty {
+        Type::Applied { base, arguments }
+            if base == "sys.SnapshotRefContext" || base == "semantic.SnapshotContextMap" =>
+        {
+            arguments
+                .iter()
+                .map(|argument| match argument {
+                    Type::Named(selector) => Some(selector.as_str()),
+                    _ => None,
+                })
+                .collect()
         }
         _ => None,
     }
