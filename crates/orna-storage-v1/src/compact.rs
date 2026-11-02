@@ -31,16 +31,16 @@ use sha2::{Digest, Sha256};
 pub const COMPACT_STORAGE_PROFILE: &str = "compact-storage-v1";
 pub const OVB_PROFILE: &str = "OVB-1";
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Typed mutation state accepted by the compact writer boundary.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CompactWriterMutationState {
     Replacement { value: Vec<u8> },
     Deletion,
 }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// One schema-validated, ordered mutation ready for compact encoding.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterMutation {
     pub sequence: u64,
@@ -49,8 +49,8 @@ pub struct CompactWriterMutation {
     pub state: CompactWriterMutationState,
 }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Deterministic, inspectable input for a compact writer.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterInput {
     pub table_id: [u8; 16],
@@ -62,9 +62,9 @@ pub struct CompactWriterInput {
     pub candidate_digest: [u8; 32],
 }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// One authoritative, base-aware row operation ready for physical encoding.
 /// Replacement values are complete canonical rows; deletions carry no value.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterRow {
     key: Vec<u8>,
@@ -87,9 +87,9 @@ impl CompactWriterRow {
     }
 }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Output of consuming one ordered freeze against its authoritative base.
 /// It carries no digest witness or sequence-based precedence.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompactWriterBatch {
     table_id: [u8; 16],
@@ -224,7 +224,7 @@ impl HybridBaseState {
     /// authority callback must hold the editable path lease and prove the
     /// destination is representable and portable before an editable move is
     /// returned.
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn apply_evolution_plan(
         &self,
         profile: &CompactOvbProfile,
@@ -461,12 +461,12 @@ impl CompactBaseState {
         self.rows.values()
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Folds a digest-verified ordered candidate against this committed base.
     ///
     /// A final deletion is omitted only when the verified base proves the key
     /// was absent. The candidate digest remains that of the original ordered
     /// freeze, not this compacted writer representation.
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn fold_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -505,10 +505,10 @@ impl CompactBaseState {
         Ok(folded)
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Folds frozen mutations by logical key and classifies their final
     /// physical roles against this verified base. Absent insert-then-delete
     /// mutations disappear; deletion output is key-only.
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn prepare_writer_batch(
         &self,
         profile: &CompactOvbProfile,
@@ -561,9 +561,9 @@ impl CompactBaseState {
         })
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Consumes generated writer input at the schema/generation boundary used
     /// by the committed base provider.
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn consume_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -571,10 +571,10 @@ impl CompactBaseState {
         self.validate_writer_input(input)
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Applies the final folded mutations to the verified base so a published
     /// candidate can be checked against its actual decoded rows before the
     /// runtime consumes the frozen prefix.
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn apply_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -606,10 +606,10 @@ impl CompactBaseState {
         Ok(expected)
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
     /// Applies the role-classified physical writer batch to this base. Role
     /// claims are checked against actual key presence so a caller cannot
     /// publish an insert as a replacement or a replacement as new data.
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     pub fn apply_writer_batch(
         &self,
         batch: &CompactWriterBatch,
@@ -674,7 +674,7 @@ impl CompactBaseState {
                 .filter_map(|(key, row)| row.value.as_ref().map(|value| (key, value))))
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     fn validate_writer_input(
         &self,
         input: &CompactWriterInput,
@@ -689,7 +689,7 @@ impl CompactBaseState {
         Ok(())
     }
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
+    #[cfg(any(test, feature = "compact-writer-fixtures"))]
     fn validate_writer_input_identity(
         &self,
         input: &CompactWriterInput,
@@ -1220,12 +1220,12 @@ impl fmt::Display for CompactLoweringError {
 #[cfg(any(test, feature = "compact-writer-fixtures"))]
 impl std::error::Error for CompactLoweringError {}
 
-#[cfg(any(test, feature = "compact-writer-fixtures"))]
 /// Validates and lowers one runtime freeze into deterministic writer input.
 ///
 /// The runtime freeze is the sole source of mutation order and candidate
 /// generation. This boundary validates every identity before exposing any
 /// writer input; no opaque pre-encoded segment is accepted.
+#[cfg(any(test, feature = "compact-writer-fixtures"))]
 pub fn lower_publication_freeze(
     profile: &CompactOvbProfile,
     freeze: &PublicationFreeze,
