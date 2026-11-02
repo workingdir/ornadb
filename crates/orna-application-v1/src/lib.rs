@@ -2984,6 +2984,9 @@ impl From<ApplicationError> for LiveError {
 }
 
 /// Mutable evaluator and admission state isolated to one remote REPL session.
+/// Every admitted watch this host is tracking, keyed by session and watch id.
+type Watches = Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>;
+
 /// The state of every admitted REPL session this host is tracking, keyed by
 /// session identity.
 type ReplSessions = Arc<Mutex<BTreeMap<[u8; 16], ApplicationReplSession>>>;
@@ -3011,7 +3014,7 @@ pub struct ApplicationLiveAdapter {
     eval_module: Option<EvalModule>,
     sessions: ReplSessions,
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
-    watches: Arc<Mutex<BTreeMap<([u8; 16], [u8; 16]), ApplicationWatch>>>,
+    watches: Watches,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
 }

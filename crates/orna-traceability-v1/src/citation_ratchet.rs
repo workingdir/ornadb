@@ -602,11 +602,10 @@ fn contains_id_in_test_string_operands(source: &str, id: &str) -> bool {
                 b'(' => delimiters.push((b')', None, 0, false)),
                 b'[' => delimiters.push((b']', None, 0, false)),
                 b'{' => delimiters.push((b'}', None, 0, false)),
-                b')' | b']' | b'}' => {
-                    if delimiters.last().is_some_and(|(close, _, _, _)| *close == bytes[cursor]) {
+                b')' | b']' | b'}'
+                    if delimiters.last().is_some_and(|(close, _, _, _)| *close == bytes[cursor]) => {
                         delimiters.pop();
                     }
-                }
                 b',' => {
                     if let Some((_, Some(_), argument, _)) = delimiters.last_mut() {
                         *argument += 1;
@@ -737,9 +736,8 @@ fn contains_id_in_assertion_args(source: &str, id: &str) -> bool {
                 b'(' => delimiters.push((b')', None, 0)),
                 b'[' => delimiters.push((b']', None, 0)),
                 b'{' => delimiters.push((b'}', None, 0)),
-                b')' | b']' | b'}' => {
-                    if delimiters.last().is_some_and(|(close, _, _)| *close == bytes[i]) { delimiters.pop(); }
-                }
+                b')' | b']' | b'}'
+                    if delimiters.last().is_some_and(|(close, _, _)| *close == bytes[i]) => { delimiters.pop(); }
                 b',' => {
                     if let Some((_, Some(_), argument)) = delimiters.last_mut() { *argument += 1; }
                 }

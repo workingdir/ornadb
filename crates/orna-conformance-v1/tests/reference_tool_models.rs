@@ -174,7 +174,7 @@ fn frozen_source_probe_cases_match_parser_acceptance() {
     for (name, expected, source) in cases {
         if name == "unparenthesised-pipeline-lambda" {
             assert!(
-                expected == false,
+                !expected,
                 "frozen reference source probe must continue to expect rejection"
             );
             assert!(
