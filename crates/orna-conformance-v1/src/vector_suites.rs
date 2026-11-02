@@ -148,7 +148,7 @@ impl CaseRun {
 
 /// Decodes lowercase hexadecimal, the only spelling the vector files use.
 fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0
+    if !text.len().is_multiple_of(2)
         || !text
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))

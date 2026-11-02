@@ -52,21 +52,21 @@ fn paired_depth_continuations_keep_each_lexical_identity() {
         let row = runtime
             .committed_row("Pair", &Value::int(id.into()))
             .expect("computed pair committed");
-        assert_eq!(field(&row, "expected"), &Raw::Text(expected.into()));
+        assert_eq!(field(row, "expected"), &Raw::Text(expected.into()));
     }
     for (id, pair_id, expected) in [(10, 1, "west"), (11, 1, "east"), (20, 2, "north")] {
         let row = runtime
             .committed_row("Left", &Value::int(id.into()))
             .expect("computed left row committed");
-        assert_eq!(field(&row, "pair_id"), &Raw::Int(pair_id.into()));
-        assert_eq!(field(&row, "expected"), &Raw::Text(expected.into()));
+        assert_eq!(field(row, "pair_id"), &Raw::Int(pair_id.into()));
+        assert_eq!(field(row, "expected"), &Raw::Text(expected.into()));
     }
     for (id, pair_id, expected) in [(100, 1, "gold"), (101, 1, "silver"), (200, 2, "violet")] {
         let row = runtime
             .committed_row("Right", &Value::int(id.into()))
             .expect("computed right row committed");
-        assert_eq!(field(&row, "pair_id"), &Raw::Int(pair_id.into()));
-        assert_eq!(field(&row, "expected"), &Raw::Text(expected.into()));
+        assert_eq!(field(row, "pair_id"), &Raw::Int(pair_id.into()));
+        assert_eq!(field(row, "expected"), &Raw::Text(expected.into()));
     }
     for (id, pair_id, left_id, right_id, pair, left, right) in [
         (1000, 1, 10, 100, "amber", "west", "gold"),
@@ -78,11 +78,11 @@ fn paired_depth_continuations_keep_each_lexical_identity() {
         let row = runtime
             .committed_row("Evidence", &Value::int(id.into()))
             .expect("computed paired evidence committed");
-        assert_eq!(field(&row, "pair_id"), &Raw::Int(pair_id.into()));
-        assert_eq!(field(&row, "left_id"), &Raw::Int(left_id.into()));
-        assert_eq!(field(&row, "right_id"), &Raw::Int(right_id.into()));
-        assert_eq!(field(&row, "pair_expected"), &Raw::Text(pair.into()));
-        assert_eq!(field(&row, "left_expected"), &Raw::Text(left.into()));
-        assert_eq!(field(&row, "right_expected"), &Raw::Text(right.into()));
+        assert_eq!(field(row, "pair_id"), &Raw::Int(pair_id.into()));
+        assert_eq!(field(row, "left_id"), &Raw::Int(left_id.into()));
+        assert_eq!(field(row, "right_id"), &Raw::Int(right_id.into()));
+        assert_eq!(field(row, "pair_expected"), &Raw::Text(pair.into()));
+        assert_eq!(field(row, "left_expected"), &Raw::Text(left.into()));
+        assert_eq!(field(row, "right_expected"), &Raw::Text(right.into()));
     }
 }
