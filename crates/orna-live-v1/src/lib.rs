@@ -1834,7 +1834,7 @@ impl LiveHost {
 // The state boundary is synchronous today, but the async methods keep the
 // adapter signature ready for hosts whose credential and deletion adapters
 // perform I/O. The explicit lint allowance records that deliberate seam.
-#[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+#[allow(clippy::unused_async)]
 impl LiveHost {
     /// Creates a bounded live host around the supplied security and serving
     /// state machines.
