@@ -1235,11 +1235,10 @@ impl Producer<'_> {
         let Type::Named(enum_or_nominal) = ty else {
             return Err(self.unsupported_pattern(key));
         };
-        if path.len() == 1 {
-            if let Some(Type::Record(fields)) = scope.nominal_rows.get(enum_or_nominal) {
+        if path.len() == 1
+            && let Some(Type::Record(fields)) = scope.nominal_rows.get(enum_or_nominal) {
                 return Ok((Vec::new(), fields.clone()));
             }
-        }
         if path.len() >= 2 {
             let owner = path[..path.len() - 1]
                 .iter()
