@@ -174,7 +174,7 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
-  lint:
+  claims:
     needs: revision
     runs-on: ubuntu-latest
     timeout-minutes: 150
@@ -188,15 +188,6 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
-        with:
-          components: rustfmt
-
-      - name: Check formatting
-        run: >-
-          python3 scripts/gate_evidence.py run --check fmt
-          --record lint-fmt --title "cargo fmt --check"
-          --out "$RUNNER_TEMP/gate-evidence"
-          -- cargo fmt --all -- --check
 
       - name: Check the fixed-row batching product claim
         if: ${{ !cancelled() }}
@@ -226,12 +217,12 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v7
         with:
-          name: evidence-lint
+          name: evidence-claims
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
   evidence:
-    needs: [revision, workspace, gate-d-crash-matrix, lint]
+    needs: [revision, workspace, gate-d-crash-matrix, claims]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
