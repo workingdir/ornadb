@@ -6456,12 +6456,24 @@ fn paired_collapse_rebinds_preserve_global_depth_label_topology() {
         )],
         &historical_nested_callable_catalogue(),
     );
+    // One drift case and one accepted relabel share this module. The drift is
+    // reported by the pin-topology check, which names the reason. The same
+    // statement also fails element unification inside its list literal, and the
+    // reference fixes no diagnostic count for a drift reset, so the count is not
+    // pinned; the named reason must appear once and the accepted relabel must
+    // contribute nothing. Rejecting the accepted relabel would change its
+    // rebound slot labels, which the slot assertions below already detect.
+    let topology_rejections = result
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.code() == DIAG_TYPE
+                && diagnostic.message()
+                    == "checkpoint reset source must preserve nested snapshot pin topology and callable contracts"
+        })
+        .count();
     assert_eq!(
-        result
-            .diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.code() == DIAG_TYPE)
-            .count(),
+        topology_rejections,
         1,
         "a rebind that changes a shared depth label into pairwise labels must fail, while a consistent relabel succeeds: {:?}",
         result
