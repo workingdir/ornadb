@@ -268,13 +268,11 @@ fn count_with_limit<I>(source: I, maximum_items: usize) -> Result<BigInt, Relati
 where
     I: IntoIterator,
 {
-    let mut observed = 0usize;
     let mut count = BigInt::from(0);
-    for _ in source {
+    for (observed, _) in source.into_iter().enumerate() {
         if observed == maximum_items {
             return Err(RelationCountError::ResourceLimitExceeded);
         }
-        observed += 1;
         count += 1;
     }
     Ok(count)

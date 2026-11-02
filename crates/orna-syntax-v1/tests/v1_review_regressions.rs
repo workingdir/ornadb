@@ -351,7 +351,7 @@ fn legacy_assertion_aliases_remain_rejected_in_their_removed_shapes() {
             for shape_index in 0..3 {
                 let case = format!("alias_{alias_index}_{operator_index}_{shape_index}");
                 let source = fixture_case(&case);
-                let parsed = parse_module(&source);
+                let parsed = parse_module(source);
                 assert_eq!(
                     parsed.diagnostics.first().map(|diagnostic| diagnostic.code),
                     Some("ORNA-A091-010"),
