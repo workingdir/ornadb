@@ -25,12 +25,10 @@ use std::process::Output;
 const BOOK_TABLE: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n";
 
 /// The published row `Dune` violates this assertion.
-const BOOK_REJECTING_DUNE: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"Dune\");\n}\n";
+const BOOK_REJECTING_DUNE: &str = "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"Dune\");\n}\n";
 
 /// The published row `Dune` satisfies this assertion.
-const BOOK_ACCEPTING_DUNE: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"\");\n}\n";
+const BOOK_ACCEPTING_DUNE: &str = "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"\");\n}\n";
 
 const ENUM_KEYED_LIBRARY: &str = "pub enum Level {\n    low,\n    high,\n}\n\
 pub table Task(level: Level) {\n    title: Str,\n}\n";
@@ -66,8 +64,7 @@ pub table Shelf(id: Int) {\n    label: Str,\n}\n";
 /// `Book` gains the constant `edition` default; `Loan` and `Shelf` keep their
 /// definitions. The module assertion over `Loan` and `Shelf` is false because
 /// `Shelf` has no rows, so it refuses the commit only if the commit evaluates it.
-const BOOK_EDITION_LOAN_SHELF_MODULE_LIBRARY: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    edition: Int = 7,\n}\n\n\
+const BOOK_EDITION_LOAN_SHELF_MODULE_LIBRARY: &str = "pub table Book(id: Int) {\n    title: Str,\n    edition: Int = 7,\n}\n\n\
 pub table Loan(id: Int) {\n    book_id: Int,\n}\n\n\
 pub table Shelf(id: Int) {\n    label: Str,\n}\n\n\
 assert every(Loan, loan => exists(Shelf, shelf => shelf.id == loan.book_id));\n";
@@ -149,8 +146,11 @@ fn enum_keyed_table_assertion_refuses_the_commit_with_its_cause() {
     commit_source(&root, "enum keyed table fixture");
     let before = head(&root);
 
-    let refused =
-        stage_and_commit(&root, ENUM_KEYED_ASSERTED_LIBRARY, "assert on enum-keyed table");
+    let refused = stage_and_commit(
+        &root,
+        ENUM_KEYED_ASSERTED_LIBRARY,
+        "assert on enum-keyed table",
+    );
     let text = transcript(&refused);
     assert_ne!(refused.status.code(), Some(0), "{text}");
     assert!(text.contains("E2300"), "{text}");
@@ -209,7 +209,10 @@ fn assert_free_project_with_non_scalar_key_still_commits() {
         &format!("// assert-free change\n{ENUM_KEYED_LIBRARY}"),
         "assert-free change to an enum-keyed table",
     );
-    assert_success(&committed, "commit of an assert-free project with an enum key");
+    assert_success(
+        &committed,
+        "commit of an assert-free project with an enum key",
+    );
     assert_ne!(head(&root), before);
 }
 
@@ -273,6 +276,9 @@ fn module_assertion_over_unchanged_tables_is_skipped_by_the_commit() {
         BOOK_EDITION_LOAN_SHELF_MODULE_LIBRARY,
         "change a table outside the module assertion",
     );
-    assert_success(&committed, "commit outside the module assertion's dependencies");
+    assert_success(
+        &committed,
+        "commit outside the module assertion's dependencies",
+    );
     assert_ne!(head(&root), before);
 }

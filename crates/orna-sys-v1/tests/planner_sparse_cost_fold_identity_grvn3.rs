@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_sys_v1::{
-    explain_query_with_join_pair_identities, ExpressionRef, ObjectRef, PlanDetail, PlanNode,
-    PlanNodeKind, QueryJoinDescription, QueryJoinPairIdentityDescription, QueryPlanDescription,
-    QuerySourceStatistics, SnapshotRef,
+    ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind, QueryJoinDescription,
+    QueryJoinPairIdentityDescription, QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
+    explain_query_with_join_pair_identities,
 };
 
 const FIXTURE: &str = include_str!("fixtures/planner_sparse_cost_fold_identity_grvn3.orna");
@@ -202,7 +202,8 @@ fn cost_fold_identity_follows_pair_results_across_sparse_reordered_chains() {
         &reversed_descriptors,
     );
 
-    let expected_results = [(
+    let expected_results = [
+        (
             "pair:small",
             "table:Small",
             Some(50),
@@ -223,7 +224,8 @@ fn cost_fold_identity_follows_pair_results_across_sparse_reordered_chains() {
             Some(3_975_000),
             Some(400),
         ),
-        ("pair:unknown", "table:Unknown", None, None, None)];
+        ("pair:unknown", "table:Unknown", None, None, None),
+    ];
     for observed in [folds(&first), folds(&second)] {
         assert_eq!(observed.len(), expected_results.len());
         for (fold, (pair_id, source, rows, bytes, work)) in
@@ -301,13 +303,15 @@ fn earlier_cost_change_reidentifies_downstream_fold_chain_and_preserves_real_est
         (changed[2].rows, changed[2].bytes, changed[2].work),
         (Some(3_600), Some(4_276_800), Some(420))
     );
-    assert!(changed
-        .iter()
-        .zip(baseline.iter())
-        .all(
-            |(changed, baseline)| changed.pair_identity == baseline.pair_identity
-                && changed.fold_identity != baseline.fold_identity
-        ));
+    assert!(
+        changed
+            .iter()
+            .zip(baseline.iter())
+            .all(
+                |(changed, baseline)| changed.pair_identity == baseline.pair_identity
+                    && changed.fold_identity != baseline.fold_identity
+            )
+    );
     assert_eq!(
         changed[3].rows, None,
         "unknown tail retains unknown cardinality"

@@ -20,22 +20,19 @@ fn captured_time_sources() -> Vec<(String, String)> {
 
 fn pinned_time_session() -> (AdmittedReplSession, StandardDependencyProfile) {
     let sources = captured_time_sources();
-    assert_eq!(sources.len(), 6, "the selected time surface has its root, calendar and four formatter modules");
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/5rysm-time-duration",
-        sources.clone(),
-    )
-    .expect("the captured time and duration sources form one pinned dependency snapshot");
+    assert_eq!(
+        sources.len(),
+        6,
+        "the selected time surface has its root, calendar and four formatter modules"
+    );
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/5rysm-time-duration", sources.clone())
+            .expect("the captured time and duration sources form one pinned dependency snapshot");
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("time and duration module imports resolve from the selected snapshot");
-    let session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured time profile failed to load: {}", error.code()));
+    let session = AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+        .unwrap_or_else(|error| panic!("captured time profile failed to load: {}", error.code()));
     (session, profile)
 }
 
@@ -46,9 +43,11 @@ fn time_and_duration_helpers_compute_exact_values_from_the_pinned_module() {
         profile
             .verify_source(&path, &source)
             .expect("the executed time source is the one captured by the selected profile");
-        assert!(profile
-            .verify_source(&path, &format!("{source}\n// changed after capture"))
-            .is_err());
+        assert!(
+            profile
+                .verify_source(&path, &format!("{source}\n// changed after capture"))
+                .is_err()
+        );
     }
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-time-use-5rysm.orna")),
@@ -74,13 +73,17 @@ fn time_and_duration_helpers_compute_exact_values_from_the_pinned_module() {
 fn elapsed_core_operations_remain_available_without_the_optional_time_module() {
     let mut core = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-core-time-without-std-5rysm.orna")),
+        core.submit(include_str!(
+            "fixtures/stdlib-core-time-without-std-5rysm.orna"
+        )),
         Ok(Some(boolean(true)))
     );
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-time-without-snapshot-5rysm.orna"))
-            .unwrap_err()
-            .code(),
+        core.submit(include_str!(
+            "fixtures/stdlib-time-without-snapshot-5rysm.orna"
+        ))
+        .unwrap_err()
+        .code(),
         "ORNA-S010-IMPORT"
     );
 }

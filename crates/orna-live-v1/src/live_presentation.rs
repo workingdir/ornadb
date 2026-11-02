@@ -473,7 +473,9 @@ mod tests {
             u8::try_from(value & 0xff).expect("a masked byte is in range")
         }
         let mut encoded = if value <= 23 {
-            vec![byte(u64::try_from(value).expect("a small length fits in u64"))]
+            vec![byte(
+                u64::try_from(value).expect("a small length fits in u64"),
+            )]
         } else if let Ok(small) = u8::try_from(value) {
             vec![0x58, small]
         } else if let Ok(length) = u16::try_from(value) {

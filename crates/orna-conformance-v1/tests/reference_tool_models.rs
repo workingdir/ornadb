@@ -71,9 +71,7 @@ fn html_attribute_values(html: &str, wanted: &str) -> Vec<String> {
             break;
         }
         let tag = &html[start + 1..end];
-        let mut i = tag
-            .find(char::is_whitespace)
-            .unwrap_or(tag.len());
+        let mut i = tag.find(char::is_whitespace).unwrap_or(tag.len());
         if tag.starts_with('/') {
             cursor = end + 1;
             continue;
@@ -104,26 +102,27 @@ fn html_attribute_values(html: &str, wanted: &str) -> Vec<String> {
             while i < tag.len() && tag.as_bytes()[i].is_ascii_whitespace() {
                 i += 1;
             }
-            let (value_start, value_end) = if i < tag.len() && matches!(tag.as_bytes()[i], b'\'' | b'"') {
-                let delimiter = tag.as_bytes()[i];
-                i += 1;
-                let value_start = i;
-                while i < tag.len() && tag.as_bytes()[i] != delimiter {
+            let (value_start, value_end) =
+                if i < tag.len() && matches!(tag.as_bytes()[i], b'\'' | b'"') {
+                    let delimiter = tag.as_bytes()[i];
                     i += 1;
-                }
-                let value_end = i;
-                i += usize::from(i < tag.len());
-                (value_start, value_end)
-            } else {
-                let value_start = i;
-                while i < tag.len()
-                    && !tag.as_bytes()[i].is_ascii_whitespace()
-                    && tag.as_bytes()[i] != b'>'
-                {
-                    i += 1;
-                }
-                (value_start, i)
-            };
+                    let value_start = i;
+                    while i < tag.len() && tag.as_bytes()[i] != delimiter {
+                        i += 1;
+                    }
+                    let value_end = i;
+                    i += usize::from(i < tag.len());
+                    (value_start, value_end)
+                } else {
+                    let value_start = i;
+                    while i < tag.len()
+                        && !tag.as_bytes()[i].is_ascii_whitespace()
+                        && tag.as_bytes()[i] != b'>'
+                    {
+                        i += 1;
+                    }
+                    (value_start, i)
+                };
             if name.eq_ignore_ascii_case(wanted) {
                 values.push(tag[value_start..value_end].to_owned());
             }
@@ -159,7 +158,10 @@ fn frozen_source_probe_cases_match_parser_acceptance() {
             let mut fields = header.split_whitespace();
             name = fields.next();
             expected = fields.next().map(|value| value == "accept");
-            assert!(fields.next().is_none(), "unexpected source fixture header: {header}");
+            assert!(
+                fields.next().is_none(),
+                "unexpected source fixture header: {header}"
+            );
         } else if name.is_some() {
             source.push_str(line);
             source.push('\n');
@@ -182,9 +184,7 @@ fn frozen_source_probe_cases_match_parser_acceptance() {
                 "Rust parser behavior changed; re-evaluate the recorded ORNA-PIPE-005 divergence"
             );
             pinned_divergence = true;
-            println!(
-                "PINNED-DIVERGENCE {name}: frozen probe expects reject; Rust parser accepts"
-            );
+            println!("PINNED-DIVERGENCE {name}: frozen probe expects reject; Rust parser accepts");
             continue;
         }
         assert_eq!(
@@ -207,7 +207,10 @@ fn reference_project_modules_parse_as_module_units() {
     ];
     assert_eq!(modules.len(), 5);
     for (index, source) in modules.iter().enumerate() {
-        assert!(parse_module(source).is_ok(), "reference module index {index}");
+        assert!(
+            parse_module(source).is_ok(),
+            "reference module index {index}"
+        );
     }
 }
 
@@ -240,7 +243,10 @@ fn frozen_documentation_source_blocks_parse_in_a_declared_entry_or_wrapper() {
             rejected.push(label);
         }
     }
-    assert_eq!(accepted, 66, "unexpected source-block rejections: {rejected:?}");
+    assert_eq!(
+        accepted, 66,
+        "unexpected source-block rejections: {rejected:?}"
+    );
     assert!(rejected.is_empty());
 }
 

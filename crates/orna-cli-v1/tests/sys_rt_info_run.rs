@@ -215,7 +215,10 @@ fn repl_evaluates_runtime_info_in_a_committed_project() {
         "\"1.1.0\" : Str\n",
     );
     assert_output(
-        &orna(root, &["repl", "sys.rt.info().mode == sys.RuntimeMode.repl"]),
+        &orna(
+            root,
+            &["repl", "sys.rt.info().mode == sys.RuntimeMode.repl"],
+        ),
         "true : Bool\n",
     );
 }

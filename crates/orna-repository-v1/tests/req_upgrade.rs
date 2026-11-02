@@ -1,23 +1,29 @@
 use std::{fs, path::Path, process::Command};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
+use orna_repository_v1::{
+    LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE, LegacyAnnotationCandidate, MigrationAnnotationDefaults,
+    migration_copy::{LEGACY_ANNOTATION_DEFAULT_FORMAT, LegacyAnnotationInventory},
+};
 use orna_runtime_v1::RuntimeState;
 use orna_storage_v1::{LoosePath, RuntimePublicationCoordinator};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use tempfile::TempDir;
-use orna_repository_v1::{
-    migration_copy::{LegacyAnnotationInventory, LEGACY_ANNOTATION_DEFAULT_FORMAT},
-    LegacyAnnotationCandidate, MigrationAnnotationDefaults, LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE,
-};
 use orna_value_v1::{Blob, MediaAnnotation};
+use tempfile::TempDir;
 
 #[path = "../../orna-cli-v1/tests/support/format3.rs"]
 mod format3;
 #[path = "../../orna-cli-v1/tests/support/media_commit.rs"]
 mod media_commit;
 
-const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../orna-cli-v1/tests/fixtures/media");
-const IMPORT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../orna-cli-v1/tests/fixtures/media/import-song.orna");
+const MEDIA_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../orna-cli-v1/tests/fixtures/media"
+);
+const IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../orna-cli-v1/tests/fixtures/media/import-song.orna"
+);
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -67,9 +73,11 @@ async fn req_upgrade_003_writes_rows_only_to_the_canonical_format3_store() {
     let capability = repository
         .capture_capability(relation_id)
         .expect("issue admitted capture capability");
-    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16)
-        .expect("bounded filesystem provider");
-    filesystem.allow_root(media.path()).expect("allow media fixture root");
+    let mut filesystem =
+        FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
+    filesystem
+        .allow_root(media.path())
+        .expect("allow media fixture root");
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default())
         .with_filesystem_provider(filesystem)
         .with_repository_capture_capability(capability);
@@ -125,12 +133,30 @@ async fn req_upgrade_003_writes_rows_only_to_the_canonical_format3_store() {
         &["ls-tree", "-r", "--name-only", "HEAD"],
     );
     let paths: Vec<_> = tree.lines().collect();
-    assert!(paths.iter().any(|path| path.starts_with(".orna/store/")), "native store is committed: {tree}");
-    assert!(paths.contains(&".orna/database.orna"), "format metadata remains tracked: {tree}");
-    assert!(paths.iter().all(|path| !path.starts_with("media/")), "no loose-row files are written: {tree}");
-    assert!(paths.iter().all(|path| !path.starts_with(".orna/rows/")), "no alternate row store is written: {tree}");
-    assert!(paths.iter().all(|path| !path.starts_with(".orna/compact/")), "no compact representation is dual-written: {tree}");
-    assert!(!paths.contains(&".orna/format.orna"), "no legacy format marker is written: {tree}");
+    assert!(
+        paths.iter().any(|path| path.starts_with(".orna/store/")),
+        "native store is committed: {tree}"
+    );
+    assert!(
+        paths.contains(&".orna/database.orna"),
+        "format metadata remains tracked: {tree}"
+    );
+    assert!(
+        paths.iter().all(|path| !path.starts_with("media/")),
+        "no loose-row files are written: {tree}"
+    );
+    assert!(
+        paths.iter().all(|path| !path.starts_with(".orna/rows/")),
+        "no alternate row store is written: {tree}"
+    );
+    assert!(
+        paths.iter().all(|path| !path.starts_with(".orna/compact/")),
+        "no compact representation is dual-written: {tree}"
+    );
+    assert!(
+        !paths.contains(&".orna/format.orna"),
+        "no legacy format marker is written: {tree}"
+    );
 }
 
 #[test]
@@ -156,7 +182,10 @@ fn req_upgrade_004_legacy_blob_defaults_are_explicit_and_payload_free() {
     );
     assert_eq!(inventory.rows()[0].annotation_media_type(), None);
     assert_eq!(inventory.rows()[0].suffix(), None);
-    assert_eq!(inventory.rows()[1].annotation_media_type(), Some("audio/mpeg"));
+    assert_eq!(
+        inventory.rows()[1].annotation_media_type(),
+        Some("audio/mpeg")
+    );
     assert_eq!(inventory.rows()[1].suffix(), Some("mp2"));
     assert_eq!(defaults.entry_count(), 1);
     assert!(!defaults.payload_inspected());
@@ -187,12 +216,16 @@ fn req_upgrade_005_reports_annotation_transition_beyond_content_identity() {
         .annotate(LEGACY_ANNOTATION_DEFAULT_MEDIA_TYPE, None)
         .expect("migration default annotation is canonical MIME-1");
 
-    assert!(source_value
-        .same_content(&migrated_value)
-        .expect("inline content identity is available"));
-    assert!(!source_value
-        .value_eq(&migrated_value)
-        .expect("annotation identity is available"));
+    assert!(
+        source_value
+            .same_content(&migrated_value)
+            .expect("inline content identity is available")
+    );
+    assert!(
+        !source_value
+            .value_eq(&migrated_value)
+            .expect("annotation identity is available")
+    );
     assert_eq!(migrated_value.media_type(), "application/octet-stream");
     assert_eq!(migrated_value.suffix(), None);
 }

@@ -290,9 +290,10 @@ impl ProcessProvider {
         join_reader(stdout_thread);
         join_reader(stderr_thread);
         if let Some(writer) = input_thread
-            && !matches!(writer.join(), Ok(Ok(()))) {
-                return Err(ProcessProviderError::Unavailable);
-            }
+            && !matches!(writer.join(), Ok(Ok(())))
+        {
+            return Err(ProcessProviderError::Unavailable);
+        }
         let mut capture = capture
             .lock()
             .expect("process capture mutex is not poisoned");

@@ -1,7 +1,7 @@
 use orna_sys_v1::{
-    explain_query, ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, PlanNullOrder, PlanOrdering,
+    ExpressionRef, ObjectRef, PlanDetail, PlanNodeKind, PlanNullOrder, PlanOrdering,
     PlanSortDirection, QueryJoinDescription, QueryPlanDescription, QuerySourceStatistics,
-    SnapshotRef,
+    SnapshotRef, explain_query,
 };
 
 const QUERY_PLAN_FIXTURE: &str = include_str!("fixtures/query_plan_hint_statistics_azb4m.orna");

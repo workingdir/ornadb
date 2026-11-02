@@ -472,12 +472,19 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
         .to_owned();
     let gitlink = git_output(
         source,
-        &["--no-replace-objects", "ls-tree", &snapshot, "--", DEPENDENCY_PATH],
+        &[
+            "--no-replace-objects",
+            "ls-tree",
+            &snapshot,
+            "--",
+            DEPENDENCY_PATH,
+        ],
         None,
     );
     assert!(
-        String::from_utf8_lossy(&gitlink)
-            .contains(&format!("160000 commit {dependency_commit}\t{DEPENDENCY_PATH}")),
+        String::from_utf8_lossy(&gitlink).contains(&format!(
+            "160000 commit {dependency_commit}\t{DEPENDENCY_PATH}"
+        )),
         "the committed snapshot stores the exact dependency commit as a native gitlink"
     );
     git(
@@ -659,12 +666,16 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     assert_eq!(source_rows.len(), 1, "publish commits the imported row");
     let publication = stdout(&published)
         .split_whitespace()
-        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit())).map_or_else(|| {
-            panic!(
-                "publish names the publication commit: {}",
-                stdout(&published)
-            )
-        }, str::to_owned);
+        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map_or_else(
+            || {
+                panic!(
+                    "publish names the publication commit: {}",
+                    stdout(&published)
+                )
+            },
+            str::to_owned,
+        );
     let head = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -980,10 +991,7 @@ fn export_fails_locally_for_a_missing_promisor_object() {
         !has_local_object(),
         "the object is missing locally before export"
     );
-    assert!(
-        has_origin_object(),
-        "the origin can still serve the object"
-    );
+    assert!(has_origin_object(), "the origin can still serve the object");
     let archive = outside.path().join("incomplete-copy");
     std::fs::create_dir(&archive).unwrap();
     let exported = run(
@@ -1174,7 +1182,10 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
         restored_length += u64::try_from(count).expect("a read count fits u64");
         hasher.update(&buffer[..count]);
     }
-    assert_eq!(restored_length, u64::try_from(payload_length).expect("payload length fits u64"));
+    assert_eq!(
+        restored_length,
+        u64::try_from(payload_length).expect("payload length fits u64")
+    );
     let restored_sha256: [u8; 32] = hasher.finalize().into();
     assert_eq!(
         restored_sha256, expected_sha256,

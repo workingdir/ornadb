@@ -1,7 +1,6 @@
 use orna_repository_v1::{Repository, RepositoryError};
 use orna_runtime_v1::{
-    FaultInjector, FaultPoint, NoFault, RuntimeError, RuntimeIdentity, RuntimeState,
-    TableMutation,
+    FaultInjector, FaultPoint, NoFault, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
 };
 use std::{fs, path::Path, process::Command};
 use tempfile::TempDir;
@@ -22,7 +21,10 @@ fn git(directory: &Path, args: &[&str]) {
 fn repository() -> (TempDir, Repository) {
     let temp = TempDir::new().unwrap();
     git(temp.path(), &["init", "-b", "main"]);
-    git(temp.path(), &["config", "user.email", "test@example.invalid"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "test@example.invalid"],
+    );
     git(temp.path(), &["config", "user.name", "Orna test"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(temp.path().join("main.orna"), "module main;\n").unwrap();
@@ -62,9 +64,11 @@ async fn local_embedded_state_rolls_back_row_and_checkpoint_together() {
         .unwrap();
     let state_db = repository.runtime_paths().state_db();
     assert!(state_db.starts_with(repository.runtime_paths().root()));
-    assert!(fs::read(&state_db)
-        .unwrap()
-        .starts_with(b"SQLite format 3\0"));
+    assert!(
+        fs::read(&state_db)
+            .unwrap()
+            .starts_with(b"SQLite format 3\0")
+    );
 
     let lease = runtime.acquire_lease(owner_id).await.unwrap();
     let before = runtime.capture().await.unwrap();
@@ -91,24 +95,24 @@ async fn local_embedded_state_rolls_back_row_and_checkpoint_together() {
     );
     assert_eq!(runtime.capture().await.unwrap(), before);
     assert_eq!(
-        runtime.committed_table_row("Contact", b"alice").await.unwrap(),
+        runtime
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         None
     );
     assert!(runtime.pending().await.unwrap().is_empty());
 
     let committed = runtime
-        .commit_table_activation(
-            lease,
-            &context,
-            &[mutation],
-            [7; 32],
-            &NoFault,
-        )
+        .commit_table_activation(lease, &context, &[mutation], [7; 32], &NoFault)
         .await
         .unwrap();
     assert_eq!(committed.generation().to_string(), "1");
     assert_eq!(
-        runtime.committed_table_row("Contact", b"alice").await.unwrap(),
+        runtime
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         Some(b"Alice".to_vec())
     );
     assert_eq!(runtime.pending().await.unwrap().len(), 1);
@@ -184,10 +188,9 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
     let old_owner = RuntimeState::open_with_owner_id(&repository, identity, [15; 32], old_owner_id)
         .await
         .unwrap();
-    let secondary =
-        RuntimeState::open_with_owner_id(&repository, identity, [15; 32], new_owner_id)
-            .await
-            .unwrap();
+    let secondary = RuntimeState::open_with_owner_id(&repository, identity, [15; 32], new_owner_id)
+        .await
+        .unwrap();
     assert!(old_owner.holds_runtime_owner_lock());
     assert!(!secondary.holds_runtime_owner_lock());
 
@@ -232,7 +235,10 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
         Err(RuntimeError::LeaseHeld)
     );
     assert_eq!(
-        secondary.committed_table_row("Contact", b"alice").await.unwrap(),
+        secondary
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         None
     );
 
@@ -252,27 +258,30 @@ async fn replacement_runtime_fences_stale_writer_before_accepting_mutations() {
         Err(RuntimeError::OwnerLost)
     );
     assert_eq!(
-        replacement.committed_table_row("Contact", b"alice").await.unwrap(),
+        replacement
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         None
     );
     assert_eq!(
-        secondary.committed_table_row("Contact", b"alice").await.unwrap(),
+        secondary
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         None
     );
 
     let context = replacement.begin_activation().await.unwrap();
     replacement
-        .commit_table_activation(
-            replacement_lease,
-            &context,
-            &[mutation],
-            [18; 32],
-            &NoFault,
-        )
+        .commit_table_activation(replacement_lease, &context, &[mutation], [18; 32], &NoFault)
         .await
         .unwrap();
     assert_eq!(
-        replacement.committed_table_row("Contact", b"alice").await.unwrap(),
+        replacement
+            .committed_table_row("Contact", b"alice")
+            .await
+            .unwrap(),
         Some(b"Alice".to_vec())
     );
 }
@@ -290,9 +299,7 @@ fn owner_lock_recovers_after_lost_acquisition_response() {
     if let (Ok(path), Ok(owner)) = (std::env::var(REPOSITORY_ENV), std::env::var(OWNER_ENV)) {
         let owner = owner.parse::<u8>().unwrap();
         let repository = Repository::discover(path).unwrap();
-        let _lock = repository
-            .acquire_runtime_owner_lock([owner; 16])
-            .unwrap();
+        let _lock = repository.acquire_runtime_owner_lock([owner; 16]).unwrap();
         std::process::abort();
     }
 
@@ -368,7 +375,11 @@ fn owner_lock_serializes_competing_state_renames() {
     let state_inode = fs::metadata(&owner_state_path).unwrap().ino();
     drop(winner);
 
-    let replacement_id = if winner_id == [31; 16] { [32; 16] } else { [31; 16] };
+    let replacement_id = if winner_id == [31; 16] {
+        [32; 16]
+    } else {
+        [31; 16]
+    };
     let replacement = repository
         .acquire_runtime_owner_lock(replacement_id)
         .unwrap();

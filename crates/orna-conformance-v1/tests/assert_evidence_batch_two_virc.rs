@@ -6,11 +6,15 @@ use orna_semantic_v1::{
     analyze_with_catalogue,
 };
 
-const RUNTIME_FIXTURE: &str = include_str!("fixtures/assert-evidence-batch-two/runtime-boundaries.orna");
+const RUNTIME_FIXTURE: &str =
+    include_str!("fixtures/assert-evidence-batch-two/runtime-boundaries.orna");
 
 fn execute(
     entry: &str,
-) -> (StageOutcome<orna_foundation_v1::Diagnostic>, TransactionalEvaluator) {
+) -> (
+    StageOutcome<orna_foundation_v1::Diagnostic>,
+    TransactionalEvaluator,
+) {
     let mut runtime = TransactionalEvaluator::new(entry, Limits::default());
     let unit = SourceUnit {
         fixture_id: format!("assert-evidence-batch-two-{entry}"),
@@ -27,8 +31,16 @@ fn execute(
 fn assert_004_checks_the_complete_unpublished_candidate_relation() {
     let (outcome, runtime) = execute("mutate_candidate");
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Note", &Value::int(3.into())).is_some());
-    assert!(runtime.committed_row("Note", &Value::int(1.into())).is_none());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(3.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(1.into()))
+            .is_none()
+    );
 }
 
 #[test]
@@ -36,18 +48,37 @@ fn assert_004_checks_the_complete_unpublished_candidate_relation() {
 fn assert_005_includes_insert_update_delete_and_rekey_in_candidate_evidence() {
     let (outcome, runtime) = execute("mutate_candidate");
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Note", &Value::int(3.into())).is_some());
-    assert!(runtime.committed_row("Note", &Value::int(2.into())).is_none());
-    assert!(runtime.committed_row("Note", &Value::int(1.into())).is_none());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(3.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(2.into()))
+            .is_none()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(1.into()))
+            .is_none()
+    );
 }
 
 #[test]
 // Specified: ORNA-ASSERT-013.
 fn assert_013_false_table_assertion_blocks_candidate_visibility() {
     let (outcome, runtime) = execute("candidate_failure");
-    assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"));
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT")
+    );
     for id in [4, 5] {
-        assert!(runtime.committed_row("Note", &Value::int(id.into())).is_none(), "candidate row {id} became visible");
+        assert!(
+            runtime
+                .committed_row("Note", &Value::int(id.into()))
+                .is_none(),
+            "candidate row {id} became visible"
+        );
     }
 }
 
@@ -68,34 +99,68 @@ fn assert_021_valid_module_assertion_resolves_two_distinct_tables() {
         &[ModuleInput::new("cross-table-assertion.orna", source)],
         &Catalogue::authoritative_fixture(),
     );
-    assert!(analysis.diagnostics.is_empty(), "{:?}", analysis.diagnostics);
-    let plans = analysis.assertions.values().flat_map(|plans| plans.iter()).collect::<Vec<_>>();
+    assert!(
+        analysis.diagnostics.is_empty(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    let plans = analysis
+        .assertions
+        .values()
+        .flat_map(|plans| plans.iter())
+        .collect::<Vec<_>>();
     assert_eq!(plans.len(), 1);
-    assert_eq!(plans[0].dependencies.len(), 2, "the plan names two distinct table dependencies");
+    assert_eq!(
+        plans[0].dependencies.len(),
+        2,
+        "the plan names two distinct table dependencies"
+    );
 }
 
 #[test]
 // Specified: ORNA-ASSERT-022.
 fn assert_022_module_assertion_with_one_table_dependency_is_rejected() {
-    let source = include_str!("fixtures/reference/examples/invalid/module-single-table-assertion.orna");
-    let analysis = analyze(&[ModuleInput::new("module-single-table-assertion.orna", source)]);
-    assert!(analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_ONE_TABLE), "{:?}", analysis.diagnostics);
+    let source =
+        include_str!("fixtures/reference/examples/invalid/module-single-table-assertion.orna");
+    let analysis = analyze(&[ModuleInput::new(
+        "module-single-table-assertion.orna",
+        source,
+    )]);
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_ONE_TABLE),
+        "{:?}",
+        analysis.diagnostics
+    );
 }
 
 // ORNA-MODULE-002: rejects module assertions without a cross-table invariant dependency.
 #[test]
 // Specified: ORNA-ASSERT-023.
 fn assert_023_module_assertion_without_table_dependencies_is_rejected() {
-    let source = include_str!("fixtures/reference/examples/invalid/module-zero-table-assertion.orna");
+    let source =
+        include_str!("fixtures/reference/examples/invalid/module-zero-table-assertion.orna");
     let analysis = analyze(&[ModuleInput::new("module-zero-table-assertion.orna", source)]);
-    assert!(analysis.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_SCOPE), "{:?}", analysis.diagnostics);
+    assert!(
+        analysis
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_ASSERTION_SCOPE),
+        "{:?}",
+        analysis.diagnostics
+    );
 }
 
 #[test]
 // Specified: ORNA-ASSERT-026.
 fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
     let (outcome, runtime) = execute("module_failure");
-    assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"), "{outcome:?}");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"),
+        "{outcome:?}"
+    );
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(8.into())), None);
 }
@@ -104,7 +169,10 @@ fn assert_026_changed_dependency_tables_trigger_the_module_assertion() {
 // Specified: ORNA-ASSERT-027.
 fn assert_027_table_assertions_fail_before_module_assertions() {
     let (outcome, runtime) = execute("table_and_module_failure");
-    assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"), "first failure must be the table-owned assertion: {outcome:?}");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"),
+        "first failure must be the table-owned assertion: {outcome:?}"
+    );
     assert_eq!(runtime.committed_row("Book", &Value::int(10.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(11.into())), None);
 }
@@ -113,7 +181,10 @@ fn assert_027_table_assertions_fail_before_module_assertions() {
 // Specified: ORNA-ASSERT-029.
 fn assert_029_false_module_assertion_rolls_back_the_complete_database_candidate() {
     let (outcome, runtime) = execute("module_failure");
-    assert!(matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"), "{outcome:?}");
+    assert!(
+        matches!(outcome, StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-MODULE-ASSERT"),
+        "{outcome:?}"
+    );
     assert_eq!(runtime.committed_row("Book", &Value::int(7.into())), None);
     assert_eq!(runtime.committed_row("Loan", &Value::int(8.into())), None);
 }

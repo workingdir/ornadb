@@ -38,17 +38,16 @@ use orna_value_v1::{Raw, SchemaDescriptor, Value, decode_canonical_storage_value
 use sha2::{Digest, Sha256};
 
 use crate::{
-    DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, IndexGeneration, IndexTreeRef,
-    HistoricalFormatContext,
-    PrivateCommit, Repository, RepositoryError, RepositoryFormat, RepositoryFormatContext, Uuid,
+    DatabaseId, FormatContextError, GitCommitRef, GitIndexLock, HistoricalFormatContext,
+    IndexGeneration, IndexTreeRef, PrivateCommit, Repository, RepositoryError, RepositoryFormat,
+    RepositoryFormatContext, Uuid,
     allocator::AllocatorError,
     bind_tree_entry_in_index,
     blob_store::GearChunker,
     native_graph::{
         ByteIndexEntry, GitHashAlgorithm, GraphError, IndexMaintenance, MAX_GRAPH_HEIGHT, MAX_REFS,
         NativeGraphContext, NativeNodeEnvelope, NativeObjectKind, NativeOid, NodeData,
-        RowIndexMutation, StoreRelationEntry, hex_decode, hex_encode,
-        sync_object_files,
+        RowIndexMutation, StoreRelationEntry, hex_decode, hex_encode, sync_object_files,
     },
     overflow::{OverflowStore, OverflowWriter},
     row_store::{
@@ -1136,9 +1135,10 @@ impl Repository {
             .filter(|identity| !identity.retired)
             .map(|identity| identity.id)
             .collect::<BTreeSet<_>>();
-        if let Some(relation_id) = entries.keys().find(|relation_id| {
-            !is_system_relation(relation_id) && !owners.contains(*relation_id)
-        }) {
+        if let Some(relation_id) = entries
+            .keys()
+            .find(|relation_id| !is_system_relation(relation_id) && !owners.contains(*relation_id))
+        {
             return Err(RelationAdmissionError::OrphanRelation {
                 relation_id: *relation_id,
             });
@@ -1797,7 +1797,9 @@ impl Repository {
             .args(["ls-files", "--stage", "-z", "--"])
             .arg(path.as_path());
         let listed = self.run(list)?.stdout;
-        let mut entries = listed.split(|byte| *byte == 0).filter(|entry| !entry.is_empty());
+        let mut entries = listed
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty());
         let entry = entries.next().ok_or_else(not_staged)?;
         if entries.next().is_some() {
             return Err(not_staged());
@@ -3515,7 +3517,11 @@ mod tests {
         fs::create_dir(&loose).unwrap();
 
         assert!(matches!(
-            repository.commit_reviewed_candidate(&review, "initial source", &crate::AcceptAllAssertions),
+            repository.commit_reviewed_candidate(
+                &review,
+                "initial source",
+                &crate::AcceptAllAssertions
+            ),
             Err(RepositoryError::Graph(GraphError::DurabilityFailed))
         ));
         assert!(
@@ -3604,7 +3610,12 @@ mod tests {
         let edited = [StagedRelation::new(music, table_descriptor(music, "Int"))];
         let staged = repository.capture_staged_candidate().unwrap();
         let admission = repository
-            .stage_store_admission(&staged, &edited, &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .stage_store_admission(
+                &staged,
+                &edited,
+                &identities_for(&[music]),
+                CommittedRelationChanges::Allowed,
+            )
             .expect("uncommitted relations follow the staged source");
         let admitted = [music];
         assert_eq!(admission.admitted(), admitted.as_slice());
@@ -3617,14 +3628,34 @@ mod tests {
         let staged = repository.capture_staged_candidate().unwrap();
         let original = [StagedRelation::new(music, table_descriptor(music, "Str"))];
         let evolved = repository
-            .stage_store_admission(&staged, &original, &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .stage_store_admission(
+                &staged,
+                &original,
+                &identities_for(&[music]),
+                CommittedRelationChanges::Allowed,
+            )
             .expect("a committed relation without rows evolves to its staged schema");
-        assert!(evolved.evolved().iter().any(|change| *change.relation_id() == music));
+        assert!(
+            evolved
+                .evolved()
+                .iter()
+                .any(|change| *change.relation_id() == music)
+        );
         let staged = repository.capture_staged_candidate().unwrap();
         let removed = repository
-            .stage_store_admission(&staged, &[], &identities_for(&[music]), CommittedRelationChanges::Allowed)
+            .stage_store_admission(
+                &staged,
+                &[],
+                &identities_for(&[music]),
+                CommittedRelationChanges::Allowed,
+            )
             .expect("a relation the source no longer declares leaves the store");
-        assert!(removed.removed().iter().any(|change| *change.relation_id() == music));
+        assert!(
+            removed
+                .removed()
+                .iter()
+                .any(|change| *change.relation_id() == music)
+        );
 
         // The user's removal from the index, unmodified: skip-worktree payload
         // entries survive it, so the index keeps a partial store.

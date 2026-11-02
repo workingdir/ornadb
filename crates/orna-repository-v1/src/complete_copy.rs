@@ -1990,7 +1990,13 @@ mod tests {
         };
         // Restoring joins the path onto the copy, so `.git` here would fetch,
         // and later check out, a dependency inside a Git directory.
-        for hostile in [".git", "deps/.git", "deps/.GIT/hooks", "deps/git~1", "deps/.git. "] {
+        for hostile in [
+            ".git",
+            "deps/.git",
+            "deps/.GIT/hooks",
+            "deps/git~1",
+            "deps/.git. ",
+        ] {
             assert!(
                 matches!(
                     CompleteCopyManifest::decode(&document(hostile)),
@@ -2185,7 +2191,13 @@ mod git_binding_tests {
         let linked = worktrees.path().join("linked");
         git(
             parent.path(),
-            &["worktree", "add", "-q", "--detach", linked.to_str().unwrap()],
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                linked.to_str().unwrap(),
+            ],
         );
         let links = tempfile::TempDir::new().unwrap();
         let dependency = links.path().join("dependency");

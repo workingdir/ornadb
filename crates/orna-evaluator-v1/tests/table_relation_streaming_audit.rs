@@ -7134,26 +7134,14 @@ fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
         let rows = values.chunks(2).collect::<Vec<_>>();
         BTreeMap::from([
             (None, page(rows[0], Some(long_a.clone()))),
-            (
-                Some(long_a.clone()),
-                page(rows[1], Some(compact_a.clone())),
-            ),
-            (
-                Some(compact_a.clone()),
-                page(rows[2], Some(long_b.clone())),
-            ),
-            (
-                Some(long_b.clone()),
-                page(rows[3], Some(compact_b.clone())),
-            ),
+            (Some(long_a.clone()), page(rows[1], Some(compact_a.clone()))),
+            (Some(compact_a.clone()), page(rows[2], Some(long_b.clone()))),
+            (Some(long_b.clone()), page(rows[3], Some(compact_b.clone()))),
             (
                 Some(compact_b.clone()),
                 page(rows[4], Some(after_compaction.clone())),
             ),
-            (
-                Some(after_compaction.clone()),
-                page(&[999_999], None),
-            ),
+            (Some(after_compaction.clone()), page(&[999_999], None)),
         ])
     };
     let mut source = PairedCursorRestoreSource::new([
@@ -7215,10 +7203,12 @@ fn paired_nested_spill_shared_cursors_follow_reverse_lane_order() {
         })
         .collect::<Vec<_>>();
     assert_eq!(source.cursors, expected_cursors);
-    assert!(source
-        .cursors
-        .iter()
-        .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction)));
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&after_compaction))
+    );
     assert!(source.pending["View.Left"].is_empty());
     assert!(source.pending["View.Right"].is_empty());
 }
@@ -7256,10 +7246,12 @@ fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
     );
 
     assert_eq!(source.lanes.len(), 2);
-    assert!(source
-        .lanes
-        .iter()
-        .all(|(source_name, _, _)| source_name == "View.Paired"));
+    assert!(
+        source
+            .lanes
+            .iter()
+            .all(|(source_name, _, _)| source_name == "View.Paired")
+    );
     assert_ne!(source.lanes[0].1, source.lanes[1].1);
     let expected_chain = [
         None,
@@ -7279,10 +7271,12 @@ fn paired_nested_folds_keep_identity_across_same_source_restore_chains() {
         })
         .collect::<Vec<_>>();
     assert_eq!(source.cursors, expected_cursors);
-    assert!(source
-        .cursors
-        .iter()
-        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4]))
+    );
     assert!(source.pending["View.Paired"].is_empty());
 }
 
@@ -7333,16 +7327,7 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_nested_restore_fold_functions();
     let mut outputs = Vec::new();
-    for (
-        first_depth,
-        second_depth,
-        reverse_order,
-        _,
-        _,
-        expected_first,
-        expected_second,
-    ) in cases
-    {
+    for (first_depth, second_depth, reverse_order, _, _, expected_first, expected_second) in cases {
         functions.insert(
             "run".into(),
             PureFunction {
@@ -7369,8 +7354,7 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
             integer_pair(expected_first, expected_second)
         };
         assert_eq!(
-            output,
-            expected,
+            output, expected,
             "fold depths {first_depth}/{second_depth} keep the paired restored values"
         );
         outputs.push(output);
@@ -7418,9 +7402,11 @@ fn paired_nested_fold_restores_keep_scopes_as_fold_depths_change() {
         })
         .collect::<Vec<_>>();
     assert_eq!(source.cursors, expected_cursors);
-    assert!(source
-        .cursors
-        .iter()
-        .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4])));
+    assert!(
+        source
+            .cursors
+            .iter()
+            .all(|(_, _, cursor)| cursor.as_ref() != Some(&chain[4]))
+    );
     assert!(source.pending["View.Paired"].is_empty());
 }

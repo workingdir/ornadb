@@ -327,9 +327,18 @@ mod tests {
     fn local_types_and_parameter_names_follow_the_source() {
         const SOURCE: &str = include_str!("../tests/fixtures/editor-lsp-hints.orna");
         let labels = hints(SOURCE);
-        assert!(labels.iter().any(|label| label.starts_with(": Int@")), "{labels:?}");
-        assert!(labels.iter().any(|label| label.starts_with("left: @")), "{labels:?}");
-        assert!(labels.iter().any(|label| label.starts_with("right: @")), "{labels:?}");
+        assert!(
+            labels.iter().any(|label| label.starts_with(": Int@")),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label.starts_with("left: @")),
+            "{labels:?}"
+        );
+        assert!(
+            labels.iter().any(|label| label.starts_with("right: @")),
+            "{labels:?}"
+        );
     }
 
     #[test]
@@ -343,7 +352,11 @@ mod tests {
             .into_iter()
             .filter(|label| label.starts_with(": "))
             .collect::<Vec<_>>();
-        assert_eq!(labels, [": Bool@5:12", ": Bool@6:12", ": Int@7:13"], "{labels:?}");
+        assert_eq!(
+            labels,
+            [": Bool@5:12", ": Bool@6:12", ": Int@7:13"],
+            "{labels:?}"
+        );
     }
 
     #[test]

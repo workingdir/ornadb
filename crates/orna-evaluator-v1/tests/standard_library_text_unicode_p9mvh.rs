@@ -77,7 +77,11 @@ fn text_module_is_captured_in_the_reference_profile() {
         .iter()
         .filter(|(path, _)| path == "std/text.orna")
         .collect::<Vec<_>>();
-    assert_eq!(text_sources.len(), 1, "std/text.orna is pinned exactly once");
+    assert_eq!(
+        text_sources.len(),
+        1,
+        "std/text.orna is pinned exactly once"
+    );
 
     let profile = reference_standard_profile();
     let (path, source) = text_sources[0];

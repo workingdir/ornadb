@@ -15,15 +15,15 @@ use sha2::{Digest, Sha256};
 #[path = "../src/abi_version.rs"]
 #[allow(dead_code)]
 mod abi_version;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
 #[path = "../build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
+#[path = "../src/host_registry_model.rs"]
+#[allow(dead_code)]
+mod host_registry_model;
 
 const SYS_API_1_1_SHA256: &str = "10ef7dab9665de4e065ee2b96797b2751c7c3f98f9886241011aee0cc8c0d40e";
 

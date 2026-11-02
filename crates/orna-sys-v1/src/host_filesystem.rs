@@ -553,8 +553,7 @@ impl<'a> RootedPath<'a> {
         for component in path.components() {
             match component {
                 Component::Normal(name)
-                    if !orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes()) => {
-                }
+                    if !orna_foundation_v1::is_git_metadata_component(name.as_encoded_bytes()) => {}
                 Component::CurDir => {}
                 Component::Normal(_)
                 | Component::ParentDir

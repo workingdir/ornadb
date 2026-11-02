@@ -88,8 +88,7 @@ fn conjunct_work_runs_after_disjunct_expansion_limits_and_cannot_refund_prior_wo
     let disjunct_filter_surface =
         serde_json::to_value(disjunct_filter).expect("disjunct filter serializes");
     assert_eq!(
-        disjunct_filter_surface["predicate"],
-        "expr:first-or-second",
+        disjunct_filter_surface["predicate"], "expr:first-or-second",
         "the pre-limit filter is the disjunctive predicate"
     );
     assert_eq!(
@@ -108,8 +107,7 @@ fn conjunct_work_runs_after_disjunct_expansion_limits_and_cannot_refund_prior_wo
     let conjunct_filter_surface =
         serde_json::to_value(conjunct_filter).expect("conjunct filter serializes");
     assert_eq!(
-        conjunct_filter_surface["predicate"],
-        "expr:third-and-fourth",
+        conjunct_filter_surface["predicate"], "expr:third-and-fourth",
         "the post-limit filter is the conjunct predicate"
     );
     assert_eq!(

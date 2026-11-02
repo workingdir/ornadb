@@ -180,8 +180,7 @@ const REFERENCE_STANDARD_REGEX_UTILITIES_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/regex/utilities.orna");
 const REFERENCE_STANDARD_TIME_UTILITIES_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/time/utilities.orna");
-const REFERENCE_STANDARD_SORTING_SOURCE_V1: &str =
-    include_str!("../../../stdlib/std/sorting.orna");
+const REFERENCE_STANDARD_SORTING_SOURCE_V1: &str = include_str!("../../../stdlib/std/sorting.orna");
 const REFERENCE_STANDARD_FORMAT_STRINGS_SOURCE_V1: &str =
     include_str!("../../../stdlib/std/format/strings.orna");
 const REFERENCE_STANDARD_PARSE_UTILITIES_SOURCE_V1: &str =

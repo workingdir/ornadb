@@ -60,12 +60,19 @@ fn is_function(kind: DeclaredKind) -> bool {
 fn declared_at_range(workspace: &Workspace, module: usize, range: &Range) -> Option<usize> {
     let file = workspace.file(module);
     let mapper = PositionMapper::new(file.text());
-    let span = SyntaxSpan::new(mapper.byte_offset(range.start), mapper.byte_offset(range.end));
+    let span = SyntaxSpan::new(
+        mapper.byte_offset(range.start),
+        mapper.byte_offset(range.end),
+    );
     file.names.declared_at(&span)
 }
 
 /// The function or method declared at an item's selection range.
-fn function_of_item(workspace: &Workspace, module: usize, item: &CallHierarchyItem) -> Option<usize> {
+fn function_of_item(
+    workspace: &Workspace,
+    module: usize,
+    item: &CallHierarchyItem,
+) -> Option<usize> {
     let index = declared_at_range(workspace, module, &item.selection_range)?;
     let declared = workspace.declaration(module, index);
     (is_function(declared.kind) && declared.name == item.name).then_some(index)
@@ -165,7 +172,12 @@ pub(crate) fn prepare_call_hierarchy(
         return None;
     }
     let mut mappers = Mappers::new(workspace);
-    Some(vec![call_item(workspace, &mut mappers, declared_module, index)])
+    Some(vec![call_item(
+        workspace,
+        &mut mappers,
+        declared_module,
+        index,
+    )])
 }
 
 /// The functions and methods that call the one `item` names, with the
@@ -181,7 +193,10 @@ pub(crate) fn incoming_calls(
     let mut callers = BTreeMap::<(usize, usize), Vec<SyntaxSpan>>::new();
     for (caller_module, span) in calls_of(workspace, &Target::Declared { module, index }) {
         if let Some(caller) = enclosing_function(workspace, caller_module, &span) {
-            callers.entry((caller_module, caller)).or_default().push(span);
+            callers
+                .entry((caller_module, caller))
+                .or_default()
+                .push(span);
         }
     }
     let mut order = callers.keys().copied().collect::<Vec<_>>();
@@ -359,7 +374,12 @@ pub(crate) fn prepare_type_hierarchy(
         return None;
     };
     let mut mappers = Mappers::new(workspace);
-    Some(vec![type_item(workspace, &mut mappers, declared_module, index)?])
+    Some(vec![type_item(
+        workspace,
+        &mut mappers,
+        declared_module,
+        index,
+    )?])
 }
 
 fn implementations(declaration: &Declaration) -> Vec<&Implementation> {
@@ -373,7 +393,10 @@ fn implementations(declaration: &Declaration) -> Vec<&Implementation> {
             .collect(),
         Declaration::Type {
             representation:
-                TypeRepresentation::Alias { refinements: members, .. }
+                TypeRepresentation::Alias {
+                    refinements: members,
+                    ..
+                }
                 | TypeRepresentation::Nominal { members },
             ..
         } => members
@@ -389,7 +412,11 @@ fn implementations(declaration: &Declaration) -> Vec<&Implementation> {
 
 /// The protocols the table or type `index` implements, each through a
 /// protocol path that resolves to exactly one protocol declaration.
-fn implemented_protocols(workspace: &Workspace, module: usize, index: usize) -> Vec<(usize, usize)> {
+fn implemented_protocols(
+    workspace: &Workspace,
+    module: usize,
+    index: usize,
+) -> Vec<(usize, usize)> {
     let file = workspace.file(module);
     let full = &workspace.declaration(module, index).full;
     let Some(item) = file
@@ -647,8 +674,8 @@ mod tests {
         assert_eq!(supertypes[0].name, "Renderable");
         assert_eq!(supertypes[0].uri.as_str(), "file:///p/shapes.orna");
 
-        let renderable = prepare_type_hierarchy(&workspace, 1, SHAPES.find("Renderable").unwrap())
-            .unwrap();
+        let renderable =
+            prepare_type_hierarchy(&workspace, 1, SHAPES.find("Renderable").unwrap()).unwrap();
         let subtypes = subtypes(&workspace, 1, &renderable[0]);
         assert_eq!(subtypes.len(), 1);
         assert_eq!(subtypes[0].name, "Page");

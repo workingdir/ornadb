@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use orna_semantic_v1::{
-    Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_MISSING_REQUIRED_FIELD, DIAG_TABLE_FIELD_TYPE, DIAG_TABLE_UNKNOWN_FIELD,
-    DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
+    Analysis, DIAG_ASSERTION_EFFECT, DIAG_BAD_PATH, DIAG_MISSING_REQUIRED_FIELD,
+    DIAG_TABLE_FIELD_TYPE, DIAG_TABLE_UNKNOWN_FIELD, DIAG_TYPE, DIAG_UNRESOLVED, DIAG_UNSUPPORTED,
     ModuleInput, RowUnitInput, admit_row_unit, analyze, lower_row_unit,
     lower_row_unit_with_owner_fields,
 };
@@ -302,8 +302,14 @@ fn row_unit_rejects_wrong_unknown_and_missing_non_key_fields() {
     let analysis = contact_analysis();
     let key_path = ["alice-smith.orna".to_owned()];
     let cases = [
-        (r#"{ name: 42, emails: ["alice@example.com"], }"#, DIAG_TABLE_FIELD_TYPE),
-        (r#"{ name: "Alice Smith", emails: ["alice@example.com"], unknown: true, }"#, DIAG_TABLE_UNKNOWN_FIELD),
+        (
+            r#"{ name: 42, emails: ["alice@example.com"], }"#,
+            DIAG_TABLE_FIELD_TYPE,
+        ),
+        (
+            r#"{ name: "Alice Smith", emails: ["alice@example.com"], unknown: true, }"#,
+            DIAG_TABLE_UNKNOWN_FIELD,
+        ),
         (r#"{ name: "Alice Smith" }"#, DIAG_MISSING_REQUIRED_FIELD),
     ];
 

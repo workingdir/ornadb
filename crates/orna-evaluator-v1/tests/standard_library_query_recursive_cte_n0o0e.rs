@@ -4,14 +4,22 @@ use orna_value_v1::Raw;
 
 fn integers(values: &[i64]) -> CanonicalValue {
     CanonicalValue::new(Raw::Array(
-        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     ))
     .expect("expected integer list is canonical")
 }
 
 fn raw_integers(values: &[i64]) -> Raw {
     Raw::Array(
-        values.iter().copied().map(|value| Raw::Int(value.into())).collect(),
+        values
+            .iter()
+            .copied()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     )
 }
 
@@ -24,7 +32,9 @@ fn recursive_cte_folds_identity_across_sparse_anchor_and_recursive_rounds() {
         Ok(None)
     );
     let actual = session
-        .submit(include_str!("fixtures/stdlib-query-recursive-cte-n0o0e.orna"))
+        .submit(include_str!(
+            "fixtures/stdlib-query-recursive-cte-n0o0e.orna"
+        ))
         .unwrap_or_else(|error| panic!("recursive CTE evaluation failed with {}", error.code()));
 
     assert_eq!(actual, Some(integers(&[0, 2, 1, 3, 4, 5, 6, 7, 8])));
@@ -40,8 +50,15 @@ fn paired_recursive_cte_folds_keep_independent_first_seen_identities() {
     );
 
     let actual = session
-        .submit(include_str!("fixtures/stdlib-query-paired-recursive-cte-o2f65.orna"))
-        .unwrap_or_else(|error| panic!("paired recursive CTE evaluation failed with {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-recursive-cte-o2f65.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "paired recursive CTE evaluation failed with {}",
+                error.code()
+            )
+        });
     let expected = CanonicalValue::new(Raw::Tag(
         60015,
         Box::new(Raw::Array(vec![
@@ -71,8 +88,15 @@ fn paired_lateral_anchors_keep_distinct_identity_across_recursive_folds() {
         Ok(None)
     );
     let actual = session
-        .submit(include_str!("fixtures/stdlib-query-paired-lateral-recursive-cte-4tksn.orna"))
-        .unwrap_or_else(|error| panic!("lateral recursive CTE evaluation failed with {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-query-paired-lateral-recursive-cte-4tksn.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "lateral recursive CTE evaluation failed with {}",
+                error.code()
+            )
+        });
 
     let expected = CanonicalValue::new(Raw::Tag(
         60015,
@@ -106,7 +130,9 @@ fn paired_recursive_anchors_keep_identity_through_sparse_window_frame_folds() {
         .submit(include_str!(
             "fixtures/stdlib-query-paired-recursive-window-fold-i7cej.orna"
         ))
-        .unwrap_or_else(|error| panic!("paired recursive window folds failed with {}", error.code()));
+        .unwrap_or_else(|error| {
+            panic!("paired recursive window folds failed with {}", error.code())
+        });
     let expected = CanonicalValue::new(Raw::Tag(
         60015,
         Box::new(Raw::Array(vec![
@@ -140,13 +166,15 @@ fn paired_recursive_window_folds_keep_empty_short_lane_independent() {
         .submit(include_str!(
             "fixtures/stdlib-query-paired-recursive-window-short-fold-i7cej.orna"
         ))
-        .unwrap_or_else(|error| panic!("short paired recursive window folds failed with {}", error.code()));
+        .unwrap_or_else(|error| {
+            panic!(
+                "short paired recursive window folds failed with {}",
+                error.code()
+            )
+        });
     let expected = CanonicalValue::new(Raw::Tag(
         60015,
-        Box::new(Raw::Array(vec![
-            raw_integers(&[]),
-            raw_integers(&[20, 10]),
-        ])),
+        Box::new(Raw::Array(vec![raw_integers(&[]), raw_integers(&[20, 10])])),
     ))
     .expect("short paired window fold result is canonical");
 

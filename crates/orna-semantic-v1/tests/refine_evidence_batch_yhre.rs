@@ -1,6 +1,4 @@
-use orna_semantic_v1::{
-    analyze, AssertionOwner, DIAG_UNRESOLVED, ModuleInput, Type,
-};
+use orna_semantic_v1::{AssertionOwner, DIAG_UNRESOLVED, ModuleInput, Type, analyze};
 
 #[test]
 fn refined_type_declarations_have_owner_plans_and_static_identity() {
@@ -12,7 +10,11 @@ fn refined_type_declarations_have_owner_plans_and_static_identity() {
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
     let module = analysis.modules.values().next().expect("module header");
     assert_eq!(
-        module.symbols.get("default_port").expect("refined return").ty,
+        module
+            .symbols
+            .get("default_port")
+            .expect("refined return")
+            .ty,
         Type::Function {
             parameters: vec![],
             parameter_names: Some(vec![]),
@@ -67,7 +69,11 @@ fn implicit_refined_subject_does_not_become_an_ordinary_module_name() {
             .collect::<Vec<_>>(),
         vec![DIAG_UNRESOLVED]
     );
-    assert!(analysis.assertions.values().flatten().any(|plan| {
-        plan.owner == AssertionOwner::RefinedType("Positive".into())
-    }));
+    assert!(
+        analysis
+            .assertions
+            .values()
+            .flatten()
+            .any(|plan| { plan.owner == AssertionOwner::RefinedType("Positive".into()) })
+    );
 }

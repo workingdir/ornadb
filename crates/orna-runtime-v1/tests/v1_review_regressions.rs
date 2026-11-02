@@ -20,9 +20,9 @@ use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunctionDeclaration, CatalogueObjectKind, CatalogueParameterDeclaration,
-    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, NoFault, PublicationMutationState,
-    PublicationRowEncoding, PublicationTableIdentity, PublicationValueEncoding, RuntimeIdentity,
-    RuntimeState, TableMutation, WriterLease,
+    CatalogueTypeDeclaration, CatalogueTypeForm, CatalogueTypeSpec, NoFault,
+    PublicationMutationState, PublicationRowEncoding, PublicationTableIdentity,
+    PublicationValueEncoding, RuntimeIdentity, RuntimeState, TableMutation, WriterLease,
 };
 use sha2::{Digest, Sha256};
 use tempfile::{Builder, TempDir};
@@ -379,14 +379,16 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
         .acquire_lease([15; 16])
         .await
         .expect("acquire writer lease");
-    let context = state.begin_activation().await.expect("begin mutation activation");
+    let context = state
+        .begin_activation()
+        .await
+        .expect("begin mutation activation");
     let mutations = [
         TableMutation::new([51; 16], "freeze-books", vec![1], Some(vec![10]))
             .expect("insert mutation"),
         TableMutation::new([52; 16], "freeze-books", vec![1], Some(vec![11]))
             .expect("replacement mutation"),
-        TableMutation::new([53; 16], "freeze-books", vec![1], None)
-            .expect("deletion mutation"),
+        TableMutation::new([53; 16], "freeze-books", vec![1], None).expect("deletion mutation"),
         TableMutation::new([54; 16], "freeze-books", vec![2], Some(vec![20]))
             .expect("second replacement mutation"),
     ];
@@ -423,8 +425,14 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
     for mutation in &freeze.mutations {
         assert_eq!(mutation.table_id, identity.table_id);
         assert_eq!(mutation.schema_fingerprint, identity.schema_fingerprint);
-        assert_eq!(mutation.row_encoding_identity, PublicationRowEncoding::CompactOvb1);
-        assert_eq!(mutation.value_encoding_identity, PublicationValueEncoding::Ovb1);
+        assert_eq!(
+            mutation.row_encoding_identity,
+            PublicationRowEncoding::CompactOvb1
+        );
+        assert_eq!(
+            mutation.value_encoding_identity,
+            PublicationValueEncoding::Ovb1
+        );
         assert_eq!(mutation.candidate_generation, checkpoint.generation);
         let key_digest: [u8; 32] = Sha256::digest(&mutation.logical_key).into();
         assert_eq!(mutation.equivalence_witness.key_digest, key_digest);
@@ -441,7 +449,10 @@ async fn compact_freeze_publishes_authoritative_ordered_mutations_and_recovers()
         freeze.mutations[1].state,
         PublicationMutationState::Replacement { ref value } if value == &vec![11]
     ));
-    assert!(matches!(freeze.mutations[2].state, PublicationMutationState::Deletion));
+    assert!(matches!(
+        freeze.mutations[2].state,
+        PublicationMutationState::Deletion
+    ));
     assert!(matches!(
         freeze.mutations[3].state,
         PublicationMutationState::Replacement { ref value } if value == &vec![20]

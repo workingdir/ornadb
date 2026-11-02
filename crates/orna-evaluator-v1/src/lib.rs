@@ -24,8 +24,8 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{
     CANONICAL_NAN_BITS, ContextValue, Error as ValueError, ErrorValue as CanonicalErrorValue,
-    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, SOV3_BLOB_TAG, Raw, ValueFormat,
-    domain_digest, float_max, float_min, float_ordinary_eq, float_total_cmp,
+    Format3Context, OVB2_BLOB_TAG, ROV3_BLOB_TAG, Raw, SOV3_BLOB_TAG, ValueFormat, domain_digest,
+    float_max, float_min, float_ordinary_eq, float_total_cmp,
 };
 use serde::{
     Deserialize,
@@ -37,46 +37,46 @@ use unicode_normalization::UnicodeNormalization;
 
 #[cfg(feature = "project-repl")]
 mod admitted_repl;
+mod browser_profile;
 mod cancellation;
+#[cfg(feature = "system-host-bindings")]
+mod explain_bindings;
 mod list;
 mod regex_lite;
 mod relation;
 mod repl;
+pub mod row_admission;
+#[cfg(feature = "system-host-bindings")]
+mod runtime_info;
 mod source_enums;
 #[cfg(feature = "system-host-bindings")]
 mod sys_bindings;
-#[cfg(feature = "system-host-bindings")]
-mod explain_bindings;
-#[cfg(feature = "system-host-bindings")]
-mod runtime_info;
 mod timezone;
 mod ui;
 mod unicode_16_case_properties;
-mod browser_profile;
-pub mod row_admission;
-pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 #[cfg(feature = "project-repl")]
 pub use admitted_repl::{
     AdmittedReplSession, ReplDetail, ReplError, RepositoryScope, StagedReplActivation,
     effect_rejection,
 };
+pub use browser_profile::{BrowserProfileError, execute_browser_profile};
 pub use cancellation::CancellationToken;
+#[cfg(feature = "system-host-bindings")]
+pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 use list::List;
+#[cfg(feature = "system-host-bindings")]
+pub use orna_sys_v1::SysHostContext;
 use relation::{
     BucketBySpec, BucketPeriod, RelationBucket, RelationBucketError, RelationBucketState,
     RelationLastState, RelationPlan, RelationStage, RelationWindowState,
 };
 pub use relation::{RelationPlanMetadata, RelationPlanNode};
 pub use repl::{ReplSession, parse_admitted_repl};
+#[cfg(feature = "system-host-bindings")]
+pub use runtime_info::SysHostAttachment;
 pub use source_enums::source_enum_definitions;
 #[cfg(feature = "system-host-bindings")]
 pub use sys_bindings::SysHostBindingRegistry;
-#[cfg(feature = "system-host-bindings")]
-pub use orna_sys_v1::SysHostContext;
-#[cfg(feature = "system-host-bindings")]
-pub use runtime_info::SysHostAttachment;
-#[cfg(feature = "system-host-bindings")]
-pub use explain_bindings::{ActivationExplainCatalogue, ExplainCatalogue};
 pub use timezone::{
     Instant, LocalDateTime, LocalTimeResolution, TIMEZONE_DATASET_VERSION, TimeZone, TimeZoneError,
     ZonedLocalDateTime, resolve_time_zone,
@@ -101,7 +101,9 @@ pub fn reference_standard_profile() -> StandardDependencyProfile {
     .expect("the bundled Orna 1.0.0 standard module path is valid")
     .with_module_prelude_exports(
         orna_standard_sources::REFERENCE_STANDARD_PRELUDE_PATH_V1,
-        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1.iter().copied(),
+        orna_standard_sources::REFERENCE_STANDARD_PRELUDE_EXPORTS_V1
+            .iter()
+            .copied(),
     )
 }
 
@@ -504,11 +506,7 @@ impl NominalDefinition {
 
     /// Associate this nominal identity with the stable Currency protocol metadata.
     #[must_use]
-    pub fn with_currency(
-        mut self,
-        code: impl Into<String>,
-        minor_digits: usize,
-    ) -> Self {
+    pub fn with_currency(mut self, code: impl Into<String>, minor_digits: usize) -> Self {
         self.currency = Some(CurrencyMetadata {
             code: code.into(),
             minor_digits,
@@ -595,8 +593,14 @@ fn rov3_blob_summary(reference: &Raw) -> Result<Raw, EvaluationError> {
         orna_value_v1::blob_metadata_from_raw(reference).map_err(|_| error("ORNA-EVAL-VALUE"))?;
     Ok(Raw::Map(vec![
         (Raw::Text("type".to_owned()), Raw::Text("Blob".to_owned())),
-        (Raw::Text("length".to_owned()), Raw::Int(metadata.length().into())),
-        (Raw::Text("sha256".to_owned()), Raw::Bytes(metadata.sha256().to_vec())),
+        (
+            Raw::Text("length".to_owned()),
+            Raw::Int(metadata.length().into()),
+        ),
+        (
+            Raw::Text("sha256".to_owned()),
+            Raw::Bytes(metadata.sha256().to_vec()),
+        ),
         (
             Raw::Text("suffix".to_owned()),
             metadata
@@ -1571,8 +1575,7 @@ impl ContextValueEffectHandlerAdapter<'_> {
         }
     }
     fn profile(&self) -> (ValueFormat, Option<&Format3Context>) {
-        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3) && self.context.is_some()
-        {
+        if matches!(self.format, ValueFormat::Rov3 | ValueFormat::Sov3) && self.context.is_some() {
             (self.format, self.context.as_ref())
         } else if matches!(self.source_format, ValueFormat::Rov3 | ValueFormat::Sov3) {
             (self.source_format, self.source_context.as_ref())
@@ -1794,14 +1797,7 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         limit: usize,
         budget: &mut StepBudget,
     ) -> Result<Option<RelationPage>, EvaluationError> {
-        EffectHandler::scan_relation_page_scoped(
-            self.handler,
-            source,
-            scope,
-            after,
-            limit,
-            budget,
-        )
+        EffectHandler::scan_relation_page_scoped(self.handler, source, scope, after, limit, budget)
     }
 
     fn validate_stream_source(
@@ -1811,13 +1807,7 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
         cancellation: Option<&CancellationToken>,
     ) -> Result<bool, EvaluationError> {
-        EffectHandler::validate_stream_source(
-            self.handler,
-            source,
-            identity,
-            budget,
-            cancellation,
-        )
+        EffectHandler::validate_stream_source(self.handler, source, identity, budget, cancellation)
     }
 
     fn poll_stream_sources(
@@ -1827,13 +1817,7 @@ impl EffectHandler for ContextValueEffectHandlerAdapter<'_> {
         budget: &mut StepBudget,
         cancellation: Option<&CancellationToken>,
     ) -> Result<StreamPage, EvaluationError> {
-        EffectHandler::poll_stream_sources(
-            self.handler,
-            sources,
-            max_events,
-            budget,
-            cancellation,
-        )
+        EffectHandler::poll_stream_sources(self.handler, sources, max_events, budget, cancellation)
     }
 
     fn begin_stream_delivery(
@@ -1941,9 +1925,12 @@ fn planner_metadata_relation_expression(expression: &Expr) -> bool {
 
 fn planner_metadata_lazy_stage(expression: &Expr) -> bool {
     let (callee, arguments) = match expression {
-        Expr::Call { callee, arguments, .. } | Expr::GenericCall { callee, arguments, .. } => {
-            (callee, arguments)
+        Expr::Call {
+            callee, arguments, ..
         }
+        | Expr::GenericCall {
+            callee, arguments, ..
+        } => (callee, arguments),
         Expr::Group { inner, .. } => return planner_metadata_lazy_stage(inner),
         _ => return false,
     };
@@ -2452,7 +2439,9 @@ fn invoke_named_with_host(
         cancellation: None,
     };
     context.items(functions.own_len())?;
-    let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+    let function = functions
+        .get_entry(name)
+        .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
     let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
     let captured = Scope::from_environment_with_nominals(
         &function.environment,
@@ -2570,7 +2559,9 @@ fn invoke_named_with_effects_and_reuse(
     };
     let result = (|| {
         context.items(functions.own_len())?;
-        let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+        let function = functions
+            .get_entry(name)
+            .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
         let supplied = supplied_arguments(arguments, nominal_definitions, &mut context)?;
         let captured = Scope::from_environment_with_nominals(
             &function.environment,
@@ -2620,13 +2611,14 @@ pub fn invoke_named_with_context_effects(
     let format = arguments
         .values()
         .find(|value| matches!(value.format(), ValueFormat::Rov3 | ValueFormat::Sov3))
-        .or_else(|| arguments.values().find(|value| value.format() == ValueFormat::Ovb2))
+        .or_else(|| {
+            arguments
+                .values()
+                .find(|value| value.format() == ValueFormat::Ovb2)
+        })
         .or_else(|| arguments.values().next())
         .map_or(ValueFormat::Ovb1, ContextValue::format);
-    let value_context = arguments
-        .values()
-        .find_map(ContextValue::context)
-        .cloned();
+    let value_context = arguments.values().find_map(ContextValue::context).cloned();
     if matches!(format, ValueFormat::Rov3 | ValueFormat::Sov3) && value_context.is_none() {
         return Err(error("ORNA-EVAL-VALUE"));
     }
@@ -2659,7 +2651,9 @@ pub fn invoke_named_with_context_effects(
         };
         let result = (|| {
             context.items(functions.own_len())?;
-            let function = functions.get_entry(name).ok_or_else(|| error("ORNA-EVAL-NAME"))?;
+            let function = functions
+                .get_entry(name)
+                .ok_or_else(|| error("ORNA-EVAL-NAME"))?;
             let supplied = supplied_context_arguments(arguments, &mut context)?;
             let captured = Scope::from_environment(&function.environment, &mut context)?;
             invoke_pure(
@@ -2904,8 +2898,10 @@ fn blob_aware_eq(left: &Value, right: &Value) -> Result<bool, EvaluationError> {
             if left_inclusive != right_inclusive {
                 return Ok(false);
             }
-            Ok(optional_blob_aware_eq(left_lower.as_deref(), right_lower.as_deref())?
-                && optional_blob_aware_eq(left_upper.as_deref(), right_upper.as_deref())?)
+            Ok(
+                optional_blob_aware_eq(left_lower.as_deref(), right_lower.as_deref())?
+                    && optional_blob_aware_eq(left_upper.as_deref(), right_upper.as_deref())?,
+            )
         }
         (
             Value::Stream {
@@ -3566,9 +3562,9 @@ impl Value {
             Self::NominalRecord { fields, .. } => fields
                 .iter()
                 .find_map(|(_, value)| value.nested_context_blob()),
-            Self::Enum { payload, .. } | Self::Option(payload) => payload
-                .as_deref()
-                .and_then(Self::nested_context_blob),
+            Self::Enum { payload, .. } | Self::Option(payload) => {
+                payload.as_deref().and_then(Self::nested_context_blob)
+            }
             Self::Range { lower, upper, .. } => lower
                 .as_deref()
                 .and_then(Self::nested_context_blob)
@@ -3584,11 +3580,13 @@ impl Value {
             Self::Tuple(values) => values.iter().any(Self::contains_annotated_blob),
             Self::Stream {
                 values, provider, ..
-            } => values.iter().any(Self::contains_annotated_blob)
-                || provider
-                    .as_ref()
-                    .and_then(|provider| provider.recover.as_deref())
-                    .is_some_and(Self::contains_annotated_blob),
+            } => {
+                values.iter().any(Self::contains_annotated_blob)
+                    || provider
+                        .as_ref()
+                        .and_then(|provider| provider.recover.as_deref())
+                        .is_some_and(Self::contains_annotated_blob)
+            }
             Self::Record(values) => values.values().any(Self::contains_annotated_blob),
             Self::NominalRecord { fields, .. } => fields
                 .iter()
@@ -3596,12 +3594,10 @@ impl Value {
             Self::Enum { payload, .. } | Self::Option(payload) => payload
                 .as_deref()
                 .is_some_and(Self::contains_annotated_blob),
-            Self::Range { lower, upper, .. } => lower
-                .as_deref()
-                .is_some_and(Self::contains_annotated_blob)
-                || upper
-                    .as_deref()
-                    .is_some_and(Self::contains_annotated_blob),
+            Self::Range { lower, upper, .. } => {
+                lower.as_deref().is_some_and(Self::contains_annotated_blob)
+                    || upper.as_deref().is_some_and(Self::contains_annotated_blob)
+            }
             _ => false,
         }
     }
@@ -3791,12 +3787,9 @@ impl Value {
                     Raw::Bool(*upper_inclusive),
                 ])),
             ),
-            Self::List(values) => Raw::Array(
-                values
-                    .iter()
-                    .map(Value::raw)
-                    .collect::<Result<_, _>>()?,
-            ),
+            Self::List(values) => {
+                Raw::Array(values.iter().map(Value::raw).collect::<Result<_, _>>()?)
+            }
             Self::Tuple(values) if values.is_empty() => {
                 Raw::Tag(60014, Box::new(Raw::Array(Vec::new())))
             }
@@ -4188,14 +4181,9 @@ impl Value {
                     };
                     match parts.as_slice() {
                         [Raw::Int(tag)] if tag.is_zero() => Ok(Value::Option(None)),
-                        [Raw::Int(tag), value] if *tag == BigInt::from(1) => {
-                            Ok(Value::Option(Some(Box::new(decode(
-                                value,
-                                profile,
-                                context,
-                                depth + 1,
-                            )?))))
-                        }
+                        [Raw::Int(tag), value] if *tag == BigInt::from(1) => Ok(Value::Option(
+                            Some(Box::new(decode(value, profile, context, depth + 1)?)),
+                        )),
                         _ => Err(error("ORNA-EVAL-VALUE")),
                     }
                 }
@@ -4677,17 +4665,20 @@ impl Context<'_, '_> {
             depth,
         );
         if let Ok(value) = &result
-            && self.reuse.enabled && self.reuse.epoch == epoch && reusable_value(value) {
-                if self.reuse.entries.len() == CALL_REUSE_CAPACITY {
-                    self.reuse.entries.pop_front();
-                }
-                self.reuse.stats.stores += 1;
-                self.reuse.entries.push_back(CallReuseEntry {
-                    key,
-                    epoch,
-                    value: value.clone(),
-                });
+            && self.reuse.enabled
+            && self.reuse.epoch == epoch
+            && reusable_value(value)
+        {
+            if self.reuse.entries.len() == CALL_REUSE_CAPACITY {
+                self.reuse.entries.pop_front();
             }
+            self.reuse.stats.stores += 1;
+            self.reuse.entries.push_back(CallReuseEntry {
+                key,
+                epoch,
+                value: value.clone(),
+            });
+        }
         result
     }
 }
@@ -4700,7 +4691,9 @@ fn reusable_value(value: &Value) -> bool {
         Value::List(values) => values.iter().all(reusable_value),
         Value::Tuple(values) => values.iter().all(reusable_value),
         Value::Record(fields) => fields.values().all(reusable_value),
-        Value::NominalRecord { fields, .. } => fields.iter().all(|(_, field)| reusable_value(field)),
+        Value::NominalRecord { fields, .. } => {
+            fields.iter().all(|(_, field)| reusable_value(field))
+        }
         Value::Enum { payload, .. } => payload.as_deref().is_none_or(reusable_value),
         Value::Option(payload) => payload.as_deref().is_none_or(reusable_value),
         Value::Range { lower, upper, .. } => {
@@ -4958,9 +4951,7 @@ impl Context<'_, '_> {
                 .ok_or_else(|| error("ORNA-EVAL-UNSUPPORTED"))?;
             (handler.value_format(), handler.accepts_context_values())
         };
-        if !accepts_context_values
-            && (value.format() != format || format != ValueFormat::Ovb2)
-        {
+        if !accepts_context_values && (value.format() != format || format != ValueFormat::Ovb2) {
             return Err(error("ORNA-EVAL-VALUE"));
         }
         if accepts_context_values {
@@ -5000,7 +4991,9 @@ impl Context<'_, '_> {
         let raw = value.raw()?;
         match format {
             ValueFormat::Rov3 | ValueFormat::Sov3 => ContextValue::new_in_context(
-                value_context.as_ref().ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
+                value_context
+                    .as_ref()
+                    .ok_or_else(|| error("ORNA-EVAL-VALUE"))?,
                 format,
                 raw,
             ),
@@ -5732,8 +5725,8 @@ impl Context<'_, '_> {
             }
             payload.insert(field.name.clone(), value);
         }
-        let payload = (!declaration.payload_fields.is_empty())
-            .then(|| Box::new(Value::Record(payload)));
+        let payload =
+            (!declaration.payload_fields.is_empty()).then(|| Box::new(Value::Record(payload)));
         Ok(Value::Enum {
             type_id: type_id.clone(),
             variant_id: declaration.variant_id.clone(),
@@ -6060,9 +6053,10 @@ impl Context<'_, '_> {
             return None;
         }
         if let Some(namespace) = self.namespace.as_deref()
-            && self.functions.contains_key(&format!("{namespace}.{path}")) {
-                return None;
-            }
+            && self.functions.contains_key(&format!("{namespace}.{path}"))
+        {
+            return None;
+        }
         self.effects.as_deref()?.admitted_relation_source(&path)
     }
 
@@ -6716,7 +6710,11 @@ impl Context<'_, '_> {
         }
         let values = named_arguments("decimal.divide", arguments, values, 0, false)?;
         match values.as_slice() {
-            [Value::Decimal(divisor), Value::Int(scale), Value::String(rounding)] => {
+            [
+                Value::Decimal(divisor),
+                Value::Int(scale),
+                Value::String(rounding),
+            ] => {
                 if scale.is_negative() {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
@@ -7093,16 +7091,16 @@ impl Context<'_, '_> {
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
             let flushed = state.push(value).map_err(bucket_error)?;
             if let Some(bucket) = flushed
-                && !emit(context, bucket)? {
-                    ended = true;
-                    return Ok(false);
-                }
+                && !emit(context, bucket)?
+            {
+                ended = true;
+                return Ok(false);
+            }
             Ok(true)
         })?;
-        if !ended
-            && let Some(bucket) = state.finish() {
-                emit(self, bucket)?;
-            }
+        if !ended && let Some(bucket) = state.finish() {
+            emit(self, bucket)?;
+        }
         Ok(())
     }
 
@@ -7219,11 +7217,7 @@ impl Context<'_, '_> {
             }
             "first" => {
                 let mut first = None;
-                self.for_each_relation_value_with_page_limit(
-                    plan,
-                    depth,
-                    1,
-                    |_, value| {
+                self.for_each_relation_value_with_page_limit(plan, depth, 1, |_, value| {
                     first = Some(value);
                     Ok(false)
                 })?;
@@ -7232,11 +7226,7 @@ impl Context<'_, '_> {
             "one" => {
                 let predicate = arguments.first();
                 let mut found = None;
-                self.for_each_relation_value_with_page_limit(
-                    plan,
-                    depth,
-                    1,
-                    |context, value| {
+                self.for_each_relation_value_with_page_limit(plan, depth, 1, |context, value| {
                     if let Some(predicate) = predicate {
                         context.step()?;
                         match context.invoke_predicate(predicate, value.clone(), depth + 1)? {
@@ -7439,12 +7429,7 @@ impl Context<'_, '_> {
         depth: usize,
         visit: impl FnMut(&mut Self, Value) -> Result<bool, EvaluationError>,
     ) -> Result<(), EvaluationError> {
-        self.for_each_relation_value_with_page_limit(
-            plan,
-            depth,
-            RELATION_SCAN_PAGE_ROWS,
-            visit,
-        )
+        self.for_each_relation_value_with_page_limit(plan, depth, RELATION_SCAN_PAGE_ROWS, visit)
     }
 
     fn for_each_relation_value_with_page_limit(
@@ -7511,9 +7496,10 @@ impl Context<'_, '_> {
                 depth,
                 page_limit,
                 |context, value| {
-                keep_going = visit(context, value)?;
-                Ok(keep_going)
-            })?;
+                    keep_going = visit(context, value)?;
+                    Ok(keep_going)
+                },
+            )?;
             if !keep_going {
                 return Ok(());
             }
@@ -7522,9 +7508,10 @@ impl Context<'_, '_> {
                 depth,
                 page_limit,
                 |context, value| {
-                keep_going = visit(context, value)?;
-                Ok(keep_going)
-            })?;
+                    keep_going = visit(context, value)?;
+                    Ok(keep_going)
+                },
+            )?;
             return Ok(());
         }
 
@@ -7981,13 +7968,7 @@ impl Context<'_, '_> {
                     Ok(Some(SourcePage::Contextual(page)))
                 } else {
                     effects
-                        .scan_relation_page_scoped(
-                            source,
-                            scope,
-                            after,
-                            page_limit,
-                            &mut budget,
-                        )
+                        .scan_relation_page_scoped(source, scope, after, page_limit, &mut budget)
                         .map(|page| page.map(SourcePage::Canonical))
                 }
             });
@@ -8502,7 +8483,7 @@ impl Context<'_, '_> {
     /// admitted only for operations bound to the generated Blob annotation
     /// role, so a source-level `sys.blob.*` call cannot reach native code the
     /// registry has not declared.
-#[cfg(feature = "system-host-bindings")]
+    #[cfg(feature = "system-host-bindings")]
     fn call_blob_operation(
         &mut self,
         operation: &str,
@@ -8633,7 +8614,7 @@ impl Context<'_, '_> {
     /// The declared type comes from the generated contract, so the conversion
     /// cannot invent a shape the declaration does not allow. Unannotated bytes
     /// remain unsupported rather than receiving a lossy fallback annotation.
-#[cfg(feature = "system-host-bindings")]
+    #[cfg(feature = "system-host-bindings")]
     fn blob_annotation_argument(
         value: Value,
         declared: &orna_sys_v1::AbiType,
@@ -8686,8 +8667,7 @@ impl Context<'_, '_> {
                     return self.decimal_divide_method(numerator, arguments, scope, depth + 1);
                 }
                 receiver => {
-                    pre_evaluated_callee =
-                        Some(self.field_value(receiver, name, scope)?);
+                    pre_evaluated_callee = Some(self.field_value(receiver, name, scope)?);
                 }
             }
         }
@@ -8874,17 +8854,13 @@ impl Context<'_, '_> {
         // catalogue, never by a provider invoke. An unshadowed call therefore
         // stays on this path.
         #[cfg(feature = "system-host-bindings")]
-        if source_function_name.as_deref() == Some("sys.explain")
-            && !scope.0.contains_key("sys")
-        {
+        if source_function_name.as_deref() == Some("sys.explain") && !scope.0.contains_key("sys") {
             return self.call_sys_explain(arguments, input, scope, depth);
         }
         // `sys.rt.info()` reports the activation the host attached. Like
         // `sys.explain`, it is lowered here, never by a provider invoke.
         #[cfg(feature = "system-host-bindings")]
-        if source_function_name.as_deref() == Some("sys.rt.info")
-            && !scope.0.contains_key("sys")
-        {
+        if source_function_name.as_deref() == Some("sys.rt.info") && !scope.0.contains_key("sys") {
             return self.call_sys_rt_info(arguments, input);
         }
 
@@ -10935,7 +10911,6 @@ impl Context<'_, '_> {
                 }
                 results
                     .into_iter()
-                    
                     .find_map(|result| {
                         result.and_then(|result| match result {
                             Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
@@ -11216,7 +11191,8 @@ impl Context<'_, '_> {
         match (name, values.as_slice()) {
             ("__encode" | "encode", [Value::Blob(bytes)]) => {
                 self.items(bytes.len())?;
-                self.string(orna_value_v1::base64_encode(bytes)).map(Value::String)
+                self.string(orna_value_v1::base64_encode(bytes))
+                    .map(Value::String)
             }
             ("__decode" | "decode", [Value::String(text)]) => {
                 self.string(text.clone())?;
@@ -11490,8 +11466,7 @@ impl Context<'_, '_> {
                 self.string(input.clone())?;
                 let mut parsed = parse_expression(input);
                 let mut bindings = BTreeMap::new();
-                if !parsed.is_ok()
-                    || !admit_orna_data_expression(&mut parsed.value, &mut bindings)
+                if !parsed.is_ok() || !admit_orna_data_expression(&mut parsed.value, &mut bindings)
                 {
                     return Err(error("ORNA-EVAL-VALUE"));
                 }
@@ -11891,7 +11866,10 @@ impl Context<'_, '_> {
         }
         let order = self.stable_order(&keys)?;
         Ok(Value::List(
-            order.into_iter().map(|index| values[index].clone()).collect(),
+            order
+                .into_iter()
+                .map(|index| values[index].clone())
+                .collect(),
         ))
     }
     fn rank(
@@ -12730,9 +12708,9 @@ impl Context<'_, '_> {
                     true,
                 )
             }
-            (Value::Float(left), Value::Float(right)) => {
-                Ok(float_value((f64::from_bits(*left) + f64::from_bits(*right)) / 2.0))
-            }
+            (Value::Float(left), Value::Float(right)) => Ok(float_value(
+                (f64::from_bits(*left) + f64::from_bits(*right)) / 2.0,
+            )),
             _ => Err(error("ORNA-EVAL-UNSUPPORTED")),
         }
     }
@@ -13875,9 +13853,7 @@ fn write_json_value(
                 .ok_or_else(|| error("ORNA-EVAL-VALUE"))?;
             output.push_str("{\"amount\":");
             let amount = decimal_json_token(amount)?;
-            output.push_str(
-                &serde_json::to_string(&amount).map_err(|_| error("ORNA-EVAL-VALUE"))?,
-            );
+            output.push_str(&serde_json::to_string(&amount).map_err(|_| error("ORNA-EVAL-VALUE"))?);
             output.push_str(",\"currency\":");
             output.push_str(
                 &serde_json::to_string(&metadata.code).map_err(|_| error("ORNA-EVAL-VALUE"))?,
@@ -14920,7 +14896,6 @@ fn portable_statistics_operation(
     resolved_function: Option<&str>,
     scope: &Scope,
 ) -> Option<&'static str> {
-    
     resolved_function
         .and_then(statistics_function_operation)
         .or_else(|| {
@@ -16563,8 +16538,14 @@ fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationEr
         // ORNA-FLOAT-007: canonical NaN if either input is NaN; `min` prefers -0.0
         // and `max` prefers +0.0 among zeros, otherwise numeric order decides.
         let values = [*a, *b];
-        let bits = if min { float_min(&values) } else { float_max(&values) };
-        return bits.map(Value::Float).ok_or_else(|| error("ORNA-EVAL-VALUE"));
+        let bits = if min {
+            float_min(&values)
+        } else {
+            float_max(&values)
+        };
+        return bits
+            .map(Value::Float)
+            .ok_or_else(|| error("ORNA-EVAL-VALUE"));
     }
     let ordering = compare_values(left, right)?;
     if (ordering.is_le()) == min {
@@ -16680,8 +16661,7 @@ mod tests {
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
         let mut functions = Functions::new();
         for item in parsed.value.items {
-            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration
-            else {
+            let orna_syntax_v1::Declaration::Function { signature, body } = item.declaration else {
                 continue;
             };
             functions.insert(
@@ -16714,15 +16694,24 @@ mod tests {
             "map",
             &collection_functions_for(include_str!("../../../stdlib/std/collection.orna"))
         ));
-        assert!(captured_collection_binding_is_native("map", &Functions::new()));
-        assert!(captured_collection_binding_is_native("__stable_sort", &Functions::new()));
+        assert!(captured_collection_binding_is_native(
+            "map",
+            &Functions::new()
+        ));
+        assert!(captured_collection_binding_is_native(
+            "__stable_sort",
+            &Functions::new()
+        ));
     }
 
     #[test]
     fn pinned_collection_declares_no_legacy_root_wrappers() {
         let pinned = collection_functions_for(include_str!("../../../stdlib/std/collection.orna"));
         for operation in LEGACY_ROOT_WRAPPER_OPERATIONS {
-            assert!(!pinned.contains_key(&format!("std.collection.{operation}")), "{operation}");
+            assert!(
+                !pinned.contains_key(&format!("std.collection.{operation}")),
+                "{operation}"
+            );
             assert!(
                 !pinned.contains_key(&format!("std.collection.{operation}_from")),
                 "{operation}_from"
@@ -16737,12 +16726,18 @@ mod tests {
             ("window", "windows_from"),
             ("split_when", "split_when_from"),
         ] {
-            assert!(pinned.contains_key(&format!("std.collection.{operation}")), "{operation}");
+            assert!(
+                pinned.contains_key(&format!("std.collection.{operation}")),
+                "{operation}"
+            );
             assert!(
                 captured_collection_helper_is_loop(&pinned, &format!("std.collection.{helper}")),
                 "{helper} must be a while loop in the pin"
             );
-            assert!(!captured_collection_binding_is_native(operation, &pinned), "{operation}");
+            assert!(
+                !captured_collection_binding_is_native(operation, &pinned),
+                "{operation}"
+            );
         }
     }
 
@@ -16845,8 +16840,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
             }
         }
         assert_eq!(
-            stub_candidates,
-            30,
+            stub_candidates, 30,
             "pinned std snapshot has 30 explicit host-binding stubs"
         );
         assert!(
@@ -17547,7 +17541,6 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
                 assert_eq!(source, "sys.Storage");
                 Ok(())
             }
-
         }
 
         impl ContextValueEffectHandler for ReplaceAndConsume {
@@ -17654,10 +17647,7 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
                 environment: Environment::new(),
             },
         )]);
-        let arguments = BTreeMap::from([(
-            String::from("blob"),
-            indexed_row.clone(),
-        )]);
+        let arguments = BTreeMap::from([(String::from("blob"), indexed_row.clone())]);
 
         let mut budget = StepBudget::new(Limits::default().max_steps);
         let mut effects = ReplaceAndConsume {
@@ -17775,8 +17765,8 @@ fn filter_from<T>(values: [T], predicate: fn(T): Bool, index: Int, end: Int, out
                 orna_value_v1::NativeOid::from_bytes(&[0x26; 20]).unwrap(),
             )
             .expect("owner-scoped Blob reference");
-        let blob = orna_value_v1::Blob::from_reference(reference)
-            .expect("owner-scoped Blob reference");
+        let blob =
+            orna_value_v1::Blob::from_reference(reference).expect("owner-scoped Blob reference");
         let blob_value = ContextValue::from_blob(&blob, ValueFormat::Sov3)
             .expect("encode protected Blob in SOV-3")
             .with_blob_annotation("image/png", Some("png"))
@@ -19515,16 +19505,16 @@ mod table_reference_value_tests {
     fn stored_table_reference_is_an_equality_only_identity_value() {
         let functions = Functions::new();
         let mut context = context(&functions);
-        let reference = orna_value_v1::Value::table_reference(
-            [1; 16],
-            [2; 16],
-            Raw::Text("ada".into()),
-        )
-        .unwrap();
+        let reference =
+            orna_value_v1::Value::table_reference([1; 16], [2; 16], Raw::Text("ada".into()))
+                .unwrap();
 
         let value = Value::from_canonical(&reference, &mut context, 0).unwrap();
         assert!(matches!(&value, Value::TableReference(identity) if identity == &reference));
-        assert_eq!(Value::from_raw(reference.raw(), &mut context, 0).unwrap(), value);
+        assert_eq!(
+            Value::from_raw(reference.raw(), &mut context, 0).unwrap(),
+            value
+        );
 
         let same = orna_value_v1::Value::table_reference([1; 16], [2; 16], Raw::Text("ada".into()))
             .unwrap();
@@ -19586,8 +19576,7 @@ mod blob_equality_tests {
             offset: u64,
             length: u64,
         ) -> orna_value_v1::Result<Vec<u8>> {
-            self.reads
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let start = usize::try_from(offset).map_err(|_| orna_value_v1::Error::InvalidRange)?;
             let length = usize::try_from(length).map_err(|_| orna_value_v1::Error::InvalidRange)?;
             let end = start
@@ -19643,9 +19632,8 @@ mod blob_equality_tests {
             None,
         )
         .unwrap();
-        let rov3 = Value::ContextualBlob(
-            ContextValue::from_blob(&rov3_blob, ValueFormat::Rov3).unwrap(),
-        );
+        let rov3 =
+            Value::ContextualBlob(ContextValue::from_blob(&rov3_blob, ValueFormat::Rov3).unwrap());
         let ovb2_blob = orna_value_v1::Blob::from_bytes_with_annotation(
             payload.to_vec(),
             "application/octet-stream",
@@ -19657,12 +19645,14 @@ mod blob_equality_tests {
         // Equal bytes and annotation compare exactly, including when nested in
         // containers. Two independently built OVB-2 values share no Arc, so this
         // exercises the exact content path rather than pointer identity.
-        let ovb2_again = annotated_ovb2(&orna_value_v1::Blob::from_bytes_with_annotation(
-            payload.to_vec(),
-            "application/octet-stream",
-            None,
-        )
-        .unwrap());
+        let ovb2_again = annotated_ovb2(
+            &orna_value_v1::Blob::from_bytes_with_annotation(
+                payload.to_vec(),
+                "application/octet-stream",
+                None,
+            )
+            .unwrap(),
+        );
         assert!(blob_aware_eq(&ovb2, &ovb2_again).unwrap());
         assert!(
             blob_aware_eq(
@@ -19867,8 +19857,14 @@ mod blob_equality_tests {
         let identity = orna_value_v1::ContentIdentity::from_bytes(payload);
         Raw::Map(vec![
             (Raw::Text("type".to_owned()), Raw::Text("Blob".to_owned())),
-            (Raw::Text("length".to_owned()), Raw::Int(identity.length().into())),
-            (Raw::Text("sha256".to_owned()), Raw::Bytes(identity.sha256().to_vec())),
+            (
+                Raw::Text("length".to_owned()),
+                Raw::Int(identity.length().into()),
+            ),
+            (
+                Raw::Text("sha256".to_owned()),
+                Raw::Bytes(identity.sha256().to_vec()),
+            ),
             (Raw::Text("suffix".to_owned()), Raw::Null),
             (
                 Raw::Text("media_type".to_owned()),
@@ -19905,7 +19901,11 @@ mod blob_equality_tests {
             CanonicalValue::new(blob_summary_raw(payload)).unwrap()
         );
         let encoded = canonical.encode().unwrap();
-        assert!(!encoded.windows(payload.len()).any(|window| window == payload));
+        assert!(
+            !encoded
+                .windows(payload.len())
+                .any(|window| window == payload)
+        );
         assert!(!encoded.windows(20).any(|window| window == [7u8; 20]));
     }
 
@@ -20255,12 +20255,10 @@ mod output_digest_equivalence {
         let mut rejected = 0;
         for value in values {
             let borrowed = outcome(value.canonical_bytes());
-            let legacy = outcome(
-                value
-                    .clone()
-                    .canonical()
-                    .and_then(|canonical| canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE"))),
-            );
+            let legacy =
+                outcome(value.clone().canonical().and_then(|canonical| {
+                    canonical.encode().map_err(|_| error("ORNA-EVAL-VALUE"))
+                }));
             assert_eq!(borrowed, legacy, "{value:?}");
             if borrowed.is_ok() {
                 accepted += 1;

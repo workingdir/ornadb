@@ -15,11 +15,26 @@ use tempfile::TempDir;
 fn reference_project() -> TempDir {
     let directory = tempfile::tempdir().expect("reference project");
     for (name, source) in [
-        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
-        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
-        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
-        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
-        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
+        (
+            "main.orna",
+            include_str!("fixtures/reference-project/main.orna"),
+        ),
+        (
+            "library.orna",
+            include_str!("fixtures/reference-project/library.orna"),
+        ),
+        (
+            "warehouse.orna",
+            include_str!("fixtures/reference-project/warehouse.orna"),
+        ),
+        (
+            "sensors.orna",
+            include_str!("fixtures/reference-project/sensors.orna"),
+        ),
+        (
+            "values.orna",
+            include_str!("fixtures/reference-project/values.orna"),
+        ),
     ] {
         std::fs::write(directory.path().join(name), source).expect("reference source");
     }
@@ -40,8 +55,14 @@ fn invoke(directory: &std::path::Path, command: &str, argument: &str) -> Output 
 }
 
 fn contains_ansi(output: &Output) -> bool {
-    output.stdout.windows(2).any(|sequence| sequence == b"\x1b[")
-        || output.stderr.windows(2).any(|sequence| sequence == b"\x1b[")
+    output
+        .stdout
+        .windows(2)
+        .any(|sequence| sequence == b"\x1b[")
+        || output
+            .stderr
+            .windows(2)
+            .any(|sequence| sequence == b"\x1b[")
 }
 
 fn initialize_project(directory: &std::path::Path) {
@@ -282,7 +303,11 @@ fn binary_explain_returns_extended_orna_diagnostic_guidance() {
         .output()
         .expect("CLI process");
     assert!(!unknown.status.success());
-    assert_eq!(unknown.status.code(), Some(2), "unknown explain uses usage exit status");
+    assert_eq!(
+        unknown.status.code(),
+        Some(2),
+        "unknown explain uses usage exit status"
+    );
     assert!(unknown.stdout.is_empty());
     assert_eq!(
         unknown.stderr,
@@ -343,7 +368,10 @@ fn binary_reference_repl_respects_color_mode() {
 
     let always = run_repl("always");
     assert!(always.status.success(), "REPL stderr: {:?}", always.stderr);
-    assert!(contains_ansi(&always), "always must color captured REPL output");
+    assert!(
+        contains_ansi(&always),
+        "always must color captured REPL output"
+    );
     let rendered = String::from_utf8_lossy(&always.stdout);
     assert!(
         rendered.contains('3') && rendered.contains("Int"),
@@ -357,7 +385,10 @@ fn binary_reference_repl_respects_color_mode() {
 
     let auto = run_repl("auto");
     assert!(auto.status.success(), "REPL stderr: {:?}", auto.stderr);
-    assert!(!contains_ansi(&auto), "captured auto output must not be colored");
+    assert!(
+        !contains_ansi(&auto),
+        "captured auto output must not be colored"
+    );
 }
 
 #[test]
@@ -374,8 +405,15 @@ fn binary_reference_status_respects_color_mode() {
     };
 
     let always = status("always");
-    assert!(always.status.success(), "status stderr: {:?}", always.stderr);
-    assert!(contains_ansi(&always), "always must color human status output");
+    assert!(
+        always.status.success(),
+        "status stderr: {:?}",
+        always.stderr
+    );
+    assert!(
+        contains_ansi(&always),
+        "always must color human status output"
+    );
 
     let never = status("never");
     assert!(never.status.success(), "status stderr: {:?}", never.stderr);
@@ -383,7 +421,10 @@ fn binary_reference_status_respects_color_mode() {
 
     let auto = status("auto");
     assert!(auto.status.success(), "status stderr: {:?}", auto.stderr);
-    assert!(!contains_ansi(&auto), "captured auto status must not be colored");
+    assert!(
+        !contains_ansi(&auto),
+        "captured auto status must not be colored"
+    );
     assert_eq!(never.stdout, auto.stdout);
     assert_eq!(never.stderr, auto.stderr);
 
@@ -393,7 +434,11 @@ fn binary_reference_status_respects_color_mode() {
         .args(["--db", status_path, "status"])
         .output()
         .expect("CLI human status with default color");
-    assert!(default.status.success(), "status stderr: {:?}", default.stderr);
+    assert!(
+        default.status.success(),
+        "status stderr: {:?}",
+        default.stderr
+    );
     assert!(
         !contains_ansi(&default),
         "captured default Auto output must not be colored"
@@ -792,7 +837,7 @@ async fn binary_run_reads_specified_storage_publication_metadata_from_runtime_st
         directory.path().join("main.orna"),
         include_str!("fixtures/publication_metadata.orna"),
     )
-        .expect("publication metadata fixture");
+    .expect("publication metadata fixture");
     initialize_project(directory.path());
 
     let repository = Repository::discover(directory.path()).expect("repository");
@@ -993,9 +1038,13 @@ async fn binary_run_debug_detail_names_the_held_runtime_writer_and_plain_output_
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn binary_invoke_routes_single_module_std_import_needing_publication_metadata_through_authority() {
+async fn binary_invoke_routes_single_module_std_import_needing_publication_metadata_through_authority()
+ {
     let (directory, _module_commit) = captured_standard_project_with(
-        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
         &[(
             "main.orna",
             "use std.math.{increment};\npub fn answer(): Bool {\n    let rows = sys.Storage | map(storage => storage.pending_rows) | first() ?? -1;\n    assert rows == 1;\n    true\n}\n",
@@ -1044,7 +1093,11 @@ async fn binary_invoke_routes_single_module_std_import_needing_publication_metad
 
     let output = invoke(directory.path(), "invoke", "answer");
 
-    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert!(
+        output.status.success(),
+        "invoke stderr: {:?}",
+        output.stderr
+    );
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
 }
@@ -1238,7 +1291,11 @@ fn commit_orna(directory: &std::path::Path, message: &str) {
         ])
         .output()
         .expect("CLI commit");
-    assert!(output.status.success(), "commit stderr: {:?}", output.stderr);
+    assert!(
+        output.status.success(),
+        "commit stderr: {:?}",
+        output.stderr
+    );
 }
 
 #[test]
@@ -1523,8 +1580,22 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .expect("seed capture")
         .generation()
         .clone();
-    assert_eq!(state.committed_table_rows("library.Book").await.unwrap().len(), 2);
-    assert_eq!(state.committed_table_rows("library.Loan").await.unwrap().len(), 0);
+    assert_eq!(
+        state
+            .committed_table_rows("library.Book")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        state
+            .committed_table_rows("library.Loan")
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
     let stock = state.committed_table_rows("warehouse.Stock").await.unwrap();
     assert_eq!(stock.len(), 2);
     assert!(stock.iter().any(|(_, row)| {
@@ -1584,11 +1655,17 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .await
         .expect("reopen runtime after exercise");
     assert!(final_state.capture().await.unwrap().generation() > &generation_after_seed);
-    let loans = final_state.committed_table_rows("library.Loan").await.unwrap();
+    let loans = final_state
+        .committed_table_rows("library.Loan")
+        .await
+        .unwrap();
     assert_eq!(loans.len(), 1);
     assert_eq!(text(&loans[0].1, "book_id"), "book-1");
     assert_eq!(text(&loans[0].1, "borrower"), "reader-1");
-    let stock = final_state.committed_table_rows("warehouse.Stock").await.unwrap();
+    let stock = final_state
+        .committed_table_rows("warehouse.Stock")
+        .await
+        .unwrap();
     assert_eq!(stock.len(), 2);
     assert!(stock.iter().any(|(_, row)| {
         text(row, "location") == "north"
@@ -1607,9 +1684,18 @@ async fn binary_reference_workflow_reopens_durable_rows_and_preserves_duplicate_
         .expect("exercise capture")
         .generation()
         .clone();
-    let books_after_exercise = final_state.committed_table_rows("library.Book").await.unwrap();
-    let loans_after_exercise = final_state.committed_table_rows("library.Loan").await.unwrap();
-    let stock_after_exercise = final_state.committed_table_rows("warehouse.Stock").await.unwrap();
+    let books_after_exercise = final_state
+        .committed_table_rows("library.Book")
+        .await
+        .unwrap();
+    let loans_after_exercise = final_state
+        .committed_table_rows("library.Loan")
+        .await
+        .unwrap();
+    let stock_after_exercise = final_state
+        .committed_table_rows("warehouse.Stock")
+        .await
+        .unwrap();
     drop(final_state);
 
     let duplicate_exercise = invoke(directory.path(), "run", "exercise");
@@ -1716,7 +1802,10 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         &generation_after_seed
     );
     assert_eq!(
-        after_missing.committed_table_rows("library.Book").await.unwrap(),
+        after_missing
+            .committed_table_rows("library.Book")
+            .await
+            .unwrap(),
         books_after_seed
     );
     assert!(
@@ -1793,7 +1882,10 @@ async fn binary_reference_library_lend_rejects_invalid_and_duplicate_rows_withou
         &generation_after_lend
     );
     assert_eq!(
-        after_duplicate.committed_table_rows("library.Loan").await.unwrap(),
+        after_duplicate
+            .committed_table_rows("library.Loan")
+            .await
+            .unwrap(),
         loans_after_lend
     );
 }
@@ -1877,8 +1969,14 @@ async fn core_transactions_and_assertions_work_without_std() {
 
 fn captured_standard_project() -> (tempfile::TempDir, String) {
     captured_standard_project_with(
-        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
-        &[("main.orna", include_str!("fixtures/captured-standard-parent.orna"))],
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            include_str!("fixtures/captured-standard-parent.orna"),
+        )],
     )
 }
 
@@ -1912,7 +2010,10 @@ fn staged_standard_project_with(
     )
     .expect("pinned module declaration");
     initialize_project(directory.path());
-    git_output_at(directory.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_output_at(
+        directory.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
     git_output_at(directory.path(), &["config", "user.name", "kierandrewett"]);
     let mut arguments = vec!["add", ".gitmodules", ".orna"];
     arguments.extend(project.iter().map(|&(name, _)| name));
@@ -1932,7 +2033,10 @@ fn captured_standard_project_with(
     project: &[(&str, &str)],
 ) -> (tempfile::TempDir, String) {
     let (directory, module_commit) = staged_standard_project_with(standard, project);
-    git_output_at(directory.path(), &["commit", "--quiet", "-m", "capture std snapshot"]);
+    git_output_at(
+        directory.path(),
+        &["commit", "--quiet", "-m", "capture std snapshot"],
+    );
     (directory, module_commit)
 }
 
@@ -1949,9 +2053,18 @@ fn committed_standard_project_with(
 /// The pinned `std.list` closure: `list` imports `collection`, and `math` is the standard root's dependency.
 fn pinned_list_closure() -> [(&'static str, &'static str); 3] {
     [
-        ("collection.orna", include_str!("fixtures/captured-standard-collection.orna")),
-        ("list.orna", include_str!("fixtures/captured-standard-list.orna")),
-        ("math.orna", include_str!("fixtures/captured-standard-math.orna")),
+        (
+            "collection.orna",
+            include_str!("fixtures/captured-standard-collection.orna"),
+        ),
+        (
+            "list.orna",
+            include_str!("fixtures/captured-standard-list.orna"),
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
     ]
 }
 
@@ -1963,12 +2076,11 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     let project = orna_project_v1::ProjectLoader::default()
         .load(&repository)
         .expect("load pinned module");
-    assert_eq!(project.standard_profile().unwrap().snapshot(), module_commit);
-    assert!(
-        project
-            .standard_runtime_modules()
-            .contains("std/math.orna")
+    assert_eq!(
+        project.standard_profile().unwrap().snapshot(),
+        module_commit
     );
+    assert!(project.standard_runtime_modules().contains("std/math.orna"));
     orna_semantic_v1::Catalogue::authoritative_core()
         .with_standard_sources(
             project.standard_profile().unwrap(),
@@ -2002,8 +2114,14 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     let (directory, _module_commit) = captured_standard_project_with(
         &pinned_list_closure(),
         &[
-            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
-            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+            (
+                "main.orna",
+                include_str!("fixtures/captured-standard-multi-main.orna"),
+            ),
+            (
+                "tiny.orna",
+                include_str!("fixtures/captured-standard-multi-tiny.orna"),
+            ),
         ],
     );
 
@@ -2019,7 +2137,10 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
         &catalogue,
         orna_semantic_v1::SystemProviders::Production,
     );
-    assert!(analysis.is_ok(), "analysis through production catalogue failed");
+    assert!(
+        analysis.is_ok(),
+        "analysis through production catalogue failed"
+    );
     let core_only = orna_semantic_v1::analyze_with_providers(
         project.modules(),
         &orna_semantic_v1::Catalogue::authoritative_core(),
@@ -2192,7 +2313,11 @@ fn binary_invoke_runs_a_single_module_import_from_the_pinned_standard_module() {
 
     let output = invoke(directory.path(), "invoke", "answer");
 
-    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert!(
+        output.status.success(),
+        "invoke stderr: {:?}",
+        output.stderr
+    );
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
 }
@@ -2202,14 +2327,24 @@ fn binary_invoke_evaluates_a_multi_module_project_importing_the_pinned_standard_
     let (directory, _module_commit) = captured_standard_project_with(
         &pinned_list_closure(),
         &[
-            ("main.orna", include_str!("fixtures/captured-standard-multi-main.orna")),
-            ("tiny.orna", include_str!("fixtures/captured-standard-multi-tiny.orna")),
+            (
+                "main.orna",
+                include_str!("fixtures/captured-standard-multi-main.orna"),
+            ),
+            (
+                "tiny.orna",
+                include_str!("fixtures/captured-standard-multi-tiny.orna"),
+            ),
         ],
     );
 
     let output = invoke(directory.path(), "invoke", "seed");
 
-    assert!(output.status.success(), "invoke stderr: {:?}", output.stderr);
+    assert!(
+        output.status.success(),
+        "invoke stderr: {:?}",
+        output.stderr
+    );
     assert_eq!(output.stdout, b"invocation completed\n");
     assert!(output.stderr.is_empty());
 }
@@ -2218,7 +2353,10 @@ fn binary_invoke_evaluates_a_multi_module_project_importing_the_pinned_standard_
 fn binary_invoke_rejects_a_negative_take_count_from_the_pinned_standard_list() {
     let (directory, _module_commit) = captured_standard_project_with(
         &pinned_list_closure(),
-        &[("main.orna", include_str!("fixtures/captured-standard-negative-take-main.orna"))],
+        &[(
+            "main.orna",
+            include_str!("fixtures/captured-standard-negative-take-main.orna"),
+        )],
     );
 
     let output = invoke(directory.path(), "invoke", "seed");
@@ -2231,8 +2369,14 @@ fn binary_invoke_rejects_a_negative_take_count_from_the_pinned_standard_list() {
 #[test]
 fn binary_invoke_refuses_a_standard_glob_import_with_its_import_code() {
     let (directory, _module_commit) = captured_standard_project_with(
-        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
-        &[("main.orna", "use std.math.*;\npub fn answer(): Int = increment(41);\n")],
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.*;\npub fn answer(): Int = increment(41);\n",
+        )],
     );
 
     let output = invoke(directory.path(), "invoke", "answer");
@@ -2240,14 +2384,23 @@ fn binary_invoke_refuses_a_standard_glob_import_with_its_import_code() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("error[ORNA-S010-IMPORT]"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("error[ORNA-S010-IMPORT]"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
 fn binary_invoke_refuses_a_standard_module_alias_import_with_its_import_code() {
     let (directory, _module_commit) = captured_standard_project_with(
-        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
-        &[("main.orna", "use std.math as m;\npub fn answer(): Int = increment(41);\n")],
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math as m;\npub fn answer(): Int = increment(41);\n",
+        )],
     );
 
     let output = invoke(directory.path(), "invoke", "answer");
@@ -2261,8 +2414,14 @@ fn binary_invoke_refuses_a_standard_module_alias_import_with_its_import_code() {
 #[test]
 fn binary_invoke_rejects_a_braced_standard_name_missing_from_the_pinned_module() {
     let (directory, _module_commit) = captured_standard_project_with(
-        &[("math.orna", include_str!("fixtures/captured-standard-math.orna"))],
-        &[("main.orna", "use std.math.{no_such_function};\npub fn answer(): Int = 1;\n")],
+        &[(
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        )],
+        &[(
+            "main.orna",
+            "use std.math.{no_such_function};\npub fn answer(): Int = 1;\n",
+        )],
     );
 
     let output = invoke(directory.path(), "invoke", "answer");

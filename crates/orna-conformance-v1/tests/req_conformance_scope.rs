@@ -27,8 +27,18 @@ fn skipped_runtime_scenarios_are_never_promoted_to_passes() {
     let corpus = Corpus::load_default().expect("published corpus validates");
     let mut adapter = SkippingAdapter;
     let report = Harness::new(corpus).run(&mut adapter);
-    assert!(report.scenarios.iter().all(|scenario| scenario.status != EvidenceStatus::Passed));
-    assert!(report.scenarios.iter().any(|scenario| scenario.status == EvidenceStatus::Skipped));
+    assert!(
+        report
+            .scenarios
+            .iter()
+            .all(|scenario| scenario.status != EvidenceStatus::Passed)
+    );
+    assert!(
+        report
+            .scenarios
+            .iter()
+            .any(|scenario| scenario.status == EvidenceStatus::Skipped)
+    );
 }
 
 /// ORNA-TEST-001 and ORNA-TEST-002: valid and invalid fixtures carry phase-specific expectations.
@@ -37,7 +47,13 @@ fn corpus_indexes_valid_fixtures_and_stable_invalid_diagnostics() {
     let corpus = Corpus::load_default().expect("published corpus validates");
     assert!(!corpus.manifest.fixtures.is_empty());
     assert!(!corpus.invalid_metadata.fixtures.is_empty());
-    assert!(corpus.invalid_metadata.fixtures.iter().all(|fixture| !fixture.failing_phase.is_empty() && !fixture.diagnostic.is_empty()));
+    assert!(
+        corpus
+            .invalid_metadata
+            .fixtures
+            .iter()
+            .all(|fixture| !fixture.failing_phase.is_empty() && !fixture.diagnostic.is_empty())
+    );
 }
 
 /// ORNA-TEST-003: project-runner evidence is distinct from full engine conformance.
@@ -54,8 +70,20 @@ fn project_adapter_does_not_claim_full_engine_conformance() {
 #[test]
 fn corpus_covers_valid_and_invalid_syntax_forms() {
     let corpus = Corpus::load_default().expect("published corpus validates");
-    assert!(corpus.manifest.fixtures.iter().any(|fixture| fixture.path.starts_with("examples/valid/")));
-    assert!(corpus.manifest.fixtures.iter().any(|fixture| fixture.path.starts_with("examples/invalid/")));
+    assert!(
+        corpus
+            .manifest
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.path.starts_with("examples/valid/"))
+    );
+    assert!(
+        corpus
+            .manifest
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.path.starts_with("examples/invalid/"))
+    );
 }
 
 /// ORNA-TEST-006: requirement evidence is a generated reporting layer over ordinary tests.
@@ -63,7 +91,13 @@ fn corpus_covers_valid_and_invalid_syntax_forms() {
 fn requirement_coverage_has_nonempty_test_mappings() {
     let corpus = Corpus::load_default().expect("published corpus validates");
     assert!(!corpus.requirement_evidence.requirements.is_empty());
-    assert!(corpus.requirement_evidence.requirements.iter().all(|entry| !entry.tests.is_empty()));
+    assert!(
+        corpus
+            .requirement_evidence
+            .requirements
+            .iter()
+            .all(|entry| !entry.tests.is_empty())
+    );
     let mut adapter = SkippingAdapter;
     let report = Harness::new(corpus).run(&mut adapter);
     assert_eq!(report.coverage.mapped_stage_evidence, 0);
@@ -71,11 +105,23 @@ fn requirement_coverage_has_nonempty_test_mappings() {
     assert!(!report.skipped_evidence.is_empty());
 }
 
-
 /// ORNA-TEST-009: a complete-project fixture must explicitly index legacy row loading.
 #[test]
 fn project_manifest_requires_explicit_row_admission() {
     let corpus = Corpus::load_default().expect("published corpus validates");
-    assert!(corpus.manifest.fixtures.iter().any(|fixture| fixture.kind == "project"));
-    assert!(corpus.manifest.fixtures.iter().filter(|fixture| fixture.kind == "project").all(|fixture| fixture.expect.contains_key("load_rows")));
+    assert!(
+        corpus
+            .manifest
+            .fixtures
+            .iter()
+            .any(|fixture| fixture.kind == "project")
+    );
+    assert!(
+        corpus
+            .manifest
+            .fixtures
+            .iter()
+            .filter(|fixture| fixture.kind == "project")
+            .all(|fixture| fixture.expect.contains_key("load_rows"))
+    );
 }

@@ -2850,11 +2850,9 @@ mod tests {
     #[test]
     fn committed_ids_survive_edits_and_retirement_prevents_reuse() {
         let first_source = "pub table Note(id: Str) { title: Str, }";
-        let first = ObjectIdentityManifest::reconcile(
-            &[ModuleInput::new("main.orna", first_source)],
-            None,
-        )
-        .expect("initial authoring allocates committed identities");
+        let first =
+            ObjectIdentityManifest::reconcile(&[ModuleInput::new("main.orna", first_source)], None)
+                .expect("initial authoring allocates committed identities");
         let table_id = *first.id(ObjectKind::Table, "Note").unwrap();
         let title_id = *first.id(ObjectKind::Field, "Note.title").unwrap();
         let encoded = first.encode().unwrap();
@@ -2871,11 +2869,9 @@ mod tests {
         assert_eq!(edited.id(ObjectKind::Table, "Note"), Some(&table_id));
         assert_eq!(edited.id(ObjectKind::Field, "Note.title"), Some(&title_id));
 
-        let removed = ObjectIdentityManifest::reconcile(
-            &[ModuleInput::new("main.orna", "")],
-            Some(&edited),
-        )
-        .expect("removal retires identities");
+        let removed =
+            ObjectIdentityManifest::reconcile(&[ModuleInput::new("main.orna", "")], Some(&edited))
+                .expect("removal retires identities");
         assert!(removed.records().iter().any(|record| {
             record.kind() == ObjectKind::Table
                 && record.qualified_name() == "Note"

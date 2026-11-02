@@ -10,7 +10,9 @@ struct AcceptCheckout;
 
 impl orna_repository_v1::CheckoutAssertionGate for AcceptCheckout {
     fn validate(
-        &self, _: &orna_repository_v1::Repository, _: &orna_repository_v1::CheckoutPreflight,
+        &self,
+        _: &orna_repository_v1::Repository,
+        _: &orna_repository_v1::CheckoutPreflight,
     ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal> {
         Ok(())
     }
@@ -42,7 +44,11 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -138,14 +144,21 @@ fn divergent_checkout_carries_nonconflicting_git_state() {
         .unwrap();
     assert!(plan.git().conflicting_paths().is_empty());
 
-    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout).unwrap();
+    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout)
+        .unwrap();
 
-    assert_eq!(git(root.path(), &["branch", "--show-current"]), "experiment");
+    assert_eq!(
+        git(root.path(), &["branch", "--show-current"]),
+        "experiment"
+    );
     assert_eq!(
         fs::read_to_string(root.path().join("target.orna")).unwrap(),
         "target source\n"
     );
-    assert_eq!(git(root.path(), &["show", ":ordinary.txt"]), "staged ordinary");
+    assert_eq!(
+        git(root.path(), &["show", ":ordinary.txt"]),
+        "staged ordinary"
+    );
     assert_eq!(
         fs::read_to_string(root.path().join("main.orna")).unwrap(),
         "unstaged source\n"

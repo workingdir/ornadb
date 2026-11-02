@@ -1,9 +1,9 @@
+use orna_security_v1::{SecretMetadata, SecretRef};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys_v1::{
     SystemEffect, TypeId, TypedValue, ValueMetadataFacts, ValueMetadataResolver,
     system_function_descriptor, system_secret_projection, system_value_metadata,
 };
-use orna_security_v1::{SecretMetadata, SecretRef};
 
 const SYS_META_SOURCE: &str = include_str!("fixtures/sys-meta-protected.orna");
 

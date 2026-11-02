@@ -22,5 +22,9 @@ fn session() -> AdmittedReplSession {
 fn math_clamp_with_reversed_bounds_saturates_to_the_lower_bound() {
     let mut session = session();
     let source = include_str!("fixtures/stdlib-math-clamp-inverted-bounds-ln4y7.orna");
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

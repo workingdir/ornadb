@@ -213,9 +213,8 @@ impl EffectHandler for IntrinsicEffects {
 /// performs it must not be stored and reused by an equal second call.
 #[test]
 fn now_boundary_prevents_reuse_of_the_enclosing_call() {
-    let functions = functions_from_source(
-        "fn pick(x: Int) = x + now();\nfn entry() = pick(1) + pick(1);",
-    );
+    let functions =
+        functions_from_source("fn pick(x: Int) = x + now();\nfn entry() = pick(1) + pick(1);");
     let mut effects = IntrinsicEffects::default();
 
     let (value, stats) = invoke_named_with_effects_and_reuse_report(
@@ -238,9 +237,8 @@ fn now_boundary_prevents_reuse_of_the_enclosing_call() {
 /// boundary as `now()`.
 #[test]
 fn uuid7_boundary_prevents_reuse_of_the_enclosing_call() {
-    let functions = functions_from_source(
-        "fn pick(x: Int) = x + uuid7();\nfn entry() = pick(1) + pick(1);",
-    );
+    let functions =
+        functions_from_source("fn pick(x: Int) = x + uuid7();\nfn entry() = pick(1) + pick(1);");
     let mut effects = IntrinsicEffects::default();
 
     let (value, stats) = invoke_named_with_effects_and_reuse_report(

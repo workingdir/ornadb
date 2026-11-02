@@ -2,8 +2,8 @@ use std::{collections::BTreeMap, path::Path};
 
 use orna_syntax_v1::{Declaration, parse_module};
 use orna_sys_v1::{
-    CaptureFileError, ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider, EnvironmentProviderError,
-    FilesystemProviderError, HttpProviderError, ProcessProviderError,
+    CaptureFileError, ClockProviderError, EnvironmentDispatchValue, EnvironmentProvider,
+    EnvironmentProviderError, FilesystemProviderError, HttpProviderError, ProcessProviderError,
     system_host_binding_modules_json, system_host_binding_stubs, system_host_operation_registry,
     system_host_operation_registry_json, system_host_operation_registry_schema_json,
 };

@@ -1,7 +1,6 @@
 // These fixtures mount a real cwd: each scenario declares its own constants and
 // imports next to the step that needs them, and indexes bounded fixture lengths.
 #![allow(clippy::items_after_statements, clippy::format_collect)]
-
 #![cfg(target_os = "linux")]
 
 //! FUSE mount cases for ORNA-VFS-017 (lazy/pinned directory iteration),
@@ -19,16 +18,16 @@ use std::{
 
 use tempfile::TempDir;
 
+#[path = "support/editor_mount.rs"]
+mod editor_mount;
 #[path = "support/format3.rs"]
 mod format3;
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[path = "support/editor_mount.rs"]
-mod editor_mount;
 use editor_mount::{
-    assert_errno, repository_with_music_rows, repository_with_music_rows_and_modules,
-    require_fuse_or_skip, retained_drafts, spawn_mount_process, spawn_snapshot_mount_process,
-    write_and_sync, MountedProcess,
+    MountedProcess, assert_errno, repository_with_music_rows,
+    repository_with_music_rows_and_modules, require_fuse_or_skip, retained_drafts,
+    spawn_mount_process, spawn_snapshot_mount_process, write_and_sync,
 };
 
 const EPERM: i32 = 1;
@@ -60,7 +59,13 @@ fn retained_candidates(records: Vec<String>) -> Vec<String> {
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(directory)
         .expect("list the collection directory")
-        .map(|entry| entry.expect("directory entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     names.sort();
     names
@@ -106,8 +111,14 @@ async fn vfs_020_multi_file_saves_are_admitted_in_order_without_cross_file_rollb
         &[EINVAL],
         "an invalid candidate for Music/paris is refused at sync with EINVAL",
     );
-    assert!(read_view(&paris).contains("Paris edit"), "rejected candidate keeps accepted paris");
-    assert!(read_view(&london).contains("London edit"), "rejected paris save keeps accepted london");
+    assert!(
+        read_view(&paris).contains("Paris edit"),
+        "rejected candidate keeps accepted paris"
+    );
+    assert!(
+        read_view(&london).contains("London edit"),
+        "rejected paris save keeps accepted london"
+    );
 }
 
 /// ORNA-VFS-019 (first half only): an open read handle keeps its captured row
@@ -144,8 +155,15 @@ async fn vfs_019_open_handle_does_not_retarget_after_sibling_row_write() {
         through_handle.contains("Paris") && !through_handle.contains("London edit"),
         "an open handle stays on its captured row: {through_handle:?}"
     );
-    assert_eq!(sorted_names(&music), listing_before, "the Music listing keeps its row set");
-    assert!(read_view(&london).contains("London edit"), "a fresh open sees the write");
+    assert_eq!(
+        sorted_names(&music),
+        listing_before,
+        "the Music listing keeps its row set"
+    );
+    assert!(
+        read_view(&london).contains("London edit"),
+        "a fresh open sees the write"
+    );
 }
 
 #[allow(clippy::too_many_lines)]
@@ -160,8 +178,12 @@ async fn vfs_017_large_collection_lookup_and_pinned_listing() {
         return;
     }
     const ROWS: usize = 512;
-    let keys = (0..ROWS).map(|index| format!("row-{index:03}")).collect::<Vec<_>>();
-    let documents = (0..ROWS).map(|index| music_row(&format!("title-{index:03}"))).collect::<Vec<_>>();
+    let keys = (0..ROWS)
+        .map(|index| format!("row-{index:03}"))
+        .collect::<Vec<_>>();
+    let documents = (0..ROWS)
+        .map(|index| music_row(&format!("title-{index:03}")))
+        .collect::<Vec<_>>();
     let rows = keys
         .iter()
         .zip(&documents)
@@ -176,12 +198,22 @@ async fn vfs_017_large_collection_lookup_and_pinned_listing() {
     mounted.await_path(&last);
 
     let known = read_view(&last);
-    assert!(known.contains("title-511"), "a known late key resolves through the index: {known:?}");
+    assert!(
+        known.contains("title-511"),
+        "a known late key resolves through the index: {known:?}"
+    );
 
     let first = sorted_names(&music);
     let second = sorted_names(&music);
-    assert_eq!(first.len(), ROWS, "every row of the multi-page collection is listed");
-    assert_eq!(first, second, "two passes over the same mount list the same rows");
+    assert_eq!(
+        first.len(),
+        ROWS,
+        "every row of the multi-page collection is listed"
+    );
+    assert_eq!(
+        first, second,
+        "two passes over the same mount list the same rows"
+    );
 }
 
 const NOTES_SOURCE: &str = "pub fn answer(): Int = 42;\n";
@@ -207,10 +239,20 @@ async fn vfs_020_reachable_source_module_is_projected_with_committed_bytes() {
     let notes = mountpoint.join("notes.orna");
     mounted.await_path(&notes);
 
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the source module reads its committed bytes");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "the source module reads its committed bytes"
+    );
     let root = sorted_names(&mountpoint);
-    assert!(root.contains(&"notes.orna".to_owned()), "the source module is listed: {root:?}");
-    assert!(root.contains(&"Music".to_owned()), "the table directory stays beside it: {root:?}");
+    assert!(
+        root.contains(&"notes.orna".to_owned()),
+        "the source module is listed: {root:?}"
+    );
+    assert!(
+        root.contains(&"Music".to_owned()),
+        "the table directory stays beside it: {root:?}"
+    );
 }
 
 /// ORNA-VFS-020 committed read path: a large source module reads its committed bytes
@@ -222,7 +264,9 @@ async fn vfs_020_large_source_module_reads_committed_bytes_by_range() {
         return;
     }
     use std::os::unix::fs::FileExt;
-    let module: String = (0..40_000).map(|line| format!("// committed line {line:08}\n")).collect();
+    let module: String = (0..40_000)
+        .map(|line| format!("// committed line {line:08}\n"))
+        .collect();
     let (repository_directory, _repository, _relation_id, _context) =
         format3::format3_repository_with_context_and_modules(
             "use big;\npub table Music(id: Str) { title: Str, artist: Str, }\n",
@@ -240,15 +284,24 @@ async fn vfs_020_large_source_module_reads_committed_bytes_by_range() {
     let mut buffer = vec![0_u8; 128 * 1024];
     let mut offset = 0_usize;
     while offset < expected.len() {
-        let read = file.read_at(&mut buffer, offset as u64).expect("a range read succeeds");
-        assert!(read > 0, "the module ends before its committed length at {offset}");
+        let read = file
+            .read_at(&mut buffer, offset as u64)
+            .expect("a range read succeeds");
+        assert!(
+            read > 0,
+            "the module ends before its committed length at {offset}"
+        );
         assert!(
             buffer[..read] == expected[offset..offset + read],
             "the range at {offset} returns the committed bytes"
         );
         offset += read;
     }
-    assert_eq!(file.read_at(&mut buffer, offset as u64).expect("an end-of-file read"), 0);
+    assert_eq!(
+        file.read_at(&mut buffer, offset as u64)
+            .expect("an end-of-file read"),
+        0
+    );
 }
 
 /// profiles/vfs-1.md:31-33 and ORNA-VFS-020: a source path keeps its plain name on
@@ -275,10 +328,18 @@ async fn vfs_020_source_path_keeps_name_and_table_projects_escaped() {
     mounted.await_path(&extra);
     mounted.await_path(&data);
 
-    assert_eq!(read_view(&extra), EXTRA_SOURCE, "the colliding source module reads its bytes");
+    assert_eq!(
+        read_view(&extra),
+        EXTRA_SOURCE,
+        "the colliding source module reads its bytes"
+    );
     assert_eq!(
         sorted_names(&mountpoint),
-        vec!["%4Dusic".to_owned(), "Music".to_owned(), "main.orna".to_owned()],
+        vec![
+            "%4Dusic".to_owned(),
+            "Music".to_owned(),
+            "main.orna".to_owned()
+        ],
         "the source path keeps Music; the table is projected under its escaped name"
     );
     assert_eq!(
@@ -286,7 +347,10 @@ async fn vfs_020_source_path_keeps_name_and_table_projects_escaped() {
         vec!["extra.orna".to_owned()],
         "the source directory lists only its source entries"
     );
-    assert!(read_view(&data).contains("Original"), "the escaped table keeps its committed row");
+    assert!(
+        read_view(&data).contains("Original"),
+        "the escaped table keeps its committed row"
+    );
 }
 
 /// ORNA-VFS-020 and profiles/vfs-1.md: a source module is editable through the
@@ -311,7 +375,11 @@ async fn vfs_020_source_module_write_is_accepted_and_visible_after_sync() {
 
     const EDITED: &str = "// edited through the mount\n";
     write_and_sync(&notes, EDITED).expect("a synced source module write is accepted");
-    assert_eq!(read_view(&notes), EDITED, "the accepted source edit is visible through a new open");
+    assert_eq!(
+        read_view(&notes),
+        EDITED,
+        "the accepted source edit is visible through a new open"
+    );
 }
 
 /// ORNA-VFS-020 and 41-vfs.md "Failure/recovery": a malformed source candidate is refused
@@ -338,7 +406,11 @@ async fn vfs_020_invalid_source_candidate_is_refused_with_einval_and_committed_b
         &[EINVAL],
         "a malformed source candidate is refused at sync with EINVAL",
     );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the committed source module is unchanged");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "the committed source module is unchanged"
+    );
 }
 
 /// ORNA-VFS-020: speculative source writes are not evaluated. A half-written file that
@@ -366,14 +438,17 @@ async fn vfs_020_speculative_source_write_is_not_visible_until_sync() {
         .truncate(true)
         .open(&notes)
         .expect("a write-intent open of a source module is accepted");
-    file.write_all(b"pub fn half").expect("a speculative write is accepted into the draft");
+    file.write_all(b"pub fn half")
+        .expect("a speculative write is accepted into the draft");
     assert_eq!(
         read_view(&notes),
         NOTES_SOURCE,
         "a new open reads the committed bytes while the draft is unsynced"
     );
-    file.write_all(b"(): Int = 1;\n").expect("the rest of the candidate is accepted");
-    file.sync_all().expect("the complete candidate is admitted at sync");
+    file.write_all(b"(): Int = 1;\n")
+        .expect("the rest of the candidate is accepted");
+    file.sync_all()
+        .expect("the complete candidate is admitted at sync");
     assert_eq!(read_view(&notes), "pub fn half(): Int = 1;\n");
 }
 
@@ -400,8 +475,12 @@ async fn vfs_020_source_module_append_open_continues_committed_bytes() {
         .append(true)
         .open(&notes)
         .expect("an append open of a source module is accepted");
-    appended.write_all(EXTRA_SOURCE.as_bytes()).expect("the append is accepted");
-    appended.sync_all().expect("the appended candidate is admitted at sync");
+    appended
+        .write_all(EXTRA_SOURCE.as_bytes())
+        .expect("the append is accepted");
+    appended
+        .sync_all()
+        .expect("the appended candidate is admitted at sync");
     assert_eq!(read_view(&notes), format!("{NOTES_SOURCE}{EXTRA_SOURCE}"));
 }
 
@@ -430,7 +509,8 @@ async fn vfs_020_stale_source_candidate_is_refused_with_eagain() {
         .truncate(true)
         .open(&notes)
         .expect("a write-intent open of a source module is accepted");
-    file.write_all(b"pub fn mine(): Int = 2;\n").expect("the candidate is accepted into the draft");
+    file.write_all(b"pub fn mine(): Int = 2;\n")
+        .expect("the candidate is accepted into the draft");
     const OTHER: &str = "pub fn other(): Int = 9;\n";
     std::fs::write(repository_directory.path().join("notes.orna"), OTHER)
         .expect("another writer changes the module on disk");
@@ -440,7 +520,11 @@ async fn vfs_020_stale_source_candidate_is_refused_with_eagain() {
         "a candidate whose disk baseline changed is refused with EAGAIN",
     );
     drop(file);
-    assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
+    assert_eq!(
+        read_view(&notes),
+        OTHER,
+        "the mount keeps the other writer's bytes"
+    );
 }
 
 /// ORNA-VFS-020 and 41-vfs.md: source candidates commit as one group. Two modules edited
@@ -477,9 +561,15 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
         .truncate(true)
         .open(&extra)
         .expect("a write-intent open of extra.orna is accepted");
-    notes_handle.write_all(NOTES_ACCEPTED.as_bytes()).expect("the notes candidate is accepted");
-    extra_handle.write_all(EXTRA_ACCEPTED.as_bytes()).expect("the extra candidate is accepted");
-    notes_handle.sync_all().expect("the valid group is admitted at sync");
+    notes_handle
+        .write_all(NOTES_ACCEPTED.as_bytes())
+        .expect("the notes candidate is accepted");
+    extra_handle
+        .write_all(EXTRA_ACCEPTED.as_bytes())
+        .expect("the extra candidate is accepted");
+    notes_handle
+        .sync_all()
+        .expect("the valid group is admitted at sync");
     assert_eq!(read_view(&notes), NOTES_ACCEPTED);
     assert_eq!(read_view(&extra), EXTRA_ACCEPTED);
     drop(extra_handle);
@@ -495,15 +585,27 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
         .truncate(true)
         .open(&extra)
         .expect("a second write-intent open of extra.orna is accepted");
-    notes_handle.write_all(b"pub fn bad_a( {\n").expect("the malformed candidate is accepted");
-    extra_handle.write_all(b"pub fn good_b(): Int = 3;\n").expect("the valid candidate is accepted");
+    notes_handle
+        .write_all(b"pub fn bad_a( {\n")
+        .expect("the malformed candidate is accepted");
+    extra_handle
+        .write_all(b"pub fn good_b(): Int = 3;\n")
+        .expect("the valid candidate is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EINVAL],
         "a group with one malformed candidate is refused as a unit with EINVAL",
     );
-    assert_eq!(read_view(&notes), NOTES_ACCEPTED, "the malformed group leaves notes committed");
-    assert_eq!(read_view(&extra), EXTRA_ACCEPTED, "the valid sibling is not admitted alone");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_ACCEPTED,
+        "the malformed group leaves notes committed"
+    );
+    assert_eq!(
+        read_view(&extra),
+        EXTRA_ACCEPTED,
+        "the valid sibling is not admitted alone"
+    );
 }
 
 /// ORNA-VFS-020 and profiles/vfs-1.md (editable candidate and grouped validation): a source
@@ -515,6 +617,7 @@ async fn vfs_020_source_module_group_is_admitted_together_or_not_at_all() {
 /// each pass alone but fail together is refused as a unit: the callee drops a function that the
 /// importer's candidate calls, and neither module changes.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn multi_file_source_edit_requires_grouped_validation() {
     if !require_fuse_or_skip() {
         return;
@@ -544,17 +647,29 @@ async fn multi_file_source_edit_requires_grouped_validation() {
 
     // Saved alone, the rename leaves the importer calling a function that no longer exists.
     let mut notes_handle = open_source_for_write(&notes);
-    notes_handle.write_all(RENAMED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
+    notes_handle
+        .write_all(RENAMED_CALLEE.as_bytes())
+        .expect("the callee candidate is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EINVAL],
         "a rename that breaks an importer is refused when the callee is saved alone",
     );
-    assert_eq!(read_view(&notes), CALLEE, "the refused callee keeps its committed bytes");
-    assert_eq!(read_view(&extra), CALLER, "the importer keeps its committed bytes");
+    assert_eq!(
+        read_view(&notes),
+        CALLEE,
+        "the refused callee keeps its committed bytes"
+    );
+    assert_eq!(
+        read_view(&extra),
+        CALLER,
+        "the importer keeps its committed bytes"
+    );
     let candidates = retained_candidates(retained_drafts(&repository));
     assert!(
-        candidates.iter().any(|draft| draft.as_str() == RENAMED_CALLEE),
+        candidates
+            .iter()
+            .any(|draft| draft.as_str() == RENAMED_CALLEE),
         "the refused callee candidate is retained as a draft"
     );
     drop(notes_handle);
@@ -562,26 +677,52 @@ async fn multi_file_source_edit_requires_grouped_validation() {
     // Saved together, the callee and its importer validate as one group and commit together.
     let mut notes_handle = open_source_for_write(&notes);
     let mut extra_handle = open_source_for_write(&extra);
-    notes_handle.write_all(RENAMED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
-    extra_handle.write_all(RENAMED_CALLER.as_bytes()).expect("the importer candidate is accepted");
-    notes_handle.sync_all().expect("the grouped rename validates as a whole and is admitted");
-    assert_eq!(read_view(&notes), RENAMED_CALLEE, "the grouped callee is committed");
-    assert_eq!(read_view(&extra), RENAMED_CALLER, "the grouped importer is committed");
+    notes_handle
+        .write_all(RENAMED_CALLEE.as_bytes())
+        .expect("the callee candidate is accepted");
+    extra_handle
+        .write_all(RENAMED_CALLER.as_bytes())
+        .expect("the importer candidate is accepted");
+    notes_handle
+        .sync_all()
+        .expect("the grouped rename validates as a whole and is admitted");
+    assert_eq!(
+        read_view(&notes),
+        RENAMED_CALLEE,
+        "the grouped callee is committed"
+    );
+    assert_eq!(
+        read_view(&extra),
+        RENAMED_CALLER,
+        "the grouped importer is committed"
+    );
     drop(extra_handle);
     drop(notes_handle);
 
     // Both candidates fail validation on their own: each is refused, so the group is refused.
     let mut notes_handle = open_source_for_write(&notes);
     let mut extra_handle = open_source_for_write(&extra);
-    notes_handle.write_all(BROKEN_CALLEE.as_bytes()).expect("the malformed callee is accepted");
-    extra_handle.write_all(DANGLING_CALLER.as_bytes()).expect("the dangling importer is accepted");
+    notes_handle
+        .write_all(BROKEN_CALLEE.as_bytes())
+        .expect("the malformed callee is accepted");
+    extra_handle
+        .write_all(DANGLING_CALLER.as_bytes())
+        .expect("the dangling importer is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EINVAL],
         "a group in which both candidates fail validation on their own is refused with EINVAL",
     );
-    assert_eq!(read_view(&notes), RENAMED_CALLEE, "the refused group leaves the callee");
-    assert_eq!(read_view(&extra), RENAMED_CALLER, "the refused group leaves the importer");
+    assert_eq!(
+        read_view(&notes),
+        RENAMED_CALLEE,
+        "the refused group leaves the callee"
+    );
+    assert_eq!(
+        read_view(&extra),
+        RENAMED_CALLER,
+        "the refused group leaves the importer"
+    );
     drop(extra_handle);
     drop(notes_handle);
     let drafts = retained_candidates(retained_drafts(&repository));
@@ -596,24 +737,44 @@ async fn multi_file_source_edit_requires_grouped_validation() {
 
     // The callee gains `spare`, which no committed importer calls, so it is valid alone.
     let mut notes_handle = open_source_for_write(&notes);
-    notes_handle.write_all(SPARE_CALLEE.as_bytes()).expect("the callee candidate is accepted");
-    notes_handle.sync_all().expect("the callee with an uncalled spare is admitted alone");
-    assert_eq!(read_view(&notes), SPARE_CALLEE, "the spare callee is committed");
+    notes_handle
+        .write_all(SPARE_CALLEE.as_bytes())
+        .expect("the callee candidate is accepted");
+    notes_handle
+        .sync_all()
+        .expect("the callee with an uncalled spare is admitted alone");
+    assert_eq!(
+        read_view(&notes),
+        SPARE_CALLEE,
+        "the spare callee is committed"
+    );
     drop(notes_handle);
 
     // Each candidate passes alone against the other's committed bytes. The callee drops `spare`
     // and the importer calls it, so together the importer calls a function that no longer exists.
     let mut notes_handle = open_source_for_write(&notes);
     let mut extra_handle = open_source_for_write(&extra);
-    notes_handle.write_all(SWAPPED_CALLEE.as_bytes()).expect("the callee candidate is accepted");
-    extra_handle.write_all(SPARE_CALLER.as_bytes()).expect("the importer candidate is accepted");
+    notes_handle
+        .write_all(SWAPPED_CALLEE.as_bytes())
+        .expect("the callee candidate is accepted");
+    extra_handle
+        .write_all(SPARE_CALLER.as_bytes())
+        .expect("the importer candidate is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EINVAL],
         "a group whose candidates each pass alone but fail together is refused with EINVAL",
     );
-    assert_eq!(read_view(&notes), SPARE_CALLEE, "the group-only refusal leaves the callee");
-    assert_eq!(read_view(&extra), RENAMED_CALLER, "the group-only refusal leaves the importer");
+    assert_eq!(
+        read_view(&notes),
+        SPARE_CALLEE,
+        "the group-only refusal leaves the callee"
+    );
+    assert_eq!(
+        read_view(&extra),
+        RENAMED_CALLER,
+        "the group-only refusal leaves the importer"
+    );
     drop(extra_handle);
     drop(notes_handle);
     let drafts = retained_candidates(retained_drafts(&repository));
@@ -663,7 +824,9 @@ async fn vfs_020_dirty_source_draft_is_retained_at_unmount() {
         .truncate(true)
         .open(&notes)
         .expect("a write-intent open of notes.orna is accepted");
-    handle.write_all(UNSYNCED.as_bytes()).expect("the candidate is written");
+    handle
+        .write_all(UNSYNCED.as_bytes())
+        .expect("the candidate is written");
 
     let signal = Command::new("kill")
         .args(["-TERM", &mounted.pid().to_string()])
@@ -672,8 +835,14 @@ async fn vfs_020_dirty_source_draft_is_retained_at_unmount() {
     assert!(signal.success(), "kill -TERM failed");
     // The open handle keeps the mount up (ORNA-VFS-024); stop retains the dirty candidate first.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while !retained_drafts(&repository).iter().any(|draft| draft.contains("unsynced_draft")) {
-        assert!(std::time::Instant::now() < deadline, "stop did not retain the dirty source draft");
+    while !retained_drafts(&repository)
+        .iter()
+        .any(|draft| draft.contains("unsynced_draft"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stop did not retain the dirty source draft"
+        );
         std::thread::sleep(Duration::from_millis(20));
     }
     drop(handle);
@@ -726,11 +895,17 @@ async fn vfs_020_o_trunc_only_open_holds_an_empty_candidate_until_sync() {
         .open(&notes)
         .expect("a truncating open of a source module is accepted");
     assert_eq!(
-        file.metadata().expect("attributes of the open candidate").len(),
+        file.metadata()
+            .expect("attributes of the open candidate")
+            .len(),
         0,
         "O_TRUNC alone empties the candidate"
     );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "a new open reads the committed bytes");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "a new open reads the committed bytes"
+    );
 }
 
 /// ORNA-VFS-020 and 41-vfs.md: a snapshot mount (`mount --at`) has no writer, so a
@@ -749,20 +924,25 @@ async fn vfs_020_source_write_on_snapshot_mount_is_refused_with_erofs() {
     let head = repository.head().unwrap().unwrap();
     let mount_parent = TempDir::new().unwrap();
     let mountpoint = mount_parent.path().join("library");
-    let mut mounted = spawn_snapshot_mount_process(
-        repository_directory.path(),
-        &mountpoint,
-        head.as_str(),
-    );
+    let mut mounted =
+        spawn_snapshot_mount_process(repository_directory.path(), &mountpoint, head.as_str());
     let notes = mountpoint.join("notes.orna");
     mounted.await_path(&notes);
 
     assert_errno(
-        OpenOptions::new().write(true).truncate(true).open(&notes).map(|_| ()),
+        OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(&notes)
+            .map(|_| ()),
         &[EROFS],
         "a write-intent open on a snapshot mount is refused",
     );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the snapshot keeps its committed bytes");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "the snapshot keeps its committed bytes"
+    );
 }
 
 /// ORNA-VFS-020: a source module is edited in place. Renaming or removing it on the live
@@ -794,7 +974,11 @@ async fn vfs_020_source_module_rename_and_unlink_are_refused_with_eperm() {
         &[EPERM],
         "a source module cannot be removed",
     );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the committed source module is unchanged");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "the committed source module is unchanged"
+    );
 }
 
 /// ORNA-VFS-020 and profiles/vfs-1.md: a sync reports only its own candidate. A malformed
@@ -831,23 +1015,37 @@ async fn vfs_020_sibling_refusal_is_not_reported_on_another_modules_sync() {
         .truncate(true)
         .open(&extra)
         .expect("a write-intent open of extra.orna is accepted");
-    notes_handle.write_all(NOTES_ACCEPTED.as_bytes()).expect("the notes candidate is accepted");
-    extra_handle.write_all(b"pub fn bad_b( {\n").expect("the malformed candidate is accepted");
+    notes_handle
+        .write_all(NOTES_ACCEPTED.as_bytes())
+        .expect("the notes candidate is accepted");
+    extra_handle
+        .write_all(b"pub fn bad_b( {\n")
+        .expect("the malformed candidate is accepted");
     assert_errno(
         notes_handle.sync_all(),
         &[EIO],
         "a group sync with a malformed sibling fails with EIO, not the sibling's EINVAL",
     );
-    assert_eq!(read_view(&notes), NOTES_SOURCE, "the failed group is not written");
+    assert_eq!(
+        read_view(&notes),
+        NOTES_SOURCE,
+        "the failed group is not written"
+    );
     assert_errno(
         extra_handle.sync_all(),
         &[EINVAL],
         "the malformed candidate is refused with EINVAL on its own sync",
     );
     await_stderr(&mounted, "sys.vfs.invalid_document");
-    notes_handle.sync_all().expect("the valid candidate is admitted once its sibling is refused");
+    notes_handle
+        .sync_all()
+        .expect("the valid candidate is admitted once its sibling is refused");
     assert_eq!(read_view(&notes), NOTES_ACCEPTED);
-    assert_eq!(read_view(&extra), EXTRA_SOURCE, "the refused sibling keeps its committed bytes");
+    assert_eq!(
+        read_view(&extra),
+        EXTRA_SOURCE,
+        "the refused sibling keeps its committed bytes"
+    );
 }
 
 /// ORNA-VFS-020 and 41-vfs.md errno table: a stale candidate is refused with EAGAIN, and
@@ -878,7 +1076,8 @@ async fn vfs_020_stale_source_candidate_is_held_on_its_handle_not_reseeded() {
         .truncate(true)
         .open(&notes)
         .expect("a write-intent open of notes.orna is accepted");
-    file.write_all(MINE.as_bytes()).expect("the candidate is accepted into the draft");
+    file.write_all(MINE.as_bytes())
+        .expect("the candidate is accepted into the draft");
     std::fs::write(repository_directory.path().join("notes.orna"), OTHER)
         .expect("another writer changes the module on disk");
     assert_errno(
@@ -886,10 +1085,19 @@ async fn vfs_020_stale_source_candidate_is_held_on_its_handle_not_reseeded() {
         &[EAGAIN],
         "a candidate whose disk baseline changed is refused with EAGAIN",
     );
-    assert_eq!(read_view(&notes), OTHER, "the mount keeps the other writer's bytes");
+    assert_eq!(
+        read_view(&notes),
+        OTHER,
+        "the mount keeps the other writer's bytes"
+    );
     await_stderr(&mounted, "sys.vfs.stale_edit");
-    file.seek(SeekFrom::Start(0)).expect("seek the held candidate");
+    file.seek(SeekFrom::Start(0))
+        .expect("seek the held candidate");
     let mut held = String::new();
-    file.read_to_string(&mut held).expect("read the held candidate through its handle");
-    assert_eq!(held, MINE, "the handle still reads its own candidate, not the replacement bytes");
+    file.read_to_string(&mut held)
+        .expect("read the held candidate through its handle");
+    assert_eq!(
+        held, MINE,
+        "the handle still reads its own candidate, not the replacement bytes"
+    );
 }

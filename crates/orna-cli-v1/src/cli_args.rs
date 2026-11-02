@@ -303,7 +303,6 @@ fn refused_command(name: &str) -> Diagnostic {
     Diagnostic::usage("E1002", title, help)
 }
 
-
 #[allow(clippy::too_many_lines)]
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
@@ -404,10 +403,18 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                 ));
             }
             let table = words.next().ok_or_else(|| {
-                Diagnostic::usage("E1001", "`add --row` needs a table", "use `add --row TABLE KEY`")
+                Diagnostic::usage(
+                    "E1001",
+                    "`add --row` needs a table",
+                    "use `add --row TABLE KEY`",
+                )
             })?;
             let key = words.next().ok_or_else(|| {
-                Diagnostic::usage("E1001", "`add --row` needs a key", "use `add --row TABLE KEY`")
+                Diagnostic::usage(
+                    "E1001",
+                    "`add --row` needs a key",
+                    "use `add --row TABLE KEY`",
+                )
             })?;
             if words.next().is_some() {
                 return Err(Diagnostic::usage(
@@ -416,7 +423,10 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
                     "use `add --row TABLE KEY` with exactly one table and key",
                 ));
             }
-            Command::AddRow { table: table.to_owned(), key: key.to_owned() }
+            Command::AddRow {
+                table: table.to_owned(),
+                key: key.to_owned(),
+            }
         }
         Some("restore") => {
             if words.next() != Some("--staged") || words.next() != Some("--row") {
@@ -525,12 +535,27 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
         }
         Some("edit") => {
             let row = words.peek() == Some(&"--row");
-            if row { words.next(); }
-            let path = words.next().ok_or_else(|| Diagnostic::usage("E1001", "`edit` needs a path", "use `edit PATH` or `edit --row PATH`"))?;
-            if words.next().is_some() {
-                return Err(Diagnostic::usage("E1002", "unexpected trailing arguments for `edit`", "use `edit PATH` or `edit --row PATH`"));
+            if row {
+                words.next();
             }
-            Command::Edit { path: path.to_owned(), row }
+            let path = words.next().ok_or_else(|| {
+                Diagnostic::usage(
+                    "E1001",
+                    "`edit` needs a path",
+                    "use `edit PATH` or `edit --row PATH`",
+                )
+            })?;
+            if words.next().is_some() {
+                return Err(Diagnostic::usage(
+                    "E1002",
+                    "unexpected trailing arguments for `edit`",
+                    "use `edit PATH` or `edit --row PATH`",
+                ));
+            }
+            Command::Edit {
+                path: path.to_owned(),
+                row,
+            }
         }
         Some("history") => Command::History(words.by_ref().map(str::to_owned).collect()),
         Some("query") => Command::Query(words.by_ref().map(str::to_owned).collect()),
@@ -793,7 +818,10 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
             Some(target) => Command::Run(Invocation::ProjectFunction(target.to_owned())),
             None => Command::Run(Invocation::ProjectMain),
         },
-        Some(name @ ("switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune" | "upgrade")) => {
+        Some(
+            name @ ("switch" | "merge" | "reset" | "pull" | "stash" | "fmt" | "verify" | "prune"
+            | "upgrade"),
+        ) => {
             return Err(refused_command(name));
         }
         Some(_) => {
@@ -829,7 +857,7 @@ pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
 mod tests {
     use super::*;
 
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     fn args(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| (*value).to_owned()).collect()
     }

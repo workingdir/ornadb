@@ -1,12 +1,19 @@
 #![cfg(target_os = "linux")]
 
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::{Command, Output}};
+use std::{
+    fs,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    process::{Command, Output},
+};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{GitHashAlgorithm, NativeOid, Repository, TypedKey};
 use orna_runtime_v1::{RuntimeState, RuntimeTableIdentity, TableObjectId};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
-use orna_value_v1::{BlobMetadata, NativeOid as ValueNativeOid, Raw, ROV3_BLOB_TAG, decode_canonical_storage_value};
+use orna_value_v1::{
+    BlobMetadata, NativeOid as ValueNativeOid, ROV3_BLOB_TAG, Raw, decode_canonical_storage_value,
+};
 use sha2::Digest;
 use tempfile::TempDir;
 
@@ -43,10 +50,18 @@ async fn current_row(
     key: &[u8],
 ) -> Option<Vec<u8>> {
     let (identity, digest) = format3::cli_runtime_identity(repository);
-    let state = RuntimeState::open(repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(repository, identity, digest)
+        .await
+        .unwrap();
     let table_identity = RuntimeTableIdentity::new(table, TableObjectId::new(relation_id)).unwrap();
-    let snapshot = state.begin_admitted_table_activation(std::slice::from_ref(&table_identity)).await.unwrap();
-    snapshot.query_exact(table_identity.table(), key).unwrap().map(<[u8]>::to_vec)
+    let snapshot = state
+        .begin_admitted_table_activation(std::slice::from_ref(&table_identity))
+        .await
+        .unwrap();
+    snapshot
+        .query_exact(table_identity.table(), key)
+        .unwrap()
+        .map(<[u8]>::to_vec)
 }
 fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
     let raw = decode_canonical_storage_value(encoded).unwrap();
@@ -61,7 +76,14 @@ fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
     let Raw::Array(fields) = *payload else {
         panic!("stored ROV-3 metadata is not an array");
     };
-    let [Raw::Int(length), Raw::Bytes(sha256), Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
+    let [
+        Raw::Int(length),
+        Raw::Bytes(sha256),
+        Raw::Text(media_type),
+        suffix,
+        Raw::Bytes(descriptor),
+    ] = fields.as_slice()
+    else {
         panic!("stored ROV-3 metadata has the wrong shape: {fields:?}");
     };
     let suffix = match suffix {
@@ -82,14 +104,15 @@ fn stored_blob_metadata(encoded: &[u8]) -> BlobMetadata {
     )
 }
 
-
 #[tokio::test]
 async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
     let initial = "{ title: \"before\", }\n";
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(NOTES_SOURCE, "Music");
     let (identity, digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     media_commit::commit_source_captures_for_table(
@@ -107,30 +130,61 @@ async fn edit_entrypoint_admits_valid_row_and_retains_invalid_candidate() {
             ordinal: 0x90,
             insert_only: true,
         }],
-    ).await;
+    )
+    .await;
     drop(state);
     let before = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("the source row is admitted before editing");
+        .await
+        .expect("the source row is admitted before editing");
 
     let scripts = TempDir::new().unwrap();
-    let valid = editor(&scripts, "valid-editor", r#"printf '%s\n' '{ title: "after", }' > "$1""#);
+    let valid = editor(
+        &scripts,
+        "valid-editor",
+        r#"printf '%s\n' '{ title: "after", }' > "$1""#,
+    );
     let accepted = edit(&repository_directory, &valid, &["edit", "--row", ROW_PATH]);
-    assert!(accepted.status.success(), "edit stderr: {}", String::from_utf8_lossy(&accepted.stderr));
+    assert!(
+        accepted.status.success(),
+        "edit stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
     let after = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("accepted row remains admitted");
+        .await
+        .expect("accepted row remains admitted");
     assert_ne!(after, before, "valid edit replaces the complete stored row");
 
-    let invalid = editor(&scripts, "invalid-editor", r#"printf '%s\n' '{ title: }' > "$1""#);
-    let rejected = edit(&repository_directory, &invalid, &["--debug", "edit", "--row", ROW_PATH]);
-    assert!(!rejected.status.success(), "invalid candidate must be rejected");
+    let invalid = editor(
+        &scripts,
+        "invalid-editor",
+        r#"printf '%s\n' '{ title: }' > "$1""#,
+    );
+    let rejected = edit(
+        &repository_directory,
+        &invalid,
+        &["--debug", "edit", "--row", ROW_PATH],
+    );
+    assert!(
+        !rejected.status.success(),
+        "invalid candidate must be rejected"
+    );
     let retained = String::from_utf8_lossy(&rejected.stderr);
-    let draft = retained.split("draft retained at ").nth(1)
+    let draft = retained
+        .split("draft retained at ")
+        .nth(1)
         .unwrap_or_else(|| panic!("invalid editor did not report retained draft: {retained}"))
-        .lines().next().expect("draft path line").trim();
+        .lines()
+        .next()
+        .expect("draft path line")
+        .trim();
     assert_eq!(fs::read(draft).unwrap(), b"{ title: }\n");
     let rejected_row = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("invalid candidate leaves accepted row");
-    assert_eq!(rejected_row, after, "rejection leaves accepted row unchanged");
+        .await
+        .expect("invalid candidate leaves accepted row");
+    assert_eq!(
+        rejected_row, after,
+        "rejection leaves accepted row unchanged"
+    );
 }
 
 #[tokio::test]
@@ -139,7 +193,9 @@ async fn edit_entrypoint_plain_and_row_edits_both_admit_without_a_live_mount() {
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(NOTES_SOURCE, "Music");
     let (identity, digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let mut bindings = SysHostBindingRegistry::new(EnvironmentProvider::default());
     media_commit::commit_source_captures_for_table(
@@ -157,28 +213,55 @@ async fn edit_entrypoint_plain_and_row_edits_both_admit_without_a_live_mount() {
             ordinal: 0x91,
             insert_only: true,
         }],
-    ).await;
+    )
+    .await;
     drop(state);
     let before = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("the source row is admitted before editing");
+        .await
+        .expect("the source row is admitted before editing");
 
     // No mount is live, so both edits take the in-process path (edit_path).
     // The baseline rule for `edit PATH` and `edit --row` must match the
     // owner-routed path; with no mount there is no baseline to advance.
     let scripts = TempDir::new().unwrap();
-    let plain_editor = editor(&scripts, "plain-editor", r#"printf '%s\n' '{ title: "plain", }' > "$1""#);
+    let plain_editor = editor(
+        &scripts,
+        "plain-editor",
+        r#"printf '%s\n' '{ title: "plain", }' > "$1""#,
+    );
     let plain = edit(&repository_directory, &plain_editor, &["edit", ROW_PATH]);
-    assert!(plain.status.success(), "plain edit stderr: {}", String::from_utf8_lossy(&plain.stderr));
+    assert!(
+        plain.status.success(),
+        "plain edit stderr: {}",
+        String::from_utf8_lossy(&plain.stderr)
+    );
     let after_plain = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("plain edit leaves the row admitted");
+        .await
+        .expect("plain edit leaves the row admitted");
     assert_ne!(after_plain, before, "plain edit replaces the stored row");
 
-    let row_editor = editor(&scripts, "row-editor", r#"printf '%s\n' '{ title: "row", }' > "$1""#);
-    let grouped = edit(&repository_directory, &row_editor, &["edit", "--row", ROW_PATH]);
-    assert!(grouped.status.success(), "row edit stderr: {}", String::from_utf8_lossy(&grouped.stderr));
+    let row_editor = editor(
+        &scripts,
+        "row-editor",
+        r#"printf '%s\n' '{ title: "row", }' > "$1""#,
+    );
+    let grouped = edit(
+        &repository_directory,
+        &row_editor,
+        &["edit", "--row", ROW_PATH],
+    );
+    assert!(
+        grouped.status.success(),
+        "row edit stderr: {}",
+        String::from_utf8_lossy(&grouped.stderr)
+    );
     let after_row = current_row(&repository, relation_id, "Music", b"london")
-        .await.expect("row edit leaves the row admitted");
-    assert_ne!(after_row, after_plain, "row edit replaces the plain-edited row");
+        .await
+        .expect("row edit leaves the row admitted");
+    assert_ne!(
+        after_row, after_plain,
+        "row edit replaces the plain-edited row"
+    );
 }
 #[allow(clippy::too_many_lines)]
 #[tokio::test]
@@ -197,7 +280,9 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
     fs::copy(&replacement_path, source.path().join("pixel2.png")).unwrap();
 
     let (identity, digest) = format3::cli_runtime_identity(&repository);
-    let state = RuntimeState::open(&repository, identity, digest).await.unwrap();
+    let state = RuntimeState::open(&repository, identity, digest)
+        .await
+        .unwrap();
     let writer = state.acquire_lease(identity.repository_id).await.unwrap();
     let capability = repository.capture_capability(relation_id).unwrap();
     let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).unwrap();
@@ -226,20 +311,27 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
             ordinal: 0xb0,
             insert_only: true,
         }],
-    ).await;
+    )
+    .await;
     drop(state);
-    let before_value = current_row(&repository, relation_id, "media", b"image").await
+    let before_value = current_row(&repository, relation_id, "media", b"image")
+        .await
         .expect("published image row exists");
     let before_metadata = stored_blob_metadata(&before_value);
     assert_eq!(before_metadata.length(), ORIGINAL_PIXEL.len() as u64);
-    assert_eq!(before_metadata.sha256(), <[u8; 32]>::from(sha2::Sha256::digest(ORIGINAL_PIXEL)));
+    assert_eq!(
+        before_metadata.sha256(),
+        <[u8; 32]>::from(sha2::Sha256::digest(ORIGINAL_PIXEL))
+    );
 
     let pinned_context = repository.open_format_context().unwrap();
     let pinned_rows = pinned_context.load_row_map(relation_id).unwrap();
     let pinned_graph = pinned_context.open_native_graph(&pinned_rows).unwrap();
     let pinned_scope = pinned_graph.open_read_scope().unwrap();
-    let pinned_row = pinned_graph.lookup_row(&TypedKey::Text("image".to_owned()), &pinned_scope)
-        .unwrap().expect("pinned snapshot contains image row");
+    let pinned_row = pinned_graph
+        .lookup_row(&TypedKey::Text("image".to_owned()), &pinned_scope)
+        .unwrap()
+        .expect("pinned snapshot contains image row");
     let descriptor_bytes = before_metadata.descriptor_oid().unwrap();
     let algorithm = match descriptor_bytes.len() {
         20 => GitHashAlgorithm::Sha1,
@@ -247,17 +339,35 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         _ => panic!("Blob descriptor has an unsupported OID width"),
     };
     let descriptor = NativeOid::new(algorithm, descriptor_bytes.as_bytes()).unwrap();
-    let pinned_blob = pinned_graph.read_stored_blob_value(&pinned_row, &descriptor, &pinned_scope).unwrap();
+    let pinned_blob = pinned_graph
+        .read_stored_blob_value(&pinned_row, &descriptor, &pinned_scope)
+        .unwrap();
     let pinned_reference = pinned_blob.reference().clone();
 
     let scripts = TempDir::new().unwrap();
-    let replacement = editor(&scripts, "replace-blob", &format!("cp '{}' \"$1\"", replacement_path.display()));
-    let accepted = edit(&repository_directory, &replacement, &["edit", "--row", "media/image/content.png"]);
-    assert!(accepted.status.success(), "edit stderr: {}", String::from_utf8_lossy(&accepted.stderr));
+    let replacement = editor(
+        &scripts,
+        "replace-blob",
+        &format!("cp '{}' \"$1\"", replacement_path.display()),
+    );
+    let accepted = edit(
+        &repository_directory,
+        &replacement,
+        &["edit", "--row", "media/image/content.png"],
+    );
+    assert!(
+        accepted.status.success(),
+        "edit stderr: {}",
+        String::from_utf8_lossy(&accepted.stderr)
+    );
 
-    let after_value = current_row(&repository, relation_id, "media", b"image").await
+    let after_value = current_row(&repository, relation_id, "media", b"image")
+        .await
         .expect("replacement image row exists");
-    assert_ne!(after_value, before_value, "replacement updates the accepted Blob row");
+    assert_ne!(
+        after_value, before_value,
+        "replacement updates the accepted Blob row"
+    );
 
     let replacement_bytes = fs::read(&replacement_path).unwrap();
     let after_metadata = stored_blob_metadata(&after_value);
@@ -269,7 +379,9 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
     );
     let committed_context = repository.open_format_context().unwrap();
     let committed_rows = committed_context.load_row_map(relation_id).unwrap();
-    let committed_graph = committed_context.open_native_graph(&committed_rows).unwrap();
+    let committed_graph = committed_context
+        .open_native_graph(&committed_rows)
+        .unwrap();
     let committed_scope = committed_graph.open_read_scope().unwrap();
     let committed_row = committed_graph
         .lookup_row(&TypedKey::Text("image".to_owned()), &committed_scope)
@@ -292,7 +404,11 @@ async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snaps
         "filesystem row save does not publish over the committed snapshot",
     );
     let old_bytes = pinned_graph
-        .read_blob_range(&pinned_reference, 0..before_metadata.length(), &pinned_scope)
+        .read_blob_range(
+            &pinned_reference,
+            0..before_metadata.length(),
+            &pinned_scope,
+        )
         .unwrap();
     assert_eq!(
         old_bytes.bytes(),

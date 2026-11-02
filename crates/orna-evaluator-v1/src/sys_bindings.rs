@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use num_traits::ToPrimitive;
 use num_bigint::BigInt;
+use num_traits::ToPrimitive;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SafeText};
 use orna_repository_v1::{
     CapturedBlobCandidate, GraphError, OrpBlobBinding, RepositoryCaptureCapability,
@@ -19,8 +19,8 @@ use orna_sys_v1::{
 use orna_value_v1::{Blob, ContextValue, Error as ValueError, ValueFormat};
 
 use crate::{
-    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget, Value,
-    SysHostAttachment, SysHostContext,
+    CancellationToken, EffectHandler, EvaluationError, Ovb2EffectHandler, StepBudget,
+    SysHostAttachment, SysHostContext, Value,
 };
 
 const MAX_RANDOM_BYTES: usize = 1_048_576;
@@ -1962,24 +1962,38 @@ mod tests {
         else {
             panic!("read must return a Blob");
         };
-        assert_eq!(slice.blob().expect("slice Blob").read_to_end().unwrap(), b"234");
+        assert_eq!(
+            slice.blob().expect("slice Blob").read_to_end().unwrap(),
+            b"234"
+        );
         let Ok(BlobReadValue::Blob(clipped)) =
             dispatch_blob_read("sys.blob.read", &source, &bounds(&[8, 5]))
         else {
             panic!("read past EOF must clip to the known end");
         };
-        assert_eq!(clipped.blob().expect("clipped Blob").read_to_end().unwrap(), b"89");
+        assert_eq!(
+            clipped.blob().expect("clipped Blob").read_to_end().unwrap(),
+            b"89"
+        );
     }
 
     #[test]
     fn blob_read_bounds_and_limit_failures_use_declared_codes() {
         let source = blob_source(b"0123456789");
         assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[-1, 1]))),
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[-1, 1])
+            )),
             "sys.blob.bounds"
         );
         assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.read", &source, &bounds(&[11, 1]))),
+            read_code(dispatch_blob_read(
+                "sys.blob.read",
+                &source,
+                &bounds(&[11, 1])
+            )),
             "sys.blob.bounds"
         );
         assert_eq!(
@@ -2239,13 +2253,15 @@ mod tests {
         assert_eq!(rov3_annotated.format(), ValueFormat::Rov3);
         assert_eq!(ovb2_annotated.format(), ValueFormat::Ovb2);
 
-        let media_type = |value: &ContextValue| {
-            match dispatch_blob_reflection("sys.blob.media_type", std::slice::from_ref(value), None)
-                .expect("media_type reads metadata")
-            {
-                Value::String(media_type) => media_type,
-                _ => panic!("media_type returns Str"),
-            }
+        let media_type = |value: &ContextValue| match dispatch_blob_reflection(
+            "sys.blob.media_type",
+            std::slice::from_ref(value),
+            None,
+        )
+        .expect("media_type reads metadata")
+        {
+            Value::String(media_type) => media_type,
+            _ => panic!("media_type returns Str"),
         };
         let suffix = |value: &ContextValue| {
             dispatch_blob_reflection("sys.blob.suffix", std::slice::from_ref(value), None)
@@ -2261,8 +2277,8 @@ mod tests {
             Value::Option(Some(value)) if matches!(value.as_ref(), Value::String(text) if text == "m4b")
         ));
 
-        let same_content = |left: &ContextValue, right: &ContextValue| {
-            match dispatch_blob_reflection(
+        let same_content =
+            |left: &ContextValue, right: &ContextValue| match dispatch_blob_reflection(
                 "sys.blob.same_content",
                 &[left.clone(), right.clone()],
                 None,
@@ -2271,12 +2287,15 @@ mod tests {
             {
                 Value::Bool(equal) => equal,
                 _ => panic!("same_content returns Bool"),
-            }
-        };
+            };
         let same_content_code = |left: &ContextValue, right: &ContextValue| {
-            dispatch_blob_reflection("sys.blob.same_content", &[left.clone(), right.clone()], None)
-                .err()
-                .map(|error| error.code().to_owned())
+            dispatch_blob_reflection(
+                "sys.blob.same_content",
+                &[left.clone(), right.clone()],
+                None,
+            )
+            .err()
+            .map(|error| error.code().to_owned())
         };
         // ORNA-BLOB-005: explicit unavailability is an allowed outcome. A decoded
         // ROV-3 value is descriptor-only and carries no content binding, so with
@@ -2293,8 +2312,12 @@ mod tests {
         assert!(same_content(&ovb2, &ovb2_annotated));
 
         let other = ContextValue::from_blob(
-            &Blob::from_bytes_with_annotation(b"different".to_vec(), "application/octet-stream", None)
-                .unwrap(),
+            &Blob::from_bytes_with_annotation(
+                b"different".to_vec(),
+                "application/octet-stream",
+                None,
+            )
+            .unwrap(),
             ValueFormat::Ovb2,
         )
         .unwrap();
@@ -2327,7 +2350,11 @@ mod tests {
             "ORNA-EVAL-ARGUMENT"
         );
         assert_eq!(
-            read_code(dispatch_blob_read("sys.blob.length", &source, &bounds(&[1]))),
+            read_code(dispatch_blob_read(
+                "sys.blob.length",
+                &source,
+                &bounds(&[1])
+            )),
             "ORNA-EVAL-ARGUMENT"
         );
     }
@@ -2348,10 +2375,10 @@ mod tests {
         .unwrap();
         let token = CancellationToken::new();
         token.request();
-        let result = dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
+        let result =
+            dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
         // No partial Bool may escape: the cancelled comparison yields only an error.
-        let error = result
-            .expect_err("a requested cancellation must fail the comparison");
+        let error = result.expect_err("a requested cancellation must fail the comparison");
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
     }
 }
