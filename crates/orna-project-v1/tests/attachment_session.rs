@@ -1,3 +1,9 @@
+// These scenarios walk parallel fixture vectors by one shared position: the
+// same index addresses the sibling commit list, the variant list and the alias
+// list, because the case under test is their alignment. Iterating one vector
+// with `enumerate` would still index the others, so the index form stays.
+#![allow(clippy::needless_range_loop)]
+
 use std::{fs, path::Path, process::Command};
 
 use orna_project_v1::{
@@ -979,10 +985,11 @@ fn repeated_rebinds_preserve_exact_alias_precedence_at_each_closure_depth() {
         &[("main.orna", &old_short_source)],
         "original short route",
     );
-    let stable_long_source = package_source.replace("42", "42");
+    // The long sibling keeps the original content; only its commit differs.
+    let stable_long_source = package_source;
     let stable_long_commit = write_commit(
         shared_dir.path(),
-        &[("main.orna", &stable_long_source)],
+        &[("main.orna", stable_long_source)],
         "stable long sibling route",
     );
 
@@ -12673,7 +12680,7 @@ fn chained_sibling_terminal_pairs_continue_from_latest_wave_tails() {
         resolve_pin(aliases[2], &terminal_chain),
     ];
     let first_chain = resolver
-        .extend_sibling_terminal_pair_chain(&histories, &[first_pair.clone()])
+        .extend_sibling_terminal_pair_chain(&histories, std::slice::from_ref(&first_pair))
         .unwrap();
     for route in first_chain.routes() {
         assert_eq!(route.retained_wave(0).unwrap().len(), 2);
