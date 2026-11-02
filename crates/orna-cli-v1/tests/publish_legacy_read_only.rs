@@ -7,7 +7,7 @@
 //! `HEAD` refuses them whatever metadata the worktree holds.
 //!
 //! Each case runs with the `format.orna` records the legacy writers actually
-//! produced, OrnaDB 1.0's format-1 record and the previous draft's closed
+//! produced, `OrnaDB` 1.0's format-1 record and the previous draft's closed
 //! format-2 record, as well as the bare `format N` marker. The worktree
 //! carries uncommitted format-3 metadata, so the worktree alone would admit a
 //! runtime and real pending rows exist: the case in which the retired loose

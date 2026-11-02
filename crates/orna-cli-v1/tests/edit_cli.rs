@@ -180,6 +180,7 @@ async fn edit_entrypoint_plain_and_row_edits_both_admit_without_a_live_mount() {
         .await.expect("row edit leaves the row admitted");
     assert_ne!(after_row, after_plain, "row edit replaces the plain-edited row");
 }
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn edit_blob_replacement_updates_the_row_without_changing_its_pinned_snapshot() {
     const ORIGINAL_PIXEL: &[u8] = include_bytes!("fixtures/media/pixel.png");

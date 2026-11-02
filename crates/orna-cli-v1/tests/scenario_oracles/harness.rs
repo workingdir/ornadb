@@ -2,6 +2,19 @@
 //! one fresh `orna init` database per scenario, a bounded process runner, and
 //! the pass/gap verdicts the runner reports.
 
+// The scenario oracles are linear transcripts: each file replays one release
+// scenario step by step, indexes fixture lengths it just bounded, and builds
+// diagnostic strings for comparison. Those properties are the fixture, so the
+// lints that describe them are allowed here and nowhere else.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines,
+    clippy::items_after_statements,
+    clippy::format_collect
+)]
+
 use std::{
     collections::BTreeMap,
     fmt::Write as _,
@@ -34,7 +47,7 @@ pub fn vendored_fixture(relative: &str) -> String {
 const SCENARIOS_SHA256: &str = "93b8edb858bc0a674cd0256c6350bd7286062eb3e2a01accc964e135fdc24ff1";
 /// Upper bound for one product command; a debug-build REPL insert takes a
 /// few seconds, so this only stops a hung process.
-const COMMAND_LIMIT: Duration = Duration::from_secs(240);
+const COMMAND_LIMIT: Duration = Duration::from_mins(4);
 /// Concurrent scenarios: each one starts several product processes.
 const MAX_WORKERS: usize = 4;
 /// Ports tried before `orna serve` is reported as unable to bind.
@@ -255,11 +268,10 @@ fn fuse_unavailable() -> Option<String> {
 
 /// Runs one scenario in its own fresh database.
 pub fn run_entry(entry: &Entry) -> Verdict {
-    if entry.requires_fuse {
-        if let Some(reason) = fuse_unavailable() {
+    if entry.requires_fuse
+        && let Some(reason) = fuse_unavailable() {
             return Verdict::Unavailable(reason);
         }
-    }
     let mut db = match Db::init() {
         Ok(db) => db,
         Err(failure) => return Verdict::Fail(format!("orna init: {}", failure.reason())),
@@ -704,7 +716,7 @@ impl Db {
             .spawn()
             .map_err(|error| Failure::Harness(format!("orna serve did not start: {error}")))?;
         let mut server = Server { child, port };
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         while Instant::now() < deadline {
             if let Some(exited) = server.exited()? {
                 return Ok(Start::Exited(exited));
@@ -801,7 +813,7 @@ impl Db {
             child,
             unmount,
         };
-        let deadline = Instant::now() + Duration::from_secs(60);
+        let deadline = Instant::now() + Duration::from_mins(1);
         while !mounted(&mount.point) {
             if let Ok(Some(status)) = mount.child.try_wait() {
                 return Err(Failure::Harness(format!(
@@ -1044,7 +1056,7 @@ impl Server {
         let mut stream = TcpStream::connect(("127.0.0.1", self.port))
             .map_err(|error| Failure::Harness(format!("connect to orna serve: {error}")))?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(60)))
+            .set_read_timeout(Some(Duration::from_mins(1)))
             .map_err(|error| Failure::Harness(format!("socket timeout: {error}")))?;
         let mut request = format!(
             "{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\nContent-Length: {}\r\n",

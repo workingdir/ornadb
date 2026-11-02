@@ -12,7 +12,7 @@
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
-use super::*;
+use super::{Diagnostic, Digest, Limits, Response, runtime_identity, RuntimeState, committed_table_identities, legacy_bare_module_candidates, legacy_bare_module_table, CommittedTableIdentity, admitted_table_schemas, committed_rows_at, CommittedRowsError, PinnedCommittedTables, PinnedCommittedRows, evaluate_over_committed_tables, Mutex, Request, unavailable_response};
 use orna_application_v1::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator_v1::Environment;
 
@@ -90,6 +90,7 @@ impl ServeApp {
         )
     }
 
+#[allow(clippy::too_many_lines)]
     /// Stages `serve` for one request at this clone's HEAD and CWD.
     ///
     /// The request takes no per-request lock. The argument that one read cannot
@@ -158,22 +159,19 @@ impl ServeApp {
                 .evaluate_staged(&base, &Environment::new())
                 .map_err(|_| "serve.evaluation_failed");
         }
-        let tables = match committed_table_identities(&repository, &commit, names.clone()) {
-            Ok(tables) => tables,
-            Err(_) => {
-                let bound = names
-                    .iter()
-                    .filter(|name| {
-                        committed_table_identities(&repository, &commit, vec![(*name).clone()])
-                            .is_ok()
-                    })
-                    .count();
-                return Err(if bound == 0 || bound == names.len() {
-                    "serve.table_identity_unavailable"
-                } else {
-                    "serve.mixed_table_identity"
-                });
-            }
+        let tables = if let Ok(tables) = committed_table_identities(&repository, &commit, names.clone()) { tables } else {
+            let bound = names
+                .iter()
+                .filter(|name| {
+                    committed_table_identities(&repository, &commit, vec![(*name).clone()])
+                        .is_ok()
+                })
+                .count();
+            return Err(if bound == 0 || bound == names.len() {
+                "serve.table_identity_unavailable"
+            } else {
+                "serve.mixed_table_identity"
+            });
         };
         let table_names = names.iter().map(String::as_str).collect::<Vec<_>>();
         let candidates = legacy_bare_module_candidates(&repository, Some(&commit), &table_names)

@@ -346,7 +346,7 @@ fn binary_reference_repl_respects_color_mode() {
     assert!(contains_ansi(&always), "always must color captured REPL output");
     let rendered = String::from_utf8_lossy(&always.stdout);
     assert!(
-        rendered.contains("3") && rendered.contains("Int"),
+        rendered.contains('3') && rendered.contains("Int"),
         "REPL arithmetic result: {rendered}"
     );
     assert!(always.stderr.is_empty());
@@ -1340,8 +1340,8 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         staged_source, original_source,
         "fixture expression must match"
     );
-    std::fs::write(&source_path, &staged_source).expect("staged fixture change");
-    std::fs::write(repository.path().join("staged.orna"), &original_source)
+    std::fs::write(&source_path, staged_source).expect("staged fixture change");
+    std::fs::write(repository.path().join("staged.orna"), original_source)
         .expect("staged Orna source");
     assert!(
         Command::new("git")
@@ -1358,12 +1358,12 @@ fn binary_status_porcelain_preserves_git_worktree_bytes_and_hides_discovery_path
         "staged expression must match"
     );
     std::fs::write(&source_path, modified_source).expect("unstaged fixture change");
-    std::fs::write(repository.path().join("untracked.orna"), &original_source)
+    std::fs::write(repository.path().join("untracked.orna"), original_source)
         .expect("untracked Orna source");
     std::fs::create_dir(repository.path().join("nested")).expect("untracked directory");
     std::fs::write(
         repository.path().join("nested/untracked.orna"),
-        &original_source,
+        original_source,
     )
     .expect("nested untracked Orna source");
 

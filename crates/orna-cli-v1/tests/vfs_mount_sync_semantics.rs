@@ -11,10 +11,8 @@ use std::{
     time::Duration,
 };
 
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
@@ -79,7 +77,7 @@ fn assert_errno(result: std::io::Result<()>, expected: i32, context: &str) {
 }
 
 fn mount_root(fixture: &EditorMount) -> PathBuf {
-    fixture._mount_parent.path().join("library")
+    fixture.mount_parent.path().join("library")
 }
 
 /// Draft guard value the mount publishes on its root: `1` while any draft is
@@ -103,9 +101,7 @@ async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
         if value == expected {
             return;
         }
-        if tokio::time::Instant::now() >= deadline {
-            panic!("{context}: guard is {value}, expected {expected} after 5s");
-        }
+        assert!(tokio::time::Instant::now() < deadline, "{context}: guard is {value}, expected {expected} after 5s");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -728,7 +724,7 @@ async fn child_write_through_inherited_handle_does_not_take_close_ownership() {
     assert_view_contains(&fixture, "Writer two");
 }
 
-/// PR owner rule for truncate-only candidates: an O_TRUNC open is owned by its
+/// PR owner rule for truncate-only candidates: an `O_TRUNC` open is owned by its
 /// opener, so an exec'd child's close of the inherited copy must not accept it.
 #[tokio::test]
 async fn child_exec_close_does_not_accept_parent_o_trunc_candidate() {
@@ -1172,7 +1168,7 @@ async fn identical_bytes_write_then_fsync_is_ok_and_clean() {
     assert_eq!(fresh_view(&fixture), accepted, "accepted bytes are unchanged");
 }
 
-/// EDIT-1 step 2: O_TRUNC with no write submits an empty candidate. That
+/// EDIT-1 step 2: `O_TRUNC` with no write submits an empty candidate. That
 /// candidate is validated like any other: the row schema rejects an empty
 /// document, so fsync returns EINVAL (not the dirty-handle EIO), the accepted
 /// view is unchanged, and a new open still reads the accepted row.

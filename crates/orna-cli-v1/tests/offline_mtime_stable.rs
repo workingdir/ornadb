@@ -61,7 +61,7 @@ fn offline_export_of_an_orna_fixture_is_stable_under_mtime_changes() {
     let mtime_after = fs::metadata(&source).unwrap().modified().unwrap();
     assert_eq!(
         mtime_after,
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000),
+        SystemTime::UNIX_EPOCH + Duration::from_hours(500_000),
         "the copy's mtime must actually change for this proof to mean anything"
     );
     let second_row = source_row(&source);
@@ -82,5 +82,10 @@ fn offline_export_of_an_orna_fixture_is_stable_under_mtime_changes() {
 }
 
 fn hex_digest(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }

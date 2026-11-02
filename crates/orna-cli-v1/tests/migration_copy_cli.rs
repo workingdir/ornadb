@@ -88,6 +88,7 @@ fn run_abort(source: &Path, destination: &Path) -> std::process::Output {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn cli_migration_copy_retry_recovers_the_same_candidate() {
     let parent = TempDir::new().unwrap();
     let source = parent.path().join("source");
@@ -470,7 +471,7 @@ fn cli_migration_copy_names_unparseable_committed_format_record() {
 
 /// ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-META-002: a source whose
 /// `format.orna` holds a record a legacy writer actually produced migrates
-/// like any other legacy source. OrnaDB 1.0's `orna init` wrote the format-1
+/// like any other legacy source. `OrnaDB` 1.0's `orna init` wrote the format-1
 /// record. The format-2 record is the closed record of the previous 1.1.0
 /// draft. The journal names the committed record bytes as the file the
 /// migration removes. The legacy source stays read-only, and only the

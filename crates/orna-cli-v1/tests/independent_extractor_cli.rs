@@ -90,10 +90,12 @@ fn import_expression(fixture: &str, root: &Path) -> String {
 
 /// The 16-byte relation id as the 32-digit hex the CLI and extractor print.
 fn relation_hex(relation_id: [u8; 16]) -> String {
-    relation_id
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(32);
+    for byte in relation_id {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// The extracted row whose key is the text `key`.
@@ -110,11 +112,10 @@ fn extracted_field(row: &Value, index: u64) -> &Value {
         .as_array()
         .unwrap()
         .iter()
-        .find(|field| field["index"].as_u64() == Some(index))
-        .map(|field| &field["value"])
-        .unwrap_or_else(|| panic!("the extracted row holds field index {index}: {row}"))
+        .find(|field| field["index"].as_u64() == Some(index)).map_or_else(|| panic!("the extracted row holds field index {index}: {row}"), |field| &field["value"])
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() {
     let (directory, repository, relation_id) = empty_format3_repository();
