@@ -18,11 +18,11 @@ use std::{
 
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use parquet::{
-    basic::{Compression, Encoding, PageType},
+    basic::{Compression, Encoding},
     column::reader::ColumnReader,
     data_type::{BoolType, ByteArray, ByteArrayType, Int32Type, Int64Type},
     file::{
-        metadata::{KeyValue, ParquetMetaDataWriter},
+        metadata::KeyValue,
         properties::{WriterProperties, WriterVersion},
         reader::{FileReader, SerializedFileReader},
         writer::SerializedFileWriter,
