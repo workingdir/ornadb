@@ -21,14 +21,17 @@ pub struct PublishedPresentation {
 }
 
 impl PublishedPresentation {
+    #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
     }
 
+    #[must_use]
     pub const fn present(&self) -> &PresentNode {
         &self.present
     }
 
+    #[must_use]
     pub const fn snapshot(&self) -> &CanonicalSnapshot {
         &self.snapshot
     }
@@ -54,10 +57,12 @@ pub struct ResyncRequest {
 
 impl ResyncRequest {
     /// Returns the watch identity that must be carried by the resync frame.
+    #[must_use]
     pub const fn watch(self) -> [u8; 16] {
         self.watch
     }
 
+    #[must_use]
     pub const fn generation(self) -> u64 {
         self.generation
     }
@@ -67,6 +72,7 @@ impl ResyncRequest {
     ///
     /// `WatchPresentation` deliberately does not mint request identities:
     /// request allocation and session binding remain transport-owned.
+    #[must_use]
     pub fn envelope(self, request: [u8; 16]) -> Envelope {
         Envelope {
             request: Some(request),
@@ -78,6 +84,11 @@ impl ResyncRequest {
 
     /// Encodes the existing protocol resync envelope at the caller's
     /// negotiated protocol limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the protocol error when the envelope exceeds the supplied
+    /// limits, so an over-limit resync is refused before it reaches the wire.
     pub fn encode(self, request: [u8; 16], limits: Limits) -> Result<Vec<u8>, ProtocolError> {
         self.envelope(request).encode(limits)
     }
@@ -107,6 +118,12 @@ pub struct WatchPresentation {
 impl WatchPresentation {
     /// Creates presentation state using the limits negotiated for this live
     /// session. Production callers must not substitute local defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LivePresentationError::InvalidLimits`] when the negotiated
+    /// limits do not validate, so a caller cannot start a watch on limits the
+    /// protocol would refuse.
     pub fn new(watch: [u8; 16], limits: Limits) -> Result<Self, LivePresentationError> {
         limits
             .validate()
@@ -116,6 +133,11 @@ impl WatchPresentation {
 
     /// Named compatibility constructor with the same explicit negotiated
     /// limits requirement as [`Self::new`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LivePresentationError::InvalidLimits`] for the same reason as
+    /// [`Self::new`]: the negotiated limits failed validation.
     pub fn with_limits(watch: [u8; 16], limits: Limits) -> Result<Self, LivePresentationError> {
         Self::new(watch, limits)
     }
@@ -132,22 +154,27 @@ impl WatchPresentation {
         }
     }
 
+    #[must_use]
     pub const fn watch(&self) -> [u8; 16] {
         self.watch
     }
 
+    #[must_use]
     pub const fn limits(&self) -> Limits {
         self.limits
     }
 
+    #[must_use]
     pub const fn published(&self) -> Option<&PublishedPresentation> {
         self.published.as_ref()
     }
 
+    #[must_use]
     pub const fn resync_required(&self) -> bool {
         self.awaiting_snapshot
     }
 
+    #[must_use]
     pub const fn awaiting_snapshot(&self) -> bool {
         self.awaiting_snapshot
     }
@@ -155,6 +182,7 @@ impl WatchPresentation {
     /// Reports that the caller should schedule the one required `resync`
     /// frame. This is deliberately non-consuming: a failed send must leave
     /// the intent available for another transport attempt.
+    #[must_use]
     pub const fn take_resync_request(&self) -> Option<ResyncRequest> {
         self.resync_intent
     }
@@ -181,6 +209,13 @@ impl WatchPresentation {
 
     /// Accepts only host Snapshot or Delta frames for this watch. The complete
     /// frame is revalidated at the negotiated boundary before any state change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LivePresentationError::WrongWatch`] when the frame names another
+    /// watch and [`LivePresentationError::UnexpectedMessage`] when it is not a
+    /// snapshot or delta. An unusable but well-formed update is not an error: it
+    /// asks the caller for a resync so the visible tree is preserved.
     pub fn receive(
         &mut self,
         frame: &Envelope,
@@ -217,6 +252,11 @@ impl WatchPresentation {
     /// authoritative state owner. A malformed envelope is treated like any
     /// other unusable presentation update: the visible tree is preserved and
     /// the caller is asked to resynchronize.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::receive`] for a decodable frame. A
+    /// frame that does not decode is not an error: it asks for a resync.
     pub fn receive_encoded(
         &mut self,
         encoded: &[u8],
