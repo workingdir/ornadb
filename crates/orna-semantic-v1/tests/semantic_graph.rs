@@ -8423,20 +8423,62 @@ fn nested_paired_boundary_depths_stay_stable_through_selector_storms() {
         element.as_ref()
     };
 
-    let Type::Function { result, .. } = &module.symbols
-        ["rejects_nested_paired_boundary_depth_drift_after_selector_storm"]
-        .ty
-    else {
-        panic!("rejected storm must retain its computed result");
+    // ornadb-3iqo ruling: a conflicting later row folds each slot to the union of its stable
+    // labels through the shared engine path of
+    // multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions, not a whole-record
+    // rollback to the first row (that came from the superseded #7161 generation).
+    // Observed at 5b73047d7: left [{1101,1102,1103},{1121}], right [{1111,1112,1113},{1121}].
+    let rejected = folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm");
+    let Type::Record(rejected_fields) = rejected else {
+        panic!("rejected nested fold element must remain a record: {rejected:?}");
     };
-    let Type::Record(fields) = result.as_ref() else {
-        panic!("rejected storm must return its source rows: {result:?}");
+    let Type::Record(rejected_group) = rejected_fields.get("group").expect("paired group") else {
+        panic!("rejected storm must preserve the nested group: {rejected_fields:?}");
     };
-    assert_eq!(
-        folded_element("rejects_nested_paired_boundary_depth_drift_after_selector_storm"),
-        fields.get("first").expect("first source row"),
-        "a nested topology conflict must roll the fold back to the first row"
-    );
+    for (side, expected) in [
+        (
+            "left",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1101".to_owned(),
+                    "selector:HEAD~1102".to_owned(),
+                    "selector:HEAD~1103".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
+            ],
+        ),
+        (
+            "right",
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1111".to_owned(),
+                    "selector:HEAD~1112".to_owned(),
+                    "selector:HEAD~1113".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1121".to_owned()]),
+            ],
+        ),
+    ] {
+        let Type::Record(boundary) = &rejected_group[side] else {
+            panic!("rejected nested {side} boundary must remain a record");
+        };
+        let Type::Tuple(slots) = &boundary["pins"] else {
+            panic!("rejected nested {side} depth labels must retain the tuple");
+        };
+        let contexts = slots
+            .iter()
+            .map(|slot| {
+                let mut contexts = BTreeSet::new();
+                collect_snapshot_contexts(slot, &mut contexts);
+                contexts
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            contexts,
+            expected,
+            "rejected nested {side} selectors must fold to the union of stable labels"
+        );
+    }
 
     let folded_value =
         folded_element("accepts_nested_paired_boundary_depths_after_selector_storm");
