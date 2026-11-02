@@ -423,7 +423,7 @@ fn admitted_source_table_mutation_commits_rolls_back_and_replays_terminally() {
         RequestState::Completed
     );
     assert_eq!(
-        CanonicalValue::decode(&committed_mutation.key())
+        CanonicalValue::decode(committed_mutation.key())
             .unwrap()
             .raw(),
         &OvbRaw::Int(12.into())
