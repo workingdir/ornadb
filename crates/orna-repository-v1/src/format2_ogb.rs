@@ -723,12 +723,11 @@ pub(crate) mod tests {
         Sha256::digest(data).into()
     }
 
+    /// One index child entry: its stop position, object id and optional digest.
+    type IndexChild = (u64, Vec<u8>, Option<[u8; 32]>);
+
     /// Encodes `[1, height, total, [[stop, oid, digest|null], ...]]`.
-    fn index_bytes(
-        height: u64,
-        total: u64,
-        children: &[(u64, Vec<u8>, Option<[u8; 32]>)],
-    ) -> Vec<u8> {
+    fn index_bytes(height: u64, total: u64, children: &[IndexChild]) -> Vec<u8> {
         let mut out = vec![0x84, 0x01];
         cbor_head(0, height, &mut out);
         cbor_head(0, total, &mut out);

@@ -921,9 +921,14 @@ fn reopens_one_legacy_format_beside_format_three(legacy_format: &str, format_num
     let writer = repository
         .open_format_context()
         .expect("the format-3 workspace admits writes");
-    writer
+    let capability = writer
         .final_format_capability()
         .expect("the format-3 mount admits writes");
+    assert_eq!(
+        Some(capability.database_id()),
+        writer.database_id(),
+        "the capability names the workspace database"
+    );
     assert!(
         writer.read_committed_file(".orna/format.orna", 64).is_err(),
         "the format-3 workspace carries no legacy metadata file"
@@ -1066,7 +1071,12 @@ fn reopens_old_and_new_mounts_of_one_migrated_repository_together() {
         old_mount_again.load_row_map([0; 16]).unwrap_err().code(),
         "ORNA-REPO-CONTEXT-015"
     );
-    new_mount
+    let new_capability = new_mount
         .final_format_capability()
         .expect("the new mount admits writes");
+    assert_eq!(
+        Some(new_capability.database_id()),
+        new_mount.database_id(),
+        "the capability names the new mount database"
+    );
 }
