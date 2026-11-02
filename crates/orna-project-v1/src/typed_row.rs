@@ -369,10 +369,10 @@ impl<'a> StoredSchema<'a> {
             .ok_or(Failure::Descriptor)?;
         match definition {
             (RECORD_DEFINITION, Raw::Array(members)) => {
-                if let Some([stored_type, _]) = tagged(value, RECORD_TAG) {
-                    if !owner_matches(stored_type, id) {
-                        return Err(Failure::Mismatch);
-                    }
+                if let Some([stored_type, _]) = tagged(value, RECORD_TAG)
+                    && !owner_matches(stored_type, id)
+                {
+                    return Err(Failure::Mismatch);
                 }
                 self.lower_member_record(id, members, value, depth)
             }
@@ -484,10 +484,10 @@ impl<'a> StoredSchema<'a> {
             }
             Raw::Null
         } else {
-            if let Some([stored_owner, _]) = tagged(payload, RECORD_TAG) {
-                if !owner_matches(stored_owner, variant_id) {
-                    return Err(Failure::Mismatch);
-                }
+            if let Some([stored_owner, _]) = tagged(payload, RECORD_TAG)
+                && !owner_matches(stored_owner, variant_id)
+            {
+                return Err(Failure::Mismatch);
             }
             self.lower_member_record(variant_id, fields, payload, depth)?
         };
@@ -705,6 +705,25 @@ fn uuid(value: &Raw) -> Option<[u8; 16]> {
         },
         _ => None,
     }
+}
+
+/// Orders stored record fields by their encoded field keys (ORNA-FORMAT-004).
+/// Declaration order and name order are not canonical for the stored value.
+fn canonical_record_fields(stored: Vec<Raw>) -> Result<Vec<Raw>, Failure> {
+    let mut keyed = stored
+        .into_iter()
+        .map(|field| {
+            let key = array(&field)
+                .and_then(|parts| parts.first())
+                .ok_or(Failure::Descriptor)?;
+            let encoded = orna_value_v1::Value::new(key.clone())
+                .and_then(|value| value.encode())
+                .map_err(|_| Failure::Mismatch)?;
+            Ok((encoded, field))
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    keyed.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(keyed.into_iter().map(|(_, field)| field).collect())
 }
 
 #[cfg(test)]
@@ -1192,23 +1211,4 @@ pub table Account(id: Str) {
             Err(TypedRowError::TypeMismatch("role".to_owned()))
         );
     }
-}
-
-/// Orders stored record fields by their encoded field keys (ORNA-FORMAT-004).
-/// Declaration order and name order are not canonical for the stored value.
-fn canonical_record_fields(stored: Vec<Raw>) -> Result<Vec<Raw>, Failure> {
-    let mut keyed = stored
-        .into_iter()
-        .map(|field| {
-            let key = array(&field)
-                .and_then(|parts| parts.first())
-                .ok_or(Failure::Descriptor)?;
-            let encoded = orna_value_v1::Value::new(key.clone())
-                .and_then(|value| value.encode())
-                .map_err(|_| Failure::Mismatch)?;
-            Ok((encoded, field))
-        })
-        .collect::<Result<Vec<_>, Failure>>()?;
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(keyed.into_iter().map(|(_, field)| field).collect())
 }

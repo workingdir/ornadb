@@ -623,6 +623,9 @@ pub fn admit_format3_row(
 /// The legacy `key-path-v1` spelling (`~xx`, `~ff`) is refused with
 /// `InvalidSourceRow`: legacy loose rows are read only through their recorded
 /// import context (Orna-1.1.0.md, "File extension"), which this path does not admit.
+/// The eight values are one source row's admission record, and every caller
+/// reads them from the same load request.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_source_row(
     project: &LoadedProject,
     logical_path: &str,
@@ -647,6 +650,9 @@ pub fn admit_source_row(
 
 /// Admit a source row while filling additional stored scalar fields supplied
 /// by the trusted source owner (for example, payload size derived from a Blob).
+/// One source row plus the scalar fields its trusted owner derives, which every
+/// caller passes from the same capture record.
+#[allow(clippy::too_many_arguments)]
 pub fn admit_source_row_with_owner_fields(
     project: &LoadedProject,
     logical_path: &str,
@@ -671,6 +677,8 @@ pub fn admit_source_row_with_owner_fields(
     )
 }
 
+/// The inner form mirrors the public entry point's admission record.
+#[allow(clippy::too_many_arguments)]
 fn admit_source_row_with_owner_fields_inner(
     project: &LoadedProject,
     logical_path: &str,
@@ -867,10 +875,9 @@ fn table_constant_defaults(
                     initializer: Some(FieldInitializer::Default(expression)),
                     ..
                 } = member
+                    && let Some(value) = lower_data_expression(expression)
                 {
-                    if let Some(value) = lower_data_expression(expression) {
-                        defaults.insert(name.clone(), value);
-                    }
+                    defaults.insert(name.clone(), value);
                 }
             }
         }
@@ -1147,7 +1154,7 @@ fn format_context_matches_commit(context: &Format3Context, commit: &str) -> bool
 }
 
 fn decode_source_oid(value: &str) -> Option<Vec<u8>> {
-    if !value.is_ascii() || value.len() % 2 != 0 { return None; }
+    if !value.is_ascii() || !value.len().is_multiple_of(2) { return None; }
     value.as_bytes().chunks_exact(2).map(|pair| {
         let high = (pair[0] as char).to_digit(16)?;
         let low = (pair[1] as char).to_digit(16)?;
