@@ -32,6 +32,7 @@ expected = [
   "lint-clippy",
   "claims-fixed-row-batching",
   "claims-prune-expire",
+  "claims-retired-row-writers",
 ]
 
 # Gate A: format and existing behaviour.
@@ -49,9 +50,12 @@ limitations = [
 gate = "A"
 id = "A2"
 title = "New format has exactly one writer"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:publish_format3_orp_only" }]
+select = [
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:publish_format3_orp_only" },
+  { record = "claims-retired-row-writers", package = "workspace", target = "check:retired-row-writers" },
+]
 limitations = [
-  "The select shows publication writes ORP rows, and a legacy HEAD is refused before any freeze (publish_legacy_read_only). The retired compact writer boundary is now compiled out of the shipped crate: its mutation, input, row and batch types, the freeze lowering, fold, consume, apply and migration-plan entry points, and their imports all sit behind the compact-writer-fixtures feature, which only test crates enable. The default-feature rlib carries no apply_writer_input or prepare_writer_batch symbol (18 with the feature, 0 without, checked by hand). The loose writer is already gone from the crate, which keeps only the loose and compact readers and the journal refusals (ornadb-5il1.99). What is still not shown: an automated check that fails when a retired writer symbol reappears in the shipped crate.",
+  "The select shows publication writes ORP rows, and a legacy HEAD is refused before any freeze (publish_legacy_read_only), and scripts/check_retired_row_writers.sh fails the nightly when the shipped crate carries a retired writer symbol: it requires the guarded build to expose the writer entry points and the default build to expose none, so an ungated writer fails the check, and an unreadable symbol table fails it too rather than passing quietly. The retired compact writer boundary is now compiled out of the shipped crate: its mutation, input, row and batch types, the freeze lowering, fold, consume, apply and migration-plan entry points, and their imports all sit behind the compact-writer-fixtures feature, which only test crates enable. The default-feature rlib carries no apply_writer_input or prepare_writer_batch symbol (18 with the feature, 0 without, checked by hand). The loose writer is already gone from the crate, which keeps only the loose and compact readers and the journal refusals (ornadb-5il1.99). ",
 ]
 
 [[item]]
