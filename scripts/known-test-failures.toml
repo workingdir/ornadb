@@ -23,13 +23,6 @@
 #   intermittent  optional; true when the test fails only on some runs, so a pass is expected
 
 [[failure]]
-package = "workspace"
-target = "check:fmt"
-test = "fmt"
-bead = "ornadb-5il1.224"
-reason = "cargo fmt --all -- --check reports diffs in at least 253 files on origin/main d35b7c0c3; the count was cut short when rustfmt hit the 4G lane memory cap."
-
-[[failure]]
 package = "orna-cli-v1"
 target = "test:req_vfs"
 test = "vfs_mount_integration::cwd_mount_sigterm_unmounts_and_detaches_the_view"

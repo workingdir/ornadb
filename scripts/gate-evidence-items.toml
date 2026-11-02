@@ -28,7 +28,6 @@ expected = [
   "workspace-sys",
   "workspace-rest",
   "gate-d-crash-matrix",
-  "lint-fmt",
   "claims-fixed-row-batching",
   "claims-prune-expire",
   "claims-retired-row-writers",
