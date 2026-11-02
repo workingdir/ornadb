@@ -118,7 +118,7 @@ fn text<'a>(node: &'a PlanNode, name: &str) -> &'a str {
     }
 }
 
-fn joins_by_subquery<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_subquery(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)

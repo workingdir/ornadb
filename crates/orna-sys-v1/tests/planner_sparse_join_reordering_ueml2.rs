@@ -51,9 +51,10 @@ fn integer_detail(node: &PlanNode, name: &str) -> u64 {
     }
 }
 
-fn join_observations(
-    plan: &orna_sys_v1::ExplainedPlan,
-) -> Vec<(u64, u64, String, Option<u64>, Option<u64>, Option<u64>)> {
+/// One join observation: rows, work, the table and the optional estimates.
+type JoinObservation = (u64, u64, String, Option<u64>, Option<u64>, Option<u64>);
+
+fn join_observations(plan: &orna_sys_v1::ExplainedPlan) -> Vec<JoinObservation> {
     let scans = plan
         .nodes()
         .iter()

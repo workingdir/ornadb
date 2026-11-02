@@ -49,8 +49,9 @@ fn disjunct_work_uses_rows_after_nested_input_limits_and_keeps_prior_work() {
     let expanded_input_rows = source_rows - 1;
     let disjunct_rows = u64::try_from((u128::from(expanded_input_rows) * 3).div_ceil(4))
         .expect("two-arm disjunction estimate fits u64");
+    // `expanded_input_rows * 2` stays inside `u64`; the point of the case is the
+    // u128 sum below, which does not.
     let expansion_work = expanded_input_rows * 2;
-    assert!(expansion_work <= u64::MAX);
     assert_eq!(u128::from(source_rows) * 3, u128::from(u64::MAX));
     assert!(u128::from(source_rows) * 3 + u128::from(expansion_work) > u128::from(u64::MAX));
 
