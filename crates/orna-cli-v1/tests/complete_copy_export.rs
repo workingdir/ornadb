@@ -265,12 +265,12 @@ fn commit_snapshot_with_secondary_root(
     append_cbor_bytes(&mut store_data, &git_oid_bytes(&relation_map_oid));
     let store_root =
         native_fixture_node(project, &store_data, &[(relation_map_oid.as_str(), "tree")]);
-    let database_ledger = std::fs::read(project.join(".orna/database.orna")).unwrap();
-    let database_oid = git_object(project, "blob", &database_ledger);
+    let ledger_bytes = std::fs::read(project.join(".orna/database.orna")).unwrap();
+    let ledger_oid = git_object(project, "blob", &ledger_bytes);
     let source_oid = git_object(project, "blob", &schema_source);
     let orna_tree = git_tree(
         project,
-        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
+        &format!("100644 blob {ledger_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
     );
     let root_tree = git_tree(
         project,

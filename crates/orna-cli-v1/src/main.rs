@@ -36,6 +36,9 @@ mod table_schema;
 mod format3;
 #[cfg(test)]
 #[path = "../tests/support/media_commit.rs"]
+// The shared capture fixture loads `table_schema` from `src` itself, so the
+// binary's own copy and this one coexist during tests and never interact.
+#[allow(clippy::duplicate_mod)]
 mod media_commit;
 
 use cli_args::{
@@ -234,6 +237,7 @@ impl From<orna_repository_v1::RepositoryError> for Diagnostic {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn project_load_diagnostic(error: orna_project_v1::ProjectLoadError) -> Diagnostic {
     if matches!(error, orna_project_v1::ProjectLoadError::SourceTreeLimit) {
         return Diagnostic::target(
@@ -1330,6 +1334,7 @@ fn terminal_supports_osc8() -> bool {
     )
 }
 
+#[allow(clippy::items_after_statements)]
 fn file_url_for_status_path(root: &std::path::Path, display_token: &[u8]) -> Option<String> {
     if !root.is_absolute()
         || display_token.is_empty()
@@ -1377,6 +1382,7 @@ fn file_url_for_status_path(root: &std::path::Path, display_token: &[u8]) -> Opt
     Some(url)
 }
 
+#[allow(clippy::items_after_statements)]
 fn write_status_path<W: io::Write>(
     writer: &mut W,
     color: AnsiColor,
@@ -2629,15 +2635,12 @@ fn refuse_legacy_bare_module_rows(
     // An unborn HEAD has no committed table relation, so only the declared
     // names can name legacy rows. An unreadable HEAD is not evidence of
     // absence: refuse it.
-    let commit = match repository.head() {
-        Ok(commit) => commit,
-        Err(_) => {
-            return Err(Diagnostic::target(
-                "E2200",
-                "committed HEAD is unreadable",
-                "repair the repository HEAD reference, then run again",
-            ));
-        }
+    let Ok(commit) = repository.head() else {
+        return Err(Diagnostic::target(
+            "E2200",
+            "committed HEAD is unreadable",
+            "repair the repository HEAD reference, then run again",
+        ));
     };
     if let Some(commit) = &commit {
         // A commit without an identity inventory never allocated its tables'
@@ -3363,9 +3366,8 @@ fn run_repl_input(
     session: &mut AdmittedReplSession,
     source: &str,
 ) -> Result<Option<CanonicalValue>, repl::ReplFailure> {
-    let staged = match session.stage_activation(source) {
-        Ok(staged) => staged,
-        Err(_) => return session.submit(source).map_err(repl::ReplFailure::from),
+    let Ok(staged) = session.stage_activation(source) else {
+        return session.submit(source).map_err(repl::ReplFailure::from);
     };
     let (Some(repository), Some(transactions)) = (repository, transactions) else {
         return Err(repl::ReplFailure::from(
@@ -3562,9 +3564,10 @@ fn run_repl_input(
             repl_effect_uncertain(settlement_cause(&original))
         }
     };
-    let admission = if let Ok((_, Some(admission))) = transactions
+    let Ok((_, Some(admission))) = transactions
         .runtime
-        .block_on(state.reserve_request_with_admission(request, fingerprint)) { admission } else {
+        .block_on(state.reserve_request_with_admission(request, fingerprint))
+    else {
         finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
         return Err("ORNA-REPL-EFFECT".to_owned().into());
     };
@@ -3638,23 +3641,21 @@ fn run_repl_input(
         *session = successor;
         return Ok(value);
     }
-    let activation = match activation
-        .stage_for_request(&transactions.authority, snapshot.context(), request)
-    {
-        Ok(activation) => activation,
-        Err(_) => return Err(unsettled_after_evaluation()),
+    let Ok(activation) =
+        activation.stage_for_request(&transactions.authority, snapshot.context(), request)
+    else {
+        return Err(unsettled_after_evaluation());
     };
     // The application stages with NoFault; rebuild the identical unit carrying
     // the runtime's injector so the request boundary owns the fault seam.
-    let request_staged = match StagedTableActivation::from_source(
+    let Ok(request_staged) = StagedTableActivation::from_source(
         activation.context().clone(),
         activation.mutations().to_vec(),
         activation.next_digest(),
         Arc::clone(&transactions.faults),
         activation.effects(),
-    ) {
-        Ok(staged) => staged,
-        Err(_) => return Err(unsettled_after_evaluation()),
+    ) else {
+        return Err(unsettled_after_evaluation());
     };
     let Some(outcome) = terminal(b"orna.repl.commit.v1") else {
         return Err(unsettled_after_evaluation());

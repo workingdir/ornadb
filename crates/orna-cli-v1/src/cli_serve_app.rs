@@ -159,7 +159,7 @@ impl ServeApp {
                 .evaluate_staged(&base, &Environment::new())
                 .map_err(|_| "serve.evaluation_failed");
         }
-        let tables = if let Ok(tables) = committed_table_identities(&repository, &commit, names.clone()) { tables } else {
+        let Ok(tables) = committed_table_identities(&repository, &commit, names.clone()) else {
             let bound = names
                 .iter()
                 .filter(|name| {

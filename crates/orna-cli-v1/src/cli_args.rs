@@ -304,6 +304,7 @@ fn refused_command(name: &str) -> Diagnostic {
 }
 
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn parse_cli(arguments: &[String]) -> Result<Parsed, Diagnostic> {
     let mut endpoint = Endpoint::ManagedLocal;
     let mut has_explicit_endpoint = false;

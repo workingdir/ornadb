@@ -279,6 +279,7 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;

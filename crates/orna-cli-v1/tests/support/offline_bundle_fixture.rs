@@ -1,5 +1,11 @@
 //! Writes one-row offline bundles whose payload is a `.orna` fixture.
 
+// Included by path from several targets, each of which uses the part of the
+// bundle fixture it needs.
+#![allow(dead_code)]
+
+#![allow(clippy::too_many_arguments)]
+
 use std::{
     path::{Path, PathBuf},
     process::{Command, Output},

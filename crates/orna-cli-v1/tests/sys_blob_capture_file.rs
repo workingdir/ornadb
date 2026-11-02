@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::{
     process::Command,
     sync::{
@@ -91,7 +92,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         .replace("__MEDIA_ROOT__", &media_root);
     let value = evaluate_expression_ovb2_with_effects(
         &source,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )
@@ -346,7 +347,7 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
             "sys.blob.capture_file({root:?}, \"flush.json\", 64)",
             root = root.to_string_lossy().as_ref()
         ),
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )
@@ -516,7 +517,7 @@ async fn captured_files_keep_the_octet_stream_fallback_until_annotated() {
     let mut evaluate = |source: &str| {
         evaluate_expression_ovb2_with_effects(
             source,
-            &Default::default(),
+            &BTreeMap::default(),
             Limits::default(),
             &mut bindings,
         )

@@ -680,6 +680,7 @@ fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
     Ok(())
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Applies one frame to the owning presentation and prints its outcome.
 fn accept_frame<W: Write>(
     state: &mut WatchCommandState,
@@ -741,6 +742,7 @@ fn accept_frame<W: Write>(
 }
 
 
+#[allow(clippy::needless_pass_by_value)]
 /// Drains every immediately available frame; `Ok(None)` keeps the REPL
 /// interactive instead of blocking the line loop.
 fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(

@@ -686,6 +686,7 @@ struct MountSignalHandler {
 
 #[cfg(target_os = "linux")]
 impl MountSignalHandler {
+    #[allow(clippy::items_after_statements)]
     fn new() -> Result<Self, String> {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -711,6 +712,7 @@ impl MountSignalHandler {
         })
     }
 
+    #[allow(clippy::items_after_statements)]
 #[allow(clippy::too_many_lines)]
     /// Waits for the FUSE session to end. A termination signal, or the loss of
     /// the registered view, stops the mount: unresolved drafts are retained and
@@ -875,6 +877,7 @@ pub(super) fn run_mount_cwd(_endpoint: &Endpoint, _mountpoint: &Path) -> Result<
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), Diagnostic> {
     let repository = open_repository(endpoint)?;
     #[cfg(target_os = "linux")]
@@ -1558,7 +1561,7 @@ fn escape_json(value: &str) -> String {
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             control if control < ' ' => {
-                escaped.push_str(&format!("\\u{:04x}", control as u32));
+                escaped.extend([format!("\\u{:04x}", u32::from(control))]);
             }
             other => escaped.push(other),
         }

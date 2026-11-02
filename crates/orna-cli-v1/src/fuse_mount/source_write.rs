@@ -161,7 +161,7 @@ impl WorkspaceFilesystem {
             .map(|(_, draft)| draft.baseline.len() + draft.candidate.len())
             .sum();
         let baseline_len = match draft_state.source_drafts.get(&inode) {
-            Some(draft) if !(rebase && !draft.dirty) => draft.baseline.len(),
+            Some(draft) if !rebase || draft.dirty => draft.baseline.len(),
             _ => self
                 .with_source_committed(inode, <[u8]>::len)
                 .ok_or(Errno::EBADF)?,
@@ -337,6 +337,7 @@ impl WorkspaceFilesystem {
         }
     }
 
+    #[allow(clippy::unused_self)]
     /// Records a refusal for `inode`, retaining its candidate. `keep_dirty` leaves the
     /// candidate pending so a later commit can accept it. Returns the retention errno
     /// when the candidate could not be kept.
@@ -516,6 +517,7 @@ impl WorkspaceFilesystem {
         group_result(trigger_in_group, DocumentCommitError::Stale)
     }
 
+    #[allow(clippy::type_complexity)]
     /// The group for one commit: every dirty draft, plus the trigger's held refusal so
     /// its own commit retries it. Returns the members and the other source modules.
     fn source_snapshot(
@@ -557,6 +559,7 @@ impl WorkspaceFilesystem {
         Ok((members, siblings))
     }
 
+    #[allow(clippy::type_complexity)]
     /// Handles the close of a source handle (release). When no handle remains open
     /// on the module, an unaccepted candidate is retained as `unsynced` and stays
     /// pending; a clean draft is dropped.
