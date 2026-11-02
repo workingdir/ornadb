@@ -145,7 +145,7 @@ pub fn extract_member(archive: &Path, member: &RecordedMember, destination: &Pat
             "fetch",
             "--no-tags",
             archive.join(&member.bundle).to_str().expect("UTF-8 path"),
-            &format!("+refs/heads/orna-complete-copy:refs/heads/extracted"),
+            "+refs/heads/orna-complete-copy:refs/heads/extracted",
         ],
     );
     let resolved = String::from_utf8(git(destination, &["rev-parse", "refs/heads/extracted"]))

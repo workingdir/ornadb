@@ -125,9 +125,9 @@ impl Column {
 
     fn keys(&self) -> Vec<Key> {
         match self {
-            Self::Int(values) => values.iter().map(|value| Key::Int(*value)).collect(),
-            Self::Date(values) => values.iter().map(|value| Key::Date(*value)).collect(),
-            Self::Str(values) => values.iter().map(|value| Key::Str(*value)).collect(),
+            Self::Int(values) => values.iter().map(|value| Key::Int(value)).collect(),
+            Self::Date(values) => values.iter().map(|value| Key::Date(value)).collect(),
+            Self::Str(values) => values.iter().map(|value| Key::Str(value)).collect(),
         }
     }
 

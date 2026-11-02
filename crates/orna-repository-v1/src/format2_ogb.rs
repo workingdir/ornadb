@@ -156,13 +156,13 @@ fn verify_root<S: OgbObjects>(
     if total > OGB_MAX_LENGTH {
         return Err(OgbError::Malformed("meta total range"));
     }
-    if let Some((_, max_len)) = payload.as_ref() {
-        if total > *max_len {
-            return Err(OgbError::Limit {
-                total,
-                limit: *max_len,
-            });
-        }
+    if let Some((_, max_len)) = payload.as_ref()
+        && total > *max_len
+    {
+        return Err(OgbError::Limit {
+            total,
+            limit: *max_len,
+        });
     }
     let Item::Bytes(data_oid) = data_oid else {
         return Err(OgbError::Malformed("meta data oid"));
@@ -197,6 +197,8 @@ fn verify_root<S: OgbObjects>(
     })
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 /// Recursively verifies one data node. Chunk bytes are fed to `hasher` in order,
 /// and appended to `payload` when the caller asked for the content.
 fn verify_node<S: OgbObjects>(
