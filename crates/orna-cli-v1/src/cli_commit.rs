@@ -355,6 +355,7 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
     Diagnostic::target_with_detail(code, title, help, format!("{error:?}"))
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = message(arguments)?;
     let path = local_project_path(endpoint)?;

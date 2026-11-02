@@ -312,10 +312,11 @@ mod tests {
 
     #[test]
     fn empty_representation_reads_nothing() {
-        let reply = media_reply(MediaMethod::Get, None, 0, |_, _| {
-            Ok::<Vec<u8>, ()>(panic!("empty representation must not read"))
-        })
-        .expect("empty plan");
+        let reply =
+            media_reply(MediaMethod::Get, None, 0, |_, _| -> Result<Vec<u8>, ()> {
+                unreachable!("empty representation must not read")
+            })
+            .expect("empty plan");
         assert_eq!(reply.plan.status, 200);
         assert!(reply.body.is_empty());
     }

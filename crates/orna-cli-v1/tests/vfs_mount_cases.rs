@@ -9,7 +9,6 @@
 //! (multi-file source saves). The nested-collection directory case from
 //! `profiles/vfs-1.md` is tracked by bead ornadb-5il1.464 and is not a test yet.
 
-use std::collections::BTreeMap;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},

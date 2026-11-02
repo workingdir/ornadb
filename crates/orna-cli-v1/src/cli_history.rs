@@ -194,6 +194,7 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
     let relation = parse_relation_id(options.relation)?;
@@ -916,6 +917,7 @@ fn read_relation_rows(
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Joins the two pinned reads by canonical key into one ordered change list.
 fn compare_rows(
     before: BTreeMap<Vec<u8>, HistoryRow>,
@@ -940,6 +942,7 @@ fn compare_rows(
     changes
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// One change as a JSON object. A `changed` entry separates the two
 /// coordinates so a content move and an annotation move are told apart.
 fn change_json(change: &RowChange) -> serde_json::Value {
@@ -1011,6 +1014,7 @@ fn counts(changes: &[RowChange]) -> (usize, usize, usize, usize) {
     (added, updated, removed, rekeyed)
 }
 
+#[allow(clippy::type_complexity)]
 /// The row moves the committed rekeys of `relation` make between the two
 /// pinned snapshots, as `(old, new)` key pairs in the order that leads from
 /// `from` to `to`. Each snapshot's log holds every rekey of the history it
@@ -1050,6 +1054,7 @@ fn rekey_window(
     Ok(Vec::new())
 }
 
+#[allow(clippy::type_complexity)]
 /// Pairs each row the window moved, so the move reads as one rekeyed change
 /// instead of a removal plus an addition. The moves are folded first: each
 /// key a chain ends on is traced back to the key it started from, so `a -> b`
@@ -1103,6 +1108,7 @@ fn pair_rekeys(
     (before, after, pairs)
 }
 
+#[allow(clippy::type_complexity)]
 /// Renders a canonical row key the way `orna query` prints one: a text key as
 /// its text, and a byte key as that same text when its bytes are valid UTF-8,
 /// so a key reported by either verb is greppable the same way.
