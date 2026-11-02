@@ -13,6 +13,9 @@
 //! Included by test binaries with `#[path = "support/independent_extractor.rs"]
 //! mod independent_extractor;`.
 
+// Included by path from more than one test target.
+#![allow(dead_code)]
+
 use std::{
     collections::BTreeMap,
     fs,

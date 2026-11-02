@@ -6446,6 +6446,7 @@ impl ValidatedRepositoryContext {
 /// Test-only context creation keeps tests focused without creating a public
 /// production admission route from arbitrary caller data.
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) const fn test_context(algorithm: GitHashAlgorithm) -> ValidatedRepositoryContext {
     ValidatedRepositoryContext { algorithm }
 }
