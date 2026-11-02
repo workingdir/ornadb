@@ -61,10 +61,3 @@ bead = "ornadb-aflz"
 reason = "Failed 1 of 3 runs on main at publication_crash_matrix.rs:520. Passed in one d35b7c0c3 baseline run (publication_crash_matrix: 12 of 12)."
 intermittent = true
 
-[[failure]]
-package = "workspace"
-target = "check:clippy"
-test = "clippy"
-bead = "ornadb-5il1.256"
-reason = "cargo clippy --locked --workspace --all-targets -- -D warnings stops at orna-value-v1 with 9 errors at cf1c6aa82."
-
