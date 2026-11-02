@@ -17,7 +17,7 @@ fn fake_sops(directory: &Path, body: &str) -> PathBuf {
     executable
 }
 
-const REVERSING_SOPS: &str = r##"#!/bin/sh
+const REVERSING_SOPS: &str = r#"#!/bin/sh
 set -eu
 action="$1"
 shift
@@ -28,7 +28,7 @@ case "$action" in
   decrypt) tail -c +6 "$input" | rev ;;
   *) exit 2 ;;
 esac
-"##;
+"#;
 
 /// ORNA-SECRET-001: Orna MUST NOT commit plaintext secret values by default.
 /// ORNA-SECRET-003: A `SecretRef` may be displayed and serialized by stable name; the resolved secret value may not.
