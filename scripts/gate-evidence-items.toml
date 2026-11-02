@@ -211,7 +211,7 @@ select = [
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
-  "The large row is a 7.7 KB inline row. The overflow row (above a mirrored 8,192-byte inline bound) is measured on the write side only and is not read back by this harness.",
+  "The large row is a 7.7 KB inline row. The harness measures an overflowing row on the write side only: a maintenance pass rewrites the graph it was handed, so reading the new root back needs the relation record pointed at the successor root, which this harness does not do. The read path itself is covered elsewhere: large_row_publish_e2e::a_row_over_8_kib_publishes_through_the_overflow_graph queries the published row by key and by diff, and format_context::pinned_orp_loader_issues_lazy_snapshot_and_reads_verified_overflow_by_point_and_range reads a verified overflow row by point and by range without fetching payload bytes.",
 ]
 
 [[item]]
