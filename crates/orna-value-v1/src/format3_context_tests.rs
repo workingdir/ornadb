@@ -914,7 +914,7 @@ fn full_reads_and_content_comparisons_honor_small_read_quotas() {
     .unwrap();
 
     assert_eq!(left.read_to_end().unwrap(), b"payload");
-    assert_eq!(left.same_content(&right).unwrap(), true);
+    assert!(left.same_content(&right).unwrap());
     assert!(left_resolver.max_request.load(Ordering::SeqCst) <= 2);
     assert!(right_resolver.max_request.load(Ordering::SeqCst) <= 2);
 }
