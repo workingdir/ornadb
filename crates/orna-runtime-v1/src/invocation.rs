@@ -684,12 +684,12 @@ impl RuntimeState {
         while let Some(id) = ready.iter().next().copied() {
             ready.remove(&id);
             ids.push(id);
-            if let Some(Some(parent_id)) = parents.get(&id) {
-                if let Some(children) = remaining_children.get_mut(parent_id) {
-                    *children -= 1;
-                    if *children == 0 {
-                        ready.insert(*parent_id);
-                    }
+            if let Some(Some(parent_id)) = parents.get(&id)
+                && let Some(children) = remaining_children.get_mut(parent_id)
+            {
+                *children -= 1;
+                if *children == 0 {
+                    ready.insert(*parent_id);
                 }
             }
         }
