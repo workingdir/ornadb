@@ -12,7 +12,7 @@
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
-use super::{Diagnostic, Digest, Limits, Response, runtime_identity, RuntimeState, committed_table_identities, legacy_bare_module_candidates, legacy_bare_module_table, CommittedTableIdentity, admitted_table_schemas, committed_rows_at, CommittedRowsError, PinnedCommittedTables, PinnedCommittedRows, evaluate_over_committed_tables, Mutex, Request, unavailable_response};
+use super::{Diagnostic, Limits, Response, runtime_identity, RuntimeState, committed_table_identities, legacy_bare_module_candidates, legacy_bare_module_table, CommittedTableIdentity, admitted_table_schemas, committed_rows_at, CommittedRowsError, PinnedCommittedTables, PinnedCommittedRows, evaluate_over_committed_tables, Mutex, Request, unavailable_response};
 use orna_application_v1::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator_v1::Environment;
 
@@ -56,8 +56,7 @@ impl ServeApp {
                 root: root.to_owned(),
             })),
             // A private `serve` is not the serving entry (ORNA-APP-001 explicit root `pub fn serve()`).
-            Ok(_) => Ok(None),
-            Err(ApplicationError::MissingEntry(_)) => Ok(None),
+            Ok(_) | Err(ApplicationError::MissingEntry(_)) => Ok(None),
             Err(error) => {
                 let detail = match &error {
                     ApplicationError::Semantic(codes) => format!("{error}: {}", codes.join(", ")),
@@ -105,6 +104,7 @@ impl ServeApp {
     ///    transaction. A sequence that differs from the pin fails closed as
     ///    `StaleCapture`, which this request reports as the coded 500
     ///    `serve.evaluation_failed` with no value.
+    ///
     /// The served process holds the runtime owner lock, so an ordinary write
     /// cannot change the CWD while it serves. A publish that does not take the
     /// lease is the remaining writer path, and step 3 covers it.

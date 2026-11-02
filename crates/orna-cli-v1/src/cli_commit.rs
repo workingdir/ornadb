@@ -18,7 +18,7 @@ use orna_repository_v1::{
 };
 
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
-use super::{Diagnostic, Cow, Exit, semantic_catalogue, Digest, Endpoint, local_project_path, runtime_identity, RuntimeState};
+use super::{Diagnostic, Cow, Exit, semantic_catalogue, Endpoint, local_project_path, runtime_identity, RuntimeState};
 
 fn usage() -> Diagnostic {
     Diagnostic::usage(

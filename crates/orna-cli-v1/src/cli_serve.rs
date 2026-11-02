@@ -905,9 +905,8 @@ fn peek_is_orna_route(stream: &TcpStream, deadline: Instant) -> bool {
                 return is_orna_request_line(&probe[..read]);
             }
             // Nothing, or only part of the line so far: wait briefly for more.
-            Ok(0) => return false,
+            Ok(0) | Err(_) => return false,
             Ok(_) => std::thread::sleep(StdDuration::from_micros(200)),
-            Err(_) => return false,
         }
     }
 }

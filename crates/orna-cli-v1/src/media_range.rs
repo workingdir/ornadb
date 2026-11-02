@@ -160,9 +160,8 @@ pub fn media_reply<E>(
     let plan = plan_media_response(method, range, length);
     let span = match resolve_range(range, length) {
         RangeOutcome::Full if length > 0 => Some((0, length - 1)),
-        RangeOutcome::Full => None,
+        RangeOutcome::Full | RangeOutcome::Unsatisfiable => None,
         RangeOutcome::Partial { start, end } => Some((start, end)),
-        RangeOutcome::Unsatisfiable => None,
     };
     let body = match span {
         Some((start, end)) if plan.send_body => {

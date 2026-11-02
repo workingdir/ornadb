@@ -14,7 +14,7 @@
 //! context, so the comparison is one pair of immutable reads taken from the
 //! local repository alone: no fetch, no remote, and no media payload.
 
-use super::{Diagnostic, Digest, Endpoint, local_project_path, cli_row_key};
+use super::{Diagnostic, Endpoint, local_project_path, cli_row_key};
 
 use orna_repository_v1::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
@@ -997,18 +997,18 @@ fn human_change(change: &RowChange) -> String {
 /// Counts the changes as `(added, changed, removed, rekeyed)`.
 fn counts(changes: &[RowChange]) -> (usize, usize, usize, usize) {
     let mut added = 0;
-    let mut changed = 0;
+    let mut updated = 0;
     let mut removed = 0;
     let mut rekeyed = 0;
     for change in changes {
         match change {
             RowChange::Added(_) => added += 1,
-            RowChange::Changed { .. } => changed += 1,
+            RowChange::Changed { .. } => updated += 1,
             RowChange::Removed(_) => removed += 1,
             RowChange::Rekeyed { .. } => rekeyed += 1,
         }
     }
-    (added, changed, removed, rekeyed)
+    (added, updated, removed, rekeyed)
 }
 
 /// The row moves the committed rekeys of `relation` make between the two
