@@ -472,15 +472,16 @@ pub fn merge_keyed_row_states(
     // the identity carried by the error. The reference specifies conflicts
     // but leaves their payload anchor unspecified.
     let anchor = identity(base).or(anchor);
-    if let Some((table, key)) = anchor {
-        if identities.iter().flatten().any(|(other_table, other_key)| {
-            *other_table != table || *other_key != key
-        }) {
-            return Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
-                table,
-                key: key.clone(),
-            }));
-        }
+    if let Some((table, key)) = anchor
+        && identities
+            .iter()
+            .flatten()
+            .any(|(other_table, other_key)| *other_table != table || *other_key != key)
+    {
+        return Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
+            table,
+            key: key.clone(),
+        }));
     }
 
     let row = |state| match state {
@@ -531,10 +532,10 @@ pub fn merge_keyed_row(
     if [base, left, right].into_iter().flatten().any(|row| !identity_matches(row)) {
         return Err(RowMergeConflict::Identity { table: exemplar.table, key: exemplar.key.clone() });
     }
-    if let (Some(base), Some(left), Some(right)) = (base, left, right) {
-        if base.key_kind != left.key_kind || base.key_kind != right.key_kind {
-            return Err(RowMergeConflict::Identity { table: base.table, key: base.key.clone() });
-        }
+    if let (Some(base), Some(left), Some(right)) = (base, left, right)
+        && (base.key_kind != left.key_kind || base.key_kind != right.key_kind)
+    {
+        return Err(RowMergeConflict::Identity { table: base.table, key: base.key.clone() });
     }
     match (base, left, right) {
         (None, None, _) | (None, _, None) => Ok(left.or(right).cloned()),
