@@ -240,7 +240,10 @@ fn violating_statement_in_a_multi_statement_call_rolls_back_every_write() {
 
     // The Book insert is valid on its own; the Loan insert violates the
     // assertion. ORNA-ASSERT-029 requires the whole boundary to roll back.
-    let output = orna_repl(&root, "main.seed()\nmain.Book | count()\nmain.Loan | count()");
+    let output = orna_repl(
+        &root,
+        "main.seed()\nmain.Book | count()\nmain.Loan | count()",
+    );
     let text = transcript(&output);
     assert!(text.contains("ORNA-A091-009"), "{text}");
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -256,11 +259,17 @@ fn valid_multi_statement_call_admits_every_write() {
     let directory = tempfile::tempdir().expect("temporary directory");
     let root = initialized_database(
         &directory,
-        &SEED_LIBRARY.replace("Loan.insert({ id: 2, book_id: 9 })", "Loan.insert({ id: 2, book_id: 1 })"),
+        &SEED_LIBRARY.replace(
+            "Loan.insert({ id: 2, book_id: 9 })",
+            "Loan.insert({ id: 2, book_id: 1 })",
+        ),
     );
     commit_source(&root, "valid multi-statement fixture");
 
-    let output = orna_repl(&root, "main.seed()\nmain.Book | count()\nmain.Loan | count()");
+    let output = orna_repl(
+        &root,
+        "main.seed()\nmain.Book | count()\nmain.Loan | count()",
+    );
     let text = transcript(&output);
     assert_success(&output, "valid multi-statement call");
     assert!(!text.contains("ORNA-A091-009"), "{text}");

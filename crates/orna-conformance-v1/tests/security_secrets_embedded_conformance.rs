@@ -1,20 +1,14 @@
-use std::{
-    cell::Cell,
-    fs,
-    path::Path,
-    process::Command,
-};
+use std::{cell::Cell, fs, path::Path, process::Command};
 
 use orna_foundation_v1::{Diagnostic, DiagnosticSeverity, SafeText};
 use orna_repository_v1::Repository;
+use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_security_v1::{SecretBoundaryError, SecretMetadata, SecretRef, SecretResolver};
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_syntax_v1::parse_module_with_file;
-use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use tempfile::TempDir;
 
-const SECRET_REFERENCE_SOURCE: &str =
-    include_str!("fixtures/security-secret-reference.orna");
+const SECRET_REFERENCE_SOURCE: &str = include_str!("fixtures/security-secret-reference.orna");
 
 struct FixtureResolver {
     available: bool,
@@ -101,16 +95,23 @@ fn redacted_secret_diagnostics_do_not_disclose_values_at_json_or_ovb_boundaries(
     let ovb = diagnostic.encode_ovb().unwrap();
 
     assert_eq!(diagnostic.message(), "<redacted>");
-    assert!(!json
-        .windows(b"secret-fixture-payload".len())
-        .any(|window| window == b"secret-fixture-payload"));
-    assert!(!ovb
-        .windows(b"secret-fixture-payload".len())
-        .any(|window| window == b"secret-fixture-payload"));
+    assert!(
+        !json
+            .windows(b"secret-fixture-payload".len())
+            .any(|window| window == b"secret-fixture-payload")
+    );
+    assert!(
+        !ovb.windows(b"secret-fixture-payload".len())
+            .any(|window| window == b"secret-fixture-payload")
+    );
 }
 
 fn git(root: &Path, args: &[&str]) {
-    let output = Command::new("git").current_dir(root).args(args).output().unwrap();
+    let output = Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "git {args:?}: {}",
@@ -122,14 +123,15 @@ fn fixture_repository() -> (TempDir, Repository) {
     let root = tempfile::tempdir_in("/var/tmp").expect("temporary Git repository");
     git(root.path(), &["init", "-b", "main"]);
     git(root.path(), &["config", "user.name", "kierandrewett"]);
-    git(
-        root.path(),
-        &["config", "user.email", "kieran@drewett.dev"],
-    );
+    git(root.path(), &["config", "user.email", "kieran@drewett.dev"]);
     git(root.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(root.path().join("main.orna"), SECRET_REFERENCE_SOURCE).unwrap();
     fs::create_dir_all(root.path().join(".orna")).unwrap();
-    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        root.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     git(root.path(), &["add", "."]);
     git(root.path(), &["commit", "-m", "fixture repository"]);
     let repository = Repository::discover(root.path()).unwrap();

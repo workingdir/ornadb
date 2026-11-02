@@ -24,10 +24,9 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    ActivationEffectReport, DeclaredEffectSet,
-    FaultInjector, FaultPoint, RequestIdentity, RequestOwner, RequestState, RunObservationStatus,
-    RuntimeActivationContext, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
-    TerminalOutcome,
+    ActivationEffectReport, DeclaredEffectSet, FaultInjector, FaultPoint, RequestIdentity,
+    RequestOwner, RequestState, RunObservationStatus, RuntimeActivationContext, RuntimeError,
+    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use orna_security_v1::{
     AttachmentId, BoundaryError, CredentialIssuer, Origin, OriginPolicy, SessionBoundary,
@@ -44,16 +43,15 @@ use std::{
     pin::Pin,
     process::Command,
     sync::{
-        Arc, mpsc,
+        Arc,
         atomic::{AtomicUsize, Ordering},
+        mpsc,
     },
     thread,
     time::{SystemTime, UNIX_EPOCH},
-
 };
 
-const LIVE_RUNTIME_BOUNDARY_FIXTURE: &str =
-    include_str!("fixtures/live-runtime-boundary.orna");
+const LIVE_RUNTIME_BOUNDARY_FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
 
 fn commit_delivered(
     transport: &mut LiveTransport,
@@ -575,13 +573,7 @@ impl LiveApplication for CompetingTerminalApplication {
         .join()
         .unwrap();
         let transaction = LiveEvalTransaction::new(
-            vec![TableMutation::new(
-                [8; 16],
-                "books",
-                vec![8],
-                Some(vec![9]),
-            )
-            .unwrap()],
+            vec![TableMutation::new([8; 16], "books", vec![8], Some(vec![9])).unwrap()],
             [4; 32],
             ActivationEffectReport::declare(DeclaredEffectSet::None),
             Arc::new(NoFault),
@@ -632,12 +624,7 @@ struct TransactionalApplication {
 }
 
 impl LiveApplication for TransactionalApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
 
@@ -724,8 +711,7 @@ impl LiveApplication for TransactionalApplication {
             watch: Some([11; 16]),
             message: Message::Snapshot {
                 revision: 0,
-                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
-                    .unwrap(),
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit()).unwrap(),
                 snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
             },
             extensions: BTreeMap::new(),
@@ -822,7 +808,12 @@ impl IdentityWatchApplication {
         .unwrap()
     }
 
-    fn snapshot(request: [u8; 16], watch: [u8; 16], revision: u64, present: PresentNode) -> Envelope {
+    fn snapshot(
+        request: [u8; 16],
+        watch: [u8; 16],
+        revision: u64,
+        present: PresentNode,
+    ) -> Envelope {
         Envelope {
             request: Some(request),
             watch: Some(watch),
@@ -882,8 +873,7 @@ impl WatchEventApplication {
             watch: Some(watch),
             message: Message::Snapshot {
                 revision: 0,
-                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit())
-                    .unwrap(),
+                present: orna_protocol_v1::PresentNode::from_value(CanonicalValue::unit()).unwrap(),
                 snapshot: CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap(),
             },
             extensions: BTreeMap::new(),
@@ -892,12 +882,7 @@ impl WatchEventApplication {
 }
 
 impl LiveApplication for WatchEventApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
 
@@ -912,7 +897,8 @@ impl LiveApplication for WatchEventApplication {
         _: &Message,
     ) -> Result<Envelope, Error> {
         self.subscriptions += 1;
-        let offset = u8::try_from(self.subscriptions % 200).expect("subscription count stays small");
+        let offset =
+            u8::try_from(self.subscriptions % 200).expect("subscription count stays small");
         Ok(Self::snapshot(request, [10 + offset; 16]))
     }
 
@@ -960,13 +946,10 @@ impl LiveApplication for WatchEventApplication {
                 WatchEventMode::Rollback => Ok(LiveEvalResponse::transaction(
                     response,
                     LiveEvalTransaction::new(
-                        vec![TableMutation::new(
-                            [201; 16],
-                            "watch_rollback",
-                            vec![1],
-                            Some(vec![2]),
-                        )
-                        .unwrap()],
+                        vec![
+                            TableMutation::new([201; 16], "watch_rollback", vec![1], Some(vec![2]))
+                                .unwrap(),
+                        ],
                         [201; 32],
                         ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(FailAt(FaultPoint::AfterTableWrite)),
@@ -979,13 +962,10 @@ impl LiveApplication for WatchEventApplication {
                 WatchEventMode::Commit => Ok(LiveEvalResponse::transaction(
                     response,
                     LiveEvalTransaction::new(
-                        vec![TableMutation::new(
-                            [202; 16],
-                            "watch_commit",
-                            vec![1],
-                            Some(vec![2]),
-                        )
-                        .unwrap()],
+                        vec![
+                            TableMutation::new([202; 16], "watch_commit", vec![1], Some(vec![2]))
+                                .unwrap(),
+                        ],
                         [202; 32],
                         ActivationEffectReport::declare(DeclaredEffectSet::None),
                         Arc::new(NoFault),
@@ -999,7 +979,6 @@ impl LiveApplication for WatchEventApplication {
         })
     }
 }
-
 
 struct Authority;
 impl LiveSessionAuthority for Authority {
@@ -2464,8 +2443,8 @@ fn cancel_request(request: [u8; 16], target: [u8; 16]) -> Vec<u8> {
         },
         extensions: BTreeMap::new(),
     }
-.encode(Limits::default().protocol)
-.unwrap()
+    .encode(Limits::default().protocol)
+    .unwrap()
 }
 fn resync() -> Vec<u8> {
     resync_request([9; 16], [10; 16])
@@ -3014,12 +2993,7 @@ fn resume_transport_session_with_socket(
     assert_eq!(transport.take_retired_attachments(), vec![old_attachment]);
     assert!(transport.acknowledge_retired_attachment(old_attachment));
     assert_eq!(
-        block_on(transport.upgrade(
-            websocket_upgrade(1, &new_token),
-            new_attachment,
-            now,
-        ))
-        .status,
+        block_on(transport.upgrade(websocket_upgrade(1, &new_token), new_attachment, now,)).status,
         101
     );
     (new_token, WebSocketState::new(new_attachment))
@@ -3488,19 +3462,21 @@ fn status_snapshots_survive_reconnect_storm(eval_outcome: UnitEvalOutcome) {
         Message::Eval { source, .. } if source == FIXTURE
     ));
     let target_fingerprint = request_fingerprint(&target_request, [1; 16]);
-    let mut ticket = Some(match block_on(transport.prepare_websocket_application(
-        &mut current_socket,
-        2,
-        &masked_binary_payload(&target_request),
-    ))
-    .unwrap()
-    {
-        WebSocketApplicationPreparation::Work(ticket) => ticket,
-        WebSocketApplicationPreparation::Output(_) => {
-            panic!("the fixture Eval is admitted as asynchronous work")
-        }
-        WebSocketApplicationPreparation::Pending => panic!("the Eval frame is complete"),
-    });
+    let mut ticket = Some(
+        match block_on(transport.prepare_websocket_application(
+            &mut current_socket,
+            2,
+            &masked_binary_payload(&target_request),
+        ))
+        .unwrap()
+        {
+            WebSocketApplicationPreparation::Work(ticket) => ticket,
+            WebSocketApplicationPreparation::Output(_) => {
+                panic!("the fixture Eval is admitted as asynchronous work")
+            }
+            WebSocketApplicationPreparation::Pending => panic!("the Eval frame is complete"),
+        },
+    );
     let status_request = |request| {
         Envelope {
             request: Some(request),
@@ -3606,8 +3582,7 @@ fn status_snapshots_survive_reconnect_storm(eval_outcome: UnitEvalOutcome) {
             else {
                 panic!("the session-owned Eval completes during the reconnect storm");
             };
-            let terminal =
-                Envelope::decode(&terminal_payload, Limits::default().protocol).unwrap();
+            let terminal = Envelope::decode(&terminal_payload, Limits::default().protocol).unwrap();
             let result = ResultBody::from_result(&terminal, Limits::default().protocol).unwrap();
             let fresh = block_on(transport.receive_with_application(
                 &mut next_socket,
@@ -3829,8 +3804,8 @@ fn unknown_snapshot_survives_reconnect_storm_before_target_id_reuse() {
         panic!("the Eval result is binary");
     };
     let target_result = Envelope::decode(&target_payload, Limits::default().protocol).unwrap();
-    let expected_result = ResultBody::from_result(&target_result, Limits::default().protocol)
-        .unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
 
     let unknown_retry = block_on(transport.receive_with_application(
         &mut current_socket,
@@ -4184,12 +4159,7 @@ fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
     assert_eq!(application.calls, 0);
 
     let other_runtime_snapshot = CanonicalSnapshot::cwd([2; 16], [4; 16], 0.into()).unwrap();
-    let other_runtime = eval_with_context(
-        [1; 16],
-        [22; 16],
-        [2; 16],
-        Some(other_runtime_snapshot),
-    );
+    let other_runtime = eval_with_context([1; 16], [22; 16], [2; 16], Some(other_runtime_snapshot));
     let prepared = block_on(transport.prepare_websocket_application(
         &mut socket,
         2,
@@ -4232,12 +4202,8 @@ fn live_requests_cannot_switch_the_issued_database_or_cwd_runtime() {
     assert_eq!(application.calls, 1);
 
     let bound_snapshot = CanonicalSnapshot::cwd([2; 16], [3; 16], 0.into()).unwrap();
-    let bound_snapshot_request = eval_with_context(
-        [1; 16],
-        [25; 16],
-        [2; 16],
-        Some(bound_snapshot),
-    );
+    let bound_snapshot_request =
+        eval_with_context([1; 16], [25; 16], [2; 16], Some(bound_snapshot));
     let accepted = block_on(transport.receive_with_application(
         &mut socket,
         2,
@@ -4260,7 +4226,11 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
         wire(
             "POST",
             "/orna/session",
-            &format!(r#"{{"database":"{}","protocol":"{}"}}"#, uuid(2), SUBPROTOCOL),
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
         ),
         0,
         &mut authority,
@@ -4270,12 +4240,7 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
     assert_eq!(created.status, 201);
     let session_token = token(&created);
     assert_eq!(
-        block_on(transport.upgrade(
-            websocket_upgrade(1, &session_token),
-            [5; 16],
-            1,
-        ))
-        .status,
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1,)).status,
         101
     );
 
@@ -4298,11 +4263,14 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
     assert!(transport.acknowledge_retired_attachment([5; 16]));
 
-    let mut delete = wire("DELETE", "/orna/session/01010101-0101-0101-0101-010101010101", "");
-    delete.headers.push((
-        "authorization".into(),
-        format!("Bearer {session_token}"),
-    ));
+    let mut delete = wire(
+        "DELETE",
+        "/orna/session/01010101-0101-0101-0101-010101010101",
+        "",
+    );
+    delete
+        .headers
+        .push(("authorization".into(), format!("Bearer {session_token}")));
     let mut children = RecordingChildren::default();
     let deleted = block_on(transport.handle_with_children(
         delete,
@@ -4313,10 +4281,13 @@ fn async_rejection_after_session_delete_stays_behind_the_session_fence() {
         &mut children,
     ));
     assert_eq!(deleted.status, 204);
-    assert_eq!(children.requests, vec![RequestIdentity {
-        session_id: [1; 16],
-        request_id: [30; 16],
-    }]);
+    assert_eq!(
+        children.requests,
+        vec![RequestIdentity {
+            session_id: [1; 16],
+            request_id: [30; 16],
+        }]
+    );
 
     assert_eq!(
         block_on(transport.complete_application(completion)),
@@ -4534,7 +4505,11 @@ fn async_rejection_keeps_watch_correlation_after_session_resume() {
         wire(
             "POST",
             "/orna/session",
-            &format!(r#"{{"database":"{}","protocol":"{}"}}"#, uuid(2), SUBPROTOCOL),
+            &format!(
+                r#"{{"database":"{}","protocol":"{}"}}"#,
+                uuid(2),
+                SUBPROTOCOL
+            ),
         ),
         0,
         &mut authority,
@@ -4544,12 +4519,7 @@ fn async_rejection_keeps_watch_correlation_after_session_resume() {
     assert_eq!(created.status, 201);
     let session_token = token(&created);
     assert_eq!(
-        block_on(transport.upgrade(
-            websocket_upgrade(1, &session_token),
-            [5; 16],
-            1,
-        ))
-        .status,
+        block_on(transport.upgrade(websocket_upgrade(1, &session_token), [5; 16], 1,)).status,
         101
     );
 
@@ -4603,9 +4573,7 @@ fn async_rejection_keeps_watch_correlation_after_session_resume() {
         wire(
             "POST",
             "/orna/session/01010101-0101-0101-0101-010101010101/resume",
-            &format!(
-                r#"{{"resume_token":"{session_token}","protocol":"{SUBPROTOCOL}"}}"#
-            ),
+            &format!(r#"{{"resume_token":"{session_token}","protocol":"{SUBPROTOCOL}"}}"#),
         ),
         3,
         &mut authority,
@@ -4673,32 +4641,19 @@ fn synchronous_event_diagnostic_replays_after_watch_closure() {
         .expect("subscription returns its host watch identity");
 
     let request = event([1; 16], [37; 16], watch);
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        4,
-        Frame::Binary(request.clone()),
-        &mut application,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 4, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
     let diagnostic = first.response.expect("portable rejection has a response");
     assert_eq!(diagnostic.request, Some([37; 16]));
     assert_eq!(diagnostic.watch, Some(watch));
     assert!(matches!(diagnostic.message, Message::Diagnostic { .. }));
 
-    block_on(host.dispatch_frame(
-        [5; 16],
-        5,
-        Frame::Binary(unsubscribe()),
-        &mut application,
-    ))
-    .unwrap();
-    let replay = block_on(host.dispatch_frame(
-        [5; 16],
-        6,
-        Frame::Binary(request),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 5, Frame::Binary(unsubscribe()), &mut application))
+        .unwrap();
+    let replay =
+        block_on(host.dispatch_frame([5; 16], 6, Frame::Binary(request), &mut application))
+            .unwrap();
     assert_eq!(replay.response, Some(diagnostic));
 }
 
@@ -4748,13 +4703,9 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
         .expect("subscription returns its host watch identity");
     let request = event([1; 16], [37; 16], watch);
     let request_fingerprint = request_fingerprint(&request, [1; 16]);
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        4,
-        Frame::Binary(request.clone()),
-        &mut application,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 4, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
     let diagnostic = first.response.expect("portable rejection has a response");
     assert_eq!(diagnostic.request, Some([37; 16]));
     assert_eq!(diagnostic.watch, Some(watch));
@@ -4777,13 +4728,8 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
         diagnostic
     );
 
-    block_on(host.dispatch_frame(
-        [5; 16],
-        5,
-        Frame::Binary(unsubscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 5, Frame::Binary(unsubscribe()), &mut application))
+        .unwrap();
     // The protocol defines terminal status without a Result body for a host
     // diagnostic, but is quiet about combining that with a closed watch. Keep
     // status terminal while replaying the original request/watch pair.
@@ -4798,15 +4744,10 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let status = block_on(host.dispatch_frame(
-        [5; 16],
-        6,
-        Frame::Binary(status),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("durable rejected request remains queryable");
+    let status = block_on(host.dispatch_frame([5; 16], 6, Frame::Binary(status), &mut application))
+        .unwrap()
+        .response
+        .expect("durable rejected request remains queryable");
     assert!(matches!(
         status.message,
         Message::RequestStatusResult {
@@ -4818,14 +4759,8 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
     ));
 
     let mut issuer = Issuer(2, None);
-    let (replacement, retired) = block_on(host.rotate_and_retire(
-        [1; 16],
-        &origin(),
-        &credential,
-        7,
-        &mut issuer,
-    ))
-    .unwrap();
+    let (replacement, retired) =
+        block_on(host.rotate_and_retire([1; 16], &origin(), &credential, 7, &mut issuer)).unwrap();
     assert_eq!(retired, Some([5; 16]));
     assert_eq!(
         block_on(host.resume(ResumeRequest {
@@ -4838,13 +4773,9 @@ fn durable_event_diagnostic_status_and_replay_keep_closed_watch_correlation() {
         Ok(orna_security_v1::AttachOutcome::Reconnected)
     );
 
-    let replay = block_on(host.dispatch_frame(
-        [6; 16],
-        9,
-        Frame::Binary(request),
-        &mut application,
-    ))
-    .unwrap();
+    let replay =
+        block_on(host.dispatch_frame([6; 16], 9, Frame::Binary(request), &mut application))
+            .unwrap();
     assert_eq!(replay.response, Some(diagnostic));
     drop(host);
     remove_test_repository(&root);
@@ -4893,25 +4824,16 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     .unwrap();
 
     let request = event([1; 16], [37; 16], [11; 16]);
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        4,
-        Frame::Binary(request.clone()),
-        &mut application,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 4, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
     let diagnostic = first.response.expect("portable rejection has a response");
     assert_eq!(diagnostic.request, Some([37; 16]));
     assert_eq!(diagnostic.watch, Some([11; 16]));
     assert!(matches!(diagnostic.message, Message::Diagnostic { .. }));
     let event_fingerprint = request_fingerprint(&request, [1; 16]);
-    block_on(host.dispatch_frame(
-        [5; 16],
-        5,
-        Frame::Binary(unsubscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 5, Frame::Binary(unsubscribe()), &mut application))
+        .unwrap();
     drop(host);
 
     let recovery_runtime = open_durable_state(&repository);
@@ -4921,11 +4843,8 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     // Rebuild process-local session/watch state, but retain the same durable
     // request identity. REQUEST-1 specifies terminal replay by fingerprint;
     // this host therefore returns the diagnostic before requiring watch restore.
-    let mut recovered = durable_host_after_takeover(
-        open_durable_state(&repository),
-        [74; 16],
-        old_owner,
-    );
+    let mut recovered =
+        durable_host_after_takeover(open_durable_state(&repository), [74; 16], old_owner);
     let mut recovered_issuer = Issuer(2, None);
     let recovered_credential = create(&mut recovered, &mut recovered_issuer);
     block_on(recovered.resume(ResumeRequest {
@@ -4991,7 +4910,10 @@ fn durable_event_diagnostic_replays_after_host_recovery_without_restored_watch()
     };
     let stale_diagnostic = Envelope::decode(payload, Limits::default().protocol).unwrap();
     assert_eq!(stale_diagnostic.request, Some([37; 16]));
-    assert_eq!(stale_diagnostic.watch, None, "the old watch is not restored");
+    assert_eq!(
+        stale_diagnostic.watch, None,
+        "the old watch is not restored"
+    );
     assert!(matches!(
         &stale_diagnostic.message,
         Message::Diagnostic { .. }
@@ -5240,15 +5162,21 @@ fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
     assert_eq!(rejected.request, Some([32; 16]));
     assert_eq!(rejected.watch, Some(watch));
     assert!(matches!(rejected.message, Message::Diagnostic { .. }));
-    assert_eq!(application.events, 0, "the stale event never reaches the app");
-    assert!(block_on(open_durable_state(&repository).request_status_for_identity(
-        RequestIdentity {
-            session_id: [1; 16],
-            request_id: [32; 16],
-        },
-    ))
-    .unwrap()
-    .is_none(), "pre-admission rejection leaves the durable ID available");
+    assert_eq!(
+        application.events, 0,
+        "the stale event never reaches the app"
+    );
+    assert!(
+        block_on(
+            open_durable_state(&repository).request_status_for_identity(RequestIdentity {
+                session_id: [1; 16],
+                request_id: [32; 16],
+            },)
+        )
+        .unwrap()
+        .is_none(),
+        "pre-admission rejection leaves the durable ID available"
+    );
 
     let accepted = block_on(transport.receive_with_application(
         &mut socket,
@@ -5263,7 +5191,10 @@ fn stale_event_fingerprint_does_not_reserve_durable_request_id() {
     let accepted = Envelope::decode(payload, Limits::default().protocol).unwrap();
     assert_eq!(accepted.request, Some([32; 16]));
     assert!(matches!(accepted.message, Message::Diagnostic { .. }));
-    assert_eq!(application.events, 1, "only the corrected event is dispatched");
+    assert_eq!(
+        application.events, 1,
+        "only the corrected event is dispatched"
+    );
 
     let stored = block_on(open_durable_state(&repository).request_status_for_identity(
         RequestIdentity {
@@ -5417,11 +5348,8 @@ fn durable_status_retry_replays_unknown_after_target_completes_and_host_recovers
     let recovery_runtime = open_durable_state(&repository);
     block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [76; 16])).unwrap();
     drop(recovery_runtime);
-    let mut recovered = durable_host_after_takeover(
-        open_durable_state(&repository),
-        [76; 16],
-        old_owner,
-    );
+    let mut recovered =
+        durable_host_after_takeover(open_durable_state(&repository), [76; 16], old_owner);
     let mut recovered_issuer = Issuer(2, None);
     let recovered_credential = create(&mut recovered, &mut recovered_issuer);
     block_on(recovered.resume(ResumeRequest {
@@ -5534,10 +5462,7 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
         session_id: session,
         request_id: [82; 16],
     };
-    block_on(
-        runtime.reserve_request(reserved_identity, reserved_fingerprint),
-    )
-    .unwrap();
+    block_on(runtime.reserve_request(reserved_identity, reserved_fingerprint)).unwrap();
     let (_, running_admission) =
         block_on(runtime.reserve_request_with_admission(running_identity, running_fingerprint))
             .unwrap();
@@ -5567,7 +5492,10 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
         Envelope {
             request: Some(request),
             watch: None,
-            message: Message::RequestStatus { target, fingerprint },
+            message: Message::RequestStatus {
+                target,
+                fingerprint,
+            },
             extensions: BTreeMap::new(),
         }
         .encode(Limits::default().protocol)
@@ -5726,10 +5654,9 @@ fn durable_status_snapshots_keep_reserved_and_running_through_handoff_storm() {
     for handoff in 0..HANDOFFS {
         let replacement_id = [76 + handoff; 16];
         let recovery_runtime = open_durable_state(&repository);
-        let replacement = block_on(
-            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
-        )
-        .unwrap();
+        let replacement =
+            block_on(recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id))
+                .unwrap();
         drop(recovery_runtime);
 
         let mut recovered = durable_host_after_takeover(
@@ -5968,15 +5895,18 @@ fn durable_running_status_snapshot_survives_session_handoff() {
     .unwrap()
     .response
     .expect("a fresh query sees the post-handoff target state");
-    assert!(matches!(
-        &fresh.message,
-        Message::RequestStatusResult {
-            target,
-            state: orna_protocol_v1::RequestState::Orphaned,
-            fingerprint: Some(fingerprint),
-            result: Some(_),
-        } if *target == [81; 16] && *fingerprint == target_fingerprint
-    ), "fresh status after handoff: {fresh:?}");
+    assert!(
+        matches!(
+            &fresh.message,
+            Message::RequestStatusResult {
+                target,
+                state: orna_protocol_v1::RequestState::Orphaned,
+                fingerprint: Some(fingerprint),
+                result: Some(_),
+            } if *target == [81; 16] && *fingerprint == target_fingerprint
+        ),
+        "fresh status after handoff: {fresh:?}"
+    );
     assert_eq!(application.calls, 0);
     drop(handed_off);
     remove_test_repository(&root);
@@ -6067,10 +5997,9 @@ fn durable_status_snapshots_survive_repeated_owner_handoffs() {
     for handoff in 0..HANDOFFS {
         let replacement_id = [76 + handoff; 16];
         let recovery_runtime = open_durable_state(&repository);
-        let replacement = block_on(
-            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
-        )
-        .unwrap();
+        let replacement =
+            block_on(recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id))
+                .unwrap();
         assert_eq!(replacement.owner_id, replacement_id);
         drop(recovery_runtime);
 
@@ -6163,9 +6092,7 @@ fn durable_terminal_failure_snapshots_survive_repeated_owner_handoffs() {
 }
 
 #[allow(clippy::too_many_lines)]
-fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
-    eval_outcome: UnitEvalOutcome,
-) {
+fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(eval_outcome: UnitEvalOutcome) {
     const FIXTURE: &str = include_str!("fixtures/live-runtime-boundary.orna");
     const HANDOFF_PAIRS: u8 = 8;
     const SHORT_RECONNECT_STORM: u8 = 4;
@@ -6200,15 +6127,11 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         eval_outcome,
         ..UnitApplication::default()
     };
-    let target_result = block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(target_request),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("the fixture Eval returns a terminal result");
+    let target_result =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(target_request), &mut application))
+            .unwrap()
+            .response
+            .expect("the fixture Eval returns a terminal result");
     let expected_status = match eval_outcome {
         UnitEvalOutcome::Unit => ResultStatus::Success,
         UnitEvalOutcome::SemanticFailure => ResultStatus::Failure,
@@ -6217,8 +6140,8 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
         &target_result.message,
         Message::Result { status, .. } if *status == expected_status
     ));
-    let expected_result = ResultBody::from_result(&target_result, Limits::default().protocol)
-        .unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
 
     let status_request = |request| {
         Envelope {
@@ -6288,12 +6211,11 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
     drop(host);
 
     for handoff_pair in 0..HANDOFF_PAIRS {
-        let (bridge_reconnect_storm, recovered_reconnect_storm) =
-            if handoff_pair % 2 == 0 {
-                (SHORT_RECONNECT_STORM, LONG_RECONNECT_STORM)
-            } else {
-                (LONG_RECONNECT_STORM, SHORT_RECONNECT_STORM)
-            };
+        let (bridge_reconnect_storm, recovered_reconnect_storm) = if handoff_pair % 2 == 0 {
+            (SHORT_RECONNECT_STORM, LONG_RECONNECT_STORM)
+        } else {
+            (LONG_RECONNECT_STORM, SHORT_RECONNECT_STORM)
+        };
         // Chain two owner takeovers before reopening the host. The completed
         // snapshot pair must survive the whole transfer pair without replay.
         let intermediate_owner_id = [76 + handoff_pair * 2; 16];
@@ -6314,7 +6236,8 @@ fn durable_terminal_snapshots_survive_repeated_owner_handoffs_with(
             RequestOwner::from(current_owner),
         );
         let mut bridge_issuer = Issuer(2 + handoff_pair * 2, None);
-        let bridge_credential = create_with_expiration(&mut bridge_host, &mut bridge_issuer, 10_000);
+        let bridge_credential =
+            create_with_expiration(&mut bridge_host, &mut bridge_issuer, 10_000);
         let bridge_attachment = [6 + handoff_pair * 2; 16];
         block_on(bridge_host.resume(ResumeRequest {
             id: session,
@@ -6605,10 +6528,9 @@ fn durable_unknown_status_snapshots_survive_reconnect_handoff_storm_and_target_r
     for handoff in 0..HANDOFFS {
         let replacement_id = [76 + handoff; 16];
         let recovery_runtime = open_durable_state(&repository);
-        let replacement = block_on(
-            recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id),
-        )
-        .unwrap();
+        let replacement =
+            block_on(recovery_runtime.recover_abandoned(current_owner.owner_id, replacement_id))
+                .unwrap();
         drop(recovery_runtime);
 
         let mut host = durable_host_after_takeover(
@@ -7031,11 +6953,8 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
     let recovery_runtime = open_durable_state(&repository);
     block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [78; 16])).unwrap();
     drop(recovery_runtime);
-    let mut recovered = durable_host_after_takeover(
-        open_durable_state(&repository),
-        [78; 16],
-        old_owner,
-    );
+    let mut recovered =
+        durable_host_after_takeover(open_durable_state(&repository), [78; 16], old_owner);
     let mut recovered_issuer = Issuer(2, None);
     let recovered_credential = create(&mut recovered, &mut recovered_issuer);
     block_on(recovered.resume(ResumeRequest {
@@ -7151,11 +7070,8 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
         panic!("a new status query observes the retained orphan outcome");
     };
     let advanced_status = Envelope::decode(payload, Limits::default().protocol).unwrap();
-    let expected_result = ResultBody::from_result(
-        &orphan_event_outcome,
-        Limits::default().protocol,
-    )
-    .unwrap();
+    let expected_result =
+        ResultBody::from_result(&orphan_event_outcome, Limits::default().protocol).unwrap();
     assert!(matches!(
         &advanced_status.message,
         Message::RequestStatusResult {
@@ -7175,12 +7091,9 @@ fn durable_unknown_status_retry_survives_orphan_resolution() {
     } else {
         panic!("the fixture proof must retain an Event request");
     }
-    let conflicting_fingerprint = canonical_request_fingerprint(
-        [1; 16],
-        &conflicting_event,
-        Limits::default().protocol,
-    )
-    .unwrap();
+    let conflicting_fingerprint =
+        canonical_request_fingerprint([1; 16], &conflicting_event, Limits::default().protocol)
+            .unwrap();
     let conflicting_status_request = Envelope {
         request: Some([41; 16]),
         watch: None,
@@ -7816,7 +7729,10 @@ fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_in
         wire(
             "POST",
             "/orna/session",
-            &format!(r#"{{"database":"{}","protocol":"orna.present.v1"}}"#, uuid(2)),
+            &format!(
+                r#"{{"database":"{}","protocol":"orna.present.v1"}}"#,
+                uuid(2)
+            ),
         ),
         0,
         &mut authority,
@@ -7827,7 +7743,10 @@ fn websocket_commit_without_completed_delivery_aborts_candidate_and_preserves_in
     let active = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &session_token), [5; 16], 1)
         .unwrap();
-    assert_eq!(commit_delivered(&mut transport, active, 1).unwrap().status, 101);
+    assert_eq!(
+        commit_delivered(&mut transport, active, 1).unwrap().status,
+        101
+    );
 
     let candidate = transport
         .begin_websocket_upgrade(&websocket_upgrade(1, &session_token), [6; 16], 2)
@@ -7891,9 +7810,7 @@ fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
         .begin_websocket_upgrade(&websocket_upgrade(1, &first_token), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        commit_delivered(&mut transport, active, 1)
-            .unwrap()
-            .status,
+        commit_delivered(&mut transport, active, 1).unwrap().status,
         101
     );
 
@@ -7938,9 +7855,7 @@ fn websocket_upgrade_reservation_blocks_only_its_session_until_commit() {
         200
     );
     assert_eq!(
-        commit_delivered(&mut transport, pending, 2)
-            .unwrap()
-            .status,
+        commit_delivered(&mut transport, pending, 2).unwrap().status,
         101
     );
     assert_eq!(transport.take_retired_attachments(), vec![[5; 16]]);
@@ -8078,9 +7993,7 @@ fn websocket_upgrade_abort_preserves_attachment_and_consumes_reservation() {
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        commit_delivered(&mut transport, active, 1)
-            .unwrap()
-            .status,
+        commit_delivered(&mut transport, active, 1).unwrap().status,
         101
     );
 
@@ -8170,9 +8083,7 @@ fn websocket_upgrade_expiry_queues_and_fences_candidate_without_replacing_attach
         .begin_websocket_upgrade(&websocket_upgrade(1, &credential), [5; 16], 1)
         .unwrap();
     assert_eq!(
-        commit_delivered(&mut transport, active, 1)
-            .unwrap()
-            .status,
+        commit_delivered(&mut transport, active, 1).unwrap().status,
         101
     );
 
@@ -8547,9 +8458,7 @@ fn child_free_delete_preserves_session_until_socket_cleanup_can_be_joined() {
     assert_eq!(deletion.calls, 0);
     assert!(transport.take_retired_attachments().is_empty());
     assert_eq!(
-        commit_delivered(&mut transport, pending, 3)
-            .unwrap()
-            .status,
+        commit_delivered(&mut transport, pending, 3).unwrap().status,
         101
     );
 }
@@ -8823,7 +8732,8 @@ fn expired_session_answers_410_with_wire_session_expired() {
         "/orna/session/01010101-0101-0101-0101-010101010101/resume",
         &format!(r#"{{"resume_token":"{credential}","protocol":"orna.present.v1"}}"#),
     );
-    let resumed = block_on(transport.handle(resume, 100, &mut authority, &mut issuer, &mut deletion));
+    let resumed =
+        block_on(transport.handle(resume, 100, &mut authority, &mut issuer, &mut deletion));
     assert_eq!(resumed.status, 410);
     assert_eq!(
         resumed.body,
@@ -8906,7 +8816,9 @@ fn application_work_bound_refuses_admission_with_correlated_wire_limit() {
     assert_eq!(rejected.request, Some([30; 16]));
     assert!(matches!(rejected.message, Message::Diagnostic { .. }));
     assert!(
-        payload.windows(b"wire.limit".len()).any(|window| window == b"wire.limit"),
+        payload
+            .windows(b"wire.limit".len())
+            .any(|window| window == b"wire.limit"),
         "the diagnostic must carry the portable wire.limit code"
     );
     drop(held);
@@ -9265,12 +9177,7 @@ fn dispatch_computes_fingerprints_and_replays_terminal_results() {
 }
 
 impl LiveApplication for DeferredWatchEventApplication {
-    fn eval(
-        &mut self,
-        _: [u8; 16],
-        _: [u8; 16],
-        _: &Message,
-    ) -> Result<Envelope, Error> {
+    fn eval(&mut self, _: [u8; 16], _: [u8; 16], _: &Message) -> Result<Envelope, Error> {
         Err(Error::UnsupportedOperation)
     }
 
@@ -9359,7 +9266,10 @@ fn subscribe_request_identity_replays_only_the_original_watch() {
     .unwrap();
     assert_eq!(application.subscriptions, 2);
     assert!(matches!(
-        resubscription.response.as_ref().map(|response| &response.message),
+        resubscription
+            .response
+            .as_ref()
+            .map(|response| &response.message),
         Some(Message::Snapshot { revision: 0, .. })
     ));
     assert_ne!(
@@ -9540,18 +9450,12 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut committed = TransactionalApplication {
         calls: 0,
         faults: Arc::new(NoFault),
-        mutations: vec![
-            TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap()],
     };
     let request = eval([1; 16], [23; 16], "insert");
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(request.clone()),
-        &mut committed,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(request.clone()), &mut committed))
+            .unwrap();
     assert!(matches!(
         first.response.as_ref().unwrap().message,
         Message::Result {
@@ -9574,13 +9478,8 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     .unwrap()
     .unwrap();
     assert_eq!(status.state, RequestState::Completed);
-    let replay = block_on(host.dispatch_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request),
-        &mut committed,
-    ))
-    .unwrap();
+    let replay =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request), &mut committed)).unwrap();
     assert_eq!(replay, first);
     assert_eq!(committed.calls, 1);
 
@@ -9588,9 +9487,7 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut failed = TransactionalApplication {
         calls: 0,
         faults: Arc::new(FailAt(FaultPoint::AfterTableWrite)),
-        mutations: vec![
-            TableMutation::new([2; 16], "books", vec![2], Some(vec![3])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([2; 16], "books", vec![2], Some(vec![3])).unwrap()],
     };
     assert_eq!(
         block_on(host.dispatch_frame(
@@ -9618,9 +9515,7 @@ fn durable_transactional_eval_commits_or_rolls_back_and_replays_terminally() {
     let mut replay_application = TransactionalApplication {
         calls: 0,
         faults: Arc::new(NoFault),
-        mutations: vec![
-            TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap(),
-        ],
+        mutations: vec![TableMutation::new([9; 16], "books", vec![9], Some(vec![9])).unwrap()],
     };
 
     let failed_replay = block_on(host.dispatch_frame(
@@ -9696,9 +9591,8 @@ fn durable_eval_snapshot_pins_resolve_before_effects() {
 
     // The accepted eval must commit a real mutation; the fixture's empty batch
     // is rejected by the runtime before it can prove acceptance.
-    application.mutations = vec![
-        TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap(),
-    ];
+    application.mutations =
+        vec![TableMutation::new([1; 16], "books", vec![1], Some(vec![2])).unwrap()];
     let accepted = block_on(host.dispatch_frame(
         [5; 16],
         3,
@@ -9751,20 +9645,12 @@ fn durable_transactional_event_commits_through_the_application_ticket() {
             TableMutation::new([6; 16], "event_books", vec![1], Some(vec![2])).unwrap(),
         ],
     };
-    block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(subscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(subscribe()), &mut application))
+        .unwrap();
     let request = event([1; 16], [23; 16], [11; 16]);
-    let preparation = block_on(host.prepare_application_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request.clone()),
-    ))
-    .unwrap();
+    let preparation =
+        block_on(host.prepare_application_frame([5; 16], 3, Frame::Binary(request.clone())))
+            .unwrap();
     let ticket = match preparation {
         orna_live_v1::ApplicationPreparation::Work(ticket) => ticket,
         orna_live_v1::ApplicationPreparation::Completed(_) => {
@@ -9811,21 +9697,12 @@ fn durable_transactional_event_commits_through_synchronous_dispatch() {
             TableMutation::new([7; 16], "event_books_sync", vec![1], Some(vec![2])).unwrap(),
         ],
     };
-    block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(subscribe()),
-        &mut application,
-    ))
-    .unwrap();
+    block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(subscribe()), &mut application))
+        .unwrap();
     let request = event([1; 16], [24; 16], [11; 16]);
-    let outcome = block_on(host.dispatch_frame(
-        [5; 16],
-        3,
-        Frame::Binary(request),
-        &mut application,
-    ))
-    .unwrap();
+    let outcome =
+        block_on(host.dispatch_frame([5; 16], 3, Frame::Binary(request), &mut application))
+            .unwrap();
     assert!(matches!(
         outcome.response.as_ref().map(|response| &response.message),
         Some(Message::Result {
@@ -10097,14 +9974,7 @@ fn public_action_registry_is_consumable_without_server_dependency() {
      -> Result<LiveEvalResponse, Error> {
         let supervisor = LiveApplicationWorkSupervisor::new();
         let mut work = supervisor.admit(binding.session, request)?;
-        block_on(registry.activate(
-            binding,
-            request,
-            [8; 32],
-            &value,
-            &context,
-            &mut work,
-        ))
+        block_on(registry.activate(binding, request, [8; 32], &value, &context, &mut work))
     };
 
     for wrong in [
@@ -10669,10 +10539,8 @@ fn durable_request_status_keeps_duplicate_targets_session_scoped_after_recovery(
         };
         block_on(runtime.reserve_request(identity, fingerprint)).unwrap();
         block_on(runtime.start_request(identity, fingerprint)).unwrap();
-        let terminal = TerminalOutcome::new(
-            response.encode(Limits::default().protocol).unwrap(),
-        )
-        .unwrap();
+        let terminal =
+            TerminalOutcome::new(response.encode(Limits::default().protocol).unwrap()).unwrap();
         block_on(runtime.complete_request(identity, fingerprint, terminal)).unwrap();
     }
     let old_owner = RequestOwner::from(block_on(runtime.acquire_lease([91; 16])).unwrap());
@@ -10681,11 +10549,8 @@ fn durable_request_status_keeps_duplicate_targets_session_scoped_after_recovery(
     let recovery_runtime = open_durable_state(&repository);
     block_on(recovery_runtime.recover_abandoned(old_owner.owner_id, [92; 16])).unwrap();
     drop(recovery_runtime);
-    let mut host = durable_host_after_takeover(
-        open_durable_state(&repository),
-        [92; 16],
-        old_owner,
-    );
+    let mut host =
+        durable_host_after_takeover(open_durable_state(&repository), [92; 16], old_owner);
 
     let mut first_issuer = Issuer(1, None);
     let first_credential = create(&mut host, &mut first_issuer);
@@ -10803,15 +10668,11 @@ fn durable_request_status_keeps_duplicate_targets_session_scoped_after_recovery(
         }
         .encode(Limits::default().protocol)
         .unwrap();
-        let mismatch = block_on(host.dispatch_frame(
-            attachment,
-            3,
-            Frame::Binary(mismatch),
-            &mut application,
-        ))
-        .unwrap()
-        .response
-        .expect("a foreign fingerprint returns a mismatch diagnostic");
+        let mismatch =
+            block_on(host.dispatch_frame(attachment, 3, Frame::Binary(mismatch), &mut application))
+                .unwrap()
+                .response
+                .expect("a foreign fingerprint returns a mismatch diagnostic");
         assert_eq!(mismatch.request, Some([45; 16]));
         assert!(matches!(mismatch.message, Message::Diagnostic { .. }));
     }
@@ -10998,13 +10859,9 @@ fn durable_applied_mismatch_is_retained_and_replayed_after_restart_without_rerun
 
     let request = eval([1; 16], [26; 16], "1");
     let mut application = MismatchedApplication { calls: 0 };
-    let first = block_on(host.dispatch_frame(
-        [5; 16],
-        2,
-        Frame::Binary(request.clone()),
-        &mut application,
-    ))
-    .unwrap();
+    let first =
+        block_on(host.dispatch_frame([5; 16], 2, Frame::Binary(request.clone()), &mut application))
+            .unwrap();
     // The application has already applied its effects, so the uncorrelated
     // answer must be retained without a value rather than reported as a
     // pre-execution rejection (ORNA-PROTO-004; 30-protocol.md L121).
@@ -11263,19 +11120,14 @@ fn durable_live_host_does_not_recover_a_request_owned_by_another_runtime() {
     assert!(first.response.is_none());
     assert_eq!(application.calls, 0);
 
-    let status = block_on(
-        open_durable_state(&repository).request_status_for_identity(identity),
-    )
-    .unwrap()
-    .unwrap();
+    let status = block_on(open_durable_state(&repository).request_status_for_identity(identity))
+        .unwrap()
+        .unwrap();
     assert_eq!(status.state, RequestState::Running);
     assert_eq!(status.fingerprint, fingerprint);
     assert!(status.terminal_outcome.is_none());
     assert_eq!(
-        block_on(
-            open_durable_state(&repository).request_owner(identity, fingerprint),
-        )
-        .unwrap(),
+        block_on(open_durable_state(&repository).request_owner(identity, fingerprint),).unwrap(),
         Some(RequestOwner::from(active_owner))
     );
 
@@ -11348,9 +11200,13 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
     }))
     .unwrap();
     let mut application = UnitApplication::default();
-    let first =
-        block_on(host.dispatch_frame([11; 16], 2, Frame::Binary(request.clone()), &mut application))
-            .unwrap();
+    let first = block_on(host.dispatch_frame(
+        [11; 16],
+        2,
+        Frame::Binary(request.clone()),
+        &mut application,
+    ))
+    .unwrap();
     assert!(matches!(
         first.response.as_ref().unwrap().message,
         Message::Result {
@@ -11367,10 +11223,9 @@ fn durable_live_host_replays_proven_rollback_without_reexecution() {
     assert_eq!(second, first);
     assert_eq!(application.calls, 0);
     assert_eq!(
-        block_on(open_durable_state(&repository).request_recovery_disposition(
-            identity,
-            fingerprint,
-        ))
+        block_on(
+            open_durable_state(&repository).request_recovery_disposition(identity, fingerprint,)
+        )
         .unwrap(),
         Some(orna_runtime_v1::RecoveryDisposition::RollbackProven)
     );
@@ -12411,15 +12266,18 @@ fn delete_cancels_durable_session_work_before_returning_success() {
             && *returned == second_fingerprint
             && result == &expected_result
     ));
-    assert!(matches!(
-        block_on(host.dispatch_frame(
-            [6; 16],
-            2,
-            Frame::Binary(first_status_request),
-            &mut application,
-        )),
-        Err(Error::Closed)
-    ), "a deleted session cannot continue its status stream");
+    assert!(
+        matches!(
+            block_on(host.dispatch_frame(
+                [6; 16],
+                2,
+                Frame::Binary(first_status_request),
+                &mut application,
+            )),
+            Err(Error::Closed)
+        ),
+        "a deleted session cannot continue its status stream"
+    );
 
     assert_eq!(
         block_on(host.http_delete_with_children(
@@ -12797,8 +12655,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let closed_target_id_query_fingerprint =
-        request_fingerprint(&closed_target_id_query, [1; 16]);
+    let closed_target_id_query_fingerprint = request_fingerprint(&closed_target_id_query, [1; 16]);
     let closed_target_id_status = block_on(host.dispatch_frame(
         [6; 16],
         6,
@@ -12971,11 +12828,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        third_identity,
-        third_target_fingerprint,
-    ))
-    .unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(third_identity, third_target_fingerprint))
+            .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the new session");
     block_on(runtime.start_request_with_owner_and_admission(
         third_identity,
@@ -13434,11 +13289,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        sixth_identity,
-        sixth_target_fingerprint,
-    ))
-    .unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(sixth_identity, sixth_target_fingerprint))
+            .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the sixth session");
     block_on(runtime.start_request_with_owner_and_admission(
         sixth_identity,
@@ -13649,10 +13502,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        seventh_identity,
-        seventh_target_fingerprint,
-    ))
+    let (_, capability) = block_on(
+        runtime.reserve_request_with_admission(seventh_identity, seventh_target_fingerprint),
+    )
     .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the seventh session");
     block_on(runtime.start_request_with_owner_and_admission(
@@ -13731,7 +13583,10 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
     for (request_id, expected_fingerprint) in [
         ([91; 16], seventh_query_fingerprint),
-        ([98; 16], request_fingerprint(&seventh_fresh_request, [7; 16])),
+        (
+            [98; 16],
+            request_fingerprint(&seventh_fresh_request, [7; 16]),
+        ),
     ] {
         assert!(matches!(
             block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
@@ -13847,10 +13702,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        eighth_identity,
-        eighth_target_fingerprint,
-    ))
+    let (_, capability) = block_on(
+        runtime.reserve_request_with_admission(eighth_identity, eighth_target_fingerprint),
+    )
     .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the eighth session");
     block_on(runtime.start_request_with_owner_and_admission(
@@ -13929,7 +13783,10 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
     for (request_id, expected_fingerprint) in [
         ([98; 16], eighth_query_fingerprint),
-        ([99; 16], request_fingerprint(&eighth_fresh_request, [8; 16])),
+        (
+            [99; 16],
+            request_fingerprint(&eighth_fresh_request, [8; 16]),
+        ),
     ] {
         assert!(matches!(
             block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
@@ -13992,11 +13849,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        ninth_identity,
-        ninth_target_fingerprint,
-    ))
-    .unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(ninth_identity, ninth_target_fingerprint))
+            .unwrap();
     let capability = capability.expect("fresh owner-bound capability after query-scope closure");
     block_on(runtime.start_request_with_owner_and_admission(
         ninth_identity,
@@ -14031,8 +13886,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     // Reusing that byte ID as a different operation is valid in the new
     // session, but a second operation in the same session still mismatches.
     let ninth_other_target_request = eval_with_context([9; 16], [92; 16], [2; 16], None);
-    let ninth_other_target_fingerprint =
-        request_fingerprint(&ninth_other_target_request, [9; 16]);
+    let ninth_other_target_fingerprint = request_fingerprint(&ninth_other_target_request, [9; 16]);
     let ninth_same_scope_query = Envelope {
         request: Some([91; 16]),
         watch: None,
@@ -14054,10 +13908,7 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     .response
     .expect("same-scope cross-kind reuse returns request mismatch");
     assert_eq!(ninth_mismatch.request, Some([91; 16]));
-    assert!(matches!(
-        ninth_mismatch.message,
-        Message::Diagnostic { .. }
-    ));
+    assert!(matches!(ninth_mismatch.message, Message::Diagnostic { .. }));
     let ninth_mismatch_retry = block_on(host.dispatch_frame(
         [14; 16],
         3,
@@ -14298,11 +14149,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        tenth_identity,
-        tenth_target_fingerprint,
-    ))
-    .unwrap();
+    let (_, capability) =
+        block_on(runtime.reserve_request_with_admission(tenth_identity, tenth_target_fingerprint))
+            .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the successor scope");
     block_on(runtime.start_request_with_owner_and_admission(
         tenth_identity,
@@ -14430,7 +14279,10 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
     for (request_id, expected_fingerprint) in [
         ([91; 16], tenth_query_fingerprint),
-        ([97; 16], request_fingerprint(&tenth_fresh_request, [10; 16])),
+        (
+            [97; 16],
+            request_fingerprint(&tenth_fresh_request, [10; 16]),
+        ),
     ] {
         assert!(matches!(
             block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
@@ -14533,10 +14385,9 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     let runtime = host
         .owner_runtime_for_test()
         .expect("durable host holds the owner-bound runtime");
-    let (_, capability) = block_on(runtime.reserve_request_with_admission(
-        eleventh_identity,
-        eleventh_target_fingerprint,
-    ))
+    let (_, capability) = block_on(
+        runtime.reserve_request_with_admission(eleventh_identity, eleventh_target_fingerprint),
+    )
     .unwrap();
     let capability = capability.expect("fresh owner-bound capability in the eleventh scope");
     block_on(runtime.start_request_with_owner_and_admission(
@@ -14615,7 +14466,10 @@ fn sibling_status_identity_reuse_replays_snapshot_after_neighbor_closure() {
     ));
     for (request_id, expected_fingerprint) in [
         ([91; 16], eleventh_query_fingerprint),
-        ([97; 16], request_fingerprint(&eleventh_fresh_request, [11; 16])),
+        (
+            [97; 16],
+            request_fingerprint(&eleventh_fresh_request, [11; 16]),
+        ),
     ] {
         assert!(matches!(
             block_on(open_durable_state(&repository).request_status_for_identity(RequestIdentity {
@@ -14742,15 +14596,11 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     // The reference requires this ID/input collision to fail, but is silent
     // on replay after the existing operation becomes terminal. Preserve the
     // original mismatch diagnostic and keep the Eval's completed row intact.
-    let terminal_retry = block_on(host.dispatch_frame(
-        [6; 16],
-        4,
-        Frame::Binary(mismatch_query),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("completion of the colliding Eval does not retarget the replay");
+    let terminal_retry =
+        block_on(host.dispatch_frame([6; 16], 4, Frame::Binary(mismatch_query), &mut application))
+            .unwrap()
+            .response
+            .expect("completion of the colliding Eval does not retarget the replay");
     assert_eq!(terminal_retry, first_mismatch);
 
     let conflicting_eval = eval_with_context([1; 16], [91; 16], [3; 16], None);
@@ -14823,8 +14673,8 @@ fn mismatch_query_replay_survives_colliding_eval_completion() {
     .unwrap()
     .response
     .expect("a fresh query still observes the Eval's terminal outcome");
-    let expected_result = ResultBody::from_result(&target_result, Limits::default().protocol)
-        .unwrap();
+    let expected_result =
+        ResultBody::from_result(&target_result, Limits::default().protocol).unwrap();
     assert!(matches!(
         &terminal_status.message,
         Message::RequestStatusResult {
@@ -14886,12 +14736,14 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     );
     assert_eq!(application.calls, 1);
 
-    let terminal_before = block_on(
-        open_durable_state(&repository).request_status_for_identity(identity),
-    )
-    .unwrap()
-    .expect("the rejected Eval has a retained terminal record");
-    assert_eq!(terminal_before.state, orna_runtime_v1::RequestState::Completed);
+    let terminal_before =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .expect("the rejected Eval has a retained terminal record");
+    assert_eq!(
+        terminal_before.state,
+        orna_runtime_v1::RequestState::Completed
+    );
     assert_eq!(terminal_before.fingerprint, fingerprint);
     let terminal_bytes = terminal_before
         .terminal_outcome
@@ -14925,15 +14777,11 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         &first_query_mismatch.message,
         Message::Diagnostic { .. }
     ));
-    let query_mismatch_retry = block_on(host.dispatch_frame(
-        [6; 16],
-        4,
-        Frame::Binary(colliding_query),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("the same status-query collision replays its mismatch");
+    let query_mismatch_retry =
+        block_on(host.dispatch_frame([6; 16], 4, Frame::Binary(colliding_query), &mut application))
+            .unwrap()
+            .response
+            .expect("the same status-query collision replays its mismatch");
     assert_eq!(query_mismatch_retry, first_query_mismatch);
 
     let different_eval = eval_with_context([1; 16], [91; 16], [3; 16], None);
@@ -14988,19 +14836,17 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         terminal_bytes
     );
     assert_eq!(application.calls, 1);
-    let terminal_after = block_on(
-        open_durable_state(&repository).request_status_for_identity(identity),
-    )
-    .unwrap()
-    .unwrap();
-    assert_eq!(terminal_after.state, orna_runtime_v1::RequestState::Completed);
+    let terminal_after =
+        block_on(open_durable_state(&repository).request_status_for_identity(identity))
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        terminal_after.state,
+        orna_runtime_v1::RequestState::Completed
+    );
     assert_eq!(terminal_after.fingerprint, fingerprint);
     assert_eq!(
-        terminal_after
-            .terminal_outcome
-            .as_ref()
-            .unwrap()
-            .as_bytes(),
+        terminal_after.terminal_outcome.as_ref().unwrap().as_bytes(),
         terminal_bytes
     );
 
@@ -15018,8 +14864,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     }
     .encode(Limits::default().protocol)
     .unwrap();
-    let failure_status_query_fingerprint =
-        request_fingerprint(&failure_status_query, [1; 16]);
+    let failure_status_query_fingerprint = request_fingerprint(&failure_status_query, [1; 16]);
     let failure_status = block_on(host.dispatch_frame(
         [6; 16],
         8,
@@ -15029,8 +14874,8 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     .unwrap()
     .response
     .expect("a fresh status query observes the retained failure after mismatches");
-    let expected_failure = ResultBody::from_result(&exact_retry, Limits::default().protocol)
-        .unwrap();
+    let expected_failure =
+        ResultBody::from_result(&exact_retry, Limits::default().protocol).unwrap();
     assert!(matches!(
         &failure_status.message,
         Message::RequestStatusResult {
@@ -15067,12 +14912,9 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         Err(Error::RequestMismatch)
     );
     assert_eq!(
-        block_on(host.dispatch_frame(
-            [6; 16],
-            11,
-            Frame::Binary(different_eval),
-            &mut application,
-        )),
+        block_on(
+            host.dispatch_frame([6; 16], 11, Frame::Binary(different_eval), &mut application,)
+        ),
         Err(Error::RequestMismatch)
     );
 
@@ -15089,15 +14931,11 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
     .expect("the status query still replays after failed Eval mismatches");
     assert_eq!(failure_status_after_eval_mismatches, failure_status);
 
-    let eval_replay_after_failure_query = block_on(host.dispatch_frame(
-        [6; 16],
-        13,
-        Frame::Binary(original_eval),
-        &mut application,
-    ))
-    .unwrap()
-    .response
-    .expect("the failed Eval still replays after its status snapshot");
+    let eval_replay_after_failure_query =
+        block_on(host.dispatch_frame([6; 16], 13, Frame::Binary(original_eval), &mut application))
+            .unwrap()
+            .response
+            .expect("the failed Eval still replays after its status snapshot");
     assert_eq!(eval_replay_after_failure_query, exact_retry);
     assert_eq!(
         eval_replay_after_failure_query
@@ -15977,8 +15815,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         seventh_failure_status
     );
 
-    let eval_reusing_seventh_failure_query =
-        eval_with_context([1; 16], [100; 16], [8; 16], None);
+    let eval_reusing_seventh_failure_query = eval_with_context([1; 16], [100; 16], [8; 16], None);
     assert!(matches!(
         Envelope::decode(&eval_reusing_seventh_failure_query, Limits::default().protocol)
             .unwrap()
@@ -16090,8 +15927,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         retargeted_eighth_response
     );
 
-    let eval_reusing_eighth_failure_query =
-        eval_with_context([1; 16], [101; 16], [9; 16], None);
+    let eval_reusing_eighth_failure_query = eval_with_context([1; 16], [101; 16], [9; 16], None);
     assert!(matches!(
         Envelope::decode(&eval_reusing_eighth_failure_query, Limits::default().protocol)
             .unwrap()
@@ -16270,8 +16106,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         tenth_failure_status
     );
 
-    let eval_reusing_ninth_failure_query =
-        eval_with_context([1; 16], [102; 16], [10; 16], None);
+    let eval_reusing_ninth_failure_query = eval_with_context([1; 16], [102; 16], [10; 16], None);
     assert!(matches!(
         Envelope::decode(&eval_reusing_ninth_failure_query, Limits::default().protocol)
             .unwrap()
@@ -16488,8 +16323,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         second_retargeted_eleventh_response
     );
 
-    let eval_reusing_eleventh_failure_query =
-        eval_with_context([1; 16], [104; 16], [12; 16], None);
+    let eval_reusing_eleventh_failure_query = eval_with_context([1; 16], [104; 16], [12; 16], None);
     assert!(matches!(
         Envelope::decode(&eval_reusing_eleventh_failure_query, Limits::default().protocol)
             .unwrap()
@@ -16702,8 +16536,7 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         Message::Diagnostic { .. }
     ));
 
-    let eval_reusing_thirteenth_query =
-        eval_with_context([1; 16], [106; 16], [13; 16], None);
+    let eval_reusing_thirteenth_query = eval_with_context([1; 16], [106; 16], [13; 16], None);
     assert!(matches!(
         Envelope::decode(&eval_reusing_thirteenth_query, Limits::default().protocol)
             .unwrap()
@@ -17064,15 +16897,10 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                99,
-                Frame::Binary(frame),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], 99, Frame::Binary(frame), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -17285,15 +17113,10 @@ fn durable_terminal_failure_eval_replays_after_mismatch_retries() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                99,
-                Frame::Binary(frame),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], 99, Frame::Binary(frame), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -17385,13 +17208,15 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         Err(Error::ApplicationRejected)
     );
     assert_eq!(application.calls, 1);
-    let retained_failure = block_on(
-        open_durable_state(&repository).request_status_for_identity(terminal_identity),
-    )
-    .unwrap()
-    .expect("the failed Eval retains its terminal identity");
+    let retained_failure =
+        block_on(open_durable_state(&repository).request_status_for_identity(terminal_identity))
+            .unwrap()
+            .expect("the failed Eval retains its terminal identity");
     assert_eq!(retained_failure.fingerprint, terminal_fingerprint);
-    assert_eq!(retained_failure.state, orna_runtime_v1::RequestState::Completed);
+    assert_eq!(
+        retained_failure.state,
+        orna_runtime_v1::RequestState::Completed
+    );
     let retained_failure_bytes = retained_failure
         .terminal_outcome
         .as_ref()
@@ -17643,15 +17468,10 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                now,
-                Frame::Binary(frame),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], now, Frame::Binary(frame), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -17740,15 +17560,10 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                now,
-                Frame::Binary(frame),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], now, Frame::Binary(frame), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -17874,15 +17689,10 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                now,
-                Frame::Binary(query),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], now, Frame::Binary(query), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -17913,15 +17723,10 @@ fn durable_terminal_eval_replays_across_retargeted_status_mismatch() {
         ),
     ] {
         assert_eq!(
-            block_on(host.dispatch_frame(
-                [6; 16],
-                now,
-                Frame::Binary(query),
-                &mut application,
-            ))
-            .unwrap()
-            .response
-            .expect(label),
+            block_on(host.dispatch_frame([6; 16], now, Frame::Binary(query), &mut application,))
+                .unwrap()
+                .response
+                .expect(label),
             expected
         );
     }
@@ -18881,7 +18686,10 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
         Envelope {
             request: Some(request_id),
             watch: None,
-            message: Message::RequestStatus { target, fingerprint },
+            message: Message::RequestStatus {
+                target,
+                fingerprint,
+            },
             extensions: BTreeMap::new(),
         }
         .encode(Limits::default().protocol)
@@ -18897,24 +18705,20 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
     let intermediate_second_status_query = status_query([99; 16], [92; 16], other_fingerprint);
     let intermediate_second_status_fingerprint =
         request_fingerprint(&intermediate_second_status_query, [1; 16]);
-    let intermediate_first_status_query =
-        status_query([100; 16], [91; 16], terminal_fingerprint);
+    let intermediate_first_status_query = status_query([100; 16], [91; 16], terminal_fingerprint);
     let intermediate_first_status_fingerprint =
         request_fingerprint(&intermediate_first_status_query, [1; 16]);
-    let mixed_retry_fresh_status_query =
-        status_query([101; 16], [92; 16], other_fingerprint);
+    let mixed_retry_fresh_status_query = status_query([101; 16], [92; 16], other_fingerprint);
     let mixed_retry_fresh_status_fingerprint =
         request_fingerprint(&mixed_retry_fresh_status_query, [1; 16]);
-    let fresh_mixed_terminal_status_query =
-        status_query([102; 16], [91; 16], terminal_fingerprint);
+    let fresh_mixed_terminal_status_query = status_query([102; 16], [91; 16], terminal_fingerprint);
     let fresh_mixed_terminal_status_fingerprint =
         request_fingerprint(&fresh_mixed_terminal_status_query, [1; 16]);
     let fresh_terminal_after_mixed_retries_query =
         status_query([103; 16], [92; 16], other_fingerprint);
     let fresh_terminal_after_mixed_retries_fingerprint =
         request_fingerprint(&fresh_terminal_after_mixed_retries_query, [1; 16]);
-    let next_fresh_terminal_first_query =
-        status_query([104; 16], [91; 16], terminal_fingerprint);
+    let next_fresh_terminal_first_query = status_query([104; 16], [91; 16], terminal_fingerprint);
     let next_fresh_terminal_first_fingerprint =
         request_fingerprint(&next_fresh_terminal_first_query, [1; 16]);
     let replayed_eval_fresh_terminal_query =
@@ -18925,78 +18729,61 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
         status_query([106; 16], [91; 16], terminal_fingerprint);
     let post_mismatch_fresh_terminal_fingerprint =
         request_fingerprint(&post_mismatch_fresh_terminal_query, [1; 16]);
-    let final_sequential_terminal_query =
-        status_query([107; 16], [91; 16], terminal_fingerprint);
+    let final_sequential_terminal_query = status_query([107; 16], [91; 16], terminal_fingerprint);
     let final_sequential_terminal_fingerprint =
         request_fingerprint(&final_sequential_terminal_query, [1; 16]);
     let terminal_after_replay_query = status_query([108; 16], [91; 16], terminal_fingerprint);
     let terminal_after_replay_fingerprint =
         request_fingerprint(&terminal_after_replay_query, [1; 16]);
-    let after_retry_sweep_terminal_query =
-        status_query([109; 16], [91; 16], terminal_fingerprint);
+    let after_retry_sweep_terminal_query = status_query([109; 16], [91; 16], terminal_fingerprint);
     let after_retry_sweep_terminal_fingerprint =
         request_fingerprint(&after_retry_sweep_terminal_query, [1; 16]);
-    let after_retry_sweep_followup_query =
-        status_query([110; 16], [91; 16], terminal_fingerprint);
+    let after_retry_sweep_followup_query = status_query([110; 16], [91; 16], terminal_fingerprint);
     let after_retry_sweep_followup_fingerprint =
         request_fingerprint(&after_retry_sweep_followup_query, [1; 16]);
     let final_retry_sweep_query = status_query([111; 16], [91; 16], terminal_fingerprint);
-    let final_retry_sweep_fingerprint =
-        request_fingerprint(&final_retry_sweep_query, [1; 16]);
-    let after_final_retry_sweep_query =
-        status_query([112; 16], [91; 16], terminal_fingerprint);
+    let final_retry_sweep_fingerprint = request_fingerprint(&final_retry_sweep_query, [1; 16]);
+    let after_final_retry_sweep_query = status_query([112; 16], [91; 16], terminal_fingerprint);
     let after_final_retry_sweep_fingerprint =
         request_fingerprint(&after_final_retry_sweep_query, [1; 16]);
-    let final_followup_snapshot_query =
-        status_query([113; 16], [91; 16], terminal_fingerprint);
+    let final_followup_snapshot_query = status_query([113; 16], [91; 16], terminal_fingerprint);
     let final_followup_snapshot_fingerprint =
         request_fingerprint(&final_followup_snapshot_query, [1; 16]);
-    let through_retry_edge_snapshot_query =
-        status_query([114; 16], [91; 16], terminal_fingerprint);
+    let through_retry_edge_snapshot_query = status_query([114; 16], [91; 16], terminal_fingerprint);
     let through_retry_edge_snapshot_fingerprint =
         request_fingerprint(&through_retry_edge_snapshot_query, [1; 16]);
-    let second_retry_edge_snapshot_query =
-        status_query([115; 16], [91; 16], terminal_fingerprint);
+    let second_retry_edge_snapshot_query = status_query([115; 16], [91; 16], terminal_fingerprint);
     let second_retry_edge_snapshot_fingerprint =
         request_fingerprint(&second_retry_edge_snapshot_query, [1; 16]);
-    let third_retry_edge_snapshot_query =
-        status_query([116; 16], [91; 16], terminal_fingerprint);
+    let third_retry_edge_snapshot_query = status_query([116; 16], [91; 16], terminal_fingerprint);
     let third_retry_edge_snapshot_fingerprint =
         request_fingerprint(&third_retry_edge_snapshot_query, [1; 16]);
-    let fourth_retry_edge_snapshot_query =
-        status_query([117; 16], [91; 16], terminal_fingerprint);
+    let fourth_retry_edge_snapshot_query = status_query([117; 16], [91; 16], terminal_fingerprint);
     let fourth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&fourth_retry_edge_snapshot_query, [1; 16]);
-    let fifth_retry_edge_snapshot_query =
-        status_query([118; 16], [91; 16], terminal_fingerprint);
+    let fifth_retry_edge_snapshot_query = status_query([118; 16], [91; 16], terminal_fingerprint);
     let fifth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&fifth_retry_edge_snapshot_query, [1; 16]);
-    let sixth_retry_edge_snapshot_query =
-        status_query([119; 16], [91; 16], terminal_fingerprint);
+    let sixth_retry_edge_snapshot_query = status_query([119; 16], [91; 16], terminal_fingerprint);
     let sixth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&sixth_retry_edge_snapshot_query, [1; 16]);
-    let seventh_retry_edge_snapshot_query =
-        status_query([120; 16], [91; 16], terminal_fingerprint);
+    let seventh_retry_edge_snapshot_query = status_query([120; 16], [91; 16], terminal_fingerprint);
     let seventh_retry_edge_snapshot_fingerprint =
         request_fingerprint(&seventh_retry_edge_snapshot_query, [1; 16]);
-    let eighth_retry_edge_snapshot_query =
-        status_query([121; 16], [91; 16], terminal_fingerprint);
+    let eighth_retry_edge_snapshot_query = status_query([121; 16], [91; 16], terminal_fingerprint);
     let eighth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&eighth_retry_edge_snapshot_query, [1; 16]);
-    let ninth_retry_edge_snapshot_query =
-        status_query([122; 16], [91; 16], terminal_fingerprint);
+    let ninth_retry_edge_snapshot_query = status_query([122; 16], [91; 16], terminal_fingerprint);
     let ninth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&ninth_retry_edge_snapshot_query, [1; 16]);
-    let tenth_retry_edge_snapshot_query =
-        status_query([123; 16], [91; 16], terminal_fingerprint);
+    let tenth_retry_edge_snapshot_query = status_query([123; 16], [91; 16], terminal_fingerprint);
     let tenth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&tenth_retry_edge_snapshot_query, [1; 16]);
     let eleventh_retry_edge_snapshot_query =
         status_query([124; 16], [91; 16], terminal_fingerprint);
     let eleventh_retry_edge_snapshot_fingerprint =
         request_fingerprint(&eleventh_retry_edge_snapshot_query, [1; 16]);
-    let twelfth_retry_edge_snapshot_query =
-        status_query([125; 16], [91; 16], terminal_fingerprint);
+    let twelfth_retry_edge_snapshot_query = status_query([125; 16], [91; 16], terminal_fingerprint);
     let twelfth_retry_edge_snapshot_fingerprint =
         request_fingerprint(&twelfth_retry_edge_snapshot_query, [1; 16]);
     let thirteenth_retry_edge_snapshot_query =
@@ -19185,8 +18972,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
     ));
     // The reference leaves retarget diagnostics with mixed snapshots open;
     // each identity must keep its accepted response through the mismatch.
-    let intermediate_first_retarget_query =
-        status_query([100; 16], [92; 16], other_fingerprint);
+    let intermediate_first_retarget_query = status_query([100; 16], [92; 16], other_fingerprint);
     let intermediate_first_retarget = block_on(host.dispatch_frame(
         [6; 16],
         11,
@@ -19220,8 +19006,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
             result: None,
         } if *target == [92; 16]
     ));
-    let intermediate_second_retarget_query =
-        status_query([99; 16], [91; 16], terminal_fingerprint);
+    let intermediate_second_retarget_query = status_query([99; 16], [91; 16], terminal_fingerprint);
     let intermediate_second_retarget = block_on(host.dispatch_frame(
         [6; 16],
         11,
@@ -19697,8 +19482,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
     );
     // Preserve both sequential terminal identities if the newest identity is
     // retried with a different fingerprint for the same completed target.
-    let sequential_changed_first_eval =
-        eval_with_context([1; 16], [91; 16], [6; 16], None);
+    let sequential_changed_first_eval = eval_with_context([1; 16], [91; 16], [6; 16], None);
     let sequential_terminal_mismatch_query = status_query(
         [105; 16],
         [91; 16],
@@ -21913,8 +21697,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
         current_first_status
     );
 
-    let fresh_second_retarget_query =
-        status_query([98; 16], [91; 16], terminal_fingerprint);
+    let fresh_second_retarget_query = status_query([98; 16], [91; 16], terminal_fingerprint);
     let fresh_second_retarget = block_on(host.dispatch_frame(
         [6; 16],
         34,
@@ -22113,11 +21896,7 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
             after_retry_sweep_followup_fingerprint,
             after_retry_sweep_followup,
         ),
-        (
-            [111; 16],
-            final_retry_sweep_fingerprint,
-            final_retry_sweep,
-        ),
+        ([111; 16], final_retry_sweep_fingerprint, final_retry_sweep),
         (
             [112; 16],
             after_final_retry_sweep_fingerprint,
@@ -22198,8 +21977,16 @@ fn status_identity_snapshots_stay_isolated_across_targets_and_eval_completion_bo
             fourteenth_retry_edge_snapshot_fingerprint,
             fourteenth_retry_edge_snapshot,
         ),
-        ([97; 16], current_first_status_fingerprint, current_first_status),
-        ([98; 16], current_second_status_fingerprint, current_second_status),
+        (
+            [97; 16],
+            current_first_status_fingerprint,
+            current_first_status,
+        ),
+        (
+            [98; 16],
+            current_second_status_fingerprint,
+            current_second_status,
+        ),
     ] {
         let status = block_on(open_durable_state(&repository).request_status_for_identity(
             RequestIdentity {
@@ -23266,8 +23053,7 @@ fn websocket_peer_close_echoes_valid_code_and_reason_on_receive_and_prepare() {
     );
 
     let (mut transport, mut socket) = attached_transport_for_close();
-    let prepared =
-        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    let prepared = prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
     assert_close_output(&prepared, Some(1000), b"normal");
     assert_eq!(
         encode_close(&prepared),
@@ -23285,19 +23071,14 @@ fn websocket_peer_close_preserves_empty_reason_on_receive_and_prepare() {
     assert_eq!(encode_close(&receive), [0x88, 2, 0x03, 0xe9]);
 
     let (mut transport, mut socket) = attached_transport_for_close();
-    let prepared =
-        prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
+    let prepared = prepared_close_output(&mut transport, &mut socket, &masked(true, 8, &payload));
     assert_close_output(&prepared, Some(1001), b"");
     assert_eq!(encode_close(&prepared), [0x88, 2, 0x03, 0xe9]);
 }
 
 #[test]
 fn websocket_peer_close_rejects_malformed_and_invalid_payloads_on_both_paths() {
-    for payload in [
-        &[0x03][..],
-        &[0x00, 0x01][..],
-        &[0x03, 0xe8, 0xff][..],
-    ] {
+    for payload in [&[0x03][..], &[0x00, 0x01][..], &[0x03, 0xe8, 0xff][..]] {
         let (mut transport, mut socket) = attached_transport_for_close();
         let receive = close_output(&mut transport, &mut socket, &masked(true, 8, payload));
         assert_close_output(&receive, Some(1002), b"");

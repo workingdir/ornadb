@@ -363,16 +363,20 @@ mod tests {
         assert_eq!(context.format(), RepositoryFormat::Final3);
         assert_eq!(context.reader_context(), ReaderContext::Final20261005);
         assert!(context.is_writer());
-        assert!(SystemFormatContext::from_recorded_pair(
-            RepositoryFormat::Final3,
-            ReaderContext::Original100
-        )
-        .is_none());
-        assert!(SystemFormatContext::from_recorded_pair(
-            RepositoryFormat::Original100,
-            ReaderContext::Final20261005
-        )
-        .is_none());
+        assert!(
+            SystemFormatContext::from_recorded_pair(
+                RepositoryFormat::Final3,
+                ReaderContext::Original100
+            )
+            .is_none()
+        );
+        assert!(
+            SystemFormatContext::from_recorded_pair(
+                RepositoryFormat::Original100,
+                ReaderContext::Final20261005
+            )
+            .is_none()
+        );
     }
 
     #[test]
@@ -495,8 +499,10 @@ mod tests {
         let selection = system_api_selection();
         assert_eq!(selection.callables().count(), 84);
         assert_eq!(selection.available(final_context).count(), 82);
-        assert!(selection
-            .descriptor(final_context, "sys.blob.length")
-            .is_some());
+        assert!(
+            selection
+                .descriptor(final_context, "sys.blob.length")
+                .is_some()
+        );
     }
 }

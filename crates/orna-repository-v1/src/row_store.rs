@@ -1289,7 +1289,9 @@ pub(crate) fn decode_canonical_fields_of(encoded: &[u8]) -> Result<Vec<CborValue
 /// A field that is not a Blob in canonical shape is not a Blob: it yields
 /// `None` rather than being reported or rejected. A field that *is* a tagged
 /// Blob but whose payload is malformed is a real error, not a silent miss.
-pub(crate) fn blob_field_metadata(field: &CborValue) -> Result<Option<BlobMetadata>, RowStoreError> {
+pub(crate) fn blob_field_metadata(
+    field: &CborValue,
+) -> Result<Option<BlobMetadata>, RowStoreError> {
     match field {
         CborValue::Tag(60013, payload) => {
             let CborValue::Array(option) = payload.as_ref() else {
@@ -1731,7 +1733,11 @@ mod tests {
         }
         let snapshot = sealed_snapshot(&keys);
         for limit in [1, 2, 3, 256] {
-            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+            assert_eq!(
+                page_through(&snapshot, None, None, limit),
+                keys,
+                "limit {limit}"
+            );
         }
     }
 
@@ -1752,7 +1758,10 @@ mod tests {
             })
             .collect();
         let pair = |first: i64, second: &str| {
-            TypedKey::Tuple(vec![TypedKey::Int(first), TypedKey::Text(second.to_owned())])
+            TypedKey::Tuple(vec![
+                TypedKey::Int(first),
+                TypedKey::Text(second.to_owned()),
+            ])
         };
         let lower = pair(1, "b");
         let upper = pair(2, "b");
@@ -1761,7 +1770,11 @@ mod tests {
             .filter(|key| *key >= &lower && *key < &upper)
             .cloned()
             .collect();
-        assert_eq!(in_range.len(), 3, "(1,b), (1,c) and (2,a) lie in [(1,b), (2,b))");
+        assert_eq!(
+            in_range.len(),
+            3,
+            "(1,b), (1,c) and (2,a) lie in [(1,b), (2,b))"
+        );
         let cursors = [
             pair(0, "z"),
             pair(1, "b"),
@@ -1808,7 +1821,11 @@ mod tests {
             assert_logical_order(keys);
             let snapshot = sealed_snapshot(keys);
             for limit in [1, 2, 3, 256] {
-                assert_eq!(page_through(&snapshot, None, None, limit), *keys, "limit {limit}");
+                assert_eq!(
+                    page_through(&snapshot, None, None, limit),
+                    *keys,
+                    "limit {limit}"
+                );
             }
         }
 
@@ -1834,7 +1851,11 @@ mod tests {
         assert_logical_order(&keys);
         let snapshot = sealed_snapshot(&keys);
         for limit in [1, 2, 256] {
-            assert_eq!(page_through(&snapshot, None, None, limit), keys, "limit {limit}");
+            assert_eq!(
+                page_through(&snapshot, None, None, limit),
+                keys,
+                "limit {limit}"
+            );
         }
     }
 

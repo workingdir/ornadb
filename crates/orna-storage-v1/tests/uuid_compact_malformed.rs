@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -19,12 +19,10 @@ use parquet::{
 
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const KEY_2: [u8; 16] = [
-    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-    0x2f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -39,10 +37,7 @@ fn profile() -> CompactOvbProfile {
     let schema = OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (OvbRaw::Int(1.into()), uuid_raw(*TABLE.as_bytes())),
-        (
-            OvbRaw::Int(2.into()),
-            OvbRaw::Array(vec![uuid_raw(KEY)]),
-        ),
+        (OvbRaw::Int(2.into()), OvbRaw::Array(vec![uuid_raw(KEY)])),
         (
             OvbRaw::Int(3.into()),
             OvbRaw::Array(vec![OvbRaw::Array(vec![
@@ -95,7 +90,10 @@ fn metadata(profile: &CompactOvbProfile) -> Vec<KeyValue> {
             Some(BASE64.encode(profile.schema().encode().unwrap())),
         ),
         KeyValue::new("orna.columns.ovb".into(), Some(BASE64.encode(columns))),
-        KeyValue::new("orna.encoder".into(), Some("uuid-malformed-proof-v1".into())),
+        KeyValue::new(
+            "orna.encoder".into(),
+            Some("uuid-malformed-proof-v1".into()),
+        ),
     ]
 }
 
@@ -315,8 +313,7 @@ fn checksummed_chunk(bytes: &[u8]) -> Vec<u8> {
             let delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
             let mut checksum_field = vec![(delta << 4) | 5];
             compact_varint(
-                ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31))
-                    as u64,
+                ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
                 &mut checksum_field,
             );
             let mut rewritten = bytes[cursor..body_start].to_vec();
@@ -349,7 +346,9 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         .iter()
         .flat_map(|group| {
             group.columns().iter().map(|meta| {
-                let start = meta.dictionary_page_offset().unwrap_or_else(|| meta.data_page_offset()) as usize;
+                let start =
+                    meta.dictionary_page_offset()
+                        .unwrap_or_else(|| meta.data_page_offset()) as usize;
                 let end = start + meta.compressed_size() as usize;
                 (start, end, checksummed_chunk(&bytes[start..end]))
             })
@@ -372,21 +371,36 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         let mut builder = group.clone().into_builder();
         let mut columns = builder.take_columns();
         for column in &mut columns {
-            let old_start = column.dictionary_page_offset().unwrap_or_else(|| column.data_page_offset()) as usize;
-            let Some((_, _, new_start, new_len)) = updates.iter().find(|item| item.0 == old_start) else { continue };
+            let old_start = column
+                .dictionary_page_offset()
+                .unwrap_or_else(|| column.data_page_offset()) as usize;
+            let Some((_, _, new_start, new_len)) = updates.iter().find(|item| item.0 == old_start)
+            else {
+                continue;
+            };
             let shift = *new_start as i64 - old_start as i64;
-            let replacement = column.clone().into_builder()
+            let replacement = column
+                .clone()
+                .into_builder()
                 .set_data_page_offset(column.data_page_offset() + shift)
-                .set_dictionary_page_offset(column.dictionary_page_offset().map(|offset| offset + shift))
-                .set_total_compressed_size(column.compressed_size() + (*new_len as i64 - column.compressed_size()))
-                .build().unwrap();
+                .set_dictionary_page_offset(
+                    column.dictionary_page_offset().map(|offset| offset + shift),
+                )
+                .set_total_compressed_size(
+                    column.compressed_size() + (*new_len as i64 - column.compressed_size()),
+                )
+                .build()
+                .unwrap();
             *column = replacement;
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let rewritten = parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
+    let rewritten =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), groups);
     let mut new_footer = Vec::new();
-    parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &rewritten).finish().unwrap();
+    parquet::file::metadata::ParquetMetaDataWriter::new(&mut new_footer, &rewritten)
+        .finish()
+        .unwrap();
     data.extend(new_footer);
     data
 }

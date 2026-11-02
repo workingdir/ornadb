@@ -9,9 +9,9 @@ use orna_foundation_v1::{
 
 use crate::{
     CwdCapture, InvocationObservationStatus, RuntimeError, RuntimeState, WriterLease,
-    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms,
-    observation_instant, opaque_reference_key, row_reference_raw, validate_id,
-    validate_observation_text, validate_writer_lease,
+    bigint_to_i64, capture_tx, decode_capture, encode_capture, fixed, now_ms, observation_instant,
+    opaque_reference_key, row_reference_raw, validate_id, validate_observation_text,
+    validate_writer_lease,
 };
 
 /// Stable relation identities for system rows whose typed Foundation aliases
@@ -302,7 +302,10 @@ impl RuntimeState {
 pub(super) fn project_query_observations(
     observations: &[QueryObservation],
 ) -> Result<Vec<SysQueryProjection>, RuntimeError> {
-    observations.iter().map(SysQueryProjection::try_from).collect()
+    observations
+        .iter()
+        .map(SysQueryProjection::try_from)
+        .collect()
 }
 
 pub(super) async fn load_query_observations(
@@ -429,23 +432,30 @@ async fn load_sys_materialization_projections(
         if materialized_ms < 0 {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let database_id = optional_fixed::<16>(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
-        let runtime_id = optional_fixed::<16>(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let database_id =
+            optional_fixed::<16>(row.get(6).map_err(|_| RuntimeError::RecoveryInvalid)?)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
+        let runtime_id =
+            optional_fixed::<16>(row.get(7).map_err(|_| RuntimeError::RecoveryInvalid)?)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
         let generation: Option<i64> = row.get(8).map_err(|_| RuntimeError::RecoveryInvalid)?;
-        let generation_digest = optional_fixed::<32>(row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?
-            .ok_or(RuntimeError::RecoveryInvalid)?;
+        let generation_digest =
+            optional_fixed::<32>(row.get(9).map_err(|_| RuntimeError::RecoveryInvalid)?)?
+                .ok_or(RuntimeError::RecoveryInvalid)?;
         let capture = decode_capture(snapshot_bytes, generation_digest)?;
         if capture.database_id() != database_id
             || capture.runtime_id() != runtime_id
-            || bigint_to_i64(capture.generation())? != generation.ok_or(RuntimeError::RecoveryInvalid)?
+            || bigint_to_i64(capture.generation())?
+                != generation.ok_or(RuntimeError::RecoveryInvalid)?
         {
             return Err(RuntimeError::RecoveryInvalid);
         }
-        let catalogue_revision_id = optional_fixed::<32>(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let catalogue_digest = optional_fixed::<32>(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
-        let catalogue_result_type_id = optional_fixed::<16>(row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let catalogue_revision_id =
+            optional_fixed::<32>(row.get(10).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let catalogue_digest =
+            optional_fixed::<32>(row.get(11).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
+        let catalogue_result_type_id =
+            optional_fixed::<16>(row.get(12).map_err(|_| RuntimeError::RecoveryInvalid)?)?;
         let valid = catalogue_revision_id == Some(revision_id)
             && catalogue_digest == Some(digest)
             && catalogue_result_type_id == Some(result_type_id);
@@ -455,11 +465,8 @@ async fn load_sys_materialization_projections(
             capture.snapshot().clone(),
         )
         .map_err(|_| RuntimeError::InvalidObservationReference)?;
-        let snapshot = snapshot_reference(
-            capture.database_id(),
-            capture.snapshot().clone(),
-        )
-        .map_err(|_| RuntimeError::InvalidObservationReference)?;
+        let snapshot = snapshot_reference(capture.database_id(), capture.snapshot().clone())
+            .map_err(|_| RuntimeError::InvalidObservationReference)?;
         let reference = RowRef::new(
             capture.database_id(),
             SYS_MATERIALIZATION_TABLE_ID,

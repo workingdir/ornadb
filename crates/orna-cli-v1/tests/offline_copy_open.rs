@@ -16,8 +16,8 @@ use std::{path::Path, process::Command};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_repository_v1::{
-    AdmittedRow, FormatContextError, GitHashAlgorithm, KeyRange, NativeOid,
-    RangeVerification, Repository, TypedKey,
+    AdmittedRow, FormatContextError, GitHashAlgorithm, KeyRange, NativeOid, RangeVerification,
+    Repository, TypedKey,
     complete_copy::{CompleteCopyReadError, export_complete_copy, read_complete_copy_manifest},
 };
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
@@ -152,7 +152,10 @@ async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     let unavailable_remote = source.path().join("unavailable-origin");
     let unavailable_remote_url = format!("file://{}", unavailable_remote.display());
     drop(source);
-    assert!(!original_media_root.exists(), "the original media directory is unavailable");
+    assert!(
+        !original_media_root.exists(),
+        "the original media directory is unavailable"
+    );
     git_output(
         directory.path(),
         &["remote", "add", "origin", &unavailable_remote_url],

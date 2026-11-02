@@ -1,16 +1,15 @@
 //! Focused successful and failing inference evidence on checked-in sources.
 
-use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 use orna_conformance_v1::AdmittedReplSession;
 use orna_evaluator_v1::Limits;
 use orna_foundation_v1::Value;
+use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
 
 const INFER_SUCCESS: &str = include_str!("fixtures/traceability-infer-success.orna");
 const INFER_UNDERCONSTRAINED: &str =
     include_str!("fixtures/semantic/underconstrained-lambda-field.orna");
-const NUMERIC_CONTEXT: &str = include_str!(
-    "fixtures/reference/examples/valid/numeric-literal-context.orna"
-);
+const NUMERIC_CONTEXT: &str =
+    include_str!("fixtures/reference/examples/valid/numeric-literal-context.orna");
 
 fn analyze(source: &str) -> orna_semantic_v1::Analysis {
     analyze_with_catalogue(
@@ -45,7 +44,11 @@ fn increment_type(result: &orna_semantic_v1::Analysis) -> &Type {
 #[test]
 fn omitted_parameter_and_return_annotations_are_inferred() {
     let result = analyze(INFER_SUCCESS);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
     assert!(matches!(
         increment_type(&result),
         Type::Function { parameters, result, .. }
@@ -58,7 +61,11 @@ fn omitted_parameter_and_return_annotations_are_inferred() {
 #[test]
 fn inferred_export_does_not_fall_back_to_dynamic_any() {
     let result = analyze(INFER_SUCCESS);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
     assert!(matches!(
         increment_type(&result),
         Type::Function { parameters, result, .. }
@@ -72,7 +79,11 @@ fn inferred_export_does_not_fall_back_to_dynamic_any() {
 #[test]
 fn inferable_function_signature_needs_no_annotations() {
     let result = analyze(INFER_SUCCESS);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
     assert!(matches!(
         increment_type(&result),
         Type::Function { parameters, result, .. }
@@ -98,7 +109,11 @@ fn underconstrained_inference_requests_an_annotation() {
 #[test]
 fn contextual_numeric_inference_preserves_decimal_and_float_types() {
     let result = analyze(NUMERIC_CONTEXT);
-    assert!(result.diagnostics.is_empty(), "{}", diagnostic_text(&result));
+    assert!(
+        result.diagnostics.is_empty(),
+        "{}",
+        diagnostic_text(&result)
+    );
     let exports = &result.modules.values().next().expect("main module").exports;
     for (name, expected) in [
         ("decimal_value", Type::Decimal),
@@ -119,7 +134,10 @@ fn contextual_numeric_inference_preserves_decimal_and_float_types() {
 fn redundant_annotation_does_not_change_successful_behavior() {
     let call = "increment(41)";
     let mut inferred = AdmittedReplSession::new(Limits::default());
-    assert_eq!(inferred.submit("fn increment(value) = value + 1;").unwrap(), None);
+    assert_eq!(
+        inferred.submit("fn increment(value) = value + 1;").unwrap(),
+        None
+    );
     let inferred_result = inferred.submit(call).unwrap();
 
     let mut annotated = AdmittedReplSession::new(Limits::default());

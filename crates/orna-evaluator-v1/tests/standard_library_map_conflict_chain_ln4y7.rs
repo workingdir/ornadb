@@ -32,7 +32,10 @@ fn pinned_session() -> AdmittedReplSession {
             .expect("executed source matches its pinned profile");
     }
     assert_eq!(session.submit("use std.map as map;"), Ok(None));
-    assert_eq!(session.submit("use std.collection as collection;"), Ok(None));
+    assert_eq!(
+        session.submit("use std.collection as collection;"),
+        Ok(None)
+    );
     session
 }
 

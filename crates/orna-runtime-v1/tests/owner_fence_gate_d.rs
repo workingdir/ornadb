@@ -163,7 +163,11 @@ fn kill_and_reap(child: &mut Child) {
 }
 
 fn encode_lease(lease: WriterLease) -> String {
-    let owner: String = lease.owner_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    let owner: String = lease
+        .owner_id
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     format!("owner={owner} epoch={}", lease.epoch)
 }
 
@@ -173,8 +177,8 @@ fn decode_lease(text: &str) -> WriterLease {
     for field in text.split_whitespace() {
         if let Some(hex) = field.strip_prefix("owner=") {
             for (index, slot) in owner_id.iter_mut().enumerate() {
-                *slot = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16)
-                    .expect("hex owner byte");
+                *slot =
+                    u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).expect("hex owner byte");
             }
         } else if let Some(value) = field.strip_prefix("epoch=") {
             epoch = Some(value.parse().expect("decimal epoch"));
@@ -300,14 +304,10 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
     runtime().block_on(async {
         // While the child is alive it owns the runtime lock and the lease. A
         // second participant must not become a writer.
-        let secondary = RuntimeState::open_with_owner_id(
-            &repository,
-            identity(),
-            INITIAL_DIGEST,
-            OTHER_OWNER,
-        )
-        .await
-        .expect("secondary runtime opens while owner is alive");
+        let secondary =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, OTHER_OWNER)
+                .await
+                .expect("secondary runtime opens while owner is alive");
         assert!(
             !secondary.holds_runtime_owner_lock(),
             "a live owner keeps the runtime owner lock"
@@ -319,7 +319,10 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             ),
             "a secondary participant must not take the writer lease from a live owner"
         );
-        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.current_lease().await,
+            Err(RuntimeError::LeaseHeld)
+        );
         drop(secondary);
     });
 
@@ -327,14 +330,10 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
 
     runtime().block_on(async {
         let replacement = process_owner_id();
-        let state = RuntimeState::open_with_owner_id(
-            &repository,
-            identity(),
-            INITIAL_DIGEST,
-            replacement,
-        )
-        .await
-        .expect("reopen after owner death");
+        let state =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, replacement)
+                .await
+                .expect("reopen after owner death");
         assert!(
             state.holds_runtime_owner_lock(),
             "the dead owner must release the runtime lock"
@@ -389,18 +388,27 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             "dead owner token must be rejected with OwnerLost, got {rejected:?}"
         );
         assert_eq!(
-            state.committed_table_row("records", DEAD_OWNER_ROW).await.unwrap(),
+            state
+                .committed_table_row("records", DEAD_OWNER_ROW)
+                .await
+                .unwrap(),
             None,
             "a fenced owner's write must not land"
         );
         assert_eq!(
-            state.committed_table_row("records", CHILD_ROW).await.unwrap(),
+            state
+                .committed_table_row("records", CHILD_ROW)
+                .await
+                .unwrap(),
             Some(vec![9]),
             "the row acknowledged before the kill must survive fencing"
         );
 
         // The replacement owner writes under its fenced lease.
-        let context = state.begin_activation().await.expect("capture for new owner");
+        let context = state
+            .begin_activation()
+            .await
+            .expect("capture for new owner");
         state
             .commit_table_activation(
                 fresh,
@@ -412,7 +420,10 @@ fn killed_writer_is_fenced_and_cannot_land_a_write() {
             .await
             .expect("replacement owner commits under the fenced lease");
         assert_eq!(
-            state.committed_table_row("records", NEW_OWNER_ROW).await.unwrap(),
+            state
+                .committed_table_row("records", NEW_OWNER_ROW)
+                .await
+                .unwrap(),
             Some(vec![2])
         );
     });
@@ -435,14 +446,10 @@ fn running_request_from_killed_run_is_recovered_before_the_next_write() {
     runtime().block_on(async {
         // A later CLI process reopens the worktree and acquires the lease.
         let owner = process_owner_id();
-        let state = RuntimeState::open_with_owner_id(
-            &repository,
-            identity(),
-            INITIAL_DIGEST,
-            owner,
-        )
-        .await
-        .expect("reopen after the killed run");
+        let state =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, owner)
+                .await
+                .expect("reopen after the killed run");
         assert!(state.holds_runtime_owner_lock());
         assert_eq!(
             state
@@ -482,7 +489,10 @@ fn running_request_from_killed_run_is_recovered_before_the_next_write() {
         );
         assert!(state.running_requests().await.unwrap().is_empty());
 
-        let context = state.begin_activation().await.expect("capture after recovery");
+        let context = state
+            .begin_activation()
+            .await
+            .expect("capture after recovery");
         state
             .commit_table_activation(
                 lease,
@@ -494,10 +504,16 @@ fn running_request_from_killed_run_is_recovered_before_the_next_write() {
             .await
             .expect("the next write is admitted after recovery");
         assert_eq!(
-            state.committed_table_row("records", NEW_OWNER_ROW).await.unwrap(),
+            state
+                .committed_table_row("records", NEW_OWNER_ROW)
+                .await
+                .unwrap(),
             Some(vec![4])
         );
-        let context = state.begin_activation().await.expect("capture for the dead token");
+        let context = state
+            .begin_activation()
+            .await
+            .expect("capture for the dead token");
         let rejected = state
             .commit_table_activation(
                 dead,
@@ -512,7 +528,10 @@ fn running_request_from_killed_run_is_recovered_before_the_next_write() {
             "the killed run's token must be rejected with OwnerLost, got {rejected:?}"
         );
         assert_eq!(
-            state.committed_table_row("records", DEAD_OWNER_ROW).await.unwrap(),
+            state
+                .committed_table_row("records", DEAD_OWNER_ROW)
+                .await
+                .unwrap(),
             None
         );
     });
@@ -533,21 +552,20 @@ fn a_secondary_participant_cannot_create_or_take_the_writer_lease() {
         .await
         .expect("open the lock holder");
         assert!(holder.holds_runtime_owner_lock());
-        let secondary = RuntimeState::open_with_owner_id(
-            &repository,
-            identity(),
-            INITIAL_DIGEST,
-            OTHER_OWNER,
-        )
-        .await
-        .expect("open a secondary participant");
+        let secondary =
+            RuntimeState::open_with_owner_id(&repository, identity(), INITIAL_DIGEST, OTHER_OWNER)
+                .await
+                .expect("open a secondary participant");
         assert!(!secondary.holds_runtime_owner_lock());
         assert_eq!(
             secondary.acquire_lease(OTHER_OWNER).await,
             Err(RuntimeError::LeaseHeld),
             "a secondary must not create the lease on a fresh worktree"
         );
-        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.current_lease().await,
+            Err(RuntimeError::LeaseHeld)
+        );
 
         let lease = holder
             .acquire_lease(process_owner_id())
@@ -559,7 +577,10 @@ fn a_secondary_participant_cannot_create_or_take_the_writer_lease() {
             Err(RuntimeError::LeaseHeld),
             "a secondary must not take the lease from the live lock holder"
         );
-        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.current_lease().await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(holder.current_lease().await.unwrap(), Some(lease));
     });
 }

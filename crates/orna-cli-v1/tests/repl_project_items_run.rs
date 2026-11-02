@@ -55,7 +55,10 @@ fn repl_qualified_root_enum_matches_the_run_entry_arm() {
 
     assert_stdout(&orna(directory, &["check"]), "project valid\n");
     assert_stdout(
-        &orna(directory, &["repl", "main.describe(main.Availability.ready)"]),
+        &orna(
+            directory,
+            &["repl", "main.describe(main.Availability.ready)"],
+        ),
         "\"ready\" : Str\n",
     );
     assert_stdout(

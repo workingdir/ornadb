@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalVariant,
     PureFunction, evaluate_with_functions_and_nominals,

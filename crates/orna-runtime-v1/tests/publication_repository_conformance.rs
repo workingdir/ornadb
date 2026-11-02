@@ -26,7 +26,10 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 
 fn repository() -> (TempDir, Repository) {
     let directory = tempfile::tempdir().expect("temporary Git repository");
-    git(directory.path(), &["init", "--quiet", "--initial-branch=main"]);
+    git(
+        directory.path(),
+        &["init", "--quiet", "--initial-branch=main"],
+    );
     git(directory.path(), &["config", "user.name", "Orna Test"]);
     git(
         directory.path(),
@@ -78,10 +81,12 @@ async fn runtime_state_opens_under_git_resolved_worktree_administration() {
 
     assert_eq!(repository.runtime_paths().root(), Path::new(&git_path));
     assert!(repository.runtime_paths().state_db().is_file());
-    assert!(!repository
-        .runtime_paths()
-        .root()
-        .starts_with(root.path().join(".orna")));
+    assert!(
+        !repository
+            .runtime_paths()
+            .root()
+            .starts_with(root.path().join(".orna"))
+    );
     drop(state);
 }
 
@@ -165,10 +170,7 @@ async fn cloned_repositories_keep_independent_runtime_cwds() {
 async fn unpublished_runtime_tail_is_absent_from_ordinary_git_state() {
     let (root, repository) = repository();
     let state = open_runtime(&repository, 3).await;
-    let lease = state
-        .acquire_lease([14; 16])
-        .await
-        .expect("acquire writer");
+    let lease = state.acquire_lease([14; 16]).await.expect("acquire writer");
     append_fixture(&state, lease, 15).await;
 
     assert_eq!(git(root.path(), &["status", "--porcelain=v1"]), "");
@@ -180,10 +182,7 @@ async fn unpublished_runtime_tail_is_absent_from_ordinary_git_state() {
 async fn durable_unpublished_tail_survives_runtime_reopen() {
     let (_root, repository) = repository();
     let state = open_runtime(&repository, 3).await;
-    let lease = state
-        .acquire_lease([16; 16])
-        .await
-        .expect("acquire writer");
+    let lease = state.acquire_lease([16; 16]).await.expect("acquire writer");
     append_fixture(&state, lease, 17).await;
     let pending_bytes = state
         .publication_metadata()

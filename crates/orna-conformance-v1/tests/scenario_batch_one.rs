@@ -26,13 +26,12 @@ fn first_scenario_batch_reports_only_the_frozen_prefix_and_never_promotes_skips(
         ])
         .output()
         .expect("bounded first-30 scenario runner starts");
-    let report: Value = serde_json::from_slice(&output.stdout)
-        .unwrap_or_else(|error| {
-            panic!(
-                "scenario report JSON: {error}; stderr: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "scenario report JSON: {error}; stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+    });
     let results = report["scenarios"].as_array().expect("scenario results");
     assert_eq!(results.len(), FIRST_SCENARIO_COUNT);
     assert_eq!(

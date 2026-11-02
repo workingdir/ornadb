@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{
     AdmittedReplSession, Environment, Functions, Limits, NominalDefinition, NominalDefinitions,
     NominalField, PureFunction, evaluate_expression, evaluate_expression_with_functions,
@@ -101,10 +100,7 @@ fn money_json_uses_currency_registry_code_and_exact_decimal_string() {
         "GBP".to_owned(),
         NominalDefinition::new(currency, None, Vec::new()).with_currency("GBP", 2),
     )]);
-    let environment = Environment::from([(
-        "amount".to_owned(),
-        money_value(1234, -2, currency),
-    )]);
+    let environment = Environment::from([("amount".to_owned(), money_value(1234, -2, currency))]);
 
     let parsed = orna_syntax_v1::parse_expression("std.encoding.json.encode(amount)");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
@@ -128,8 +124,12 @@ fn pinned_encoding_modules_compute_canonical_values_and_reject_noncanonical_inpu
         Ok(None)
     );
     assert_eq!(
-        with_std.submit(include_str!("fixtures/stdlib-call-encoding-base64-6u13r.orna")),
-        Ok(Some(CanonicalValue::new(Raw::Bytes(b"a".to_vec())).unwrap()))
+        with_std.submit(include_str!(
+            "fixtures/stdlib-call-encoding-base64-6u13r.orna"
+        )),
+        Ok(Some(
+            CanonicalValue::new(Raw::Bytes(b"a".to_vec())).unwrap()
+        ))
     );
     assert_eq!(
         with_std.submit(include_str!("fixtures/stdlib-codec-json-exact-rl767.orna")),
@@ -346,13 +346,17 @@ fn exact_money_allocation_distributes_remainders_stably_and_preserves_total() {
         .unwrap())
     );
     assert_eq!(
-        eval_pinned(include_str!("fixtures/stdlib-money-format-values-rl767.orna")),
+        eval_pinned(include_str!(
+            "fixtures/stdlib-money-format-values-rl767.orna"
+        )),
         Ok(bool_value(true))
     );
     assert_eq!(
-        eval_pinned(include_str!("fixtures/stdlib-money-format-unsupported-locale-rl767.orna"))
-            .unwrap_err()
-            .code(),
+        eval_pinned(include_str!(
+            "fixtures/stdlib-money-format-unsupported-locale-rl767.orna"
+        ))
+        .unwrap_err()
+        .code(),
         "ORNA-EVAL-VALUE"
     );
 }

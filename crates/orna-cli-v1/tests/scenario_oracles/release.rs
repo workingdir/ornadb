@@ -29,8 +29,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     harness::{
-        Check, Db, Entry, Failure, Probe, check_refuses, ensure, harness_ensure, hex,
-        repl_refuses, unknown_command, vendored_fixture,
+        Check, Db, Entry, Failure, Probe, check_refuses, ensure, harness_ensure, hex, repl_refuses,
+        unknown_command, vendored_fixture,
     },
     mandatory::{LIVE_BLOCKER as LIVE_WATCH, watches_receive_no_update},
 };
@@ -1501,10 +1501,12 @@ fn check_native_graph(entries: &[StoreEntry]) -> Check {
             "node {node} has entries {names:?}"
         );
         for kid in kids {
-            if kid.name() == "data" { ensure!(
-                kid.kind == "blob" && kid.size.is_some_and(|size| size <= 64 * 1024),
-                "node {node} data is not a bounded blob"
-            ); } else {
+            if kid.name() == "data" {
+                ensure!(
+                    kid.kind == "blob" && kid.size.is_some_and(|size| size <= 64 * 1024),
+                    "node {node} data is not a bounded blob"
+                );
+            } else {
                 ensure!(kid.kind == "tree", "node {node} refs is not a tree");
                 for edge in children
                     .get(kid.path.as_str())
@@ -1512,8 +1514,7 @@ fn check_native_graph(entries: &[StoreEntry]) -> Check {
                     .unwrap_or_default()
                 {
                     ensure!(
-                        edge.name() == edge.oid
-                            && matches!(edge.kind.as_str(), "tree" | "blob"),
+                        edge.name() == edge.oid && matches!(edge.kind.as_str(), "tree" | "blob"),
                         "edge {} is not named by its {} object ID",
                         edge.path,
                         edge.kind
@@ -1637,7 +1638,9 @@ fn replace_node_data(db: &mut Db, node: &str, bytes: &[u8]) -> Check {
             .iter()
             .find(|entry| entry.kind == "tree" && entry.oid == node)
             .map(|entry| entry.path.clone())
-            .ok_or_else(|| Failure::Harness(format!("node {node} is not in the committed store")))?;
+            .ok_or_else(|| {
+                Failure::Harness(format!("node {node} is not in the committed store"))
+            })?;
         format!("{node_path}/data")
     };
     db.write("tampered.bin", bytes)?;
@@ -1667,7 +1670,12 @@ fn export_copies_refused_store(check: Check) -> Probe {
             if failure.reason().contains("copied a corrupted store")
                 || failure.reason().contains("copied a content graph") =>
         {
-            Ok(failure.reason().lines().next().unwrap_or_default().to_owned())
+            Ok(failure
+                .reason()
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned())
         }
         Err(failure) => Err(failure),
     }
@@ -1707,9 +1715,12 @@ fn executor_stops_at(check: Check, needle: &str) -> Probe {
         Ok(()) => Err(Failure::Unmet(format!(
             "the scenario now passes; `{needle}` no longer blocks it"
         ))),
-        Err(failure) if failure.reason().contains(needle) => {
-            Ok(failure.reason().lines().next().unwrap_or_default().to_owned())
-        }
+        Err(failure) if failure.reason().contains(needle) => Ok(failure
+            .reason()
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned()),
         Err(failure) => Err(failure),
     }
 }
@@ -1893,10 +1904,9 @@ fn missing_chunks_are_not_empty_content(db: &mut Db) -> Check {
         .join(objects.trim())
         .join(&chunk.oid[..2])
         .join(&chunk.oid[2..]);
-    fs::remove_file(&object)
-        .map_err(|error| {
-            Failure::Harness(format!("remove chunk object {}: {error}", object.display()))
-        })?;
+    fs::remove_file(&object).map_err(|error| {
+        Failure::Harness(format!("remove chunk object {}: {error}", object.display()))
+    })?;
     let export = db.orna(&["export", "../missing-copy", "--at", "HEAD"])?;
     ensure!(
         !export.succeeded(),
@@ -2091,7 +2101,10 @@ fn views_expose_no_repository_internals(db: &mut Db) -> Check {
     // and never projected (profiles/vfs-1.md:33-34).
     let mut listed = names;
     listed.sort();
-    ensure!(listed == ["main.orna", "media"], "the view root lists {listed:?}");
+    ensure!(
+        listed == ["main.orna", "media"],
+        "the view root lists {listed:?}"
+    );
     ensure!(
         fs::write(mount.point.join(".git"), b"x").is_err()
             && fs::write(mount.point.join("data"), b"x").is_err(),
@@ -2265,7 +2278,9 @@ fn different_commit_checkout_refused(db: &mut Db) -> Probe {
         )));
     }
     ensure!(
-        checkout.output().contains("checkout to a different commit is refused while"),
+        checkout
+            .output()
+            .contains("checkout to a different commit is refused while"),
         "orna checkout earlier to a different commit was refused for another reason: {}",
         checkout.diagnostic()
     );
@@ -2551,7 +2566,9 @@ fn workspace_source_module_writes_are_admitted_or_refused(db: &mut Db) -> Check 
     }
     const EDITED: &str = "// edited\n";
     fs::write(&module, EDITED.as_bytes()).map_err(|error| {
-        Failure::Unmet(format!("the workspace mount refused a source module write: {error}"))
+        Failure::Unmet(format!(
+            "the workspace mount refused a source module write: {error}"
+        ))
     })?;
     expect_source_bytes(&module, EDITED)?;
 
@@ -2566,7 +2583,11 @@ fn workspace_source_module_writes_are_admitted_or_refused(db: &mut Db) -> Check 
         .map_err(|error| Failure::Harness(format!("write the stale candidate: {error}")))?;
     const OTHER: &str = "// another writer\n";
     db.write("main.orna", OTHER)?;
-    expect_source_errno(stale.sync_all(), 11, "a candidate whose disk baseline changed")?;
+    expect_source_errno(
+        stale.sync_all(),
+        11,
+        "a candidate whose disk baseline changed",
+    )?;
     expect_source_bytes(&module, OTHER)
 }
 
@@ -2581,7 +2602,9 @@ fn open_source_for_write(module: &std::path::Path) -> Result<fs::File, Failure> 
 fn expect_source_errno(result: std::io::Result<()>, code: i32, what: &str) -> Check {
     match result {
         Err(error) if error.raw_os_error() == Some(code) => Ok(()),
-        Err(error) => Err(Failure::Unmet(format!("{what}: expected errno {code}, got {error}"))),
+        Err(error) => Err(Failure::Unmet(format!(
+            "{what}: expected errno {code}, got {error}"
+        ))),
         Ok(()) => Err(Failure::Unmet(format!("{what} was admitted"))),
     }
 }

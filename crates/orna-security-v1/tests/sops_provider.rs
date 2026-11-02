@@ -56,17 +56,23 @@ fn write_encrypts_before_persisting_and_removes_plaintext_temp() {
         .path();
     let encrypted = fs::read(&encrypted_file).unwrap();
     assert!(encrypted.starts_with(b"FAKE:"));
-    assert!(!encrypted
-        .windows(payload.len())
-        .any(|window| window == payload));
+    assert!(
+        !encrypted
+            .windows(payload.len())
+            .any(|window| window == payload)
+    );
 
-    provider.store_secret(&reference, b"replacement-secret").unwrap();
+    provider
+        .store_secret(&reference, b"replacement-secret")
+        .unwrap();
     assert_eq!(fs::read_dir(&secrets).unwrap().count(), 1);
     assert_eq!(fs::read_dir(&plaintext_temps).unwrap().count(), 0);
     let replacement_ciphertext = fs::read(&encrypted_file).unwrap();
-    assert!(!replacement_ciphertext
-        .windows(b"replacement-secret".len())
-        .any(|window| window == b"replacement-secret"));
+    assert!(
+        !replacement_ciphertext
+            .windows(b"replacement-secret".len())
+            .any(|window| window == b"replacement-secret")
+    );
 
     let mut returned = Vec::new();
     let mut operation = |secret: &[u8]| returned.extend_from_slice(secret);

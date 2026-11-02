@@ -436,7 +436,10 @@ async fn read_checkpoints(connection: &Connection) -> Result<Vec<CheckpointRow>,
     Ok(checkpoints)
 }
 
-async fn read_history(connection: &Connection, table: &str) -> Result<Vec<HistoryRow>, RuntimeError> {
+async fn read_history(
+    connection: &Connection,
+    table: &str,
+) -> Result<Vec<HistoryRow>, RuntimeError> {
     let mut rows = connection
         .query(
             &format!("SELECT key_id, version, committed_position, snapshot, generation_digest, transition FROM {table} ORDER BY key_id, version"),

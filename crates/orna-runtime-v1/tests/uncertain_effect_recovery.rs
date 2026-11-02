@@ -12,8 +12,7 @@
 //! reopen the same repository from the parent and assert the durable outcome.
 
 use std::{
-    env,
-    fs,
+    env, fs,
     os::unix::process::ExitStatusExt,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
@@ -22,9 +21,8 @@ use std::{
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     ActivationEffectReport, ControlledEffectToken, DeclaredEffectSet, FaultInjector, FaultPoint,
-    RecoveryDisposition,
-    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState,
-    TableMutation, TerminalOutcome,
+    RecoveryDisposition, RequestIdentity, RequestOwner, RequestState, RuntimeError,
+    RuntimeIdentity, RuntimeState, TableMutation, TerminalOutcome,
 };
 use tempfile::{Builder, TempDir};
 
@@ -341,11 +339,7 @@ fn child_repository() -> PathBuf {
 /// The child dies by SIGABRT on purpose. On Linux the child is a `/bin/sh` that
 /// disables core dumps for itself and then `exec`s this test binary, so the
 /// limit survives into the crashing process without unsafe code.
-fn run_crashing_child(
-    scenario: Scenario,
-    repository_path: &Path,
-    test_name: &str,
-) -> ExitStatus {
+fn run_crashing_child(scenario: Scenario, repository_path: &Path, test_name: &str) -> ExitStatus {
     let binary = env::current_exe().expect("resolve test binary");
     let mut command = if cfg!(target_os = "linux") {
         let mut command = Command::new("/bin/sh");
@@ -451,7 +445,10 @@ fn external_effect_at_the_kill_recovers_as_uncertain_never_rollback() {
             Some(RecoveryDisposition::ExternalEffectsUncertain)
         );
         assert_eq!(
-            reopened.request_owner(request(), FINGERPRINT).await.unwrap(),
+            reopened
+                .request_owner(request(), FINGERPRINT)
+                .await
+                .unwrap(),
             None,
             "recovery releases the abandoned owner"
         );
@@ -460,10 +457,7 @@ fn external_effect_at_the_kill_recovers_as_uncertain_never_rollback() {
             .await
             .expect("the orphaned request stays addressable");
         assert_eq!(reserved.state, RequestState::Orphaned);
-        assert_eq!(
-            reserved.terminal_outcome,
-            Some(outcome(EFFECTS_UNCERTAIN))
-        );
+        assert_eq!(reserved.terminal_outcome, Some(outcome(EFFECTS_UNCERTAIN)));
         assert!(
             capability.is_none(),
             "an orphaned request never reissues admission"

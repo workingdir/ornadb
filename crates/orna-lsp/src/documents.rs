@@ -23,7 +23,6 @@ impl Document {
     pub fn new(uri: Uri, text: String, version: i32) -> Self {
         Self { uri, text, version }
     }
-
 }
 
 /// Converts between byte offsets and LSP positions for one source text.

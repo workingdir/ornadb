@@ -1,7 +1,7 @@
 use std::{error::Error, fs, path::Path, process::Command};
 
 use orna_project_v1::{
-    AttachmentError, AttachedDatabaseSession, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
+    AttachedDatabaseSession, AttachmentError, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
     PinnedDatabase, ProjectLoader,
 };
 use orna_repository_v1::Repository;
@@ -37,7 +37,10 @@ fn repository(files: &[(&str, &str)]) -> (TempDir, Repository, String) {
         fs::write(path, contents).unwrap();
     }
     git(directory.path(), &["add", "--all"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "fixture snapshot"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "fixture snapshot"],
+    );
     let commit = git(directory.path(), &["rev-parse", "HEAD"]);
     let repository = Repository::discover(directory.path()).unwrap();
     (directory, repository, commit)
@@ -52,10 +55,7 @@ fn write_commit(directory: &Path, path: &str, contents: &str) -> String {
     git(directory, &["rev-parse", "HEAD"])
 }
 
-fn routed_module_source(
-    session: &AttachedDatabaseSession,
-    logical_path: &str,
-) -> Option<String> {
+fn routed_module_source(session: &AttachedDatabaseSession, logical_path: &str) -> Option<String> {
     session
         .module_inputs()
         .into_iter()
@@ -122,8 +122,7 @@ fn assert_relation_routes(
 ) {
     let sources = routed_relation_sources(session, "contacts/Contact", database);
     assert_eq!(sources.len(), expected.len(), "rows for {database}");
-    for ((actual_commit, actual_path, actual_source), (path, value)) in
-        sources.iter().zip(expected)
+    for ((actual_commit, actual_path, actual_source), (path, value)) in sources.iter().zip(expected)
     {
         assert_eq!(actual_commit, commit, "snapshot for {database}/{path}");
         assert_eq!(actual_path, path, "row identity for {database}");
@@ -137,14 +136,10 @@ fn assert_relation_routes(
 /// ORNA-ATTACH-002: independently pinned attachments are read-only, so no cross-database atomic writes are claimed.
 #[test]
 fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
-    let (_primary_dir, primary_repository, primary_commit) = repository(&[(
-        "main.orna",
-        include_str!("fixtures/attach-primary.orna"),
-    )]);
-    let (history_dir, history_repository, history_commit) = repository(&[(
-        "main.orna",
-        include_str!("fixtures/attach-package.orna"),
-    )]);
+    let (_primary_dir, primary_repository, primary_commit) =
+        repository(&[("main.orna", include_str!("fixtures/attach-primary.orna"))]);
+    let (history_dir, history_repository, history_commit) =
+        repository(&[("main.orna", include_str!("fixtures/attach-package.orna"))]);
     let moved_head = write_commit(
         history_dir.path(),
         "main.orna",
@@ -161,8 +156,8 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
     let status_before = git(history_dir.path(), &["status", "--porcelain"]);
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let history = PinnedDatabase::resolve(
         "archive",
         history_repository.clone(),
@@ -170,13 +165,9 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         loader,
     )
     .unwrap();
-    let standard = PinnedDatabase::resolve(
-        "std",
-        history_repository.clone(),
-        &history_commit,
-        loader,
-    )
-    .unwrap();
+    let standard =
+        PinnedDatabase::resolve("std", history_repository.clone(), &history_commit, loader)
+            .unwrap();
     let mut session = AttachedDatabaseSession::new(primary).unwrap();
     session.attach_database(history).unwrap();
     session.attach_database(standard).unwrap();
@@ -201,15 +192,19 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("missing"),
         Err(AttachmentError::DatabaseUnavailable)
     ));
-    assert!(session
-        .database("archive")
-        .unwrap()
-        .project()
-        .modules()
-        .iter()
-        .any(|module| module.source.contains("= 42")));
-    assert!(routed_module_source(&session, "archive.orna")
-        .is_some_and(|source| source.contains("= 42")));
+    assert!(
+        session
+            .database("archive")
+            .unwrap()
+            .project()
+            .modules()
+            .iter()
+            .any(|module| module.source.contains("= 42"))
+    );
+    assert!(
+        routed_module_source(&session, "archive.orna")
+            .is_some_and(|source| source.contains("= 42"))
+    );
     let mut in_flight = session.clone();
     assert!(matches!(
         session.detach_database("../outside"),
@@ -251,20 +246,18 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
             .as_str(),
         history_commit
     );
-    assert!(routed_module_source(&in_flight, "archive.orna")
-        .is_some_and(|source| source.contains("= 42")));
+    assert!(
+        routed_module_source(&in_flight, "archive.orna")
+            .is_some_and(|source| source.contains("= 42"))
+    );
     assert!(matches!(
         in_flight.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
     let detached_clone = session.clone();
-    let replacement = PinnedDatabase::resolve(
-        "archive",
-        history_repository.clone(),
-        &moved_head,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("archive", history_repository.clone(), &moved_head, loader)
+            .unwrap();
     session.attach_database(replacement).unwrap();
     assert_eq!(
         session.database("archive").unwrap().pin().commit().as_str(),
@@ -274,8 +267,10 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
-    assert!(routed_module_source(&session, "archive.orna")
-        .is_some_and(|source| source.contains("= 99")));
+    assert!(
+        routed_module_source(&session, "archive.orna")
+            .is_some_and(|source| source.contains("= 99"))
+    );
     assert_eq!(
         in_flight
             .database("archive")
@@ -310,8 +305,10 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
-    assert!(routed_module_source(&session, "archive.orna")
-        .is_some_and(|source| source.contains("= 88")));
+    assert!(
+        routed_module_source(&session, "archive.orna")
+            .is_some_and(|source| source.contains("= 88"))
+    );
     assert_eq!(
         intermediate_clone
             .database("archive")
@@ -325,8 +322,10 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         intermediate_clone.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
-    assert!(routed_module_source(&intermediate_clone, "archive.orna")
-        .is_some_and(|source| source.contains("= 99")));
+    assert!(
+        routed_module_source(&intermediate_clone, "archive.orna")
+            .is_some_and(|source| source.contains("= 99"))
+    );
     in_flight.detach_database("archive").unwrap();
     assert!(matches!(
         in_flight.validate_write_target("archive"),
@@ -341,10 +340,15 @@ fn attached_history_reads_its_exact_commit_without_changing_repository_state() {
         session.validate_write_target("archive"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
     ));
-    assert!(routed_module_source(&session, "archive.orna")
-        .is_some_and(|source| source.contains("= 88")));
+    assert!(
+        routed_module_source(&session, "archive.orna")
+            .is_some_and(|source| source.contains("= 88"))
+    );
     assert_eq!(git(history_dir.path(), &["rev-parse", "HEAD"]), head_before);
-    assert_eq!(git(history_dir.path(), &["status", "--porcelain"]), status_before);
+    assert_eq!(
+        git(history_dir.path(), &["status", "--porcelain"]),
+        status_before
+    );
     assert_eq!(
         fs::read_to_string(history_dir.path().join("main.orna")).unwrap(),
         worktree_source
@@ -387,8 +391,8 @@ fn cloned_sessions_route_relation_rows_to_their_own_pinned_snapshot() {
         &include_str!("fixtures/attach-routing-package-row.orna").replace("42", "99"),
     );
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let archive = PinnedDatabase::resolve(
         "archive",
         archive_repository.clone(),
@@ -453,20 +457,24 @@ fn cloned_sessions_route_relation_rows_to_their_own_pinned_snapshot() {
         .unwrap();
     assert_eq!(old_archive.commit().as_str(), archive_commit);
     assert!(old_archive.row().source().contains("value: 42"));
-    assert!(detached_clone
-        .relation_sources("contacts/Contact")
-        .iter()
-        .all(|source| source.database() == "app"));
+    assert!(
+        detached_clone
+            .relation_sources("contacts/Contact")
+            .iter()
+            .all(|source| source.database() == "app")
+    );
     assert!(matches!(
         detached_clone.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
     ));
 
     old_clone.detach_database("archive").unwrap();
-    assert!(old_clone
-        .relation_sources("contacts/Contact")
-        .iter()
-        .all(|source| source.database() == "app"));
+    assert!(
+        old_clone
+            .relation_sources("contacts/Contact")
+            .iter()
+            .all(|source| source.database() == "app")
+    );
     assert!(matches!(
         old_clone.validate_write_target("archive"),
         Err(AttachmentError::DatabaseUnavailable)
@@ -540,8 +548,8 @@ fn detaching_one_relation_alias_preserves_other_routes_in_each_clone() {
     ]);
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let archive = PinnedDatabase::resolve(
         "archive",
         archive_repository.clone(),
@@ -672,8 +680,8 @@ fn prefix_overlapping_aliases_keep_same_repository_pins_isolated() {
     );
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let archive = PinnedDatabase::resolve(
         "archive",
         archive_repository.clone(),
@@ -729,13 +737,9 @@ fn prefix_overlapping_aliases_keep_same_repository_pins_isolated() {
         Err(AttachmentError::DatabaseUnavailable)
     ));
 
-    let replacement = PinnedDatabase::resolve(
-        "archive",
-        archive_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("archive", archive_repository, &replacement_commit, loader)
+            .unwrap();
     session.attach_database(replacement).unwrap();
     assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
     assert_relation_routes(
@@ -809,8 +813,8 @@ fn attached_alias_with_primary_prefix_stays_read_only_and_independent() {
     );
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let attached = PinnedDatabase::resolve(
         "app_copy",
         attached_repository.clone(),
@@ -862,13 +866,9 @@ fn attached_alias_with_primary_prefix_stays_read_only_and_independent() {
         Err(AttachmentError::DatabaseUnavailable)
     ));
 
-    let replacement = PinnedDatabase::resolve(
-        "app_copy",
-        attached_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("app_copy", attached_repository, &replacement_commit, loader)
+            .unwrap();
     session.attach_database(replacement).unwrap();
     assert_relation_routes(
         &session,
@@ -883,10 +883,12 @@ fn attached_alias_with_primary_prefix_stays_read_only_and_independent() {
         &[("contacts/Contact/1.orna", "value: 42")],
     );
     assert!(detached_clone.database("app_copy").is_none());
-    assert!(detached_clone
-        .relation_sources("contacts/Contact")
-        .iter()
-        .all(|source| source.database() == "app"));
+    assert!(
+        detached_clone
+            .relation_sources("contacts/Contact")
+            .iter()
+            .all(|source| source.database() == "app")
+    );
     assert!(matches!(
         session.validate_write_target("app_copy"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
@@ -930,20 +932,11 @@ fn attached_alias_prefix_of_primary_stays_read_only_and_independent() {
     );
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve(
-        "app_copy",
-        primary_repository,
-        &primary_commit,
-        loader,
-    )
-    .unwrap();
-    let attached = PinnedDatabase::resolve(
-        "app",
-        attached_repository.clone(),
-        &attached_commit,
-        loader,
-    )
-    .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app_copy", primary_repository, &primary_commit, loader).unwrap();
+    let attached =
+        PinnedDatabase::resolve("app", attached_repository.clone(), &attached_commit, loader)
+            .unwrap();
     let mut session = AttachedDatabaseSession::new(primary).unwrap();
     session.attach_database(attached).unwrap();
     assert_eq!(session.relation_sources("contacts/Contact").len(), 2);
@@ -988,13 +981,8 @@ fn attached_alias_prefix_of_primary_stays_read_only_and_independent() {
         Err(AttachmentError::DatabaseUnavailable)
     ));
 
-    let replacement = PinnedDatabase::resolve(
-        "app",
-        attached_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("app", attached_repository, &replacement_commit, loader).unwrap();
     session.attach_database(replacement).unwrap();
     assert_relation_routes(
         &session,
@@ -1015,10 +1003,12 @@ fn attached_alias_prefix_of_primary_stays_read_only_and_independent() {
         &[("contacts/Contact/1.orna", "value: 42")],
     );
     assert!(detached_clone.database("app").is_none());
-    assert!(detached_clone
-        .relation_sources("contacts/Contact")
-        .iter()
-        .all(|source| source.database() == "app_copy"));
+    assert!(
+        detached_clone
+            .relation_sources("contacts/Contact")
+            .iter()
+            .all(|source| source.database() == "app_copy")
+    );
     assert!(matches!(
         session.validate_write_target("app"),
         Err(AttachmentError::AttachedSnapshotReadOnly)
@@ -1077,8 +1067,8 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
     );
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let shorter_alias = PinnedDatabase::resolve(
         "app_copy",
         package_repository.clone(),
@@ -1166,13 +1156,9 @@ fn chained_primary_prefix_aliases_detach_only_the_exact_route() {
     ));
     let detached_clone = session.clone();
 
-    let replacement = PinnedDatabase::resolve(
-        "app_copy",
-        package_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("app_copy", package_repository, &replacement_commit, loader)
+            .unwrap();
     session.attach_database(replacement).unwrap();
     assert_relation_routes(
         &session,
@@ -1289,8 +1275,8 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
     );
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader)
-        .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let main_alias = PinnedDatabase::resolve(
         "main",
         attached_repository.clone(),
@@ -1367,13 +1353,8 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
     assert!(routed_module_source(&session, "main/main.orna").is_none());
     assert_routed_module_source(&session, "main_archive.orna", "= 43");
 
-    let replacement = PinnedDatabase::resolve(
-        "main",
-        attached_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("main", attached_repository, &replacement_commit, loader).unwrap();
     session.attach_database(replacement).unwrap();
     assert_eq!(session.relation_sources("contacts/Contact").len(), 3);
     assert_relation_routes(
@@ -1436,16 +1417,11 @@ fn attached_main_alias_has_a_distinct_prefix_chain_module_namespace() {
 
 #[test]
 fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
-    let (_valid_dir, _valid_repository, valid_commit) = repository(&[(
-        "main.orna",
-        include_str!("fixtures/attach-package.orna"),
-    )]);
+    let (_valid_dir, _valid_repository, valid_commit) =
+        repository(&[("main.orna", include_str!("fixtures/attach-package.orna"))]);
     let manifest = format!("widgets {valid_commit}\n");
     let (_primary_dir, primary_repository, primary_commit) = repository(&[
-        (
-            "main.orna",
-            include_str!("fixtures/attach-primary.orna"),
-        ),
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
         (PACKAGE_PIN_MANIFEST_PATH, &manifest),
     ]);
     let primary = PinnedDatabase::resolve(
@@ -1465,7 +1441,10 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
         .resolve_for_parent(primary.clone())
         .unwrap_err();
     assert!(matches!(error, AttachmentError::RepositoryUnavailable));
-    assert_eq!(error.to_string(), "pinned package repository is unavailable");
+    assert_eq!(
+        error.to_string(),
+        "pinned package repository is unavailable"
+    );
 
     let (_wrong_dir, wrong_repository, _) = repository(&[(
         "main.orna",
@@ -1485,10 +1464,7 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
     let invalid_repository_path = invalid_dir.path().to_string_lossy().into_owned();
     let invalid_manifest = format!("broken {invalid_commit}\n");
     let (_invalid_parent_dir, invalid_parent_repository, invalid_parent_commit) = repository(&[
-        (
-            "main.orna",
-            include_str!("fixtures/attach-primary.orna"),
-        ),
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
         (PACKAGE_PIN_MANIFEST_PATH, &invalid_manifest),
     ]);
     let invalid_parent = PinnedDatabase::resolve(
@@ -1517,17 +1493,12 @@ fn package_pin_failures_are_redacted_and_fail_before_a_session_is_returned() {
 
 #[test]
 fn failed_later_pin_does_not_return_a_partial_writable_session() {
-    let (package_dir, package_repository, package_commit) = repository(&[(
-        "main.orna",
-        include_str!("fixtures/attach-package.orna"),
-    )]);
+    let (package_dir, package_repository, package_commit) =
+        repository(&[("main.orna", include_str!("fixtures/attach-package.orna"))]);
     let missing_commit = "a".repeat(40);
     let manifest = format!("widgets {package_commit}\nmissing {missing_commit}\n");
     let (primary_dir, primary_repository, primary_commit) = repository(&[
-        (
-            "main.orna",
-            include_str!("fixtures/attach-primary.orna"),
-        ),
+        ("main.orna", include_str!("fixtures/attach-primary.orna")),
         (PACKAGE_PIN_MANIFEST_PATH, &manifest),
     ]);
     let parent_head_before = git(primary_dir.path(), &["rev-parse", "HEAD"]);
@@ -1536,16 +1507,10 @@ fn failed_later_pin_does_not_return_a_partial_writable_session() {
     let package_status_before = git(package_dir.path(), &["status", "--porcelain"]);
 
     let loader = ProjectLoader::default();
-    let primary = PinnedDatabase::resolve(
-        "app",
-        primary_repository,
-        &primary_commit,
-        loader,
-    )
-    .unwrap();
+    let primary =
+        PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
     let resolver =
-        PackageResolver::new([("widgets".to_owned(), package_repository.clone())], loader)
-            .unwrap();
+        PackageResolver::new([("widgets".to_owned(), package_repository.clone())], loader).unwrap();
     let error = resolver.resolve_for_parent(primary).unwrap_err();
 
     assert!(matches!(error, AttachmentError::RepositoryUnavailable));

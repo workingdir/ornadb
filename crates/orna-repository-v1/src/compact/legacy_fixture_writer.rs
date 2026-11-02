@@ -3,11 +3,11 @@
 //! Compiled only under `cfg(test)` or the `legacy-fixture-writer` feature.
 //! Production builds never contain these helpers (ORNA-UPGRADE-003).
 
+use parquet::basic::PageType;
 use parquet::file::{
     metadata::ParquetMetaDataWriter,
     reader::{FileReader, SerializedFileReader},
 };
-use parquet::basic::PageType;
 pub(crate) fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
     let reader = SerializedFileReader::new(bytes::Bytes::from(bytes.clone())).unwrap();
     let metadata = reader.metadata().clone();

@@ -66,7 +66,11 @@ fn consumer_effects(source: &str, function: &str) -> (bool, Vec<String>, Vec<Str
     let (summary, diagnostics) = consumer_summary(source, function);
     (
         summary.may_fail,
-        summary.effects.iter().map(|kind| kind.as_str().to_owned()).collect(),
+        summary
+            .effects
+            .iter()
+            .map(|kind| kind.as_str().to_owned())
+            .collect(),
         diagnostics,
     )
 }
@@ -128,8 +132,10 @@ fn std_wrapper_calling_std_net_propagates_network_through_module_alias() {
 
 #[test]
 fn std_wrapper_calling_sys_random_propagates_randomness() {
-    let (may_fail, effects, diagnostics) =
-        consumer_effects("use std.wrap_dice.{coin};\npub fn flip(): Int = coin();\n", "flip");
+    let (may_fail, effects, diagnostics) = consumer_effects(
+        "use std.wrap_dice.{coin};\npub fn flip(): Int = coin();\n",
+        "flip",
+    );
 
     assert!(
         may_fail,
@@ -177,7 +183,9 @@ fn method_call_on_user_impl_with_host_body_is_rejected() {
     );
 
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
         "diagnostics: {diagnostics:?}"
     );
 }
@@ -194,7 +202,9 @@ fn generic_protocol_method_dispatch_is_rejected() {
     );
 
     assert!(
-        diagnostics.iter().any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.starts_with("ORNA-S021-TYPE")),
         "diagnostics: {diagnostics:?}"
     );
 }

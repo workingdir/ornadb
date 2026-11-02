@@ -51,9 +51,7 @@ fn schema(value: &Value) -> Schema {
         tables: vec![Table {
             id: id(&table["id"]),
             name: table["name"].as_str().expect("table name").to_owned(),
-            explicit_key: table["explicit_key"]
-                .as_bool()
-                .expect("explicit-key flag"),
+            explicit_key: table["explicit_key"].as_bool().expect("explicit-key flag"),
             fields,
         }],
     }

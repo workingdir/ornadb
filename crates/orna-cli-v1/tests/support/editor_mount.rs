@@ -205,12 +205,21 @@ pub fn spawn_snapshot_mount_process(
     selector: &str,
 ) -> MountedProcess {
     std::fs::create_dir(mountpoint).unwrap();
-    wait_for_mount(spawn_mount_with(repository_path, mountpoint, &["--at", selector]))
+    wait_for_mount(spawn_mount_with(
+        repository_path,
+        mountpoint,
+        &["--at", selector],
+    ))
 }
 
 fn spawn_mount_with(repository_path: &Path, mountpoint: &Path, mode: &[&str]) -> MountedProcess {
     let mut child = Command::new(env!("CARGO_BIN_EXE_orna"))
-        .args(["--db", repository_path.to_str().unwrap(), "mount", mountpoint.to_str().unwrap()])
+        .args([
+            "--db",
+            repository_path.to_str().unwrap(),
+            "mount",
+            mountpoint.to_str().unwrap(),
+        ])
         .args(mode)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -390,9 +399,7 @@ pub async fn liveforeign_writer(repository: &Repository) -> RuntimeState {
 
 /// Creates a repository whose `Music` table has one committed row for each
 /// `(key, document)` pair.
-pub async fn repository_with_music_rows(
-    rows: &[(&str, &str)],
-) -> (TempDir, Repository, [u8; 16]) {
+pub async fn repository_with_music_rows(rows: &[(&str, &str)]) -> (TempDir, Repository, [u8; 16]) {
     repository_with_music_rows_and_modules(MUSIC_SOURCE, &[], rows).await
 }
 
@@ -461,8 +468,9 @@ pub fn retained_draft_records(repository: &Repository) -> Vec<(String, String)> 
                     .expect("a retained record has a file name")
                     .to_string_lossy()
                     .into_owned();
-                let bytes = String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
-                    .into_owned();
+                let bytes =
+                    String::from_utf8_lossy(&std::fs::read(&path).expect("read retained draft"))
+                        .into_owned();
                 (id, bytes)
             })
             .collect(),
@@ -628,7 +636,10 @@ pub async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &st
         if value == expected {
             return;
         }
-        assert!(tokio::time::Instant::now() < deadline, "{context}: guard is {value}, expected {expected} after 5s");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{context}: guard is {value}, expected {expected} after 5s"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }

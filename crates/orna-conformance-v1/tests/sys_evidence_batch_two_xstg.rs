@@ -1,42 +1,31 @@
 use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys_v1::{
-    AdmissionError, AdmissionRequest, Argument, ArgumentMap, ExecutionBoundary,
-    FunctionDescriptor, FunctionId, FunctionIdentity, InvocationContext, InvocationExecutor,
-    InvocationMode, InvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId,
-    TransactionMode, TypeId, TypeWitness, TypedValue,
+    AdmissionError, AdmissionRequest, Argument, ArgumentMap, ExecutionBoundary, FunctionDescriptor,
+    FunctionId, FunctionIdentity, InvocationContext, InvocationExecutor, InvocationMode,
+    InvocationResult, RevisionId, RuntimeId, RuntimeSupervisor, SnapshotId, TransactionMode,
+    TypeId, TypeWitness, TypedValue,
 };
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
 
-const SYSTEM_REFERENCE: &str =
-    include_str!("fixtures/reference/source/15-system.md");
-const RESERVED_SYS: &str =
-    include_str!("fixtures/reference/examples/invalid/reserved-sys.orna");
-const LEGACY_SYS_RUNTIME: &str = include_str!(
-    "fixtures/reference/examples/invalid/legacy-sys-runtime.orna"
-);
-const LEGACY_SYS_STORAGE_CALL: &str = include_str!(
-    "fixtures/reference/examples/invalid/legacy-sys-storage-call.orna"
-);
+const SYSTEM_REFERENCE: &str = include_str!("fixtures/reference/source/15-system.md");
+const RESERVED_SYS: &str = include_str!("fixtures/reference/examples/invalid/reserved-sys.orna");
+const LEGACY_SYS_RUNTIME: &str =
+    include_str!("fixtures/reference/examples/invalid/legacy-sys-runtime.orna");
+const LEGACY_SYS_STORAGE_CALL: &str =
+    include_str!("fixtures/reference/examples/invalid/legacy-sys-storage-call.orna");
 const MUTATE_SYS_COMMIT: &str =
     include_str!("fixtures/reference/examples/invalid/mutate-sys-commit.orna");
-const TYPED_INVOKE_VALID: &str =
-    include_str!("fixtures/typed-invoke-valid.orna");
-const TYPED_INVOKE_MISMATCH: &str =
-    include_str!("fixtures/typed-invoke-mismatch.orna");
-const ERASED_INVOKE_MISSING_WITNESS: &str = include_str!(
-    "fixtures/erased-invoke-missing-witness.orna"
-);
-const TYPED_START_VALID: &str =
-    include_str!("fixtures/typed-start-valid.orna");
-const TYPED_START_MISMATCH: &str =
-    include_str!("fixtures/typed-start-mismatch.orna");
-const ERASED_START_VALID: &str =
-    include_str!("fixtures/erased-start-valid.orna");
-const ERASED_INVOKE_VALID: &str =
-    include_str!("fixtures/erased-invoke-valid.orna");
+const TYPED_INVOKE_VALID: &str = include_str!("fixtures/typed-invoke-valid.orna");
+const TYPED_INVOKE_MISMATCH: &str = include_str!("fixtures/typed-invoke-mismatch.orna");
+const ERASED_INVOKE_MISSING_WITNESS: &str =
+    include_str!("fixtures/erased-invoke-missing-witness.orna");
+const TYPED_START_VALID: &str = include_str!("fixtures/typed-start-valid.orna");
+const TYPED_START_MISMATCH: &str = include_str!("fixtures/typed-start-mismatch.orna");
+const ERASED_START_VALID: &str = include_str!("fixtures/erased-start-valid.orna");
+const ERASED_INVOKE_VALID: &str = include_str!("fixtures/erased-invoke-valid.orna");
 
 #[derive(Clone, Copy)]
 enum Expected {
@@ -202,7 +191,9 @@ fn ten_sys_gap_rows_have_fixture_backed_semantic_boundary_evidence() {
         let observed = match row.expected {
             Expected::Accepted => "typecheck=Passed",
             Expected::Rejected => "expected-negative-test=Passed; typecheck=Failed-as-specified",
-            Expected::Diagnostic(_) => "expected-diagnostic-test=Passed; resolve=Failed-as-specified",
+            Expected::Diagnostic(_) => {
+                "expected-diagnostic-test=Passed; resolve=Failed-as-specified"
+            }
         };
         println!(
             "{} source/15-system.md:{} Specified=Yes Exists=Yes Passed=Yes boundary={} fixture={} observed={}; full_requirement=Partial",
@@ -238,7 +229,11 @@ fn ten_sys_gap_rows_have_fixture_backed_semantic_boundary_evidence() {
         assert_eq!(analyze(source).is_ok(), expected, "{fixture}");
         println!(
             "ORNA-SYS-140 source/15-system.md:371 Specified=Yes Exists=Yes Passed=Yes boundary=typecheck fixture={fixture} observed={}; full_requirement=Partial",
-            if expected { "Passed" } else { "expected-failure" }
+            if expected {
+                "Passed"
+            } else {
+                "expected-failure"
+            }
         );
     }
 }
@@ -256,7 +251,10 @@ fn argument_map_contract_is_type_preserving_and_canonical() {
     ])
     .expect("distinct names form an argument map");
     let entries = arguments.entries().collect::<Vec<_>>();
-    assert_eq!(entries.iter().map(|(name, _)| *name).collect::<Vec<_>>(), ["alpha", "zeta"]);
+    assert_eq!(
+        entries.iter().map(|(name, _)| *name).collect::<Vec<_>>(),
+        ["alpha", "zeta"]
+    );
     assert_eq!(entries[0].1.static_type(), &TypeId::new("Str"));
     assert_eq!(entries[1].1.static_type(), &TypeId::new("Int"));
     assert!(matches!(
@@ -318,7 +316,10 @@ fn result_witness_mismatch_fails_before_executor_effects() {
     let invoke_calls = Arc::new(AtomicUsize::new(0));
     let mut invoke = CountingExecutor(Arc::clone(&invoke_calls));
     assert_eq!(
-        supervisor.run(incompatible_typed_request(InvocationMode::Invoke), &mut invoke),
+        supervisor.run(
+            incompatible_typed_request(InvocationMode::Invoke),
+            &mut invoke
+        ),
         Err(AdmissionError::ReturnType)
     );
     assert_eq!(invoke_calls.load(Ordering::SeqCst), 0);

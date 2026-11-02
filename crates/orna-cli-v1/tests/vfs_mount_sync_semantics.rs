@@ -63,12 +63,18 @@ fn fresh_view(fixture: &EditorMount) -> String {
 
 fn assert_view_contains(fixture: &EditorMount, needle: &str) {
     let view = fresh_view(fixture);
-    assert!(view.contains(needle), "accepted view lacks {needle:?}: {view:?}");
+    assert!(
+        view.contains(needle),
+        "accepted view lacks {needle:?}: {view:?}"
+    );
 }
 
 fn assert_view_lacks(fixture: &EditorMount, needle: &str) {
     let view = fresh_view(fixture);
-    assert!(!view.contains(needle), "accepted view contains {needle:?}: {view:?}");
+    assert!(
+        !view.contains(needle),
+        "accepted view contains {needle:?}: {view:?}"
+    );
 }
 
 fn assert_errno(result: std::io::Result<()>, expected: i32, context: &str) {
@@ -101,7 +107,10 @@ async fn await_draft_guard(fixture: &EditorMount, expected: u8, context: &str) {
         if value == expected {
             return;
         }
-        assert!(tokio::time::Instant::now() < deadline, "{context}: guard is {value}, expected {expected} after 5s");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{context}: guard is {value}, expected {expected} after 5s"
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
@@ -212,7 +221,11 @@ async fn rejected_sync_retains_recoverable_draft_listed_by_id() {
     let candidate = invalid_row("Diagnosed draft");
     let mut file = open_rw(&fixture);
     replace_draft(&mut file, &candidate);
-    assert_errno(file.sync_all(), EINVAL, "invalid draft fsync must fail with EINVAL");
+    assert_errno(
+        file.sync_all(),
+        EINVAL,
+        "invalid draft fsync must fail with EINVAL",
+    );
     await_draft_guard(&fixture, b'1', "the rejected draft holds the draft guard").await;
     assert_view_lacks(&fixture, "Diagnosed draft");
     let fields = unresolved_draft_fields(&fixture);
@@ -224,18 +237,38 @@ async fn rejected_sync_retains_recoverable_draft_listed_by_id() {
     let mut columns = line.split('\t').skip(2);
     let draft_id = columns.next().unwrap_or_default();
     let detail = columns.next().unwrap_or_default();
-    assert!(!draft_id.is_empty() && draft_id != "-", "a retained draft id is listed: {line:?}");
-    assert!(!detail.trim().is_empty(), "the diagnostic is listed: {line:?}");
+    assert!(
+        !draft_id.is_empty() && draft_id != "-",
+        "a retained draft id is listed: {line:?}"
+    );
+    assert!(
+        !detail.trim().is_empty(),
+        "the diagnostic is listed: {line:?}"
+    );
 
     let records = retained_draft_records(&fixture.repository);
     let record = records
         .iter()
         .find(|(id, _)| id == draft_id)
-        .unwrap_or_else(|| panic!("the listed id {draft_id:?} names a retained record: {records:?}"));
-    let (header, body) = record.1.split_once("\n\n").unwrap_or_else(|| panic!("the record has a header: {:?}", record.1));
-    assert!(header.contains(&format!("draft {draft_id}\n")), "the record header names the listed id: {header:?}");
-    assert!(header.contains("cause sys.vfs.invalid_document\n"), "the record header names the cause: {header:?}");
-    assert_eq!(body, candidate, "the retained record body holds the exact rejected candidate bytes");
+        .unwrap_or_else(|| {
+            panic!("the listed id {draft_id:?} names a retained record: {records:?}")
+        });
+    let (header, body) = record
+        .1
+        .split_once("\n\n")
+        .unwrap_or_else(|| panic!("the record has a header: {:?}", record.1));
+    assert!(
+        header.contains(&format!("draft {draft_id}\n")),
+        "the record header names the listed id: {header:?}"
+    );
+    assert!(
+        header.contains("cause sys.vfs.invalid_document\n"),
+        "the record header names the cause: {header:?}"
+    );
+    assert_eq!(
+        body, candidate,
+        "the retained record body holds the exact rejected candidate bytes"
+    );
 }
 
 /// ORNA-VFS-008: fdatasync acknowledges and rejects with the same contract as fsync.
@@ -446,7 +479,10 @@ async fn stale_refusal_resolved_by_later_peer_accept_leaves_guard_clear_on_drop(
     }
     drop(winner);
     let stale_sync = stale.sync_all();
-    assert!(stale_sync.is_err(), "a stale fsync is refused: {stale_sync:?}");
+    assert!(
+        stale_sync.is_err(),
+        "a stale fsync is refused: {stale_sync:?}"
+    );
     await_draft_guard(
         &fixture,
         b'1',
@@ -614,7 +650,8 @@ async fn close_after_rejected_sync_leaves_the_durable_row_unchanged() {
 /// (EDIT-1 step 5). A literal `fork(2)` cannot be called here because the
 /// crate forbids `unsafe_code`; this gap is recorded on the Gate E bead.
 #[tokio::test]
-async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_is_flushed_on_close() {
+async fn inherited_handle_child_write_is_acknowledged_and_parent_unsynced_write_is_flushed_on_close()
+ {
     if !require_fuse_or_skip() {
         return;
     }
@@ -711,8 +748,13 @@ async fn child_write_through_inherited_handle_does_not_take_close_ownership() {
         .env("ORNA_CHILD_DOCUMENT", &child_document)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(shared));
-    let status = command.status().expect("run child writing through the inherited handle");
-    assert!(status.success(), "child write through the inherited handle must succeed");
+    let status = command
+        .status()
+        .expect("run child writing through the inherited handle");
+    assert!(
+        status.success(),
+        "child write through the inherited handle must succeed"
+    );
     assert_eq!(
         fresh_view(&fixture),
         before,
@@ -1099,9 +1141,16 @@ async fn path_truncate_while_writer_open_cuts_the_accepted_candidate() {
     let mut file = open_rw(&fixture);
     let kept = row("Truncated before accept");
     replace_draft(&mut file, &format!("{kept}{}", row("discarded tail")));
-    assert_eq!(draft_guard(&fixture), b'1', "a write is pending draft state");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'1',
+        "a write is pending draft state"
+    );
     let truncated = std::process::Command::new("python3")
-        .args(["-c", "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))"])
+        .args([
+            "-c",
+            "import os, sys; os.truncate(sys.argv[1], int(sys.argv[2]))",
+        ])
         .arg(&fixture.data_path)
         .arg(kept.len().to_string())
         .output()
@@ -1134,8 +1183,13 @@ async fn write_then_fsync_accepts_candidate_and_clears_dirty_state() {
     let fixture = start_editor_mount(false).await;
     let mut file = open_rw(&fixture);
     replace_draft(&mut file, &row("Write then sync"));
-    assert_eq!(draft_guard(&fixture), b'1', "a write is pending draft state");
-    file.sync_all().expect("fsync of a written candidate is acknowledged");
+    assert_eq!(
+        draft_guard(&fixture),
+        b'1',
+        "a write is pending draft state"
+    );
+    file.sync_all()
+        .expect("fsync of a written candidate is acknowledged");
     assert_view_contains(&fixture, "Write then sync");
     assert_eq!(
         draft_guard(&fixture),
@@ -1165,7 +1219,11 @@ async fn identical_bytes_write_then_fsync_is_ok_and_clean() {
         b'0',
         "an identical-bytes rewrite leaves the handle clean",
     );
-    assert_eq!(fresh_view(&fixture), accepted, "accepted bytes are unchanged");
+    assert_eq!(
+        fresh_view(&fixture),
+        accepted,
+        "accepted bytes are unchanged"
+    );
 }
 
 /// EDIT-1 step 2: `O_TRUNC` with no write submits an empty candidate. That
@@ -1222,5 +1280,9 @@ async fn failed_write_then_fsync_is_ok_and_not_dirty() {
     );
     file.sync_all()
         .expect("fsync after a refused write is acknowledged");
-    assert_eq!(fresh_view(&fixture), accepted, "accepted state is unchanged");
+    assert_eq!(
+        fresh_view(&fixture),
+        accepted,
+        "accepted state is unchanged"
+    );
 }

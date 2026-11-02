@@ -5,9 +5,9 @@
 //! adapter traits below; secret storage is the explicit SOPS-backed exception.
 //! No request payload may select a provider or authority.
 
+use serde::Serialize;
 use std::collections::{BTreeSet, HashMap};
 use std::fmt;
-use serde::Serialize;
 use subtle::ConstantTimeEq;
 
 mod sops;
@@ -257,7 +257,9 @@ impl RemoteAnalysisRequest {
         Self {
             decision: match policy {
                 RemoteAnalysisPolicy::LocalOnly => RemoteAnalysisDecision::DeniedLocalOnly,
-                RemoteAnalysisPolicy::AllowRemoteDisclosure => RemoteAnalysisDecision::AllowedByUserPolicy,
+                RemoteAnalysisPolicy::AllowRemoteDisclosure => {
+                    RemoteAnalysisDecision::AllowedByUserPolicy
+                }
             },
             source_snapshot: source_snapshot.into(),
             disclosed_data: disclosed_data.into_iter().collect(),
@@ -265,13 +267,19 @@ impl RemoteAnalysisRequest {
     }
 
     #[must_use]
-    pub fn decision(&self) -> RemoteAnalysisDecision { self.decision }
+    pub fn decision(&self) -> RemoteAnalysisDecision {
+        self.decision
+    }
 
     #[must_use]
-    pub fn source_snapshot(&self) -> &str { &self.source_snapshot }
+    pub fn source_snapshot(&self) -> &str {
+        &self.source_snapshot
+    }
 
     #[must_use]
-    pub fn disclosed_data(&self) -> &[String] { &self.disclosed_data }
+    pub fn disclosed_data(&self) -> &[String] {
+        &self.disclosed_data
+    }
 
     #[must_use]
     pub fn is_allowed(&self) -> bool {
@@ -311,7 +319,10 @@ mod remote_analysis_tests {
         );
         assert!(!denied.is_allowed());
         assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
-        assert_eq!(denied.source_snapshot(), "git:source=abc;deps=def;resources=ghi;toolchain=jkl;abi=mno");
+        assert_eq!(
+            denied.source_snapshot(),
+            "git:source=abc;deps=def;resources=ghi;toolchain=jkl;abi=mno"
+        );
         assert!(denied.disclosed_data().is_empty());
 
         let allowed = RemoteAnalysisRequest::new(
@@ -320,8 +331,14 @@ mod remote_analysis_tests {
             ["source", "dependency-snapshot", "query"].map(str::to_owned),
         );
         assert!(allowed.is_allowed());
-        assert_eq!(allowed.decision(), RemoteAnalysisDecision::AllowedByUserPolicy);
-        assert_eq!(allowed.disclosed_data(), &["source", "dependency-snapshot", "query"]);
+        assert_eq!(
+            allowed.decision(),
+            RemoteAnalysisDecision::AllowedByUserPolicy
+        );
+        assert_eq!(
+            allowed.disclosed_data(),
+            &["source", "dependency-snapshot", "query"]
+        );
     }
 }
 
@@ -583,7 +600,10 @@ impl SessionBoundary {
         let record = self.sessions.get(&session).ok_or(BoundaryError::Denied)?;
         let unattached = matches!(
             &record.state,
-            State::Open { attachment: None, .. }
+            State::Open {
+                attachment: None,
+                ..
+            }
         );
         if unattached && now >= record.expires_at {
             return Err(BoundaryError::Expired);

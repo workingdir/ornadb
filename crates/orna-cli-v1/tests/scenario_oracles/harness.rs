@@ -269,9 +269,10 @@ fn fuse_unavailable() -> Option<String> {
 /// Runs one scenario in its own fresh database.
 pub fn run_entry(entry: &Entry) -> Verdict {
     if entry.requires_fuse
-        && let Some(reason) = fuse_unavailable() {
-            return Verdict::Unavailable(reason);
-        }
+        && let Some(reason) = fuse_unavailable()
+    {
+        return Verdict::Unavailable(reason);
+    }
     let mut db = match Db::init() {
         Ok(db) => db,
         Err(failure) => return Verdict::Fail(format!("orna init: {}", failure.reason())),
@@ -454,7 +455,10 @@ impl Run {
         if self.succeeded() {
             Ok(self)
         } else {
-            Err(Failure::Harness(format!("expected success: {}", self.describe())))
+            Err(Failure::Harness(format!(
+                "expected success: {}",
+                self.describe()
+            )))
         }
     }
 }
@@ -492,10 +496,11 @@ impl Db {
     }
 
     fn create(object_format: Option<&str>) -> Result<Db, Failure> {
-        let directory =
-            TempDir::new().map_err(|error| Failure::Harness(format!("temporary directory: {error}")))?;
+        let directory = TempDir::new()
+            .map_err(|error| Failure::Harness(format!("temporary directory: {error}")))?;
         let home = directory.path().join("home");
-        fs::create_dir(&home).map_err(|error| Failure::Harness(format!("home directory: {error}")))?;
+        fs::create_dir(&home)
+            .map_err(|error| Failure::Harness(format!("home directory: {error}")))?;
         let root = directory.path().join("db");
         let mut db = Db {
             root: root.clone(),
@@ -563,9 +568,11 @@ impl Db {
     pub fn write(&self, relative: &str, contents: impl AsRef<[u8]>) -> Result<(), Failure> {
         let path = self.root.join(relative);
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|error| Failure::Harness(format!("{relative}: {error}")))?;
+            fs::create_dir_all(parent)
+                .map_err(|error| Failure::Harness(format!("{relative}: {error}")))?;
         }
-        fs::write(&path, contents).map_err(|error| Failure::Harness(format!("write {relative}: {error}")))
+        fs::write(&path, contents)
+            .map_err(|error| Failure::Harness(format!("write {relative}: {error}")))
     }
 
     pub fn read(&self, relative: &str) -> Result<Vec<u8>, Failure> {
@@ -1078,13 +1085,17 @@ impl Server {
         let split = bytes
             .windows(4)
             .position(|window| window == b"\r\n\r\n")
-            .ok_or_else(|| Failure::Harness(format!("{method} {path}: response has no header end")))?;
+            .ok_or_else(|| {
+                Failure::Harness(format!("{method} {path}: response has no header end"))
+            })?;
         let head = String::from_utf8_lossy(&bytes[..split]).into_owned();
         let status = head
             .split_whitespace()
             .nth(1)
             .and_then(|code| code.parse().ok())
-            .ok_or_else(|| Failure::Harness(format!("{method} {path}: no status line in {head:?}")))?;
+            .ok_or_else(|| {
+                Failure::Harness(format!("{method} {path}: no status line in {head:?}"))
+            })?;
         Ok(Response {
             status,
             head,

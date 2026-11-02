@@ -9,37 +9,37 @@
 
 mod assertion_gate;
 mod checkout_assertion_gate;
+mod cli_annotate;
 mod cli_args;
+mod cli_checkout;
+mod cli_commit;
 mod cli_dispatch;
+mod cli_export;
 mod cli_help;
 mod cli_history;
-mod cli_query;
-mod cli_row_key;
-mod cli_export;
 mod cli_import;
 mod cli_mount;
-mod cli_stage;
-mod cli_checkout;
-#[cfg(target_os = "linux")]
-mod fuse_mount;
-mod cli_annotate;
 mod cli_publish;
-mod cli_commit;
-mod cli_status;
+mod cli_query;
+mod cli_row_key;
 mod cli_serve;
-mod media_range;
-mod repl;
-mod sys_host;
-mod table_schema;
+mod cli_stage;
+mod cli_status;
 #[cfg(test)]
 #[path = "../tests/support/format3.rs"]
 mod format3;
+#[cfg(target_os = "linux")]
+mod fuse_mount;
 #[cfg(test)]
 #[path = "../tests/support/media_commit.rs"]
 // The shared capture fixture loads `table_schema` from `src` itself, so the
 // binary's own copy and this one coexist during tests and never interact.
 #[allow(clippy::duplicate_mod)]
 mod media_commit;
+mod media_range;
+mod repl;
+mod sys_host;
+mod table_schema;
 
 use cli_args::{
     Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
@@ -54,8 +54,8 @@ use std::fmt;
 use std::io::{self, BufReader, IsTerminal, Write as _};
 use std::process::ExitCode;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use orna_application_v1::{
@@ -92,7 +92,6 @@ fn cli_request_nonce() -> u128 {
         ^ (u128::from(std::process::id()) << 16)
         ^ u128::from(CLI_REQUEST_NONCE.fetch_add(1, AtomicOrdering::Relaxed))
 }
-
 
 const SENSOR_SOURCE_IDENTITY: &str = "example:sensors:v1";
 
@@ -131,24 +130,17 @@ impl ColorMode {
     }
 }
 
-
-fn write_cli_line(
-    text: &[u8],
-    color: AnsiColor,
-    color_enabled: bool,
-) -> Result<(), Diagnostic> {
+fn write_cli_line(text: &[u8], color: AnsiColor, color_enabled: bool) -> Result<(), Diagnostic> {
     let mut stdout = io::stdout().lock();
     write_styled(&mut stdout, color, text, color_enabled)
         .and_then(|()| stdout.write_all(b"\n"))
-        .map_err(|_| {
-            Diagnostic {
-                code: "E2200",
-                title: Cow::Borrowed("CLI output could not be written"),
-                help: "check the output stream, then retry the command",
-                exit: Exit::Presentation,
-                detail: None,
-                body: None,
-            }
+        .map_err(|_| Diagnostic {
+            code: "E2200",
+            title: Cow::Borrowed("CLI output could not be written"),
+            help: "check the output stream, then retry the command",
+            exit: Exit::Presentation,
+            detail: None,
+            body: None,
         })
 }
 #[allow(
@@ -296,92 +288,79 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-S010-IMPORT" => DiagnosticDocumentation {
             code: "ORNA-S010-IMPORT",
             title: "imported module is unavailable",
-            explanation:
-                "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
+            explanation: "The project names a module that is not part of its captured dependencies, so the module cannot be checked or executed.",
             help: "use a captured standard dependency or remove the import",
         },
         "ORNA-S011-AMBIGUOUS" => DiagnosticDocumentation {
             code: "ORNA-S011-AMBIGUOUS",
             title: "standard import name is ambiguous",
-            explanation:
-                "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
+            explanation: "Two standard imports bind the same unqualified name to different functions, so the name cannot be resolved.",
             help: "import the functions under distinct names or use their qualified paths",
         },
         "ORNA-S012-UNRESOLVED" => DiagnosticDocumentation {
             code: "ORNA-S012-UNRESOLVED",
             title: "name could not be resolved",
-            explanation:
-                "The source refers to a name that is not declared or imported in the current namespace.",
+            explanation: "The source refers to a name that is not declared or imported in the current namespace.",
             help: "declare the name or add the matching `use` import before using it",
         },
         "ORNA-S021-TYPE" => DiagnosticDocumentation {
             code: "ORNA-S021-TYPE",
             title: "expression has the wrong type",
-            explanation:
-                "The value produced by an expression does not satisfy the type required at that source location.",
+            explanation: "The value produced by an expression does not satisfy the type required at that source location.",
             help: "change the expression or its declared type so the value and requirement agree",
         },
         "ORNA-REPL-EFFECT" => DiagnosticDocumentation {
             code: "ORNA-REPL-EFFECT",
             title: "REPL preview cannot perform an effect",
-            explanation:
-                "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
+            explanation: "Interactive previews are read-only and cannot perform network, filesystem, process, or other external effects.",
             help: "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
         },
         "ORNA-REPL-EFFECT-UNCERTAIN" => DiagnosticDocumentation {
             code: "ORNA-REPL-EFFECT-UNCERTAIN",
             title: "REPL effect outcome is uncertain",
-            explanation:
-                "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
+            explanation: "The input was evaluated before its request was durably committed, so external effects may already have happened. The outcome is uncertain and recovery is pending; the request is not replayed.",
             help: "check the external system for the effect before repeating the input, because repeating it may repeat an external effect",
         },
         "ORNA-REPL-AT" => DiagnosticDocumentation {
             code: "ORNA-REPL-AT",
             title: "snapshot selection failed",
-            explanation:
-                "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
+            explanation: "The requested CWD, HEAD, or reference snapshot could not be loaded as an admitted REPL context.",
             help: "choose an existing snapshot and keep the repository available while selecting it",
         },
         "ORNA091-E-RETURN-ARROW" => DiagnosticDocumentation {
             code: "ORNA091-E-RETURN-ARROW",
             title: "function return type uses the arrow form",
-            explanation:
-                "Orna function declarations separate the parameter list from the return type with a colon.",
+            explanation: "Orna function declarations separate the parameter list from the return type with a colon.",
             help: "replace `->` with `:` in the function declaration",
         },
         "ORNA091-E-VAR" => DiagnosticDocumentation {
             code: "ORNA091-E-VAR",
             title: "local declaration uses `var`",
-            explanation:
-                "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
+            explanation: "Orna uses `let` for local declarations; reassignment updates that binding when permitted.",
             help: "replace `var` with `let`",
         },
         "ORNA-A091-001" => DiagnosticDocumentation {
             code: "ORNA-A091-001",
             title: "refined type uses the legacy `where self` form",
-            explanation:
-                "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
+            explanation: "Refined Orna types state their invariant in a brace-delimited assertion block owned by the type.",
             help: "replace `where self` with a brace-delimited `assert` block",
         },
         "ORNA-A091-002" => DiagnosticDocumentation {
             code: "ORNA-A091-002",
             title: "table assertion repeats its owner",
-            explanation:
-                "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
+            explanation: "A table assertion is already evaluated for its owning table, so an explicit owner pipeline is redundant.",
             help: "remove the leading `self |` or table-name pipeline from the assertion",
         },
         "ORNA-A091-003" => DiagnosticDocumentation {
             code: "ORNA-A091-003",
             title: "module assertion belongs to one table",
-            explanation:
-                "An assertion that depends on only one table must live with that table so its owner is explicit.",
+            explanation: "An assertion that depends on only one table must live with that table so its owner is explicit.",
             help: "move the assertion into the table body it depends on",
         },
         "ORNA-A091-004" => DiagnosticDocumentation {
             code: "ORNA-A091-004",
             title: "assertion predicate has the wrong owner",
-            explanation:
-                "The declaration's predicate does not describe the type or table that owns the assertion.",
+            explanation: "The declaration's predicate does not describe the type or table that owns the assertion.",
             help: "rewrite the predicate for the reported owner type",
         },
         "ORNA-A091-005" => DiagnosticDocumentation {
@@ -393,29 +372,25 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-A091-006" => DiagnosticDocumentation {
             code: "ORNA-A091-006",
             title: "assertion uses a dedicated recovery branch",
-            explanation:
-                "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
+            explanation: "Assertions report failed propositions; they do not provide an assertion-specific `else` branch.",
             help: "use ordinary failure, recovery, or control flow instead",
         },
         "ORNA-A091-007" => DiagnosticDocumentation {
             code: "ORNA-A091-007",
             title: "assertion has a forbidden effect",
-            explanation:
-                "Declaration and refined assertions must be deterministic and cannot perform external effects.",
+            explanation: "Declaration and refined assertions must be deterministic and cannot perform external effects.",
             help: "remove the identified effect or nondeterministic operation",
         },
         "ORNA-A091-008" => DiagnosticDocumentation {
             code: "ORNA-A091-008",
             title: "assertion is false",
-            explanation:
-                "The executable or refined assertion does not hold for the value being checked.",
+            explanation: "The executable or refined assertion does not hold for the value being checked.",
             help: "inspect the owner and proposition, then provide a safe value",
         },
         "ORNA-A091-009" => DiagnosticDocumentation {
             code: "ORNA-A091-009",
             title: "table or cross-table assertion is false",
-            explanation:
-                "A table or cross-table invariant does not hold for the deterministic rows being checked.",
+            explanation: "A table or cross-table invariant does not hold for the deterministic rows being checked.",
             help: "inspect the reported witness and repair the affected table data",
         },
         "ORNA-A091-010" => DiagnosticDocumentation {
@@ -433,92 +408,79 @@ fn diagnostic_documentation(code: &str) -> Option<DiagnosticDocumentation> {
         "ORNA-A091-012" => DiagnosticDocumentation {
             code: "ORNA-A091-012",
             title: "module assertion has no table dependency",
-            explanation:
-                "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
+            explanation: "A module assertion is only valid when it depends on a table; otherwise it has no executable owner.",
             help: "place the check in executable or test code",
         },
         "ORNA091-E-MATCH" => DiagnosticDocumentation {
             code: "ORNA091-E-MATCH",
             title: "value branching uses the legacy `match` form",
-            explanation:
-                "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
+            explanation: "Orna branches on values with `case` and colon-separated arms rather than `match` and arrows.",
             help: "replace `match` with `case` and use `:` for each arm",
         },
         "ORNA091-E-RESULT" => DiagnosticDocumentation {
             code: "ORNA091-E-RESULT",
             title: "source uses an explicit `Result` value",
-            explanation:
-                "Orna returns the successful type directly and propagates failures automatically.",
+            explanation: "Orna returns the successful type directly and propagates failures automatically.",
             help: "return the successful type and use `|?` for recovery",
         },
         "ORNA091-E-POSTFIX-QUESTION" => DiagnosticDocumentation {
             code: "ORNA091-E-POSTFIX-QUESTION",
             title: "operation uses postfix failure propagation",
-            explanation:
-                "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
+            explanation: "Orna propagates operation failures automatically instead of using a postfix `?` operator.",
             help: "remove the postfix `?` and use `|?` only for recovery",
         },
         "ORNA091-E-CURRENCY" => DiagnosticDocumentation {
             code: "ORNA091-E-CURRENCY",
             title: "source uses a special currency declaration",
-            explanation:
-                "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
+            explanation: "Currencies are nominal types with a nested `Currency` implementation, not a separate declaration form.",
             help: "replace the currency declaration with a nominal type and nested `impl Currency`",
         },
         "ORNA091-E-CURRENCY-SYMBOL" => DiagnosticDocumentation {
             code: "ORNA091-E-CURRENCY-SYMBOL",
             title: "currency declares a universal symbol",
-            explanation:
-                "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
+            explanation: "Currency symbols and placement depend on locale formatter data rather than a universal static field.",
             help: "move symbol and placement choices to the locale-aware money formatter",
         },
         "ORNA091-E-IMPL-FOR" => DiagnosticDocumentation {
             code: "ORNA091-E-IMPL-FOR",
             title: "protocol implementation uses the legacy top-level form",
-            explanation:
-                "Orna protocol implementations are nested inside the type that owns them.",
+            explanation: "Orna protocol implementations are nested inside the type that owns them.",
             help: "nest `impl P` inside the owning type instead of writing `impl P for T`",
         },
         "ORNA091-E-BOUND-COLON" => DiagnosticDocumentation {
             code: "ORNA091-E-BOUND-COLON",
             title: "generic bound uses the legacy colon form",
-            explanation:
-                "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
+            explanation: "Generic protocol bounds use the `impl` keyword in Orna type parameters.",
             help: "replace `<T: P>` with `<T impl P>`",
         },
         "ORNA091-E-STATIC-FN" => DiagnosticDocumentation {
             code: "ORNA091-E-STATIC-FN",
             title: "protocol declares a static function",
-            explanation:
-                "Protocols expose static properties or ordinary functions rather than static function declarations.",
+            explanation: "Protocols expose static properties or ordinary functions rather than static function declarations.",
             help: "use a static property or an ordinary function",
         },
         "ORNA091-E-TRYFROM" => DiagnosticDocumentation {
             code: "ORNA091-E-TRYFROM",
             title: "source uses `TryFrom`",
-            explanation:
-                "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
+            explanation: "Orna's `From<S>` conversion may fail without wrapping the successful value in a separate result type.",
             help: "use `From<S>` for a conversion that may fail",
         },
         "ORNA091-E-CONVERSION-CHAIN" => DiagnosticDocumentation {
             code: "ORNA091-E-CONVERSION-CHAIN",
             title: "conversion chain is implicit",
-            explanation:
-                "Orna does not search for unspoken multi-step conversions between types.",
+            explanation: "Orna does not search for unspoken multi-step conversions between types.",
             help: "name each conversion step explicitly",
         },
         "ORNA091-E-OPAQUE" => DiagnosticDocumentation {
             code: "ORNA091-E-OPAQUE",
             title: "source uses an opaque type declaration",
-            explanation:
-                "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
+            explanation: "Orna uses one nominal or refined `type` form instead of a separate opaque declaration.",
             help: "replace `opaque Name` with the unified nominal or refined `type` form",
         },
         "ORNA091-E-FIELD-CONSTRAINT" => DiagnosticDocumentation {
             code: "ORNA091-E-FIELD-CONSTRAINT",
             title: "field declares a legacy constraint",
-            explanation:
-                "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
+            explanation: "Field uniqueness and checks are table assertions owned by the table, not field suffixes.",
             help: "write an owner-local table assertion using `all_unique` or `every`",
         },
         _ => return None,
@@ -538,7 +500,6 @@ fn explain_diagnostic(code: &str) -> Result<String, Diagnostic> {
         documentation.code, documentation.title, documentation.explanation, documentation.help
     ))
 }
-
 
 fn cancellation_diagnostic(diagnostic: &orna_foundation_v1::Diagnostic) -> Diagnostic {
     let code = match diagnostic.code() {
@@ -613,7 +574,6 @@ fn write_diagnostic<W: io::Write>(
 fn write_success_line(message: &str, color_enabled: bool) -> Result<(), Diagnostic> {
     write_cli_line(message.as_bytes(), AnsiColor::Green, color_enabled)
 }
-
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Endpoint {
@@ -1036,15 +996,13 @@ fn run_status(endpoint: &Endpoint) -> Result<(), Diagnostic> {
             "check that Git can read the local worktree, then retry `status --porcelain`",
         ));
     }
-    io::stdout()
-        .write_all(&output.stdout)
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be written",
-                "retry `status --porcelain`",
-            )
-        })?;
+    io::stdout().write_all(&output.stdout).map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status --porcelain`",
+        )
+    })?;
     Ok(())
 }
 
@@ -1107,8 +1065,7 @@ fn run_status_json(endpoint: &Endpoint) -> Result<(), Diagnostic> {
                 "check that Git can read the local worktree, then retry `status --format json`",
             )
         })?;
-    let branch =
-        cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
+    let branch = cli_status::branch_name(branch_output.status.success(), &branch_output.stdout);
     let json = cli_status::encode_status_json(branch, &output.stdout).ok_or_else(|| {
         Diagnostic::target(
             "E2100",
@@ -1538,8 +1495,7 @@ fn write_short_status<W: io::Write>(
                 || matches!(
                     (code[0], code[1]),
                     (b'D' | b'U', b'D') | (b'A' | b'U', b'A') | (b'A' | b'D', b'U')
-                )
-            {
+                ) {
                 AnsiColor::Red
             } else {
                 AnsiColor::Yellow
@@ -1556,7 +1512,6 @@ fn write_short_status<W: io::Write>(
     }
     Ok(())
 }
-
 
 fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let path = local_project_path(endpoint)?;
@@ -1600,15 +1555,19 @@ fn run_status_human(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
         None
     };
     let mut stdout = stdout.lock();
-    write_human_status(&output.stdout, &mut stdout, color_enabled, link_root.as_deref()).map_err(
-        |_| {
-            Diagnostic::target(
-                "E2100",
-                "local Git worktree status could not be written",
-                "retry `status`",
-            )
-        },
-    )?;
+    write_human_status(
+        &output.stdout,
+        &mut stdout,
+        color_enabled,
+        link_root.as_deref(),
+    )
+    .map_err(|_| {
+        Diagnostic::target(
+            "E2100",
+            "local Git worktree status could not be written",
+            "retry `status`",
+        )
+    })?;
     write_unpublished_summary(&mut stdout, unpublished_count).map_err(|_| {
         Diagnostic::target(
             "E2100",
@@ -1705,7 +1664,6 @@ fn run_status_short(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diag
     Ok(())
 }
 
-
 fn load_project(endpoint: &Endpoint) -> Result<orna_project_v1::LoadedProject, Diagnostic> {
     let project = load_project_without_standard_rejection(endpoint)?;
     reject_uncaptured_standard_modules(&project)?;
@@ -1757,7 +1715,11 @@ fn semantic_catalogue(
 fn check_project(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if analysis.is_ok() {
         write_success_line("project valid", color_enabled)
     } else {
@@ -1800,9 +1762,7 @@ fn execution_project(project: &orna_project_v1::LoadedProject) -> ProjectUnit {
         project
             .standard_sources()
             .iter()
-            .filter(|(logical_path, _)| {
-                project.standard_runtime_modules().contains(logical_path)
-            })
+            .filter(|(logical_path, _)| project.standard_runtime_modules().contains(logical_path))
             .map(|(logical_path, source)| SourceUnit {
                 fixture_id: "cli-project".into(),
                 source_id: logical_path.clone(),
@@ -1873,12 +1833,7 @@ fn run_project_invocation(
     root_entry: &str,
     color_enabled: bool,
 ) -> Result<(), Diagnostic> {
-    run_project_invocation_with_arguments(
-        endpoint,
-        root_entry,
-        &Environment::new(),
-        color_enabled,
-    )
+    run_project_invocation_with_arguments(endpoint, root_entry, &Environment::new(), color_enabled)
 }
 
 fn public_project_function(analysis: &orna_semantic_v1::Analysis, target: &str) -> bool {
@@ -1906,10 +1861,7 @@ fn run_public_project_function(
 ) -> Result<(), Diagnostic> {
     run_project_function(endpoint, target, false, color_enabled)
 }
-fn run_default_project_main(
-    endpoint: &Endpoint,
-    color_enabled: bool,
-) -> Result<(), Diagnostic> {
+fn run_default_project_main(endpoint: &Endpoint, color_enabled: bool) -> Result<(), Diagnostic> {
     run_project_function(endpoint, "main.main", true, color_enabled)
 }
 fn run_project_function(
@@ -1920,7 +1872,11 @@ fn run_project_function(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -1971,7 +1927,11 @@ fn run_project_stream_invocation(
 ) -> Result<(), Diagnostic> {
     let project = load_project(endpoint)?;
     let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2006,7 +1966,11 @@ fn run_project_invocation_with_arguments(
         })?;
     let project = load_project(endpoint)?;
     let catalogue = std::sync::Arc::new(semantic_catalogue(&project)?);
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2069,21 +2033,23 @@ fn run_project_invocation_with_arguments(
         .map_err(|error| durable_invocation_failed(&error))?;
     match outcome {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
-        StageOutcome::Failed(diagnostic) => Err(if let Some(mut published) = published_runtime_failure(&diagnostic) {
-            published.detail = Some(
-                "the project transaction failed atomically; no partial changes were committed"
-                    .into(),
-            );
-            published
-        } else {
-            let mut rejection = Diagnostic::target(
-                "E2200",
-                "durable project invocation was rejected",
-                "the project transaction failed atomically; no partial changes were committed",
-            );
-            rejection.detail = Some(failure_detail(&diagnostic));
-            rejection
-        }),
+        StageOutcome::Failed(diagnostic) => Err(
+            if let Some(mut published) = published_runtime_failure(&diagnostic) {
+                published.detail = Some(
+                    "the project transaction failed atomically; no partial changes were committed"
+                        .into(),
+                );
+                published
+            } else {
+                let mut rejection = Diagnostic::target(
+                    "E2200",
+                    "durable project invocation was rejected",
+                    "the project transaction failed atomically; no partial changes were committed",
+                );
+                rejection.detail = Some(failure_detail(&diagnostic));
+                rejection
+            },
+        ),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
         StageOutcome::Skipped { reason }
             if arguments.is_empty()
@@ -2258,7 +2224,10 @@ fn run_pure_invocation(
         let namespace = if module_name.is_empty() {
             Vec::new()
         } else {
-            module_name.split('.').map(str::to_owned).collect::<Vec<_>>()
+            module_name
+                .split('.')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
         };
         if identity.namespace() == namespace {
             let authority = ApplicationAuthority::new(
@@ -2353,7 +2322,11 @@ fn run_pure_invocation(
         }
     }
     let catalogue = semantic_catalogue(&project)?;
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return Err(Diagnostic::target(
             "E2101",
@@ -2386,7 +2359,10 @@ fn run_pure_invocation(
                         "ORNA-S010-IMPORT",
                         "imported module is unavailable",
                         "use a captured standard dependency or remove the import",
-                        format!("standard dependency load rejected with {}", diagnostic.code()),
+                        format!(
+                            "standard dependency load rejected with {}",
+                            diagnostic.code()
+                        ),
                     )
                 }));
             }
@@ -2420,20 +2396,19 @@ fn run_pure_invocation(
     match evaluator.invoke(target) {
         StageOutcome::Passed => write_success_line("invocation completed", color_enabled),
         StageOutcome::Cancelled(diagnostic) => Err(cancellation_diagnostic(&diagnostic)),
-        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic).unwrap_or_else(|| Diagnostic::unavailable(
-            "requested invocation is not available",
-            "define a reachable zero-argument pure function with the requested name",
-        ))),
+        StageOutcome::Failed(diagnostic) => Err(published_runtime_failure(&diagnostic)
+            .unwrap_or_else(|| {
+                Diagnostic::unavailable(
+                    "requested invocation is not available",
+                    "define a reachable zero-argument pure function with the requested name",
+                )
+            })),
         StageOutcome::Skipped { .. } => Err(Diagnostic::unavailable(
             "requested invocation is not available",
             "define a reachable zero-argument pure function with the requested name",
         )),
     }
 }
-
-
-
-
 
 /// Runtime authority retained by one CLI REPL session.
 ///
@@ -2779,16 +2754,15 @@ fn committed_invocation_rows(
     tables: &[RuntimeTableIdentity],
 ) -> Result<PinnedCommittedTables, Diagnostic> {
     let schemas = admitted_table_schemas(admitted);
-    let (rows, storage_orders) = committed_rows_at(repository, commit, &schemas, tables).map_err(
-        |error| match error {
+    let (rows, storage_orders) =
+        committed_rows_at(repository, commit, &schemas, tables).map_err(|error| match error {
             CommittedRowsError::Limit => Diagnostic::target(
                 "E2200",
                 "committed table rows exceed the read bound",
                 "keep each table within the evaluator collection limit and the source byte limit",
             ),
             CommittedRowsError::Unavailable => committed_rows_read_error(),
-        },
-    )?;
+        })?;
     pin_committed_tables(runtime, state, rows, storage_orders)
         .map_err(|_| committed_rows_read_error())
 }
@@ -3028,7 +3002,11 @@ fn repl_transactions(
         return None;
     }
     let catalogue = semantic_catalogue(&project).ok()?;
-    let analysis = orna_semantic_v1::analyze_with_providers(project.modules(), &catalogue, orna_semantic_v1::SystemProviders::Production);
+    let analysis = orna_semantic_v1::analyze_with_providers(
+        project.modules(),
+        &catalogue,
+        orna_semantic_v1::SystemProviders::Production,
+    );
     if !analysis.is_ok() {
         return None;
     }
@@ -3037,8 +3015,8 @@ fn repl_transactions(
         return None;
     }
     let tables = committed_table_identities(repository, &commit, table_names).ok()?;
-    let identities = orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit)
-        .ok()?;
+    let identities =
+        orna_project_v1::ObjectIdentityManifest::read_committed(repository, &commit).ok()?;
     let table_object_ids: Arc<BTreeMap<String, TableObjectId>> = Arc::new(
         tables
             .iter()
@@ -3153,7 +3131,7 @@ fn repl_runtime(
             project.standard_sources().iter().cloned(),
             Limits::default(),
         )
-            .map_err(|error| repl_session_error(&error))?;
+        .map_err(|error| repl_session_error(&error))?;
         let session = match repl_sys_host_context(repository, &project) {
             Some(context) => session.with_sys_host_context(context),
             None => session,
@@ -3177,15 +3155,15 @@ fn repl_session(endpoint: &Endpoint) -> Result<ReplRuntime, Diagnostic> {
         // The legacy implicit local REPL remains core-only when no worktree is
         // present. Keep the successful discovery result as session authority.
         Endpoint::ManagedLocal => orna_repository_v1::Repository::discover(".").ok(),
-        Endpoint::Path(path) => Some(
-            orna_repository_v1::Repository::discover(path).map_err(|_| {
+        Endpoint::Path(path) => {
+            Some(orna_repository_v1::Repository::discover(path).map_err(|_| {
                 Diagnostic::target(
                     "E2100",
                     "project Git worktree could not be discovered",
                     "run the command inside a Git worktree or provide a local project path",
                 )
-            })?,
-        ),
+            })?)
+        }
         // Snapshot selectors are deliberately repository-backed. Keep a
         // non-local REPL core-only so the loader can reject `:at` uniformly as
         // ORNA-REPL-AT instead of failing before the command loop starts.
@@ -3347,7 +3325,11 @@ fn repl_request_fingerprint(
     hasher.update(session_id);
     hasher.update(query_id);
     hasher.update(initial_digest);
-    hasher.update(u64::try_from(source.len()).unwrap_or(u64::MAX).to_be_bytes());
+    hasher.update(
+        u64::try_from(source.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
     hasher.update(source.as_bytes());
     hasher.finalize().into()
 }
@@ -3411,7 +3393,9 @@ fn run_repl_input(
             .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?
         {
             return Err(repl_effect_failure(
-                &format!("module table `{table}` has rows stored under its bare name by an earlier build"),
+                &format!(
+                    "module table `{table}` has rows stored under its bare name by an earlier build"
+                ),
                 "re-create the store from the committed project; rows under bare module names are not migrated",
             ));
         }
@@ -3439,9 +3423,7 @@ fn run_repl_input(
         }
         *host_bindings = Some(bindings);
     }
-    let bindings = host_bindings
-        .as_mut()
-        .expect("host bindings initialized");
+    let bindings = host_bindings.as_mut().expect("host bindings initialized");
     if transactions.lease.is_none() {
         let state = transactions
             .state
@@ -3470,20 +3452,18 @@ fn run_repl_input(
         &transactions.tables,
     )
     .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
-    let committed = PinnedCommittedRows::new(pin, committed_rows)
-        .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
+    let committed =
+        PinnedCommittedRows::new(pin, committed_rows).map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let snapshot = transactions
         .runtime
-        .block_on(state.begin_admitted_table_activation_over_committed(
-            &transactions.tables,
-            committed,
-        ))
+        .block_on(
+            state.begin_admitted_table_activation_over_committed(&transactions.tables, committed),
+        )
         .map_err(|_| "ORNA-REPL-EFFECT".to_owned())?;
     let query_id = cli_request_nonce().to_be_bytes();
-    let expression = (source.len() <= 16 * 1024
-        && !source.is_empty()
-        && !source.as_bytes().contains(&0))
-        .then(|| source.to_owned());
+    let expression =
+        (source.len() <= 16 * 1024 && !source.is_empty() && !source.as_bytes().contains(&0))
+            .then(|| source.to_owned());
     let request = RequestIdentity {
         session_id: transactions.session_id,
         request_id: query_id,
@@ -3510,7 +3490,9 @@ fn run_repl_input(
     );
     #[cfg(test)]
     let scope = scope.with_dispatch_observer(&observe_first_dispatch);
-    let writer = transactions.lease.expect("runtime writer lease initialized");
+    let writer = transactions
+        .lease
+        .expect("runtime writer lease initialized");
     transactions
         .runtime
         .block_on(state.begin_query_observation(
@@ -3691,22 +3673,23 @@ fn run_repl_input(
                 )));
             }
         };
-        let committed = transactions
-            .runtime
-            .block_on(state.commit_validated_table_request_activation(
-                ValidatedTableRequestActivationCommit {
-                    writer,
-                    identity: request,
-                    fingerprint,
-                    context: request_staged.context(),
-                    mutations: request_staged.mutations(),
-                    next_digest: request_staged.next_digest(),
-                    outcome,
-                    validator: &mut *validator,
-                    faults: request_staged.faults(),
-                    effects: request_staged.effects(),
-                },
-            ));
+        let committed =
+            transactions
+                .runtime
+                .block_on(state.commit_validated_table_request_activation(
+                    ValidatedTableRequestActivationCommit {
+                        writer,
+                        identity: request,
+                        fingerprint,
+                        context: request_staged.context(),
+                        mutations: request_staged.mutations(),
+                        next_digest: request_staged.next_digest(),
+                        outcome,
+                        validator: &mut *validator,
+                        faults: request_staged.faults(),
+                        effects: request_staged.effects(),
+                    },
+                ));
         match committed {
             Ok(_) => {}
             // Validation runs before any publication, so a failed validation
@@ -3733,15 +3716,16 @@ fn run_repl_input(
             }
         }
     } else {
-        let committed = transactions
-            .runtime
-            .block_on(state.commit_staged_table_request_activation(
-                writer,
-                request,
-                fingerprint,
-                &request_staged,
-                outcome,
-            ));
+        let committed =
+            transactions
+                .runtime
+                .block_on(state.commit_staged_table_request_activation(
+                    writer,
+                    request,
+                    fingerprint,
+                    &request_staged,
+                    outcome,
+                ));
         if let Err(error) = committed {
             finish_query(orna_runtime_v1::InvocationObservationStatus::Failed)?;
             return Err(repl_effect_uncertain(format!(
@@ -3880,28 +3864,23 @@ where
             let (result, ty) = rendered
                 .rsplit_once(" : ")
                 .unwrap_or((rendered.as_str(), ""));
-            write_styled(
-                writer,
-                AnsiColor::Green,
-                result.as_bytes(),
-                color_enabled,
-            )
-            .and_then(|()| {
-                if ty.is_empty() {
-                    Ok(())
-                } else {
-                    writer.write_all(b" : ")?;
-                    write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)
-                }
-            })
-            .and_then(|()| writer.write_all(b"\n"))
-            .map_err(|_| {
-                Diagnostic::target(
-                    "E2200",
-                    "REPL console I/O failed",
-                    "check the terminal input and output streams, then start a new session",
-                )
-            })?;
+            write_styled(writer, AnsiColor::Green, result.as_bytes(), color_enabled)
+                .and_then(|()| {
+                    if ty.is_empty() {
+                        Ok(())
+                    } else {
+                        writer.write_all(b" : ")?;
+                        write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)
+                    }
+                })
+                .and_then(|()| writer.write_all(b"\n"))
+                .map_err(|_| {
+                    Diagnostic::target(
+                        "E2200",
+                        "REPL console I/O failed",
+                        "check the terminal input and output streams, then start a new session",
+                    )
+                })?;
             Ok(())
         }
         Ok(None) => Ok(()),
@@ -3945,9 +3924,10 @@ fn run_repl(
     let mut runtime = repl_session(endpoint)?;
     let color_enabled = color_mode.stdout_enabled();
     let repository = runtime.repository.as_ref();
-    let host_bindings = runtime
-        .transactions
-        .as_ref().map_or_else(|| Rc::new(RefCell::new(None)), |transactions| transactions.host_bindings.clone());
+    let host_bindings = runtime.transactions.as_ref().map_or_else(
+        || Rc::new(RefCell::new(None)),
+        |transactions| transactions.host_bindings.clone(),
+    );
     let mut transactions = runtime.transactions.as_mut();
     let mut submitter = |session: &mut AdmittedReplSession, source: &str| {
         run_repl_input(repository, transactions.as_deref_mut(), session, source)
@@ -4012,7 +3992,6 @@ fn main() -> ExitCode {
         }
     }
 }
-
 
 fn repository_init_diagnostic(error: &orna_repository_v1::RepositoryInitError) -> Diagnostic {
     let code = error.code();
@@ -4103,23 +4082,23 @@ fn run_fetch(
             "run `fetch` inside a Git worktree or provide a local project path",
         )
     })?;
-    let requested = orna_repository_v1::RequestedRef::branch(branch.to_owned()).map_err(
-        |error| {
+    let requested =
+        orna_repository_v1::RequestedRef::branch(branch.to_owned()).map_err(|error| {
             Diagnostic::target_with_detail(
                 "E2100",
                 "fetch branch is invalid",
                 "supply a valid Git branch name",
                 error.to_string(),
             )
-        },
-    )?;
+        })?;
     let report = repository
         .fetch_with_local_continuity(remote.to_owned(), [requested])
         .map_err(|error| fetch_failure(&error))?;
     if let Some(continuity) = report.continuity()
-        && let Some(diagnostic) = fetch_continuity_diagnostic(continuity) {
-            return Err(diagnostic);
-        }
+        && let Some(diagnostic) = fetch_continuity_diagnostic(continuity)
+    {
+        return Err(diagnostic);
+    }
     let fetched = report.ordinary().first().ok_or_else(|| {
         Diagnostic::target(
             "E2100",
@@ -4189,20 +4168,22 @@ fn run_push(
     })?;
     let branch = match branch {
         Some(branch) => branch.to_owned(),
-        None => repository.checked_out_branch().map_err(|_| {
-            Diagnostic::target(
-                "E2100",
-                "the checked-out branch could not be read",
-                "run `push REMOTE BRANCH` or check out a branch first",
-            )
-        })?
-        .ok_or_else(|| {
-            Diagnostic::target(
-                "E2100",
-                "`push` needs a branch when HEAD is detached",
-                "run `push REMOTE BRANCH` or check out a branch first",
-            )
-        })?,
+        None => repository
+            .checked_out_branch()
+            .map_err(|_| {
+                Diagnostic::target(
+                    "E2100",
+                    "the checked-out branch could not be read",
+                    "run `push REMOTE BRANCH` or check out a branch first",
+                )
+            })?
+            .ok_or_else(|| {
+                Diagnostic::target(
+                    "E2100",
+                    "`push` needs a branch when HEAD is detached",
+                    "run `push REMOTE BRANCH` or check out a branch first",
+                )
+            })?,
     };
     if repository
         .read_publication_journal()
@@ -4288,13 +4269,9 @@ fn run_push(
         })?;
     let mut stdout = io::stdout().lock();
     write_styled(&mut stdout, AnsiColor::Green, b"pushed ", color_enabled)
-        .and_then(|()| {
-            write_styled_display(&mut stdout, AnsiColor::Cyan, remote, color_enabled)
-        })
+        .and_then(|()| write_styled_display(&mut stdout, AnsiColor::Cyan, remote, color_enabled))
         .and_then(|()| stdout.write_all(b" -> "))
-        .and_then(|()| {
-            write_styled_display(&mut stdout, AnsiColor::Cyan, &branch, color_enabled)
-        })
+        .and_then(|()| write_styled_display(&mut stdout, AnsiColor::Cyan, &branch, color_enabled))
         .and_then(|()| stdout.write_all(b"\n"))
         .map_err(|_| {
             Diagnostic::target(
@@ -4320,13 +4297,12 @@ fn fetch_continuity_diagnostic(
     ))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use orna_runtime_v1::{Mutation, NoFault, RunObservationStatus, RuntimeState};
     use sha2::{Digest, Sha256};
+    use std::path::PathBuf;
     #[test]
     fn color_mode_respects_stream_tty_and_explicit_overrides() {
         assert!(!ColorMode::Auto.enabled(false));
@@ -4383,7 +4359,9 @@ mod tests {
             Endpoint::RemoteTls("orna://host/reference".into())
         );
         assert_eq!(
-            parse_cli(&["status".into()]).expect("default color mode parses").color,
+            parse_cli(&["status".into()])
+                .expect("default color mode parses")
+                .color,
             ColorMode::Auto
         );
         let colored = parse_cli(&[
@@ -4517,13 +4495,19 @@ mod tests {
         );
         assert_eq!(
             parse_cli(&["serve".into()]).unwrap().command,
-            Command::Serve { port: 8080, allow_push: false }
+            Command::Serve {
+                port: 8080,
+                allow_push: false
+            }
         );
         assert_eq!(
             parse_cli(&["serve".into(), "--port".into(), "0".into()])
                 .unwrap()
                 .command,
-            Command::Serve { port: 0, allow_push: false }
+            Command::Serve {
+                port: 0,
+                allow_push: false
+            }
         );
     }
 
@@ -4550,7 +4534,10 @@ mod tests {
             &["semantic-legend", "--format", "xml"][..],
             &["semantic-legend", "--limit", "0"][..],
         ] {
-            let arguments = words.iter().map(|word| (*word).to_owned()).collect::<Vec<_>>();
+            let arguments = words
+                .iter()
+                .map(|word| (*word).to_owned())
+                .collect::<Vec<_>>();
             match parse_cli(&arguments) {
                 Ok(_) => panic!("{words:?} should be rejected"),
                 Err(error) => {
@@ -4600,6 +4587,7 @@ mod tests {
 
     /// ORNA-CLI-006: supported terminals receive safe OSC 8 status-path hyperlinks.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn human_status_links_safe_paths_only_for_supported_terminal_capabilities() {
         const FIXTURE: &str = include_str!("../tests/fixtures/function-expression.orna");
         let directory = tempfile::tempdir().expect("status repository");
@@ -4616,28 +4604,34 @@ mod tests {
         }
 
         let human_output = std::process::Command::new("git")
-            .args(["-c", "color.status=false", "status", "--untracked-files=all"])
+            .args([
+                "-c",
+                "color.status=false",
+                "status",
+                "--untracked-files=all",
+            ])
             .current_dir(directory.path())
             .output()
             .expect("human Git status");
         assert!(human_output.status.success());
-        let root = directory.path().canonicalize().expect("absolute repository root");
+        let root = directory
+            .path()
+            .canonicalize()
+            .expect("absolute repository root");
         let mut without_links = Vec::new();
         write_human_status(&human_output.stdout, &mut without_links, true, None)
             .expect("unlinked human status");
         let mut linked = Vec::new();
-        write_human_status(
-            &human_output.stdout,
-            &mut linked,
-            true,
-            Some(&root),
-        )
-        .expect("linked human status");
+        write_human_status(&human_output.stdout, &mut linked, true, Some(&root))
+            .expect("linked human status");
 
         let linked_text = std::str::from_utf8(&linked).expect("UTF-8 human status");
         for (name, encoded_suffix) in [
             ("function-expression.orna", "/function-expression.orna"),
-            ("function expression#?.orna", "/function%20expression%23%3F.orna"),
+            (
+                "function expression#?.orna",
+                "/function%20expression%23%3F.orna",
+            ),
         ] {
             let url = file_url_for_status_path(&root, name.as_bytes()).expect("safe file URL");
             assert!(url.starts_with("file:///"));
@@ -4722,11 +4716,8 @@ mod tests {
     #[test]
     fn json_status_includes_unpublished_runtime_mutation_count() {
         assert_eq!(
-            append_unpublished_count_json(
-                b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(),
-                4,
-            )
-            .expect("JSON status terminator"),
+            append_unpublished_count_json(b"{\"branch\":\"main\",\"changes\":[]}\n".to_vec(), 4,)
+                .expect("JSON status terminator"),
             b"{\"branch\":\"main\",\"changes\":[],\"unpublished_runtime_mutations\":4}\n"
         );
         assert!(append_unpublished_count_json(b"{}".to_vec(), 0).is_none());
@@ -4880,7 +4871,6 @@ mod tests {
             "use a captured standard dependency or remove the import"
         );
     }
-
 
     #[test]
     fn repl_repository_authority_is_reused_for_cwd_head_and_named_refs_without_git_mutation() {
@@ -5216,17 +5206,14 @@ mod tests {
             "the expected remote response was unavailable",
         );
         let mut plain = Vec::new();
-        write_diagnostic(&mut plain, &diagnostic, false, false)
-            .expect("plain diagnostic write");
+        write_diagnostic(&mut plain, &diagnostic, false, false).expect("plain diagnostic write");
         assert_eq!(
-            plain,
-            b"error[E2300]: request failed\nhelp: retry the operation\n",
+            plain, b"error[E2300]: request failed\nhelp: retry the operation\n",
             "technical details are hidden in normal output"
         );
 
         let mut colored = Vec::new();
-        write_diagnostic(&mut colored, &diagnostic, true, true)
-            .expect("colored diagnostic write");
+        write_diagnostic(&mut colored, &diagnostic, true, true).expect("colored diagnostic write");
         assert_eq!(
             String::from_utf8(colored).expect("diagnostic is UTF-8"),
             "\x1b[31merror\x1b[0m[\x1b[31mE2300\x1b[0m]: \x1b[31mrequest failed\x1b[0m\n  \x1b[2mthe expected remote response was unavailable\x1b[0m\nhelp: \x1b[2mretry the operation\x1b[0m\n"
@@ -5314,10 +5301,7 @@ mod tests {
             run_repl_submission(&mut session, ":quit", &mut output, false),
             Ok(())
         );
-        assert_eq!(
-            String::from_utf8(output).expect("UTF-8"),
-            "3 : Int\n"
-        );
+        assert_eq!(String::from_utf8(output).expect("UTF-8"), "3 : Int\n");
     }
 
     struct BrokenWriter;
@@ -5335,16 +5319,14 @@ mod tests {
     #[test]
     fn single_expression_repl_converts_writer_failure_to_console_diagnostic() {
         let mut session = AdmittedReplSession::new(Limits::default());
-        let error =
-            run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
-                .expect_err("writer failure");
+        let error = run_repl_submission(&mut session, "1", &mut BrokenWriter, false)
+            .expect_err("writer failure");
         assert_eq!((error.code, error.exit), ("E2200", Exit::Target));
     }
     #[test]
     fn execution_project_preserves_reachable_loose_row_metadata() {
         let directory = tempfile::tempdir().expect("temporary project");
-        std::fs::create_dir_all(directory.path().join("contacts/Contact"))
-            .expect("row directory");
+        std::fs::create_dir_all(directory.path().join("contacts/Contact")).expect("row directory");
         std::fs::write(
             directory.path().join("main.orna"),
             "use contacts.main; pub fn run() {}",
@@ -5410,11 +5392,26 @@ mod tests {
     fn authoritative_reference_project_runs_seed_exercise_and_sensor_stream() {
         let directory = tempfile::tempdir().expect("temporary reference project");
         for (name, source) in [
-            ("main.orna", include_str!("../tests/fixtures/reference-project/main.orna")),
-            ("library.orna", include_str!("../tests/fixtures/reference-project/library.orna")),
-            ("warehouse.orna", include_str!("../tests/fixtures/reference-project/warehouse.orna")),
-            ("sensors.orna", include_str!("../tests/fixtures/reference-project/sensors.orna")),
-            ("values.orna", include_str!("../tests/fixtures/reference-project/values.orna")),
+            (
+                "main.orna",
+                include_str!("../tests/fixtures/reference-project/main.orna"),
+            ),
+            (
+                "library.orna",
+                include_str!("../tests/fixtures/reference-project/library.orna"),
+            ),
+            (
+                "warehouse.orna",
+                include_str!("../tests/fixtures/reference-project/warehouse.orna"),
+            ),
+            (
+                "sensors.orna",
+                include_str!("../tests/fixtures/reference-project/sensors.orna"),
+            ),
+            (
+                "values.orna",
+                include_str!("../tests/fixtures/reference-project/values.orna"),
+            ),
         ] {
             std::fs::write(directory.path().join(name), source).expect("reference source");
         }
@@ -6064,9 +6061,18 @@ mod tests {
         git(&local, &["push", "origin", "HEAD:refs/heads/main"]);
         git(
             root.path(),
-            &["--git-dir", "remote.git", "symbolic-ref", "HEAD", "refs/heads/main"],
+            &[
+                "--git-dir",
+                "remote.git",
+                "symbolic-ref",
+                "HEAD",
+                "refs/heads/main",
+            ],
         );
-        git(root.path(), &["clone", "--branch", "main", remote_path, "updater"]);
+        git(
+            root.path(),
+            &["clone", "--branch", "main", remote_path, "updater"],
+        );
         assert_eq!(git(&updater, &["rev-parse", "HEAD"]), initial);
         git(&updater, &["config", "user.email", "kieran@drewett.dev"]);
         git(&updater, &["config", "user.name", "kierandrewett"]);
@@ -6141,7 +6147,10 @@ mod repl_request_effect_tests {
             .runtime
             .block_on(state.running_requests())
             .expect("running requests");
-        assert!(running.is_empty(), "a committed REPL insert leaves no running request");
+        assert!(
+            running.is_empty(),
+            "a committed REPL insert leaves no running request"
+        );
     }
 
     #[test]

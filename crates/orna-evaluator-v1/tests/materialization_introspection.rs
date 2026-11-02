@@ -313,13 +313,8 @@ fn recording_a_decision_does_not_consume_the_query_step_budget() {
         max_steps: minimum,
         ..Limits::default()
     };
-    let result = run_limited(
-        source,
-        vec![2, 1],
-        Clock::Instant,
-        limits,
-    )
-    .expect("recording must not add a step-limit failure to a pure query");
+    let result = run_limited(source, vec![2, 1], Clock::Instant, limits)
+        .expect("recording must not add a step-limit failure to a pure query");
 
     assert_eq!(result.raw(), &integer(3));
 }

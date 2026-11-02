@@ -208,8 +208,8 @@ fn structural_epoch_redacts_values_without_erasing_cell_structure() {
 #[test]
 fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
     let fixture = include_str!("fixtures/secret-surface.orna").trim();
-    let secret = InvokeValue::new(RuntimeValue::Text(fixture.to_owned()))
-        .expect("fixture value is valid");
+    let secret =
+        InvokeValue::new(RuntimeValue::Text(fixture.to_owned())).expect("fixture value is valid");
     let key = UserStateKeyWithoutPrincipal::new(
         FunctionId::from_bytes([0x61; 16]),
         "default".to_owned(),
@@ -234,21 +234,19 @@ fn structural_inspect_and_trace_events_do_not_publish_secret_fixture_values() {
         SystemTime::UNIX_EPOCH,
         FunctionId::from_bytes([0x69; 16]),
         InspectOutcomeKind::Allowed,
-        InspectSnapshotSummary::new(
-            1,
-            InspectResultSummary::ValueBatch { value_count: 1 },
-            None,
-        )
-        .unwrap(),
+        InspectSnapshotSummary::new(1, InspectResultSummary::ValueBatch { value_count: 1 }, None)
+            .unwrap(),
         &InspectSnapshotOptions::structural(),
         Vec::new(),
-        vec![orna_core::inspect::CallRow::new(
-            InvocationId::from_bytes([0x66; 16]),
-            Some(secret.clone()),
-            1,
-            0,
-        )
-        .expect("fixture call is valid")],
+        vec![
+            orna_core::inspect::CallRow::new(
+                InvocationId::from_bytes([0x66; 16]),
+                Some(secret.clone()),
+                1,
+                0,
+            )
+            .expect("fixture call is valid"),
+        ],
         Vec::new(),
         vec![row],
         Vec::new(),

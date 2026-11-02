@@ -1,11 +1,11 @@
 use std::sync::{
-    atomic::{AtomicUsize, Ordering},
     Arc,
+    atomic::{AtomicUsize, Ordering},
 };
 
 use orna_value_v1::{
-    decode_rov3_in_context, encode_rov3, AvailabilityState, Blob, BlobResolver, ContentIdentity,
-    ContentReference, Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot,
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, Format3Context,
+    Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot, decode_rov3_in_context, encode_rov3,
 };
 
 struct CountingResolver {

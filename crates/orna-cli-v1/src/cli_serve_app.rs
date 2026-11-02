@@ -12,7 +12,13 @@
 //! Git transport, installs no page at `/`, and reports the absence once at
 //! startup.
 
-use super::{Diagnostic, Limits, Response, runtime_identity, RuntimeState, committed_table_identities, legacy_bare_module_candidates, legacy_bare_module_table, CommittedTableIdentity, admitted_table_schemas, committed_rows_at, CommittedRowsError, PinnedCommittedTables, PinnedCommittedRows, evaluate_over_committed_tables, Mutex, Request, unavailable_response};
+use super::{
+    CommittedRowsError, CommittedTableIdentity, Diagnostic, Limits, Mutex, PinnedCommittedRows,
+    PinnedCommittedTables, Request, Response, RuntimeState, admitted_table_schemas,
+    committed_rows_at, committed_table_identities, evaluate_over_committed_tables,
+    legacy_bare_module_candidates, legacy_bare_module_table, runtime_identity,
+    unavailable_response,
+};
 use orna_application_v1::{ApplicationAuthority, ApplicationError, StagedActivation};
 use orna_evaluator_v1::Environment;
 
@@ -89,7 +95,7 @@ impl ServeApp {
         )
     }
 
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     /// Stages `serve` for one request at this clone's HEAD and CWD.
     ///
     /// The request takes no per-request lock. The argument that one read cannot
@@ -163,8 +169,7 @@ impl ServeApp {
             let bound = names
                 .iter()
                 .filter(|name| {
-                    committed_table_identities(&repository, &commit, vec![(*name).clone()])
-                        .is_ok()
+                    committed_table_identities(&repository, &commit, vec![(*name).clone()]).is_ok()
                 })
                 .count();
             return Err(if bound == 0 || bound == names.len() {
@@ -207,7 +212,10 @@ impl ServeApp {
         // expose its placeholder as committed data.
         for (name, table) in admitted.table_schemas() {
             let stored = rows.get(name).map(Vec::as_slice).unwrap_or_default();
-            let order = storage_orders.get(name).map(Vec::as_slice).unwrap_or_default();
+            let order = storage_orders
+                .get(name)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
             if orna_project_v1::stored_rows_hold_blob(table.schema(), order, stored)
                 .map_err(|_| "serve.table_rows_unavailable")?
             {

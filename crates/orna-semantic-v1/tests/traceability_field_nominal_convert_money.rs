@@ -34,9 +34,12 @@ fn computed_field_cannot_be_supplied_to_insert() {
         "{:?}",
         result.diagnostics
     );
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message().contains("computed field")
-    }));
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message().contains("computed field") })
+    );
 }
 
 // Specified: ORNA-FIELD-008, source/07-tables.md:132.
@@ -101,11 +104,15 @@ fn target_from_selects_its_nested_source_implementation() {
 
     assert!(result.is_ok(), "{:?}", result.diagnostics);
     let parse_email = &result.modules.values().next().unwrap().exports["parse_email"];
-    assert!(matches!(
-        &parse_email.ty,
-        Type::Function { result, .. }
-            if result.as_ref() == &Type::Named("explicit-from.EmailAddress".into())
-    ), "unexpected conversion result type: {:?}", parse_email.ty);
+    assert!(
+        matches!(
+            &parse_email.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Named("explicit-from.EmailAddress".into())
+        ),
+        "unexpected conversion result type: {:?}",
+        parse_email.ty
+    );
 }
 
 // Specified: ORNA-CONVERT-006, source/05-types.md:442.
@@ -134,14 +141,18 @@ fn money_construction_keeps_decimal_exactness() {
     )]);
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
     let amount = &exact.modules.values().next().unwrap().exports["amount"];
-    assert!(matches!(
-        &amount.ty,
-        Type::Function { result, .. }
-            if result.as_ref() == &Type::Applied {
-                base: "Money".into(),
-                arguments: vec![Type::Named("exact-money.GBP".into())],
-            }
-    ), "unexpected exact-money result type: {:?}", amount.ty);
+    assert!(
+        matches!(
+            &amount.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "Money".into(),
+                    arguments: vec![Type::Named("exact-money.GBP".into())],
+                }
+        ),
+        "unexpected exact-money result type: {:?}",
+        amount.ty
+    );
 
     let inexact = analyze(&[ModuleInput::new(
         "inexact-money.orna",
@@ -207,5 +218,9 @@ fn currency_requires_code_and_minor_digits_properties() {
         "currency-incomplete.orna",
         include_str!("fixtures/traceability-money-currency-protocol-incomplete.orna"),
     )]);
-    assert!(has_type_diagnostic(&incomplete), "{:?}", incomplete.diagnostics);
+    assert!(
+        has_type_diagnostic(&incomplete),
+        "{:?}",
+        incomplete.diagnostics
+    );
 }

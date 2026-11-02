@@ -170,7 +170,11 @@ pub(crate) fn document_links(workspace: &Workspace, module: usize) -> Vec<Docume
         .collect()
 }
 
-fn matching_open_module(workspace: &Workspace, module: usize, path: &[ImportSegment]) -> Option<Uri> {
+fn matching_open_module(
+    workspace: &Workspace,
+    module: usize,
+    path: &[ImportSegment],
+) -> Option<Uri> {
     let module_path = path
         .iter()
         .map(|segment| segment.name.as_str())
@@ -695,7 +699,11 @@ pub(crate) fn hover(workspace: &Workspace, module: usize, byte: usize) -> Option
                 return Some(hover_symbol(symbol));
             }
             let detail = match &declared.ty {
-                Some(ty) => format!("{}: {}", declared.name, source_slice(file.text(), type_span(ty))),
+                Some(ty) => format!(
+                    "{}: {}",
+                    declared.name,
+                    source_slice(file.text(), type_span(ty))
+                ),
                 None => source_slice(file.text(), &declared.full).trim().to_owned(),
             };
             Some(crate::hover::declaration(
@@ -842,7 +850,12 @@ pub(crate) fn signature_help(
     };
     let functions = functions
         .into_iter()
-        .filter(|function| matches!(function.kind, EditorSymbolKind::Function | EditorSymbolKind::Method))
+        .filter(|function| {
+            matches!(
+                function.kind,
+                EditorSymbolKind::Function | EditorSymbolKind::Method
+            )
+        })
         .collect::<Vec<_>>();
     if functions.is_empty() {
         return None;
@@ -851,19 +864,19 @@ pub(crate) fn signature_help(
     let signatures = functions
         .iter()
         .map(|function| {
-            let active_parameter = call
-                .arguments
-                .get(active_argument)
-                .and_then(|argument| argument.name.as_deref())
-                .and_then(|name| {
-                    let name = normalized_identifier(name);
-                    function.parameters.iter().position(|parameter| {
-                        parameter_name(parameter)
-                            .is_some_and(|parameter| normalized_identifier(parameter) == name)
+            let active_parameter =
+                call.arguments
+                    .get(active_argument)
+                    .and_then(|argument| argument.name.as_deref())
+                    .and_then(|name| {
+                        let name = normalized_identifier(name);
+                        function.parameters.iter().position(|parameter| {
+                            parameter_name(parameter)
+                                .is_some_and(|parameter| normalized_identifier(parameter) == name)
+                        })
                     })
-                })
-                .unwrap_or(active_argument)
-                .min(function.parameters.len().saturating_sub(1)) as u32;
+                    .unwrap_or(active_argument)
+                    .min(function.parameters.len().saturating_sub(1)) as u32;
             let parameters = function
                 .parameters
                 .iter()
@@ -915,7 +928,10 @@ pub(crate) fn callee_name_span(file: &FileAnalysis, callee: &Expr) -> Option<Sou
 /// Every expression body an item declares: function bodies, implementation
 /// members, field initializers, assertions and values.
 pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
-    fn implementation<'a>(implementation: &'a orna_syntax_v1::Implementation, bodies: &mut Vec<&'a Expr>) {
+    fn implementation<'a>(
+        implementation: &'a orna_syntax_v1::Implementation,
+        bodies: &mut Vec<&'a Expr>,
+    ) {
         for member in &implementation.members {
             match member {
                 orna_syntax_v1::ImplMember::Function { body, .. } => bodies.push(body),
@@ -939,7 +955,10 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
                         ..
                     }
                     | orna_syntax_v1::TableMember::Assertion { value, .. } => bodies.push(value),
-                    orna_syntax_v1::TableMember::Implementation { implementation: inner, .. } => {
+                    orna_syntax_v1::TableMember::Implementation {
+                        implementation: inner,
+                        ..
+                    } => {
                         implementation(inner, &mut bodies);
                     }
                     orna_syntax_v1::TableMember::Field { .. } => {}
@@ -958,7 +977,10 @@ pub(crate) fn item_bodies(item: &Item) -> Vec<&Expr> {
                         ..
                     }
                     | orna_syntax_v1::TypeMember::Assertion { value, .. } => bodies.push(value),
-                    orna_syntax_v1::TypeMember::Implementation { implementation: inner, .. } => {
+                    orna_syntax_v1::TypeMember::Implementation {
+                        implementation: inner,
+                        ..
+                    } => {
                         implementation(inner, &mut bodies);
                     }
                     orna_syntax_v1::TypeMember::Field { .. } => {}
@@ -994,9 +1016,7 @@ fn active_argument_index(call: &CallSite, tokens: &[Token], position: usize) -> 
         tokens[first..]
             .iter()
             .take_while(|token| token.span.end <= end)
-            .any(|token| {
-                matches!(token.kind, TokenKind::Punct(",")) && token.span.start < position
-            })
+            .any(|token| matches!(token.kind, TokenKind::Punct(",")) && token.span.start < position)
     };
     let separators = call
         .arguments
@@ -1227,7 +1247,10 @@ pub(crate) fn references(
     locations
 }
 
-pub fn document_symbols(symbols: &[EditorSymbol], mapper: &PositionMapper<'_>) -> Vec<DocumentSymbol> {
+pub fn document_symbols(
+    symbols: &[EditorSymbol],
+    mapper: &PositionMapper<'_>,
+) -> Vec<DocumentSymbol> {
     symbols
         .iter()
         .cloned()
@@ -1575,7 +1598,11 @@ fn is_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
-fn import_module_before_cursor(standard: &StandardLibrary, text: &str, byte: usize) -> Option<String> {
+fn import_module_before_cursor(
+    standard: &StandardLibrary,
+    text: &str,
+    byte: usize,
+) -> Option<String> {
     let before_cursor = text.get(..byte)?;
     let line_start = before_cursor.rfind('\n').map_or(0, |offset| offset + 1);
     let line = before_cursor.get(line_start..)?.trim_start();

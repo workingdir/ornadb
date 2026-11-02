@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{Environment, Functions, Limits, PureFunction, evaluate_with_functions};
 use orna_foundation_v1::CanonicalValue;
 use orna_syntax_v1::{Declaration, parse_expression, parse_module};

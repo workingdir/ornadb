@@ -29,13 +29,14 @@ const READ_CHUNK: u64 = 8 * 1024 * 1024;
 
 #[test]
 fn product_capture_streams_a_source_larger_than_its_memory_budget() {
-    let source_bytes = std::env::var("ORNA_CAPTURE_RSS_BYTES")
-        .ok()
-        .map_or(DEFAULT_SOURCE_BYTES, |bytes| {
-            bytes
-                .parse::<u64>()
-                .expect("ORNA_CAPTURE_RSS_BYTES is a byte count")
-        });
+    let source_bytes =
+        std::env::var("ORNA_CAPTURE_RSS_BYTES")
+            .ok()
+            .map_or(DEFAULT_SOURCE_BYTES, |bytes| {
+                bytes
+                    .parse::<u64>()
+                    .expect("ORNA_CAPTURE_RSS_BYTES is a byte count")
+            });
     assert!(
         source_bytes > PEAK_RSS_BOUND,
         "the source must exceed the memory bound for the check to prove streaming"

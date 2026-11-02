@@ -93,7 +93,10 @@ fn committed_table_project(source: &str) -> tempfile::TempDir {
         .expect("initialize project");
     assert!(initialized.status.success(), "initialize: {initialized:?}");
     git(project.path(), &["config", "user.name", "Orna test"]);
-    git(project.path(), &["config", "user.email", "orna-test@example.invalid"]);
+    git(
+        project.path(),
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     git(project.path(), &["config", "commit.gpgsign", "false"]);
     std::fs::write(project.path().join("main.orna"), source).expect("write main.orna");
     git(project.path(), &["add", "main.orna", ".orna/database.orna"]);
@@ -273,7 +276,10 @@ fn refused_write_leaves_repository_head_and_worktree_unchanged() {
         git_stdout(project.path(), &["rev-parse", "HEAD"]),
         head_before
     );
-    assert_eq!(git_stdout(project.path(), &["status", "--porcelain"]), status_before);
+    assert_eq!(
+        git_stdout(project.path(), &["status", "--porcelain"]),
+        status_before
+    );
 }
 
 #[test]
@@ -316,7 +322,10 @@ fn semantic_broken_main_reports_and_git_transport_still_serves() {
     let project = project_with_main("pub fn serve(): Int = \"text\";\n");
     let (_server, address, stderr) = start_server_with_stderr(project.path());
     assert!(stderr.contains("E2101"), "stderr: {stderr}");
-    assert!(stderr.contains("serving module failed semantic analysis"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("serving module failed semantic analysis"),
+        "stderr: {stderr}"
+    );
     assert!(!stderr.contains("E2102"), "stderr: {stderr}");
     assert!(stderr.contains("ORNA-S021-TYPE"), "stderr: {stderr}");
     let (status, _) = http_get(&address, "/").expect("GET /");

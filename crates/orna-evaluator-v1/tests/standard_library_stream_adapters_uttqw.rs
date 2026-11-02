@@ -1,4 +1,3 @@
-
 use orna_evaluator_v1::{
     Environment, Functions, Limits, NominalDefinition, NominalDefinitions, NominalField,
     PureFunction, evaluate_with_functions_and_nominals,
@@ -75,7 +74,10 @@ fn assert_fixture(fixture: &str, expected: Raw) {
         Limits::default(),
     )
     .unwrap_or_else(|error| {
-        panic!("stream adapter fixture failed for `{fixture}`: {}", error.code())
+        panic!(
+            "stream adapter fixture failed for `{fixture}`: {}",
+            error.code()
+        )
     });
     assert_eq!(actual, canonical(expected), "{fixture}");
 }

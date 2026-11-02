@@ -17,5 +17,9 @@ fn session() -> AdmittedReplSession {
 fn ordinary_float_comparison_treats_signed_zeros_as_equal() {
     let mut session = session();
     let source = include_str!("fixtures/stdlib-float-compare-signed-zero-ln4y7.orna");
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

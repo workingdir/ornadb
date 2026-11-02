@@ -107,13 +107,22 @@ fn evidence_closure_and_migration_rows_keep_specified_exists_and_passed_distinct
             .iter()
             .find(|row| row["requirement"] == id)
             .unwrap_or_else(|| panic!("evidence obligation exists for {id}"));
-        assert_eq!(row["implementation_result"], "not-executed", "{id}: {boundary}");
+        assert_eq!(
+            row["implementation_result"], "not-executed",
+            "{id}: {boundary}"
+        );
         assert!(
-            row["tests"].as_array().is_some_and(|tests| !tests.is_empty()),
+            row["tests"]
+                .as_array()
+                .is_some_and(|tests| !tests.is_empty()),
             "{id} has a specified test obligation"
         );
         assert!(
-            row["tests"].as_array().unwrap().iter().all(|test| test["status"] == "not-executed"),
+            row["tests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|test| test["status"] == "not-executed"),
             "this bounded guard test must not rewrite not-executed evidence for {id} as passed"
         );
     }
@@ -122,11 +131,19 @@ fn evidence_closure_and_migration_rows_keep_specified_exists_and_passed_distinct
 #[test]
 fn lambda_in_case_fixture_parses_and_retains_its_arrow_token() {
     let parsed = parse_module(FIXTURE);
-    assert!(parsed.diagnostics.is_empty(), "fixture parse: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "fixture parse: {:?}",
+        parsed.diagnostics
+    );
     let tokens = lex(FIXTURE).expect("fixture lexes");
     let arrows = tokens
         .iter()
         .filter(|token| matches!(&token.kind, TokenKind::Punct(punct) if *punct == "=>"))
         .collect::<Vec<_>>();
-    assert_eq!(arrows.len(), 1, "anonymous-function => remains a single token");
+    assert_eq!(
+        arrows.len(),
+        1,
+        "anonymous-function => remains a single token"
+    );
 }

@@ -22,28 +22,25 @@ fn captured_hash_sources() -> Vec<(String, String)> {
 fn hash_helpers_compute_values_from_the_captured_hash_module() {
     let sources = captured_hash_sources();
     assert_eq!(sources.len(), 1, "the pinned hash module is captured once");
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/27d5k-hash",
-        sources.clone(),
-    )
-    .expect("the exact std.hash source forms a dependency snapshot");
+    let profile = StandardDependencyProfile::from_sources("orna.std/27d5k-hash", sources.clone())
+        .expect("the exact std.hash source forms a dependency snapshot");
     let (path, source) = &sources[0];
     profile
         .verify_source(path, source)
         .expect("the selected source matches the captured hash snapshot");
-    assert!(profile
-        .verify_source(path, &format!("{source}\n// changed after capture"))
-        .is_err());
+    assert!(
+        profile
+            .verify_source(path, &format!("{source}\n// changed after capture"))
+            .is_err()
+    );
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("the selected hash module resolves against the core catalogue");
-    let mut session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured hash profile failed to load: {}", error.code()));
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!("captured hash profile failed to load: {}", error.code())
+            });
     assert_eq!(
         session.submit(include_str!("fixtures/stdlib-use-hash-27d5k.orna")),
         Ok(None)
@@ -60,13 +57,17 @@ fn hash_helpers_compute_values_from_the_captured_hash_module() {
 fn absent_random_module_does_not_replace_core_or_hash_dependencies() {
     let mut core = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-core-without-random-hash-27d5k.orna")),
+        core.submit(include_str!(
+            "fixtures/stdlib-core-without-random-hash-27d5k.orna"
+        )),
         Ok(Some(boolean(true)))
     );
     assert_eq!(
-        core.submit(include_str!("fixtures/stdlib-random-without-snapshot-27d5k.orna"))
-            .unwrap_err()
-            .code(),
+        core.submit(include_str!(
+            "fixtures/stdlib-random-without-snapshot-27d5k.orna"
+        ))
+        .unwrap_err()
+        .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(

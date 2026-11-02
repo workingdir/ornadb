@@ -192,7 +192,12 @@ fn git(directory: &std::path::Path, arguments: &[&str]) -> String {
     let output = std::process::Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory)
-        .args(["-c", "user.name=kierandrewett", "-c", "user.email=kieran@drewett.dev"])
+        .args([
+            "-c",
+            "user.name=kierandrewett",
+            "-c",
+            "user.email=kieran@drewett.dev",
+        ])
         .args(["-c", "commit.gpgsign=false"])
         .args(arguments)
         .output()
@@ -202,7 +207,10 @@ fn git(directory: &std::path::Path, arguments: &[&str]) -> String {
         "git {arguments:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("UTF-8 git output").trim().to_owned()
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 git output")
+        .trim()
+        .to_owned()
 }
 
 /// A project whose `stdlib/std` gitlink pins a committed snapshot holding
@@ -218,7 +226,10 @@ fn captured_standard_project(standard: &[(&str, &str)], files: &[(&str, &str)]) 
         std::fs::write(module.join(name), source).expect("standard source");
     }
     git(&module, &["add", "-A"]);
-    git(&module, &["commit", "--quiet", "-m", "standard module snapshot"]);
+    git(
+        &module,
+        &["commit", "--quiet", "-m", "standard module snapshot"],
+    );
     let snapshot = git(&module, &["rev-parse", "HEAD"]);
 
     std::fs::write(
@@ -236,15 +247,26 @@ fn captured_standard_project(standard: &[(&str, &str)], files: &[(&str, &str)]) 
     git(&root, &stage);
     git(
         &root,
-        &["update-index", "--add", "--cacheinfo", &format!("160000,{snapshot},stdlib/std")],
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{snapshot},stdlib/std"),
+        ],
     );
     git(&root, &["commit", "--quiet", "-m", "capture std snapshot"]);
     project
 }
 
 const CAPTURED_STD: [(&str, &str); 2] = [
-    ("main.orna", "use math;\npub fn version(): Str = \"1.0.0\";\n"),
-    ("math.orna", "pub fn increment(value: Int): Int = value + 1;\n"),
+    (
+        "main.orna",
+        "use math;\npub fn version(): Str = \"1.0.0\";\n",
+    ),
+    (
+        "math.orna",
+        "pub fn increment(value: Int): Int = value + 1;\n",
+    ),
 ];
 
 /// Opens `main.orna` of a captured standard project and returns the published

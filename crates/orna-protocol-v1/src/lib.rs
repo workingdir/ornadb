@@ -3936,7 +3936,11 @@ mod tests {
             message: Message::Delta {
                 base_revision: 0,
                 new_revision: 1,
-                patches: patch_at(Node::Array(vec![uint(1), uuid_node([4; 16]), marker_node()])),
+                patches: patch_at(Node::Array(vec![
+                    uint(1),
+                    uuid_node([4; 16]),
+                    marker_node(),
+                ])),
                 snapshot: snapshot(),
             },
             extensions: BTreeMap::new(),
@@ -3976,5 +3980,4 @@ mod tests {
         };
         assert_profile_tags_rejected(present_property, "present property");
     }
-
 }

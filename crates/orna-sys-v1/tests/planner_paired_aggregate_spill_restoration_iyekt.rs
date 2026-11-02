@@ -574,12 +574,18 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
     let unknown = joins["table:Unknown"];
 
     assert_eq!(
-        text(small, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(
+            small,
+            "paired_aggregate_spill_restoration_aggregate_fold_identity"
+        ),
         text(small, "paired_aggregate_anchor_cascade_fold_identity"),
         "the paired restore fold exposes its exact aggregate cascade component"
     );
     assert_eq!(
-        text(small, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            small,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
         text(small, "paired_window_spill_cascade_fold_identity"),
         "the paired restore fold exposes its exact spill cascade component"
     );
@@ -596,22 +602,34 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
         "a sparse join carries the existing fold without inventing a new transition"
     );
     assert_eq!(
-        text(large, "paired_aggregate_spill_restoration_previous_fold_identity"),
+        text(
+            large,
+            "paired_aggregate_spill_restoration_previous_fold_identity"
+        ),
         text(small, "paired_aggregate_spill_restoration_fold_identity"),
         "the next aggregate event points to the last restoration fold across the gap"
     );
     assert_eq!(
-        text(unknown, "paired_aggregate_spill_restoration_previous_fold_identity"),
+        text(
+            unknown,
+            "paired_aggregate_spill_restoration_previous_fold_identity"
+        ),
         text(large, "paired_aggregate_spill_restoration_fold_identity"),
         "the later spill restoration points to the preceding aggregate fold"
     );
     assert_eq!(
-        text(middle, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(
+            middle,
+            "paired_aggregate_spill_restoration_aggregate_fold_identity"
+        ),
         text(middle, "paired_aggregate_anchor_cascade_fold_identity"),
         "the aggregate component stays bound to the carried aggregate cascade"
     );
     assert_eq!(
-        text(middle, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            middle,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
         text(middle, "paired_window_spill_cascade_fold_identity"),
         "the spill component stays bound to accumulated spill history"
     );
@@ -628,7 +646,10 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
     );
     let changed_large = joins_by_source(&changed_aggregate)["table:Large"];
     assert_ne!(
-        text(large, "paired_aggregate_spill_restoration_aggregate_fold_identity"),
+        text(
+            large,
+            "paired_aggregate_spill_restoration_aggregate_fold_identity"
+        ),
         text(
             changed_large,
             "paired_aggregate_spill_restoration_aggregate_fold_identity"
@@ -636,7 +657,10 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
         "changing the restored frame changes the exposed aggregate component"
     );
     assert_eq!(
-        text(large, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            large,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
         text(
             changed_large,
             "paired_aggregate_spill_restoration_spill_fold_identity"
@@ -666,7 +690,10 @@ fn aggregate_fold_components_survive_sparse_spill_restoration() {
         "the restored pair exposes the aggregate cascade selected for the changed plan"
     );
     assert_ne!(
-        text(middle, "paired_aggregate_spill_restoration_spill_fold_identity"),
+        text(
+            middle,
+            "paired_aggregate_spill_restoration_spill_fold_identity"
+        ),
         text(
             changed_middle,
             "paired_aggregate_spill_restoration_spill_fold_identity"
