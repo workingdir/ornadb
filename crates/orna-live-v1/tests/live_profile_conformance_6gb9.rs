@@ -196,7 +196,11 @@ fn string(value: &Json) -> &str {
 fn integer(value: &Json) -> i64 {
     match value { Json::Number(value) => *value, other => panic!("expected integer, got {other:?}") }
 }
-fn field<'a>(value: &'a Json, key: &str) -> &'a Json { object(value).get(key).unwrap_or_else(|| panic!("missing JSON field {key}")) }
+fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
+    object(value)
+        .get(key)
+        .unwrap_or_else(|| panic!("missing JSON field {key}"))
+}
 
 fn reference_file(name: &str) -> String {
     let root = env::var_os("ORNA_REFERENCE_DIR").map(PathBuf::from).unwrap_or_else(|| {
@@ -333,7 +337,7 @@ fn codec_accepts_profiled_client_control_envelopes_and_rejects_bad_identity_shap
     ];
     for envelope in envelopes {
         let code = envelope.message.code();
-        let profile_row = array(field(&profile, "messages")).iter().find(|row| integer(field(row, "code")) == code as i64).expect("codec code is in live-messages registry");
+        let profile_row = array(field(&profile, "messages")).iter().find(|row| integer(field(row, "code")) == i64::try_from(code).expect("a codec code fits in i64")).expect("codec code is in live-messages registry");
         assert_eq!(string(field(profile_row, "direction")), "client");
         let request_rule = string(field(profile_row, "request"));
         let watch_rule = string(field(profile_row, "watch"));
