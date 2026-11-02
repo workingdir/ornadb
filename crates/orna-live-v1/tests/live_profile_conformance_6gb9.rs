@@ -203,9 +203,10 @@ fn field<'a>(value: &'a Json, key: &str) -> &'a Json {
 }
 
 fn reference_file(name: &str) -> String {
-    let root = env::var_os("ORNA_REFERENCE_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference")
-    });
+    let root = env::var_os("ORNA_REFERENCE_DIR").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/reference"),
+        PathBuf::from,
+    );
     fs::read_to_string(root.join(name)).unwrap_or_else(|error| {
         panic!("could not read {name} from the selected Orna reference root: {error}")
     })
