@@ -9,11 +9,8 @@ fn bool_value(value: bool) -> CanonicalValue {
 fn session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .expect("reference standard profile is admitted");
-    for import in [
-        include_str!("fixtures/stdlib-use-money-rl767.orna"),
-    ] {
-        assert_eq!(session.submit(import), Ok(None), "import: {import}");
-    }
+    let import = include_str!("fixtures/stdlib-use-money-rl767.orna");
+    assert_eq!(session.submit(import), Ok(None), "import: {import}");
     session
 }
 

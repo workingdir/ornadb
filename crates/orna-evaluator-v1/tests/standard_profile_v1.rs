@@ -111,9 +111,8 @@ fn pinned_core_collection_exports_are_declared_in_source() {
         // collection source; they are exercised behaviourally by the evaluator
         // fixtures (e.g. collection_filter_named_callback.orna). Only the operation
         // still declared in the pinned source is checked here.
-        for declaration in [
-            "pub fn bucket_by<T, P>(rows: [T], period: P, zone: Str): [[T]]",
-        ] {
+        {
+            let declaration = "pub fn bucket_by<T, P>(rows: [T], period: P, zone: Str): [[T]]";
             assert!(
                 source.contains(declaration),
                 "{path} is missing `{declaration}`"

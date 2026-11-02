@@ -57,7 +57,8 @@ fn standard_sources(math_source: &str) -> Vec<(String, String)> {
     .collect()
 }
 
-fn snapshot_projects() -> (
+/// The two loaded projects, their commit ids and their module and source sets.
+type SnapshotProjects = (
     TempDir,
     LoadedProject,
     LoadedProject,
@@ -65,7 +66,9 @@ fn snapshot_projects() -> (
     String,
     Vec<(String, String)>,
     Vec<(String, String)>,
-) {
+);
+
+fn snapshot_projects() -> SnapshotProjects {
     let directory = tempfile::tempdir().unwrap();
     let project_path = directory.path().join("project");
     fs::create_dir_all(&project_path).unwrap();
@@ -2288,12 +2291,15 @@ fn dependency_graph_sources(
     .collect()
 }
 
-fn dependency_graph_projects() -> (
+/// The loaded dependency-graph projects with their sources.
+type DependencyGraphProjects = (
     TempDir,
     Vec<LoadedProject>,
     Vec<String>,
     Vec<Vec<(String, String)>>,
-) {
+);
+
+fn dependency_graph_projects() -> DependencyGraphProjects {
     let (directory, project_path, standard_path) = module_chain_repository();
     fs::write(
         project_path.join("main.orna"),
@@ -2349,7 +2355,6 @@ fn dependency_graph_projects() -> (
     )
     .unwrap();
     capture("upgrade graph aggregator");
-    drop(capture);
 
     let source_bundles = vec![
         dependency_graph_sources(
@@ -2555,12 +2560,15 @@ fn module_chain_sources(leaf: &str) -> Vec<(String, String)> {
     .collect()
 }
 
-fn module_chain_repin_projects() -> (
+/// Three linked modules with their source sets.
+type ModuleChainRepinProjects = (
     TempDir,
     Vec<LoadedProject>,
     [String; 3],
     [Vec<(String, String)>; 3],
-) {
+);
+
+fn module_chain_repin_projects() -> ModuleChainRepinProjects {
     let (directory, project_path, standard_path) = module_chain_repository();
     fs::write(
         project_path.join("main.orna"),
@@ -2664,14 +2672,17 @@ fn nested_module_pin_sources(collection: &str, leaf: &str) -> Vec<(String, Strin
     .collect()
 }
 
-fn nested_module_pin_projects() -> (
+/// The nested module pin fixture: projects, paths and the three module sources.
+type NestedModulePinProjects = (
     TempDir,
     PathBuf,
     Vec<String>,
     Vec<LoadedProject>,
     [String; 3],
     [Vec<(String, String)>; 3],
-) {
+);
+
+fn nested_module_pin_projects() -> NestedModulePinProjects {
     let (directory, project_path, standard_path) = module_chain_repository();
     fs::write(
         project_path.join("main.orna"),
@@ -7089,7 +7100,7 @@ fn stepwise_transitive_replay_retains_prior_pins_after_each_upgrade() {
         }
     }
 
-    let mut clones = retained_sessions.iter().cloned().collect::<Vec<_>>();
+    let mut clones = retained_sessions.to_vec();
     for index in (0..clones.len()).rev() {
         assert_eq!(
             clones[index].submit(replay_source),
@@ -7437,7 +7448,7 @@ fn replay_results_are_stable_across_semantics_preserving_module_repins() {
         );
     }
 
-    let mut cloned_replays = retained_sessions.iter().cloned().collect::<Vec<_>>();
+    let mut cloned_replays = retained_sessions.to_vec();
     for index in (0..cloned_replays.len()).rev() {
         assert_eq!(
             cloned_replays[index].submit(replay),

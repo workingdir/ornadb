@@ -727,20 +727,21 @@ fn http_response_raw(response: HostHttpResponse) -> Result<OvbRaw, EvaluationErr
     ]))
 }
 
+/// One parsed `sys.http` request: method, URL, header pairs, optional body,
+/// optional timeout, and the header and body limits the call declared.
+type ParsedHttpRequest = (
+    String,
+    String,
+    Vec<(String, String)>,
+    Option<Vec<u8>>,
+    Option<std::time::Duration>,
+    usize,
+    usize,
+);
+
 fn parse_http_request_arguments(
     arguments: &[CanonicalValue],
-) -> Result<
-    (
-        String,
-        String,
-        Vec<(String, String)>,
-        Option<Vec<u8>>,
-        Option<std::time::Duration>,
-        usize,
-        usize,
-    ),
-    EvaluationError,
-> {
+) -> Result<ParsedHttpRequest, EvaluationError> {
     let [method, url, headers, body, timeout, max_headers, max_body] = arguments else {
         return Err(redacted_error("ORNA-EVAL-ARGUMENT"));
     };
@@ -2350,8 +2351,7 @@ mod tests {
         let result = dispatch_blob_reflection("sys.blob.same_content", &[left, right], Some(&token));
         // No partial Bool may escape: the cancelled comparison yields only an error.
         let error = result
-            .err()
-            .expect("a requested cancellation must fail the comparison");
+            .expect_err("a requested cancellation must fail the comparison");
         assert_eq!(error.code(), "ORNA-EVAL-CANCELLED");
     }
 }
