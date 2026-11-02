@@ -161,7 +161,7 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
             "--debug" => {
                 words.next();
             }
-            "--db" => {
+            "--db" | "--format" => {
                 words.next();
                 if words.next().is_none() {
                     break;
@@ -177,12 +177,7 @@ pub(super) fn requested_color_mode(arguments: &[String]) -> ColorMode {
                 };
                 color = mode;
             }
-            "--format" => {
-                words.next();
-                if words.next().is_none() {
-                    break;
-                }
-            }
+
             _ => break,
         }
     }

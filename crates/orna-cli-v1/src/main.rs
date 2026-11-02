@@ -2,6 +2,10 @@
     dead_code,
     reason = "The bounded binary exposes planning and session seams for a later integration adapter."
 )]
+// Every command returns `Result<(), Diagnostic>` with the full command
+// diagnostic: code, message and the hints a user needs to fix the call. Boxing
+// it would push a Box onto every command without shrinking what a user reads.
+#![allow(clippy::result_large_err)]
 
 mod assertion_gate;
 mod checkout_assertion_gate;

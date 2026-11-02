@@ -23,7 +23,7 @@ use orna_storage_v1::RuntimePublicationCoordinator;
 use orna_repository_v1::{CandidateAssertionGate, publication_crash_barrier};
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
 
-use super::{Diagnostic, Exit, Digest, Endpoint, local_project_path, runtime_identity, BTreeMap};
+use super::{Diagnostic, Exit, Endpoint, local_project_path, runtime_identity, BTreeMap};
 
 const USAGE_HELP: &str = "use `orna publish [--message MESSAGE]`";
 const DEFAULT_MESSAGE: &str = "orna: publish runtime data";
