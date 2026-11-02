@@ -6,10 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[path = "support/format3.rs"]
-mod format3;
 #[path = "support/orna_cli_run.rs"]
 mod cli;
+#[path = "support/format3.rs"]
+mod format3;
 
 const BINARY: &str = env!("CARGO_BIN_EXE_orna");
 
@@ -26,7 +26,10 @@ fn http_get(address: &str, path: &str) -> std::io::Result<(u16, String)> {
     let mut stream = TcpStream::connect(address)?;
     // Host must name the listener's own authority, port included (RFC 9110);
     // `orna serve` refuses any other Host.
-    write!(stream, "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")?;
+    write!(
+        stream,
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+    )?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
     let (headers, body) = response.split_once("\r\n\r\n").unwrap_or((&response, ""));
@@ -74,8 +77,11 @@ fn devtools_are_absent_while_local_query_and_serving_remain_available() {
         .output()
         .expect("initialize project");
     assert!(initialized.status.success(), "initialize: {initialized:?}");
-    std::fs::write(project.path().join("main.orna"), "pub fn main(): Int = 42;\n")
-        .expect("write application source");
+    std::fs::write(
+        project.path().join("main.orna"),
+        "pub fn main(): Int = 42;\n",
+    )
+    .expect("write application source");
     git(project.path(), &["add", "main.orna"]);
     git(
         project.path(),
@@ -116,5 +122,8 @@ fn devtools_are_absent_while_local_query_and_serving_remain_available() {
     assert_eq!(status, 404, "no serve entry: no native root page");
     assert!(!body.contains("<html"));
     let (status, _) = http_get(&address, "/devtools/tables").expect("request removed route");
-    assert_eq!(status, 404, "removed devtools route must not be reinstalled");
+    assert_eq!(
+        status, 404,
+        "removed devtools route must not be reinstalled"
+    );
 }

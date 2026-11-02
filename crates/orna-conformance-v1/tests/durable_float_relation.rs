@@ -21,10 +21,7 @@ fn git(path: &Path, args: &[&str]) {
 fn durable_repository() -> (TempDir, Repository) {
     let temp = TempDir::new().expect("temporary repository");
     git(temp.path(), &["init", "--quiet"]);
-    git(
-        temp.path(),
-        &["config", "user.email", "kieran@drewett.dev"],
-    );
+    git(temp.path(), &["config", "user.email", "kieran@drewett.dev"]);
     git(temp.path(), &["config", "user.name", "kierandrewett"]);
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     fs::write(

@@ -48,10 +48,7 @@ fn key_path_component_and_table_relative_limits_round_trip_at_the_boundary() {
     let path = LoosePath::for_key("Boundary", &keys).expect("1024-byte key path is admitted");
     let components = encoded_components(&path, "Boundary");
     assert_eq!(components.join("/").len(), 1024);
-    assert_eq!(
-        path_decode_key_components(&components).unwrap(),
-        keys
-    );
+    assert_eq!(path_decode_key_components(&components).unwrap(), keys);
 
     keys[5].push('b');
     assert!(LoosePath::for_key("Boundary", &keys).is_err());

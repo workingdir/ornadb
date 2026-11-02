@@ -37,7 +37,11 @@ pub(crate) struct Renamable {
 pub(crate) type ModuleEdits = BTreeMap<usize, Vec<(SyntaxSpan, String)>>;
 
 /// The renamable name at `byte`, or why there is none.
-pub(crate) fn prepare(workspace: &Workspace, module: usize, byte: usize) -> Result<Renamable, Refusal> {
+pub(crate) fn prepare(
+    workspace: &Workspace,
+    module: usize,
+    byte: usize,
+) -> Result<Renamable, Refusal> {
     let file = workspace.file(module);
     if let Some(keyword) = file.keyword_at(byte) {
         return Err(Refusal::new(format!(
@@ -45,14 +49,20 @@ pub(crate) fn prepare(workspace: &Workspace, module: usize, byte: usize) -> Resu
             keyword.spelling()
         )));
     }
-    if let Some((broken, diagnostic)) = workspace.modules.iter().enumerate().find_map(|(index, entry)| {
-        entry
-            .file
-            .parse
-            .diagnostics
-            .first()
-            .map(|diagnostic| (index, diagnostic))
-    }) {
+    if let Some((broken, diagnostic)) =
+        workspace
+            .modules
+            .iter()
+            .enumerate()
+            .find_map(|(index, entry)| {
+                entry
+                    .file
+                    .parse
+                    .diagnostics
+                    .first()
+                    .map(|diagnostic| (index, diagnostic))
+            })
+    {
         return Err(Refusal::new(format!(
             "{} has a syntax error ({}); references cannot be found until it is fixed",
             workspace.location_label(broken, diagnostic.span.start),
@@ -302,7 +312,8 @@ fn verify_resolution(workspace: &Workspace, edits: &ModuleEdits) -> Result<(), R
             let old = meaning(workspace, workspace.resolve(module, occurrence), &shifts);
             let new = meaning(&edited, edited.resolve(module, moved), &after_shifts);
             if old != new {
-                let text = &workspace.file(module).text()[occurrence.span.start..occurrence.span.end];
+                let text =
+                    &workspace.file(module).text()[occurrence.span.start..occurrence.span.end];
                 return Err(Refusal::new(format!(
                     "`{text}` at {} would then refer to something else",
                     workspace.location_label(module, occurrence.span.start)
@@ -350,7 +361,10 @@ mod tests {
         let byte = FIXTURE.find("fn title").unwrap() + 3;
         let (_, edits) = plan(&workspace, 0, byte, "heading").unwrap();
         let text = renamed(&workspace, 0, &edits);
-        assert!(text.contains("pub fn heading(contact: Contact): Str = contact.title;"), "{text}");
+        assert!(
+            text.contains("pub fn heading(contact: Contact): Str = contact.title;"),
+            "{text}"
+        );
         assert!(text.contains("= heading(contact);"), "{text}");
         assert!(text.contains("    title: Str,"), "{text}");
     }
@@ -362,7 +376,10 @@ mod tests {
         let (_, edits) = plan(&workspace, 0, byte, "heading").unwrap();
         let text = renamed(&workspace, 0, &edits);
         assert!(text.contains("    heading: Str,"), "{text}");
-        assert!(text.contains("pub fn title(contact: Contact): Str = contact.heading;"), "{text}");
+        assert!(
+            text.contains("pub fn title(contact: Contact): Str = contact.heading;"),
+            "{text}"
+        );
         assert!(text.contains("= title(contact);"), "{text}");
     }
 
@@ -399,7 +416,10 @@ mod tests {
         let Err(Refusal(reason)) = plan(&workspace, 0, byte, "sum") else {
             panic!("renaming onto an existing declaration must be refused");
         };
-        assert!(reason.contains("would then refer to something else"), "{reason}");
+        assert!(
+            reason.contains("would then refer to something else"),
+            "{reason}"
+        );
 
         let local = "pub fn shadow(value: Int): Int { let other = 1; value + other }\n";
         let workspace = super::tests::workspace(&[("file:///w/main.orna", local)]);
@@ -424,7 +444,8 @@ mod tests {
 
     #[test]
     fn project_rename_updates_imports_and_qualified_uses() {
-        let main = "use util;\nuse util.{helper};\npub fn total(): Int = util.helper() + helper();\n";
+        let main =
+            "use util;\nuse util.{helper};\npub fn total(): Int = util.helper() + helper();\n";
         let util = "pub fn helper(): Int = 1;\n";
         let workspace = Workspace::project(
             vec![
@@ -453,6 +474,9 @@ mod tests {
             renamed(&workspace, 0, &edits),
             "use util;\nuse util.{assist};\npub fn total(): Int = util.assist() + assist();\n"
         );
-        assert_eq!(renamed(&workspace, 1, &edits), "pub fn assist(): Int = 1;\n");
+        assert_eq!(
+            renamed(&workspace, 1, &edits),
+            "pub fn assist(): Int = 1;\n"
+        );
     }
 }

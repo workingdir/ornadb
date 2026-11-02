@@ -11,7 +11,12 @@
 //! (profiles/vfs-1.md states no cross-handle trigger). The sync trigger's errno
 //! reports only the trigger's own candidate, never another module's refusal.
 
-use super::{DRAFT_FILE_BOUND_BYTES, WorkspaceFilesystem, NodeKind, Arc, MountWriter, OpenFile, DraftState, Errno, Ordering, DocumentCommitError, worst_retention_errno, Path, checked_project_source_path, BTreeMap, write_source_atomically, restore_source_after_failed_write, RetentionError};
+use super::{
+    Arc, BTreeMap, DRAFT_FILE_BOUND_BYTES, DocumentCommitError, DraftState, Errno, MountWriter,
+    NodeKind, OpenFile, Ordering, Path, RetentionError, WorkspaceFilesystem,
+    checked_project_source_path, restore_source_after_failed_write, worst_retention_errno,
+    write_source_atomically,
+};
 
 /// Refusal causes recorded with a retained source candidate (ORNA-VFS-009). The
 /// `sys.vfs.*` names follow the document causes in `DocumentCommitError::cause`.
@@ -191,7 +196,10 @@ impl WorkspaceFilesystem {
                 .source_drafts
                 .insert(inode, SourceDraft::seeded(committed));
         }
-        draft_state.source_drafts.get_mut(&inode).ok_or(Errno::EBADF)
+        draft_state
+            .source_drafts
+            .get_mut(&inode)
+            .ok_or(Errno::EBADF)
     }
 
     fn mark_source_handle(draft_state: &mut DraftState, handle: u64, inode: u64) {
@@ -209,7 +217,8 @@ impl WorkspaceFilesystem {
         truncate: bool,
         pid: u32,
     ) -> Result<u64, Errno> {
-        self.with_source_committed(inode, |_| ()).ok_or(Errno::EPERM)?;
+        self.with_source_committed(inode, |_| ())
+            .ok_or(Errno::EPERM)?;
         self.source_writer().ok_or(Errno::EPERM)?;
         if truncate {
             self.source_budget_fits(&*draft_state, inode, true, 0)?;
@@ -301,7 +310,9 @@ impl WorkspaceFilesystem {
         };
         match draft_state.source_drafts.get(&inode) {
             Some(draft) => window(&draft.candidate),
-            None => self.with_source_committed(inode, window).unwrap_or_default(),
+            None => self
+                .with_source_committed(inode, window)
+                .unwrap_or_default(),
         }
     }
 
@@ -354,16 +365,17 @@ impl WorkspaceFilesystem {
             eprintln!("[vfs] {path}: not accepted ({cause}); no candidate is held to retain");
             return Some(Errno::EIO);
         };
-        let (draft_id, failure) = match retain_source_candidate(writer, path, cause, &draft.candidate) {
-            Ok(id) => (Some(id), None),
-            Err(error) => {
-                eprintln!(
-                    "[vfs] {path}: not accepted ({cause}); candidate not retained: {}",
-                    error.message
-                );
-                (None, Some(error.errno))
-            }
-        };
+        let (draft_id, failure) =
+            match retain_source_candidate(writer, path, cause, &draft.candidate) {
+                Ok(id) => (Some(id), None),
+                Err(error) => {
+                    eprintln!(
+                        "[vfs] {path}: not accepted ({cause}); candidate not retained: {}",
+                        error.message
+                    );
+                    (None, Some(error.errno))
+                }
+            };
         draft.refusal = Some(SourceRefusal {
             cause,
             draft: draft_id,
@@ -394,7 +406,7 @@ impl WorkspaceFilesystem {
         })
     }
 
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     /// The commit itself, run under the commit gate. `trigger` is the inode of the
     /// handle that asked for the sync. Its errno reports only its own candidate.
     fn source_group_commit(&self, trigger: u64) -> Result<(), DocumentCommitError> {
@@ -470,9 +482,10 @@ impl WorkspaceFilesystem {
                             }
                             (SOURCE_STALE, DocumentCommitError::Stale)
                         }
-                        SourceVerdict::Invalid(detail) => {
-                            (SOURCE_INVALID, DocumentCommitError::Rejected(detail.clone()))
-                        }
+                        SourceVerdict::Invalid(detail) => (
+                            SOURCE_INVALID,
+                            DocumentCommitError::Rejected(detail.clone()),
+                        ),
                     };
                     let failure = self.refuse_source(
                         &mut draft_state,
@@ -573,10 +586,10 @@ impl WorkspaceFilesystem {
         if still_open {
             return;
         }
-        let (dirty, refused) = if let Some(draft) = draft_state.source_drafts.get(&inode) { (draft.dirty, draft.refusal.is_some()) } else {
-            eprintln!(
-                "[vfs] source module {inode}: closed with no candidate; nothing to retain"
-            );
+        let (dirty, refused) = if let Some(draft) = draft_state.source_drafts.get(&inode) {
+            (draft.dirty, draft.refusal.is_some())
+        } else {
+            eprintln!("[vfs] source module {inode}: closed with no candidate; nothing to retain");
             return;
         };
         if !dirty && !refused {
@@ -633,12 +646,11 @@ impl WorkspaceFilesystem {
 
 /// The result of a group commit for the sync trigger: an error only when the trigger
 /// is a group member. A trigger outside the group has nothing pending to report.
-fn group_result(trigger_in_group: bool, error: DocumentCommitError) -> Result<(), DocumentCommitError> {
-    if trigger_in_group {
-        Err(error)
-    } else {
-        Ok(())
-    }
+fn group_result(
+    trigger_in_group: bool,
+    error: DocumentCommitError,
+) -> Result<(), DocumentCommitError> {
+    if trigger_in_group { Err(error) } else { Ok(()) }
 }
 
 /// Whether the draft still holds what the snapshot captured.
@@ -661,7 +673,11 @@ fn disk_bytes(root: &Path, path: &str) -> Option<Vec<u8>> {
 /// Judges each member: the disk must still hold its baseline, and its candidate must
 /// pass the project check. A candidate that fails alone is invalid. A group that fails
 /// only together is refused as a whole, and the verdict says so on stderr.
-fn source_verdicts(writer: &MountWriter, root: &Path, members: &[SourceMember]) -> Vec<SourceVerdict> {
+fn source_verdicts(
+    writer: &MountWriter,
+    root: &Path,
+    members: &[SourceMember],
+) -> Vec<SourceVerdict> {
     let mut verdicts: Vec<SourceVerdict> = members
         .iter()
         .map(|member| {
@@ -712,7 +728,9 @@ fn source_verdicts(writer: &MountWriter, root: &Path, members: &[SourceMember]) 
         }
     }
     if !blamed {
-        eprintln!("source group refused: {detail}; no candidate fails alone, so every candidate is refused");
+        eprintln!(
+            "source group refused: {detail}; no candidate fails alone, so every candidate is refused"
+        );
         for verdict in &mut verdicts {
             if matches!(verdict, SourceVerdict::Accept) {
                 *verdict = SourceVerdict::Invalid(detail.clone());
@@ -750,7 +768,10 @@ fn write_source_group(root: &Path, members: &[SourceMember]) -> Result<(), Strin
 
 /// Validates the project with the given candidates as overlays, the same check `check`
 /// runs on a saved tree.
-fn admit_source_overlays(writer: &MountWriter, overlays: &BTreeMap<String, String>) -> Result<(), String> {
+fn admit_source_overlays(
+    writer: &MountWriter,
+    overlays: &BTreeMap<String, String>,
+) -> Result<(), String> {
     let project = orna_project_v1::ProjectLoader::default()
         .load_with_overlays(&writer.repository, overlays)
         .map_err(|error| format!("{error:?}"))?;

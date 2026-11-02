@@ -2031,7 +2031,8 @@ fn emacs_eglot_attaches_and_proves_hover_rename_references_and_semantic_tokens()
     let hover_semantic_result_path = temporary_path("hover-semantic.json");
     let plugin = root.join("editors/emacs/orna-eglot.el");
     let emacs_signature_fixture = isolated_fixture("signature-actions-v1.orna", SIGNATURE_SOURCE);
-    let emacs_action_fixture = isolated_fixture("missing-semicolon-code-action-v1.orna", ACTION_SOURCE);
+    let emacs_action_fixture =
+        isolated_fixture("missing-semicolon-code-action-v1.orna", ACTION_SOURCE);
     let emacs_hover_fixture = isolated_fixture("ji3t0-lsp-v1-self-contained.orna", SOURCE);
     let emacs_semantic_fixture = isolated_fixture("editor-semantic-tokens.orna", SEMANTIC_SOURCE);
     let emacs_hints_fixture = isolated_fixture("editor-lsp-hints.orna", HINTS_SOURCE);

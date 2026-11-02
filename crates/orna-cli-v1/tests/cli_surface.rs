@@ -35,8 +35,7 @@ fn git_succeeds(repository: &std::path::Path, arguments: &[&str]) {
 fn unavailable_workflow_commands_are_usage_refusals_before_any_repository_opens() {
     let directory = tempdir().expect("temporary directory");
     for command in [
-        "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune",
-        "upgrade", "restore",
+        "switch", "merge", "reset", "pull", "stash", "fmt", "verify", "prune", "upgrade", "restore",
     ] {
         let output = orna(directory.path(), &[command]);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -228,7 +227,10 @@ fn checkout_to_a_different_commit_is_refused_and_changes_nothing() {
     let stderr = String::from_utf8_lossy(&cli.stderr);
     assert_eq!(cli.status.code(), Some(1), "{stderr}");
     assert!(stderr.contains("E2100"), "{stderr}");
-    assert!(stderr.contains("checkout would overwrite uncommitted changes to a.txt"), "{stderr}");
+    assert!(
+        stderr.contains("checkout would overwrite uncommitted changes to a.txt"),
+        "{stderr}"
+    );
 
     let current = git(repository.path(), &["branch", "--show-current"]);
     assert_eq!(

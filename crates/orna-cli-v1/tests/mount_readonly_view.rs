@@ -54,7 +54,11 @@ fn legacy_repository() -> (TempDir, String) {
     git(root, &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("main.orna"), LEGACY_SOURCE).unwrap();
     fs::create_dir_all(root.join(".orna")).unwrap();
-    fs::write(root.join(LEGACY_FORMAT_METADATA), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        root.join(LEGACY_FORMAT_METADATA),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     let head = commit(root, "legacy format 1 fixture");
     (directory, head)
 }

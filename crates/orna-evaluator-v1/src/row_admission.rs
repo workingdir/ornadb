@@ -222,7 +222,10 @@ fn admit_row(
             ));
         }
         if key_names.contains(field.name.as_str()) {
-            return Err(row_error("E3004", "loose row body must not repeat path key"));
+            return Err(row_error(
+                "E3004",
+                "loose row body must not repeat path key",
+            ));
         }
         if admission.computed.contains(&field.name) {
             return Err(row_error(

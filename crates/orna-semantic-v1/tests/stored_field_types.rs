@@ -190,7 +190,10 @@ fn stored_field_rejects_imported_nominal_containing_secret() {
             "main.orna",
             "use creds.{Credential};\n\npub table Account(id: Uuid) {\n    cred: Credential,\n}\n",
         ),
-        ModuleInput::new("creds.orna", "pub type Credential {\n    pub token: Secret<Str>,\n}\n"),
+        ModuleInput::new(
+            "creds.orna",
+            "pub type Credential {\n    pub token: Secret<Str>,\n}\n",
+        ),
     ]);
     assert_rejects_secret(&analysis);
 }
@@ -213,7 +216,10 @@ fn stored_field_rejects_imported_nominal_private_secret_member() {
             "main.orna",
             "use creds.{Credential};\n\npub table Account(id: Uuid) {\n    cred: Credential,\n}\n",
         ),
-        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+        ModuleInput::new(
+            "creds.orna",
+            "pub type Credential {\n    token: Secret<Str>,\n}\n",
+        ),
     ]);
     assert_rejects_secret(&analysis);
 }
@@ -284,7 +290,10 @@ fn stored_field_rejects_local_wrapper_of_imported_secret_nominal() {
             "main.orna",
             "use creds.{Credential};\n\npub type Wrap {\n    c: Credential,\n}\n\npub table Account(id: Uuid) {\n    w: Wrap,\n}\n",
         ),
-        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+        ModuleInput::new(
+            "creds.orna",
+            "pub type Credential {\n    token: Secret<Str>,\n}\n",
+        ),
     ]);
     assert_rejects_secret(&analysis);
 }
@@ -302,7 +311,10 @@ fn stored_field_rejects_exported_wrapper_of_imported_secret_nominal() {
             "b.orna",
             "use creds.{Credential};\n\npub type Wrap {\n    c: Credential,\n}\n",
         ),
-        ModuleInput::new("creds.orna", "pub type Credential {\n    token: Secret<Str>,\n}\n"),
+        ModuleInput::new(
+            "creds.orna",
+            "pub type Credential {\n    token: Secret<Str>,\n}\n",
+        ),
     ]);
     assert_rejects_secret(&analysis);
 }
@@ -334,10 +346,7 @@ fn stored_field_accepts_local_wrapper_of_imported_nominal_without_secret() {
             "main.orna",
             "use addr.{Address};\n\npub type Wrap {\n    a: Address,\n}\n\npub table Account(id: Uuid) {\n    w: Wrap,\n}\n",
         ),
-        ModuleInput::new(
-            "addr.orna",
-            "pub type Address {\n    street: Str,\n}\n",
-        ),
+        ModuleInput::new("addr.orna", "pub type Address {\n    street: Str,\n}\n"),
     ]);
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
 }

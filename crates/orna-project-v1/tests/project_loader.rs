@@ -333,8 +333,14 @@ fn format3_modules_beside_a_table_are_not_loose_rows() {
 fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
     let (directory, repository) = repository(&[
         ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
-        (".orna/format.orna", "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n"),
-        (".orna/database.orna", "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n"),
+        (
+            ".orna/format.orna",
+            "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+        ),
+        (
+            ".orna/database.orna",
+            "{database_id: \"9f237b7e-6844-4498-bcd5-d24641c07449\"}\n",
+        ),
         ("Music/london.orna", "{\n    title: \"Legacy row\",\n}\n"),
     ]);
     commit_all(&directory);
@@ -347,8 +353,7 @@ fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
     assert_eq!(project.loose_rows()[0].logical_path(), "Music/london.orna");
     // The candidate adds a valid top-level declaration (ORNA-SOURCE-002) so
     // its source differs from the committed module.
-    let candidate_source =
-        "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n";
+    let candidate_source = "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n";
     let candidate = repository
         .build_private_commit(
             &commit,
@@ -363,10 +368,11 @@ fn legacy_database_sidecar_does_not_hide_committed_source_rows() {
         .load_private_candidate(&repository, &candidate)
         .unwrap();
     assert_eq!(candidate_project.loose_rows().len(), 1);
-    assert_eq!(candidate_project.loose_rows()[0].logical_path(), "Music/london.orna");
-
+    assert_eq!(
+        candidate_project.loose_rows()[0].logical_path(),
+        "Music/london.orna"
+    );
 }
-
 
 /// ORNA-REPO-001, ORNA-REPO-002, ORNA-REPO-003: only module-graph-reachable source enters the loaded program.
 #[test]
@@ -619,15 +625,24 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
         "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
     )
     .unwrap();
-    git_output_at(repository.worktree(), &["config", "user.email", "kieran@drewett.dev"]);
-    git_output_at(repository.worktree(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.name", "kierandrewett"],
+    );
     git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
     let first_link = format!("160000,{first_module_commit},stdlib/std");
     git_output_at(
         repository.worktree(),
         &["update-index", "--add", "--cacheinfo", &first_link],
     );
-    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std v1"]);
+    git_output_at(
+        repository.worktree(),
+        &["commit", "--quiet", "-m", "capture std v1"],
+    );
     let first_parent_commit = repository.head().unwrap().unwrap();
 
     fs::write(
@@ -659,7 +674,10 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
             .iter()
             .find(|(path, _)| path == "std/collection.orna")
             .unwrap();
-        assert_eq!(collection.1, include_str!("fixtures/captured-standard-collection-v1.orna"));
+        assert_eq!(
+            collection.1,
+            include_str!("fixtures/captured-standard-collection-v1.orna")
+        );
         let catalogue = Catalogue::authoritative_core()
             .with_standard_sources(profile, project.standard_sources().iter().cloned())
             .unwrap();
@@ -672,7 +690,10 @@ fn loads_the_captured_standard_gitlink_and_keeps_historical_imports_pinned() {
         repository.worktree(),
         &["update-index", "--add", "--cacheinfo", &second_link],
     );
-    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std v2"]);
+    git_output_at(
+        repository.worktree(),
+        &["commit", "--quiet", "-m", "capture std v2"],
+    );
     let second_parent_commit = repository.head().unwrap().unwrap();
     let latest = loader
         .load_committed_snapshot(&repository, &second_parent_commit)
@@ -706,7 +727,11 @@ fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
         "use std.io;\npub fn answer(): Int = 41 + 1;\n",
     )
     .unwrap();
-    fs::write(module_path.join("io/main.orna"), "use fs;\npub fn read(): Int = 1;\n").unwrap();
+    fs::write(
+        module_path.join("io/main.orna"),
+        "use fs;\npub fn read(): Int = 1;\n",
+    )
+    .unwrap();
     fs::write(module_path.join("io/fs.orna"), "pub fn open(): Int = 2;\n").unwrap();
     commit_directory(&module_path, "standard");
     let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
@@ -716,12 +741,24 @@ fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
         "[submodule \"std\"]\n\tpath = stdlib/std\n\turl = https://example.invalid/ornadb-std.git\n",
     )
     .unwrap();
-    git_output_at(repository.worktree(), &["config", "user.email", "kieran@drewett.dev"]);
-    git_output_at(repository.worktree(), &["config", "user.name", "kierandrewett"]);
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git_output_at(
+        repository.worktree(),
+        &["config", "user.name", "kierandrewett"],
+    );
     git_output_at(repository.worktree(), &["add", "main.orna", ".gitmodules"]);
     let link = format!("160000,{module_commit},stdlib/std");
-    git_output_at(repository.worktree(), &["update-index", "--add", "--cacheinfo", &link]);
-    git_output_at(repository.worktree(), &["commit", "--quiet", "-m", "capture std"]);
+    git_output_at(
+        repository.worktree(),
+        &["update-index", "--add", "--cacheinfo", &link],
+    );
+    git_output_at(
+        repository.worktree(),
+        &["commit", "--quiet", "-m", "capture std"],
+    );
     let parent_commit = repository.head().unwrap().unwrap();
 
     let project = ProjectLoader::default()
@@ -735,7 +772,12 @@ fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
             .iter()
             .map(|(path, _)| path.as_str())
             .collect::<Vec<_>>(),
-        ["std/collection.orna", "std/io/fs.orna", "std/io/main.orna", "std/main.orna"]
+        [
+            "std/collection.orna",
+            "std/io/fs.orna",
+            "std/io/main.orna",
+            "std/main.orna"
+        ]
     );
 }
 
@@ -743,11 +785,26 @@ fn attached_std_module_resolves_sibling_and_absolute_imports_at_snapshot() {
 fn unchanged_reference_bundle_loads_and_reaches_v1_semantic_analysis() {
     let directory = tempfile::tempdir().unwrap();
     for (name, source) in [
-        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
-        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
-        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
-        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
-        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
+        (
+            "main.orna",
+            include_str!("fixtures/reference-project/main.orna"),
+        ),
+        (
+            "library.orna",
+            include_str!("fixtures/reference-project/library.orna"),
+        ),
+        (
+            "warehouse.orna",
+            include_str!("fixtures/reference-project/warehouse.orna"),
+        ),
+        (
+            "sensors.orna",
+            include_str!("fixtures/reference-project/sensors.orna"),
+        ),
+        (
+            "values.orna",
+            include_str!("fixtures/reference-project/values.orna"),
+        ),
     ] {
         fs::write(directory.path().join(name), source).unwrap();
     }
@@ -1035,8 +1092,7 @@ fn loads_reachable_modules_from_a_committed_snapshot_without_touching_git_state(
 
 #[test]
 fn loads_private_candidate_source_without_reading_human_edits_or_changing_head() {
-    const CANDIDATE_SOURCE: &str =
-        include_str!("fixtures/semantic_consumer_gap.orna");
+    const CANDIDATE_SOURCE: &str = include_str!("fixtures/semantic_consumer_gap.orna");
 
     let (directory, candidate_repository) =
         repository(&[("main.orna", include_str!("fixtures/main_from_head.orna"))]);

@@ -163,20 +163,55 @@ fn semantic_diff_reports_catalogue_rows_results_dependencies_and_storage() {
         |change| matches!(change, orna_core::catalogue_diff::SemanticChange::ObjectTypeAdded { id, .. } if *id == ADDED_TYPE)
     ));
     assert_eq!(report.rows().len(), 3);
-    assert!(report.rows().iter().any(|change| change.kind() == RowChangeKind::Updated));
-    assert!(report.rows().iter().any(|change| change.kind() == RowChangeKind::Added));
-    assert!(report.rows().iter().any(|change| change.kind() == RowChangeKind::Removed));
-    assert_eq!(report.results().len(), 2);
-    assert!(report.results().iter().any(|change| change.kind() == ResultChangeKind::Changed));
-    assert!(report.results().iter().any(|change| change.kind() == ResultChangeKind::Removed));
-    assert_eq!(report.dependencies().len(), 2);
-    assert!(report.dependencies().iter().any(|change| change.kind() == DependencyChangeKind::Added));
-    assert!(report.dependencies().iter().any(|change| change.kind() == DependencyChangeKind::Removed));
-    assert_eq!(
-        report.physical().unwrap().compact_generation,
-        Some((4, 5))
+    assert!(
+        report
+            .rows()
+            .iter()
+            .any(|change| change.kind() == RowChangeKind::Updated)
     );
-    assert_eq!(report.physical().unwrap().representation_changed, Some(true));
+    assert!(
+        report
+            .rows()
+            .iter()
+            .any(|change| change.kind() == RowChangeKind::Added)
+    );
+    assert!(
+        report
+            .rows()
+            .iter()
+            .any(|change| change.kind() == RowChangeKind::Removed)
+    );
+    assert_eq!(report.results().len(), 2);
+    assert!(
+        report
+            .results()
+            .iter()
+            .any(|change| change.kind() == ResultChangeKind::Changed)
+    );
+    assert!(
+        report
+            .results()
+            .iter()
+            .any(|change| change.kind() == ResultChangeKind::Removed)
+    );
+    assert_eq!(report.dependencies().len(), 2);
+    assert!(
+        report
+            .dependencies()
+            .iter()
+            .any(|change| change.kind() == DependencyChangeKind::Added)
+    );
+    assert!(
+        report
+            .dependencies()
+            .iter()
+            .any(|change| change.kind() == DependencyChangeKind::Removed)
+    );
+    assert_eq!(report.physical().unwrap().compact_generation, Some((4, 5)));
+    assert_eq!(
+        report.physical().unwrap().representation_changed,
+        Some(true)
+    );
     assert!(report.physical().unwrap().logical_changes_present);
     assert!(!report.is_physical_only());
 }
@@ -192,10 +227,11 @@ fn semantic_diff_coalesces_only_an_explicit_rekey_intent() {
     )
     .unwrap();
     let candidate_rows = [KeyedRow::new(TABLE, &integer(8), &text("same row")).unwrap()];
-    let candidate = SemanticSnapshot::new(catalogue(1, false), candidate_rows.clone(), [], [], None)
-        .unwrap()
-        .with_rekeys([RowRekey::new(TABLE, &integer(7), &integer(8)).unwrap()])
-        .unwrap();
+    let candidate =
+        SemanticSnapshot::new(catalogue(1, false), candidate_rows.clone(), [], [], None)
+            .unwrap()
+            .with_rekeys([RowRekey::new(TABLE, &integer(7), &integer(8)).unwrap()])
+            .unwrap();
 
     let report = semantic_snapshot_diff(&base, &candidate);
     assert_eq!(report.rows().len(), 1);
@@ -203,14 +239,27 @@ fn semantic_diff_coalesces_only_an_explicit_rekey_intent() {
     let old_key = integer(7).encode().unwrap();
     let new_key = integer(8).encode().unwrap();
     assert_eq!(report.rows()[0].key_bytes(), new_key);
-    assert_eq!(report.rows()[0].previous_key_bytes(), Some(old_key.as_slice()));
+    assert_eq!(
+        report.rows()[0].previous_key_bytes(),
+        Some(old_key.as_slice())
+    );
 
-    let without_intent = SemanticSnapshot::new(catalogue(1, false), candidate_rows, [], [], None)
-        .unwrap();
+    let without_intent =
+        SemanticSnapshot::new(catalogue(1, false), candidate_rows, [], [], None).unwrap();
     let conservative = semantic_snapshot_diff(&base, &without_intent);
     assert_eq!(conservative.rows().len(), 2);
-    assert!(conservative.rows().iter().any(|row| row.kind() == RowChangeKind::Added));
-    assert!(conservative.rows().iter().any(|row| row.kind() == RowChangeKind::Removed));
+    assert!(
+        conservative
+            .rows()
+            .iter()
+            .any(|row| row.kind() == RowChangeKind::Added)
+    );
+    assert!(
+        conservative
+            .rows()
+            .iter()
+            .any(|row| row.kind() == RowChangeKind::Removed)
+    );
 }
 
 #[test]
@@ -241,7 +290,10 @@ fn semantic_diff_keeps_row_identity_through_a_rekey_tail_with_an_update() {
 
     assert_eq!(report.rows().len(), 1);
     assert_eq!(report.rows()[0].kind(), RowChangeKind::Rekeyed);
-    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(7).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[0].previous_key_bytes(),
+        Some(integer(7).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[0].key_bytes(), integer(9).encode().unwrap());
 }
 
@@ -279,10 +331,21 @@ fn semantic_diff_uses_activation_order_when_a_rekeyed_key_is_reused() {
     let report = semantic_snapshot_diff(&base, &candidate);
 
     assert_eq!(report.rows().len(), 2);
-    assert!(report.rows().iter().all(|row| row.kind() == RowChangeKind::Rekeyed));
-    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert!(
+        report
+            .rows()
+            .iter()
+            .all(|row| row.kind() == RowChangeKind::Rekeyed)
+    );
+    assert_eq!(
+        report.rows()[0].previous_key_bytes(),
+        Some(integer(1).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[0].key_bytes(), integer(2).encode().unwrap());
-    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(2).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[1].previous_key_bytes(),
+        Some(integer(2).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[1].key_bytes(), integer(3).encode().unwrap());
 }
 
@@ -321,10 +384,16 @@ fn semantic_diff_tracks_rekey_identity_when_a_freed_destination_is_reused_again(
 
     assert_eq!(report.rows().len(), 2);
     assert_eq!(report.rows()[0].kind(), RowChangeKind::Rekeyed);
-    assert_eq!(report.rows()[0].previous_key_bytes(), Some(integer(4).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[0].previous_key_bytes(),
+        Some(integer(4).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[0].key_bytes(), integer(2).encode().unwrap());
     assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
-    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[1].previous_key_bytes(),
+        Some(integer(1).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[1].key_bytes(), integer(3).encode().unwrap());
 }
 
@@ -361,7 +430,10 @@ fn semantic_diff_reports_insert_at_a_rekeyed_rows_former_key() {
     assert_eq!(report.rows()[0].kind(), RowChangeKind::Added);
     assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
     assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
-    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(1).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[1].previous_key_bytes(),
+        Some(integer(1).encode().unwrap().as_slice())
+    );
     assert_eq!(report.rows()[1].key_bytes(), integer(2).encode().unwrap());
 }
 
@@ -436,7 +508,10 @@ fn semantic_diff_keeps_retired_and_rekeyed_identities_distinct_at_a_reused_key()
     assert_eq!(report.rows()[0].key_bytes(), integer(1).encode().unwrap());
     assert_eq!(report.rows()[1].kind(), RowChangeKind::Rekeyed);
     assert_eq!(report.rows()[1].key_bytes(), integer(1).encode().unwrap());
-    assert_eq!(report.rows()[1].previous_key_bytes(), Some(integer(2).encode().unwrap().as_slice()));
+    assert_eq!(
+        report.rows()[1].previous_key_bytes(),
+        Some(integer(2).encode().unwrap().as_slice())
+    );
 }
 
 #[test]

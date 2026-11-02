@@ -14,7 +14,9 @@ fn pinned_concurrent_module_imports_and_rejects_clock_sleep_in_plain_repl() {
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-call-concurrent-sleep-zhw5h.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-call-concurrent-sleep-zhw5h.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-REPL-EFFECT"
@@ -37,25 +39,34 @@ fn pinned_concurrent_sleep_succeeds_with_clock_binding() {
         include_str!("fixtures/stdlib-call-concurrent-sleep-zhw5h.orna"),
         &mut bindings,
     );
-    assert!(result.is_ok(), "clock-bound sleep must be admitted, got {result:?}");
+    assert!(
+        result.is_ok(),
+        "clock-bound sleep must be admitted, got {result:?}"
+    );
 }
 
 #[test]
 fn core_remains_available_without_std_and_concurrent_import_is_not_filled_in() {
     let mut session = AdmittedReplSession::new(Limits::default());
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-core-without-concurrent-zhw5h.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-without-concurrent-zhw5h.orna"
+        )),
         Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap()))
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-concurrent-without-snapshot-zhw5h.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-concurrent-without-snapshot-zhw5h.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-core-without-concurrent-zhw5h.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-core-without-concurrent-zhw5h.orna"
+        )),
         Ok(Some(CanonicalValue::new(Raw::Bool(true)).unwrap()))
     );
 }

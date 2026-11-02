@@ -264,7 +264,10 @@ mod tests {
     fn inline_golden_vectors_match_draft_zip_when_readable() {
         let require = std::env::var_os("ORNA_REQUIRE_DRAFT_ZIP").is_some_and(|v| v == "1");
         let Some(zip) = std::env::var_os("ORNA_DRAFT_ZIP") else {
-            assert!(!require, "ORNA_REQUIRE_DRAFT_ZIP=1 but ORNA_DRAFT_ZIP is unset");
+            assert!(
+                !require,
+                "ORNA_REQUIRE_DRAFT_ZIP=1 but ORNA_DRAFT_ZIP is unset"
+            );
             eprintln!("SKIPPED draft golden comparison: ORNA_DRAFT_ZIP not set");
             return;
         };
@@ -276,7 +279,10 @@ mod tests {
         {
             Ok(output) if output.status.success() => output,
             _ => {
-                assert!(!require, "ORNA_REQUIRE_DRAFT_ZIP=1 but draft zip unreadable: {zip:?}");
+                assert!(
+                    !require,
+                    "ORNA_REQUIRE_DRAFT_ZIP=1 but draft zip unreadable: {zip:?}"
+                );
                 eprintln!("SKIPPED draft golden comparison: draft zip not readable at {zip:?}");
                 return;
             }

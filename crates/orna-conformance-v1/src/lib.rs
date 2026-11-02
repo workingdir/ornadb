@@ -30,15 +30,14 @@ mod admitted_repl;
 pub mod row_admission;
 mod semantic_adapter;
 mod syntax_adapter;
-mod vector_suites;
 #[cfg(test)]
 mod test_support;
+mod vector_suites;
 pub use admitted_repl::{AdmittedReplSession, ReplError};
 pub use semantic_adapter::{
     BoundedEvaluator, DurableTransactionalEvaluator, PendingPublicationError,
     RunningTableRequestDisposition, RuntimeAdapter, RuntimeEvaluator, RuntimeTarget,
-    SemanticAdapter, TransactionalEvaluator, project_declares_assertions,
-    is_table_assertion_false,
+    SemanticAdapter, TransactionalEvaluator, is_table_assertion_false, project_declares_assertions,
     transactional_loaded_project_candidate_validator,
     transactional_loaded_project_commit_validator,
 };
@@ -741,7 +740,8 @@ impl Corpus {
             })
         {
             return Err(CorpusError(
-                "scenario corpus must declare its exact scenario count and identify every scenario".into(),
+                "scenario corpus must declare its exact scenario count and identify every scenario"
+                    .into(),
             ));
         }
         if self.vectors.len() != VECTOR_FILES.len() || self.vectors.values().any(Value::is_null) {
@@ -774,7 +774,8 @@ impl Corpus {
         if self.project_expectations.steps.is_empty()
             || self.project_expectations.environment.network
             || self.project_expectations.environment.credentials
-            || self.project_expectations.environment.intrinsics != format!("Orna {} core", self.manifest.version)
+            || self.project_expectations.environment.intrinsics
+                != format!("Orna {} core", self.manifest.version)
         {
             return Err(CorpusError(
                 "project expectations have an invalid offline intrinsic environment".into(),
@@ -2643,10 +2644,11 @@ impl Harness {
                     continue;
                 }
                 if let Some(subject) = test.get("subject")
-                    && subject.as_str() != Some(entry.requirement.as_str()) {
-                        saw_malformed_link = true;
-                        continue;
-                    }
+                    && subject.as_str() != Some(entry.requirement.as_str())
+                {
+                    saw_malformed_link = true;
+                    continue;
+                }
                 let stage_values = match evidence_test_stages(test) {
                     Ok(Some(stages)) => stages,
                     Ok(None) => {
@@ -2658,9 +2660,10 @@ impl Harness {
                         continue;
                     }
                 };
-                if stage_values.iter().any(|value| {
-                    *value == stage.expectation_key() || *value == stage.phase_name()
-                }) && seen.insert(entry.requirement.clone())
+                if stage_values
+                    .iter()
+                    .any(|value| *value == stage.expectation_key() || *value == stage.phase_name())
+                    && seen.insert(entry.requirement.clone())
                 {
                     linked.push(entry.requirement.clone());
                 }
@@ -2763,16 +2766,15 @@ fn is_evidence_stage(stage: &str) -> bool {
     )
 }
 
-fn validate_requirement_evidence_test(
-    test: &Value,
-    requirement: &str,
-) -> Result<(), CorpusError> {
+fn validate_requirement_evidence_test(test: &Value, requirement: &str) -> Result<(), CorpusError> {
     let object = test
         .as_object()
         .ok_or_else(|| CorpusError("requirement evidence test must be an object".into()))?;
     let kind = object.get("kind").and_then(Value::as_str);
     let subject = object.get("subject").and_then(Value::as_str);
-    let subject_is_malformed = object.get("subject").is_some_and(|value| !value.is_string());
+    let subject_is_malformed = object
+        .get("subject")
+        .is_some_and(|value| !value.is_string());
     if subject_is_malformed {
         return Err(CorpusError(
             "requirement evidence test subject must match requirement".into(),
@@ -2952,6 +2954,11 @@ mod authority_tests {
         );
 
         write_release(root.path(), &pinned, 1);
-        assert_eq!(release_digests(root.path(), &pinned).expect("pinned release").len(), 1);
+        assert_eq!(
+            release_digests(root.path(), &pinned)
+                .expect("pinned release")
+                .len(),
+            1
+        );
     }
 }

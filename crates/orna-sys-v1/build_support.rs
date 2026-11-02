@@ -540,9 +540,7 @@ pub fn generate_system_api_document(
             object
                 .get(name)
                 .and_then(Value::as_array)
-                .ok_or_else(|| {
-                    format!("system API registry inventory `{name}` must be an array")
-                })?
+                .ok_or_else(|| format!("system API registry inventory `{name}` must be an array"))?
                 .len()
         };
         counts.insert(name.to_owned(), Value::from(count));
@@ -1528,9 +1526,7 @@ fn is_qualified_sys_failure_code(code: &str) -> bool {
                 .next()
                 .is_some_and(|character| character.is_ascii_lowercase())
                 && characters.all(|character| {
-                    character.is_ascii_lowercase()
-                        || character.is_ascii_digit()
-                        || character == '_'
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
                 })
         })
 }
@@ -1645,7 +1641,6 @@ fn validate_removed_names(value: &Value) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 const BUILTIN_TYPES: &[&str] = &[
     "Blob",

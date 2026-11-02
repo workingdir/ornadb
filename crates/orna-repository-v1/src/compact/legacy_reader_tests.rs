@@ -33,8 +33,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use super::legacy_fixture_writer::with_page_checksums;
+use super::{CompactCommittedRow, resolve_legacy_authoritative_rows};
 use crate::{
     CompactManifest, CompactPublicationPlan, CompactSegment, CompactSegmentRole, GitCommitRef,
     GitDeclaredObjectSetState, GitObjectKind, GitObjectState, IndexGeneration, ManagedFileChange,
@@ -67,7 +67,11 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -184,9 +188,14 @@ fn compact_parquet(table: Uuid, ordinal: u64, columns: &[u8], payload: Vec<u8>) 
         ),
         KeyValue::new(
             "orna.schema.ovb".to_owned(),
-            Some(orna_value_v1::base64_encode(&compact_schema(table).encode().unwrap())),
+            Some(orna_value_v1::base64_encode(
+                &compact_schema(table).encode().unwrap(),
+            )),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
+        KeyValue::new(
+            "orna.columns.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(columns)),
+        ),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -280,7 +289,10 @@ fn date_parquet(table: Uuid, schema: &SchemaDescriptor, columns: &[u8], days: &[
             "orna.schema.ovb".to_owned(),
             Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
+        KeyValue::new(
+            "orna.columns.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(columns)),
+        ),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -517,7 +529,10 @@ fn compact_primitive_parquet(
             "orna.schema.ovb".to_owned(),
             Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
+        KeyValue::new(
+            "orna.columns.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(columns)),
+        ),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -590,7 +605,10 @@ fn compact_ovb_parquet(
             "orna.schema.ovb".to_owned(),
             Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
         ),
-        KeyValue::new("orna.columns.ovb".to_owned(), Some(orna_value_v1::base64_encode(columns))),
+        KeyValue::new(
+            "orna.columns.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(columns)),
+        ),
         KeyValue::new(
             "orna.encoder".to_owned(),
             Some("test-encoder-v1".to_owned()),
@@ -701,7 +719,6 @@ fn compact_ovb_segment_for_schema(
     .unwrap()
 }
 
-
 /// Builds a compact candidate with the test-only legacy fixture writer.
 fn compact_plan(
     repository: &Repository,
@@ -766,7 +783,11 @@ fn filtered_compact_clone() -> Option<FilteredCompactClone> {
     fs::write(seed.join("main.orna"), "module main;\n").ok()?;
     fs::write(seed.join("ordinary.txt"), "base\n").ok()?;
     fs::create_dir_all(seed.join(".orna")).ok()?;
-    fs::write(seed.join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").ok()?;
+    fs::write(
+        seed.join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .ok()?;
     git(&seed, &["add", "."]);
     git(&seed, &["commit", "-m", "initial"]);
 

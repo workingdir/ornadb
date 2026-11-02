@@ -18,7 +18,10 @@ use orna_repository_v1::{
 };
 
 use super::assertion_gate::{AssertionGate, GatedCommand, refusal_diagnostic};
-use super::{Diagnostic, Cow, Exit, semantic_catalogue, Endpoint, local_project_path, runtime_identity, RuntimeState};
+use super::{
+    Cow, Diagnostic, Endpoint, Exit, RuntimeState, local_project_path, runtime_identity,
+    semantic_catalogue,
+};
 
 fn usage() -> Diagnostic {
     Diagnostic::usage(
@@ -197,8 +200,8 @@ fn stage_store(
         )
     })?;
     let table_name = |relation: &[u8; 16]| {
-        staged_relations
-            .table_name(relation).map_or_else(|| {
+        staged_relations.table_name(relation).map_or_else(
+            || {
                 // A removed table keeps its name in the retired inventory record.
                 previous
                     .as_ref()
@@ -209,7 +212,9 @@ fn stage_store(
                         })
                     })
                     .map_or_else(String::new, |record| record.qualified_name().to_owned())
-            }, str::to_owned)
+            },
+            str::to_owned,
+        )
     };
     let admission = repository
         .stage_store_admission(
@@ -337,11 +342,9 @@ fn failure(error: &orna_repository_v1::RepositoryError, generic_title: &'static 
             "review the staged changes again, then retry `orna commit -m MESSAGE`",
         ),
         // sys.git.nothing_to_commit
-        RepositoryError::SysGitNothingToCommit => (
-            "E2304",
-            NOTHING_TO_COMMIT_TITLE,
-            NOTHING_TO_COMMIT_HELP,
-        ),
+        RepositoryError::SysGitNothingToCommit => {
+            ("E2304", NOTHING_TO_COMMIT_TITLE, NOTHING_TO_COMMIT_HELP)
+        }
         // ORNA-ASSERT-048 to ORNA-ASSERT-051: the candidate's assertion gate refused it.
         RepositoryError::CandidateAssertionRefused(refusal) => {
             return refusal_diagnostic(refusal, GatedCommand::Commit, error);

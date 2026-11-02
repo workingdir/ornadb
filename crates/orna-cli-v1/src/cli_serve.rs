@@ -951,10 +951,12 @@ impl ConnectionSlot {
                 (active < limit).then_some(active + 1)
             })
             .ok()?;
-        if let Ok(socket) = stream.try_clone() { Some(Self {
-            state: Arc::clone(state),
-            socket,
-        }) } else {
+        if let Ok(socket) = stream.try_clone() {
+            Some(Self {
+                state: Arc::clone(state),
+                socket,
+            })
+        } else {
             state.connections.fetch_sub(1, Ordering::AcqRel);
             None
         }
@@ -2009,9 +2011,10 @@ fn run_git_http_backend(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
     if let Some(protocol) = request_header(request, "git-protocol")
-        && protocol == "version=2" {
-            command.env("GIT_PROTOCOL", protocol);
-        }
+        && protocol == "version=2"
+    {
+        command.env("GIT_PROTOCOL", protocol);
+    }
     // Only reached after the operator enabled push with `serve --allow-push`.
     // Git's ordinary receive-pack checks (including checked-out-branch
     // protection) still apply.
@@ -2661,7 +2664,11 @@ mod tests {
                 "X-Frame-Options: DENY",
                 "Referrer-Policy: no-referrer",
             ] {
-                assert!(page.head.contains(header), "{path} lacks {header}: {}", page.head);
+                assert!(
+                    page.head.contains(header),
+                    "{path} lacks {header}: {}",
+                    page.head
+                );
             }
         }
     }
@@ -3224,7 +3231,7 @@ mod tests {
         assert!(response.contains("\"CWD\":{\"branch\":\"listener-test\""));
     }
 
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn smart_http_clones_and_pushes_the_selected_clones_head() {
         for (index, branch, dirty) in [(0_u8, "http-left", false), (1_u8, "http-right", true)] {
@@ -4457,11 +4464,9 @@ mod tests {
         git_commit(root, "base");
         let source = std::fs::read_to_string(root.join("main.orna")).expect("project source");
         let module = orna_semantic_v1::ModuleInput::new("main.orna", source.as_str());
-        let identities = orna_project_v1::ObjectIdentityManifest::reconcile(
-            std::slice::from_ref(&module),
-            None,
-        )
-        .expect("object identities");
+        let identities =
+            orna_project_v1::ObjectIdentityManifest::reconcile(std::slice::from_ref(&module), None)
+                .expect("object identities");
         let repository = Repository::discover(root).expect("served clone");
         let staged = repository
             .capture_staged_candidate()

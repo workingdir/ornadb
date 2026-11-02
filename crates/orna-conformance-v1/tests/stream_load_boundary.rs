@@ -26,10 +26,7 @@ fn repository() -> (TempDir, Repository) {
         directory.path(),
         &["config", "user.email", "kieran@drewett.dev"],
     );
-    git(
-        directory.path(),
-        &["config", "user.name", "kierandrewett"],
-    );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
     let repository = Repository::discover(directory.path()).expect("repository");
     (directory, repository)
 }
@@ -229,14 +226,9 @@ async fn admitted_literal_stream_cannot_poll_or_invoke_its_callback_before_the_r
         Ok(StageOutcome::Passed)
     ));
 
-    let state = RuntimeState::open_with_owner_id(
-        &repository,
-        identity,
-        [73; 32],
-        blocker.owner_id,
-    )
-    .await
-    .expect("reopen runtime state as lease owner");
+    let state = RuntimeState::open_with_owner_id(&repository, identity, [73; 32], blocker.owner_id)
+        .await
+        .expect("reopen runtime state as lease owner");
 
     assert_eq!(state.current_lease().await, Ok(Some(blocker)));
     let checkpoint = state

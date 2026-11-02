@@ -62,8 +62,17 @@ fn a_two_thousand_line_module_answers_every_request_within_the_bound() {
     };
 
     let hover = check("hover", timed(&mut client, "textDocument/hover", at(&call)));
-    assert!(hover["contents"]["value"].as_str().unwrap().contains("f166"), "{hover}");
-    let definition = check("definition", timed(&mut client, "textDocument/definition", at(&call)));
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("f166"),
+        "{hover}"
+    );
+    let definition = check(
+        "definition",
+        timed(&mut client, "textDocument/definition", at(&call)),
+    );
     assert_eq!(definition["range"]["start"], declaration);
     let references = check(
         "references",
@@ -77,10 +86,22 @@ fn a_two_thousand_line_module_answers_every_request_within_the_bound() {
             }),
         ),
     );
-    assert_eq!(references.as_array().unwrap().len(), 2, "declaration and call");
-    let completion = check("completion", timed(&mut client, "textDocument/completion", at(&call)));
+    assert_eq!(
+        references.as_array().unwrap().len(),
+        2,
+        "declaration and call"
+    );
+    let completion = check(
+        "completion",
+        timed(&mut client, "textDocument/completion", at(&call)),
+    );
     // The cursor follows `f`: every `f{index}` function matches.
-    assert!(completion.as_array().is_some_and(|items| items.len() >= 333), "{completion}");
+    assert!(
+        completion
+            .as_array()
+            .is_some_and(|items| items.len() >= 333),
+        "{completion}"
+    );
     let symbols = check(
         "documentSymbol",
         timed(&mut client, "textDocument/documentSymbol", document.clone()),
@@ -88,9 +109,17 @@ fn a_two_thousand_line_module_answers_every_request_within_the_bound() {
     assert_eq!(symbols.as_array().unwrap().len(), 667);
     let tokens = check(
         "semanticTokens/full",
-        timed(&mut client, "textDocument/semanticTokens/full", document.clone()),
+        timed(
+            &mut client,
+            "textDocument/semanticTokens/full",
+            document.clone(),
+        ),
     );
-    assert!(tokens["data"].as_array().is_some_and(|data| !data.is_empty()));
+    assert!(
+        tokens["data"]
+            .as_array()
+            .is_some_and(|data| !data.is_empty())
+    );
     check(
         "inlayHint",
         timed(&mut client, "textDocument/inlayHint", whole),
@@ -108,7 +137,10 @@ fn a_two_thousand_line_module_answers_every_request_within_the_bound() {
     // An edit is answered from a fresh analysis just as fast.
     let edited = source.replace("f166(row.id, 166)", "f166(row.id, 167)");
     client.change(uri, 2, &edited);
-    check("hover after an edit", timed(&mut client, "textDocument/hover", at(&call)));
+    check(
+        "hover after an edit",
+        timed(&mut client, "textDocument/hover", at(&call)),
+    );
 
     for (name, elapsed) in &timings {
         eprintln!("{name}: {} ms", elapsed.as_millis());

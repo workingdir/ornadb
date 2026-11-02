@@ -28,13 +28,11 @@ fn pattern_module_import_is_bound_to_its_captured_snapshot() {
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("the optional pattern module resolves against core");
-    let mut session = AdmittedReplSession::from_catalogue(
-        &[],
-        catalogue,
-        sources,
-        Limits::default(),
-    )
-    .unwrap_or_else(|error| panic!("captured pattern source failed to load: {}", error.code()));
+    let mut session =
+        AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
+            .unwrap_or_else(|error| {
+                panic!("captured pattern source failed to load: {}", error.code())
+            });
     session
         .submit(include_str!("fixtures/stdlib-use-pattern-xt7ge.orna"))
         .unwrap_or_else(|error| panic!("pattern import failed: {}", error.code()));
@@ -44,17 +42,28 @@ fn pattern_module_import_is_bound_to_its_captured_snapshot() {
 fn core_assertions_work_without_std_and_pattern_module_stays_optional() {
     let mut session = AdmittedReplSession::new(Limits::default());
     session
-        .submit(include_str!("fixtures/stdlib-core-assertions-without-pattern-xt7ge.orna"))
-        .unwrap_or_else(|error| panic!("core assertion declaration failed without std: {}", error.code()));
+        .submit(include_str!(
+            "fixtures/stdlib-core-assertions-without-pattern-xt7ge.orna"
+        ))
+        .unwrap_or_else(|error| {
+            panic!(
+                "core assertion declaration failed without std: {}",
+                error.code()
+            )
+        });
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-core-assertions-call-without-pattern-xt7ge.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-core-assertions-call-without-pattern-xt7ge.orna"
+            ))
             .unwrap_or_else(|error| panic!("core assertion failed without std: {}", error.code())),
         Some(bool_value(true))
     );
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-pattern-without-snapshot-xt7ge.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-pattern-without-snapshot-xt7ge.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-S010-IMPORT"

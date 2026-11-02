@@ -10,13 +10,13 @@ use std::{
 use fs2::FileExt;
 use orna_foundation_v1::{GitHash, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{
-    CheckoutTarget, CommittedTreeEntryKind, CompactManifest,
-    GitDeclaredObjectSetState, GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration,
-    LegacyAnnotationCandidate, ManagedFileChange, ManagedPath, MigrationAnnotationDefaults,
-    MigrationContinuityRecord, MountError, MountView, NativeObjectId, OrnaInternalRef,
-    PublicationJournal, PublicationJournalEntry, PublicationJournalStage, RemoteContinuity,
-    Repository, RepositoryError, RequiredInternalRef, RuntimeGeneration,
-    StreamCheckpointIdentityPredecessor, WorktreeState,
+    CheckoutTarget, CommittedTreeEntryKind, CompactManifest, GitDeclaredObjectSetState,
+    GitObjectKind, GitObjectState, GitRepositoryMode, IndexGeneration, LegacyAnnotationCandidate,
+    ManagedFileChange, ManagedPath, MigrationAnnotationDefaults, MigrationContinuityRecord,
+    MountError, MountView, NativeObjectId, OrnaInternalRef, PublicationJournal,
+    PublicationJournalEntry, PublicationJournalStage, RemoteContinuity, Repository,
+    RepositoryError, RequiredInternalRef, RuntimeGeneration, StreamCheckpointIdentityPredecessor,
+    WorktreeState,
 };
 
 use sha2::{Digest, Sha256};
@@ -30,7 +30,9 @@ struct AcceptCheckout;
 
 impl orna_repository_v1::CheckoutAssertionGate for AcceptCheckout {
     fn validate(
-        &self, _: &orna_repository_v1::Repository, _: &orna_repository_v1::CheckoutPreflight,
+        &self,
+        _: &orna_repository_v1::Repository,
+        _: &orna_repository_v1::CheckoutPreflight,
     ) -> Result<(), orna_repository_v1::CandidateAssertionRefusal> {
         Ok(())
     }
@@ -116,7 +118,11 @@ fn repository() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     git(temp.path(), &["add", "."]);
     git(temp.path(), &["commit", "-m", "initial"]);
     temp
@@ -152,7 +158,11 @@ fn repository_with_v1_module_fixture() -> TempDir {
     .unwrap();
     fs::write(temp.path().join("ordinary.txt"), "base\n").unwrap();
     fs::create_dir_all(temp.path().join(".orna")).unwrap();
-    fs::write(temp.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        temp.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     git(temp.path(), &["add", "."]);
     git(
         temp.path(),
@@ -625,10 +635,20 @@ fn publish_raw_commit(root: &Path, tree: &str, branch: &str) {
     );
     let commit_id = git_raw(
         root,
-        &["hash-object", "-t", "commit", "--literally", "-w", "--stdin"],
+        &[
+            "hash-object",
+            "-t",
+            "commit",
+            "--literally",
+            "-w",
+            "--stdin",
+        ],
         commit_body.as_bytes(),
     );
-    git(root, &["update-ref", &format!("refs/heads/{branch}"), &commit_id]);
+    git(
+        root,
+        &["update-ref", &format!("refs/heads/{branch}"), &commit_id],
+    );
 }
 
 /// Builds a root tree holding `sub/.git/config`, which Git's own writers refuse.
@@ -1466,7 +1486,6 @@ fn same_commit_checkout_rejects_a_divergent_target_without_mutating_cwd() {
     assert_eq!(git(root.path(), &["branch", "--show-current"]), "main");
 }
 
-
 fn create_format3_checkout_target(root: &Path, with_store_root: bool) {
     git(root, &["switch", "-c", "format3-target"]);
     fs::remove_file(root.join(".orna/format.orna")).unwrap();
@@ -1509,7 +1528,8 @@ fn divergent_checkout_accepts_a_format3_target_with_source_and_store_roots() {
     let runtime = RuntimeGeneration::new(92);
     let plan = repo.plan_checkout("format3-target", runtime).unwrap();
 
-    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout).unwrap();
+    repo.execute_nonconflicting_git_checkout(&plan, &AcceptCheckout)
+        .unwrap();
 
     assert_eq!(repo.head().unwrap().as_ref(), Some(plan.target().commit()));
     assert_eq!(
@@ -1540,14 +1560,22 @@ fn divergent_checkout_logical_validation_rejection_fences_git_mutation() {
         .unwrap();
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan, &CheckoutGate(&|repository, observed| {
-            assert_eq!(repository.head().unwrap(), observed.expected_head().cloned());
-            assert_eq!(observed.target().branch_name(), Some("experiment"));
-            Err(orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None))
-        })),
-        Err(orna_repository_v1::RepositoryError::CandidateAssertionRefused(
-            orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
-        ))
+        repo.execute_nonconflicting_git_checkout(
+            &plan,
+            &CheckoutGate(&|repository, observed| {
+                assert_eq!(
+                    repository.head().unwrap(),
+                    observed.expected_head().cloned()
+                );
+                assert_eq!(observed.target().branch_name(), Some("experiment"));
+                Err(orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None))
+            })
+        ),
+        Err(
+            orna_repository_v1::RepositoryError::CandidateAssertionRefused(
+                orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
+            )
+        )
     ));
     assert_eq!(
         repo.cwd_generation(RuntimeGeneration::new(31)).unwrap(),
@@ -1584,10 +1612,13 @@ fn divergent_checkout_rechecks_git_state_after_candidate_validation() {
     let before = git_state(&repo, root.path());
 
     assert!(matches!(
-        repo.execute_nonconflicting_git_checkout(&plan, &CheckoutGate(&|_, _| {
-            fs::write(root.path().join("main.orna"), "changed during validation\n").unwrap();
-            Ok(())
-        })),
+        repo.execute_nonconflicting_git_checkout(
+            &plan,
+            &CheckoutGate(&|_, _| {
+                fs::write(root.path().join("main.orna"), "changed during validation\n").unwrap();
+                Ok(())
+            })
+        ),
         Err(orna_repository_v1::RepositoryError::CheckoutPlanStale)
     ));
     assert_eq!(git_state(&repo, root.path()).0, before.0);
@@ -2181,7 +2212,6 @@ fn interrupted_force_checkout_after_discard_journal_recovers_recorded_target() {
     );
 }
 
-
 #[test]
 fn interrupted_force_checkout_after_discard_journal_recovers_detached_target() {
     let root = repository();
@@ -2409,14 +2439,19 @@ fn checkout_discard_set_logical_validation_rejection_fences_force_admission() {
             Some(&token),
             plan.git().discardable_paths(),
             &CheckoutGate(&|repository, observed| {
-                assert_eq!(repository.head().unwrap(), observed.expected_head().cloned());
+                assert_eq!(
+                    repository.head().unwrap(),
+                    observed.expected_head().cloned()
+                );
                 assert_eq!(observed.target().branch_name(), Some("experiment"));
                 Err(orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None))
             }),
         ),
-        Err(orna_repository_v1::RepositoryError::CandidateAssertionRefused(
-            orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
-        ))
+        Err(
+            orna_repository_v1::RepositoryError::CandidateAssertionRefused(
+                orna_repository_v1::CandidateAssertionRefusal::AssertionFalse(None)
+            )
+        )
     ));
     assert_eq!(
         repo.cwd_generation(RuntimeGeneration::new(32)).unwrap(),
@@ -2514,14 +2549,17 @@ fn conflicted_index_fails_closed_and_errors_redact_local_paths() {
     assert!(!rendered.contains(&root.path().display().to_string()));
 }
 
-
 #[test]
 fn create_branch_at_unborn_head_fails_without_mutating_repository_state() {
     let root = TempDir::new().unwrap();
     git(root.path(), &["init", "-b", "main"]);
 
     fs::create_dir_all(root.path().join(".orna")).unwrap();
-    fs::write(root.path().join(".orna/format.orna"), "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n").unwrap();
+    fs::write(
+        root.path().join(".orna/format.orna"),
+        "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n",
+    )
+    .unwrap();
     fs::write(root.path().join("ordinary.txt"), "untracked\n").unwrap();
     git(root.path(), &["add", ".orna/format.orna"]);
 
@@ -3871,7 +3909,10 @@ fn retained_journal_with_moved_head_is_stale_and_keeps_batch() {
     )
     .unwrap();
 
-    git(root.path(), &["commit", "--allow-empty", "-m", "moved head"]);
+    git(
+        root.path(),
+        &["commit", "--allow-empty", "-m", "moved head"],
+    );
     let moved_head = repo.head().unwrap();
     assert_ne!(moved_head, Some(head));
 
@@ -6040,8 +6081,8 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
             Some(store_root.to_vec()),
         ),
     ];
-    let continuity =
-        MigrationContinuityRecord::new(vec![StreamCheckpointIdentityPredecessor::new(
+    let continuity = MigrationContinuityRecord::new(vec![
+        StreamCheckpointIdentityPredecessor::new(
             [91; 32],
             b"legacy-source".to_vec(),
             Some(b"legacy-partition".to_vec()),
@@ -6049,8 +6090,9 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
             b"format3-source".to_vec(),
             Some(b"format3-partition".to_vec()),
         )
-        .unwrap()])
-        .unwrap();
+        .unwrap(),
+    ])
+    .unwrap();
     let intent = [93; 16];
     let journal = PublicationJournal::new_with_runtime_intent(
         old_head.clone(),
@@ -6137,9 +6179,11 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
         "staged user edit",
         "recovery must preserve the user's staged blob"
     );
-    assert!(git(root.path(), &["diff", "--cached", "--name-only"])
-        .lines()
-        .any(|path| path == "ordinary.txt"));
+    assert!(
+        git(root.path(), &["diff", "--cached", "--name-only"])
+            .lines()
+            .any(|path| path == "ordinary.txt")
+    );
     assert_eq!(
         fs::read(root.path().join("ordinary.txt")).unwrap(),
         b"staged user edit\n",
@@ -6151,16 +6195,24 @@ fn interrupted_legacy_migration_recovers_new_snapshot_and_preserves_checkout_edi
     repo.mark_runtime_complete(intent, &mut resumed).unwrap();
     assert!(repo.read_publication_journal().unwrap().is_none());
     assert_eq!(repo.head().unwrap(), Some(candidate.commit().clone()));
-    assert!(git(root.path(), &["diff", "--cached", "--name-only"])
-        .lines()
-        .any(|path| path == "ordinary.txt"));
+    assert!(
+        git(root.path(), &["diff", "--cached", "--name-only"])
+            .lines()
+            .any(|path| path == "ordinary.txt")
+    );
 }
 
 #[test]
 fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates() {
     for (format, format_number) in [
-        (include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"), 1u8),
-        (include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"), 2u8),
+        (
+            include_str!("fixtures/format-context/format-1-ornadb-1.0.orna"),
+            1u8,
+        ),
+        (
+            include_str!("fixtures/format-context/format-2-draft-1.1.0.orna"),
+            2u8,
+        ),
     ] {
         let source = repository_with_legacy_format(format);
         let module_source = TempDir::new().unwrap();
@@ -6187,7 +6239,11 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
             ],
         );
         git(source.path(), &["commit", "-m", "add module"]);
-        fs::write(source.path().join("removed.txt"), "tracked before removal\n").unwrap();
+        fs::write(
+            source.path().join("removed.txt"),
+            "tracked before removal\n",
+        )
+        .unwrap();
         git(source.path(), &["add", "removed.txt"]);
         git(source.path(), &["commit", "-m", "add tracked file"]);
         let repo = Repository::discover(source.path()).unwrap();
@@ -6523,7 +6579,10 @@ fn only_mount_record(repository: &Repository) -> PathBuf {
     fs::read_dir(repository.runtime_paths().root().join("mounts"))
         .unwrap()
         .map(|entry| entry.unwrap().path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "orna"))
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "orna")
+        })
         .unwrap()
 }
 
@@ -6583,12 +6642,14 @@ fn mount_registry_reconciles_interrupted_pin_and_record_updates() {
     let first_pin = mount_pin_reference(&repository, &first_record);
     fs::remove_file(&first_record_path).unwrap();
     assert!(repository.mount_status().unwrap().is_empty());
-    assert!(!Command::new("git")
-        .current_dir(root.path())
-        .args(["show-ref", "--verify", "--quiet", &first_pin])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        !Command::new("git")
+            .current_dir(root.path())
+            .args(["show-ref", "--verify", "--quiet", &first_pin])
+            .status()
+            .unwrap()
+            .success()
+    );
 
     let _second = MountView::attach(&repository, mountpoint.path(), "HEAD").unwrap();
     let second_record_path = only_mount_record(&repository);
@@ -6651,19 +6712,23 @@ fn mount_registry_reconciliation_preserves_other_worktree_pins() {
     fs::remove_file(&linked_record_path).unwrap();
 
     assert_eq!(repository.mount_status().unwrap().len(), 1);
-    assert!(Command::new("git")
-        .current_dir(root.path())
-        .args(["show-ref", "--verify", "--quiet", &linked_pin])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .current_dir(root.path())
+            .args(["show-ref", "--verify", "--quiet", &linked_pin])
+            .status()
+            .unwrap()
+            .success()
+    );
     assert!(linked_repository.mount_status().unwrap().is_empty());
-    assert!(!Command::new("git")
-        .current_dir(root.path())
-        .args(["show-ref", "--verify", "--quiet", &linked_pin])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        !Command::new("git")
+            .current_dir(root.path())
+            .args(["show-ref", "--verify", "--quiet", &linked_pin])
+            .status()
+            .unwrap()
+            .success()
+    );
     linked_view.detach().unwrap();
     first_view.detach().unwrap();
 }
@@ -6681,10 +6746,12 @@ fn mount_detach_propagates_non_not_found_registry_read_errors() {
     fs::remove_file(&record_path).unwrap();
     fs::create_dir(&record_path).unwrap();
     assert_eq!(view.detach().unwrap_err(), MountError::HostFilesystem);
-    assert!(Command::new("git")
-        .current_dir(root.path())
-        .args(["show-ref", "--verify", "--quiet", &pin])
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .current_dir(root.path())
+            .args(["show-ref", "--verify", "--quiet", &pin])
+            .status()
+            .unwrap()
+            .success()
+    );
 }

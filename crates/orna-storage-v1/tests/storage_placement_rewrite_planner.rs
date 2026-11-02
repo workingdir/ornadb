@@ -1,11 +1,11 @@
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::{CompactManifest, Uuid};
 use orna_storage_v1::{
-    plan_compact_consolidation, plan_compact_scan, plan_storage_placement, plan_storage_rewrite,
-    CompactKeyRange, CompactOvbProfile, EditableBaseRow, HybridBaseState, PhysicalPlacement,
-    PlacementAction, PlacementCandidate, StoragePlacementError, StoragePreference, StorageProfile,
-    StorageRewriteError, StorageRewriteTarget, PlacementReason,
-    AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS,
+    AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES, AUTOMATIC_EDITABLE_MAX_ROWS, CompactKeyRange,
+    CompactOvbProfile, EditableBaseRow, HybridBaseState, PhysicalPlacement, PlacementAction,
+    PlacementCandidate, PlacementReason, StoragePlacementError, StoragePreference, StorageProfile,
+    StorageRewriteError, StorageRewriteTarget, plan_compact_consolidation, plan_compact_scan,
+    plan_storage_placement, plan_storage_rewrite,
 };
 use orna_syntax_v1::{Expr, LiteralKind, parse_row};
 
@@ -101,9 +101,7 @@ fn profile_for_str_key_arity(table: Uuid, arity: usize) -> CompactOvbProfile {
                 OvbRaw::Array(
                     field_ids
                         .iter()
-                        .map(|id| {
-                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec())))
-                        })
+                        .map(|id| OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(id.as_bytes().to_vec()))))
                         .collect(),
                 ),
             ),
@@ -292,12 +290,7 @@ fn placement_preserves_existing_rows_and_applies_automatic_policy_to_inserts() {
                 PhysicalPlacement::Editable,
                 Some(editable_path("1")),
             ),
-            PlacementCandidate::update(
-                key(2),
-                body,
-                PhysicalPlacement::Compact,
-                None,
-            ),
+            PlacementCandidate::update(key(2), body, PhysicalPlacement::Compact, None),
             PlacementCandidate::insert(key(3), body, Some(editable_path("3"))),
             PlacementCandidate::delete(key(4), PhysicalPlacement::Compact, None),
             PlacementCandidate::delete(
@@ -385,7 +378,10 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
     )
     .unwrap();
     assert_eq!(at_row_limit.resulting_row_count(), 10_000);
-    assert_eq!(at_row_limit.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(
+        at_row_limit.new_row_placement(),
+        PhysicalPlacement::Editable
+    );
 
     let at_byte_limit = plan_storage_placement(
         &profile,
@@ -400,7 +396,10 @@ fn automatic_placement_keeps_inclusive_row_and_byte_limits() {
         )],
     )
     .unwrap();
-    assert_eq!(at_byte_limit.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(
+        at_byte_limit.new_row_placement(),
+        PhysicalPlacement::Editable
+    );
 }
 
 #[test]
@@ -416,8 +415,8 @@ fn batch_delete_offsets_insert_at_row_limit_while_update_counts_toward_byte_limi
 
     // Model a large canonical insert body without checking in a multi-MiB
     // fixture; the fixture rows anchor the three logical identities.
-    let insert_body_bytes = AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES
-        - BATCH_BOUNDARY_UPDATE_ROW.len();
+    let insert_body_bytes =
+        AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES - BATCH_BOUNDARY_UPDATE_ROW.len();
     let plan_with_update_bytes = |update_body_bytes| {
         plan_storage_placement(
             &profile,
@@ -448,7 +447,10 @@ fn batch_delete_offsets_insert_at_row_limit_while_update_counts_toward_byte_limi
     };
 
     let at_boundary = plan_with_update_bytes(BATCH_BOUNDARY_UPDATE_ROW.len());
-    assert_eq!(at_boundary.resulting_row_count(), AUTOMATIC_EDITABLE_MAX_ROWS);
+    assert_eq!(
+        at_boundary.resulting_row_count(),
+        AUTOMATIC_EDITABLE_MAX_ROWS
+    );
     assert_eq!(at_boundary.new_row_placement(), PhysicalPlacement::Editable);
     assert_eq!(at_boundary.reason(), PlacementReason::AutomaticEditable);
 
@@ -595,14 +597,16 @@ fn automatic_placement_compacts_every_new_row_when_insert_paths_alias() {
     .unwrap();
 
     assert_eq!(plan.reason(), PlacementReason::AutomaticUnrepresentablePath);
-    assert!(plan
-        .decisions()
-        .iter()
-        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
-    assert!(plan
-        .decisions()
-        .iter()
-        .all(|decision| decision.editable_path().is_none()));
+    assert!(
+        plan.decisions()
+            .iter()
+            .all(|decision| decision.placement() == PhysicalPlacement::Compact)
+    );
+    assert!(
+        plan.decisions()
+            .iter()
+            .all(|decision| decision.editable_path().is_none())
+    );
 }
 
 #[test]
@@ -683,7 +687,10 @@ fn portable_path_component_and_relative_path_limits_are_inclusive() {
         )],
     )
     .unwrap();
-    assert_eq!(exact_path_plan.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(
+        exact_path_plan.new_row_placement(),
+        PhysicalPlacement::Editable
+    );
 
     let over_limit_plan = plan_storage_placement(
         &composite_profile,
@@ -711,20 +718,28 @@ fn portable_path_component_and_relative_path_limits_are_inclusive() {
         ],
     )
     .unwrap();
-    assert_eq!(over_limit_plan.new_row_placement(), PhysicalPlacement::Compact);
+    assert_eq!(
+        over_limit_plan.new_row_placement(),
+        PhysicalPlacement::Compact
+    );
     let retained_boundary_row = over_limit_plan
         .decisions()
         .iter()
         .find(|decision| decision.key().encoded() == composite_text_key(&at_path_limit))
         .unwrap();
     assert_eq!(retained_boundary_row.action(), PlacementAction::Update);
-    assert_eq!(retained_boundary_row.placement(), PhysicalPlacement::Editable);
+    assert_eq!(
+        retained_boundary_row.placement(),
+        PhysicalPlacement::Editable
+    );
     assert_eq!(retained_boundary_row.editable_path(), Some(&exact_path));
-    assert!(over_limit_plan
-        .decisions()
-        .iter()
-        .filter(|decision| decision.action() == PlacementAction::Insert)
-        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+    assert!(
+        over_limit_plan
+            .decisions()
+            .iter()
+            .filter(|decision| decision.action() == PlacementAction::Insert)
+            .all(|decision| decision.placement() == PhysicalPlacement::Compact)
+    );
 }
 
 #[test]
@@ -735,10 +750,7 @@ fn escaped_utf8_expansion_uses_encoded_bytes_for_fallback_boundaries() {
     let encoded_path = encoded_table_relative_path(&at_limit_path);
     assert_eq!(encoded_path.len(), 1024);
     assert_eq!(
-        encoded_path
-            .split('/')
-            .map(str::len)
-            .collect::<Vec<_>>(),
+        encoded_path.split('/').map(str::len).collect::<Vec<_>>(),
         [200, 200, 200, 200, 200, 19]
     );
     assert!(editable_path_components(&over_limit).is_err());
@@ -757,7 +769,10 @@ fn escaped_utf8_expansion_uses_encoded_bytes_for_fallback_boundaries() {
         )],
     )
     .unwrap();
-    assert_eq!(at_limit_plan.new_row_placement(), PhysicalPlacement::Editable);
+    assert_eq!(
+        at_limit_plan.new_row_placement(),
+        PhysicalPlacement::Editable
+    );
 
     let existing_components = text_key_components_from_fixture(PATH_AT_LIMIT_ROW);
     let existing_path = editable_path_components(&existing_components).unwrap();
@@ -790,21 +805,24 @@ fn escaped_utf8_expansion_uses_encoded_bytes_for_fallback_boundaries() {
     )
     .unwrap();
 
-    assert_eq!(fallback_plan.new_row_placement(), PhysicalPlacement::Compact);
+    assert_eq!(
+        fallback_plan.new_row_placement(),
+        PhysicalPlacement::Compact
+    );
     let retained = fallback_plan
         .decisions()
         .iter()
-        .find(|decision| {
-            decision.key().encoded() == composite_text_key(&existing_components)
-        })
+        .find(|decision| decision.key().encoded() == composite_text_key(&existing_components))
         .unwrap();
     assert_eq!(retained.placement(), PhysicalPlacement::Editable);
     assert_eq!(retained.editable_path(), Some(&existing_path));
-    assert!(fallback_plan
-        .decisions()
-        .iter()
-        .filter(|decision| decision.action() == PlacementAction::Insert)
-        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+    assert!(
+        fallback_plan
+            .decisions()
+            .iter()
+            .filter(|decision| decision.action() == PlacementAction::Insert)
+            .all(|decision| decision.placement() == PhysicalPlacement::Compact)
+    );
 }
 
 #[test]
@@ -861,11 +879,12 @@ fn escaped_component_boundary_still_enforces_portable_alias_fallback() {
         .unwrap();
     assert_eq!(retained.placement(), PhysicalPlacement::Editable);
     assert_eq!(retained.editable_path(), Some(&upper_path));
-    assert!(plan
-        .decisions()
-        .iter()
-        .filter(|decision| decision.action() == PlacementAction::Insert)
-        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+    assert!(
+        plan.decisions()
+            .iter()
+            .filter(|decision| decision.action() == PlacementAction::Insert)
+            .all(|decision| decision.placement() == PhysicalPlacement::Compact)
+    );
 }
 
 #[test]
@@ -925,11 +944,12 @@ fn escaped_parent_case_alias_falls_back_even_when_leaf_paths_differ() {
         .unwrap();
     assert_eq!(existing.placement(), PhysicalPlacement::Editable);
     assert_eq!(existing.editable_path(), Some(&upper_path));
-    assert!(plan
-        .decisions()
-        .iter()
-        .filter(|decision| decision.action() == PlacementAction::Insert)
-        .all(|decision| decision.placement() == PhysicalPlacement::Compact));
+    assert!(
+        plan.decisions()
+            .iter()
+            .filter(|decision| decision.action() == PlacementAction::Insert)
+            .all(|decision| decision.placement() == PhysicalPlacement::Compact)
+    );
 
     assert_eq!(
         plan_storage_placement(
@@ -1147,11 +1167,7 @@ fn one_unrepresentable_automatic_insert_closes_the_new_row_batch() {
                 PhysicalPlacement::Editable,
                 Some(existing_path.clone()),
             ),
-            PlacementCandidate::insert(
-                too_long_key.clone(),
-                CASE_COLLISION_LOWER_ROW.len(),
-                None,
-            ),
+            PlacementCandidate::insert(too_long_key.clone(), CASE_COLLISION_LOWER_ROW.len(), None),
             PlacementCandidate::insert(
                 ordinary_key.clone(),
                 CASE_COLLISION_LOWER_ROW.len(),
@@ -1255,7 +1271,6 @@ fn deleting_a_case_alias_source_frees_the_path_for_an_editable_reinsert() {
     assert_eq!(plan.decisions()[1].placement(), PhysicalPlacement::Editable);
 }
 
-
 #[test]
 fn rewrite_preview_is_generation_bound_and_proves_an_empty_logical_diff() {
     let profile = profile();
@@ -1355,10 +1370,7 @@ fn rewrite_source_fence_preserves_the_full_editable_tail_at_repeated_generations
         Err(StorageRewriteError::StaleInput)
     );
     assert_eq!(
-        plan.verify_candidate(
-            &profile_for_table(Uuid::from_u128(2)),
-            source_rows,
-        ),
+        plan.verify_candidate(&profile_for_table(Uuid::from_u128(2)), source_rows,),
         Err(StorageRewriteError::WrongProfile)
     );
 }
@@ -1370,8 +1382,8 @@ fn compact_scan_hook_adds_key_projection_and_rejects_invalid_ranges() {
         Uuid::from_bytes(profile.table_id()),
         profile.schema_fingerprint(),
     );
-    let range = CompactKeyRange::new(&profile, Some((key(2), true)), Some((key(8), false)))
-        .unwrap();
+    let range =
+        CompactKeyRange::new(&profile, Some((key(2), true)), Some((key(8), false))).unwrap();
     let plan = plan_compact_scan(&profile, &manifest, range, [[0x55; 16]]).unwrap();
     assert!(plan.selected_segments().is_empty());
     assert_eq!(plan.pruned_segments().len(), 0);
@@ -1399,8 +1411,7 @@ fn consolidation_refuses_a_routine_data_only_rewrite() {
         Err(orna_storage_v1::CompactConsolidationError::NotMateriallyOverlaid)
     );
     assert!(
-        plan_compact_consolidation(&profile, &manifest, &base, 100)
-            .unwrap_err()
+        plan_compact_consolidation(&profile, &manifest, &base, 100).unwrap_err()
             == orna_storage_v1::CompactConsolidationError::NotMateriallyOverlaid
     );
 }

@@ -1,8 +1,8 @@
 use std::collections::BTreeSet;
 
 use orna_semantic_v1::{
-    analyze, Analysis, EffectSummary, ModuleHeader, ModuleInput, Namespace, DIAG_ASSERTION_EFFECT,
-    DIAG_ASSERTION_SCOPE, DIAG_IMPORT,
+    Analysis, DIAG_ASSERTION_EFFECT, DIAG_ASSERTION_SCOPE, DIAG_IMPORT, EffectSummary,
+    ModuleHeader, ModuleInput, Namespace, analyze,
 };
 
 const TABLE_HELPER: &str = include_str!("fixtures/imported_helper_dependencies/checks.orna");
@@ -128,7 +128,12 @@ fn private_named_import_reports_import_diagnostic_without_unresolved_name_noise(
         ),
     ]);
 
-    assert_eq!(analysis.diagnostics.len(), 1, "unexpected diagnostics: {:?}", analysis.diagnostics);
+    assert_eq!(
+        analysis.diagnostics.len(),
+        1,
+        "unexpected diagnostics: {:?}",
+        analysis.diagnostics
+    );
     assert_eq!(analysis.diagnostics[0].code(), DIAG_IMPORT);
     assert_eq!(
         analysis.diagnostics[0].message(),
@@ -149,7 +154,12 @@ fn table_free_imported_helper_reports_scope_diagnostic_and_empty_plan() {
         ),
     ]);
 
-    assert_eq!(analysis.diagnostics.len(), 1, "unexpected diagnostics: {:?}", analysis.diagnostics);
+    assert_eq!(
+        analysis.diagnostics.len(),
+        1,
+        "unexpected diagnostics: {:?}",
+        analysis.diagnostics
+    );
     assert_eq!(analysis.diagnostics[0].code(), DIAG_ASSERTION_SCOPE);
     assert_eq!(
         analysis.diagnostics[0].message(),

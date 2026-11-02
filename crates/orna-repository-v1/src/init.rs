@@ -230,7 +230,11 @@ pub fn inspect_metadata_for_runtime(
             let journal = repository
                 .read_publication_journal()
                 .map_err(|_| RepositoryInitError::LocalStateUnavailable)?;
-            if journal.as_ref().and_then(|j| j.migration_continuity()).is_none() {
+            if journal
+                .as_ref()
+                .and_then(|j| j.migration_continuity())
+                .is_none()
+            {
                 return Err(RepositoryInitError::MetadataUnsupported);
             }
             let database = read_regular_file(&metadata_root(repository).join(DATABASE_FILE))?

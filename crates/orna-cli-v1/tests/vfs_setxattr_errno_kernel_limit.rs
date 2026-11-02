@@ -135,7 +135,10 @@ fn client_errno_for_daemon_reply(reply: Errno) -> (i32, usize) {
 
 /// The running kernel release, as `uname -r` reports it, for the proof output.
 fn kernel_release() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/osrelease").map_or_else(|error| format!("unknown ({error})"), |release| release.trim().to_owned())
+    std::fs::read_to_string("/proc/sys/kernel/osrelease").map_or_else(
+        |error| format!("unknown ({error})"),
+        |release| release.trim().to_owned(),
+    )
 }
 
 /// Names the errnos this proof expects, for the proof output.

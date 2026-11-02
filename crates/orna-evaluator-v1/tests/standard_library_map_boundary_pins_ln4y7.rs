@@ -10,7 +10,9 @@ fn reference_map_session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference standard failed to load: {}", error.code()));
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-use-collection-alias-yfifu.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-use-collection-alias-yfifu.orna"
+        )),
         Ok(None)
     );
     assert_eq!(session.submit("use std.map as map;"), Ok(None));
@@ -23,8 +25,15 @@ fn map_merge_keeps_boundary_key_positions_under_conflict() {
     let fixture = include_str!("fixtures/stdlib-map-boundary-pins-ln4y7.orna");
     for (index, expression) in fixture.split("\n&& ").enumerate() {
         let actual = session.submit(expression).unwrap_or_else(|error| {
-            panic!("map boundary pin behavior {index} failed: {} ({expression})", error.code())
+            panic!(
+                "map boundary pin behavior {index} failed: {} ({expression})",
+                error.code()
+            )
         });
-        assert_eq!(actual, Some(boolean(true)), "map boundary pin behavior {index}: {expression}");
+        assert_eq!(
+            actual,
+            Some(boolean(true)),
+            "map boundary pin behavior {index}: {expression}"
+        );
     }
 }

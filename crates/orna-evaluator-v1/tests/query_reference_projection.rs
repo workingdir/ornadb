@@ -35,7 +35,11 @@ fn run_fixture(
     effects: &mut dyn EffectHandler,
 ) -> CanonicalValue {
     let parsed = parse_expression(source);
-    assert!(parsed.is_ok(), "fixture should parse: {source}: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "fixture should parse: {source}: {:?}",
+        parsed.diagnostics
+    );
     let functions = Functions::from([(
         "query".to_owned(),
         PureFunction {
@@ -44,8 +48,14 @@ fn run_fixture(
             environment,
         },
     )]);
-    invoke_named_with_effects("query", &functions, &Environment::new(), Limits::default(), effects)
-        .expect("query fixture should evaluate")
+    invoke_named_with_effects(
+        "query",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        effects,
+    )
+    .expect("query fixture should evaluate")
 }
 
 #[derive(Default)]
@@ -76,9 +86,11 @@ impl EffectHandler for ProjectionEffects {
         let index = match after {
             None => 0,
             Some([1]) => 1,
-            _ => return Err(EvaluationError::redacted(
-                orna_foundation_v1::SafeText::new("ORNA-EVAL-VALUE").unwrap(),
-            )),
+            _ => {
+                return Err(EvaluationError::redacted(
+                    orna_foundation_v1::SafeText::new("ORNA-EVAL-VALUE").unwrap(),
+                ));
+            }
         };
         self.scans += 1;
         Ok(Some(RelationPage {
@@ -120,7 +132,10 @@ fn project_shapes_a_relation_lazily_and_preserves_its_result_order() {
     );
 
     assert_eq!(result, expected);
-    assert_eq!(effects.scans, 2, "the window stops after its second relation row");
+    assert_eq!(
+        effects.scans, 2,
+        "the window stops after its second relation row"
+    );
 }
 
 fn reference(generation: i64) -> CanonicalValue {
@@ -152,7 +167,10 @@ impl EffectHandler for ReferenceEffects {
         &mut self,
         reference: &CanonicalValue,
     ) -> Result<Option<CanonicalValue>, EvaluationError> {
-        assert_eq!(reference, &self.expected, "resolver receives full pinned identity");
+        assert_eq!(
+            reference, &self.expected,
+            "resolver receives full pinned identity"
+        );
         self.resolutions += 1;
         Ok(Some(self.target.clone()))
     }
@@ -174,7 +192,10 @@ fn references_keep_snapshot_identity_expose_keys_and_resolve_fields_through_the_
         &mut effects,
     );
     assert_eq!(key, CanonicalValue::new(integer(7)).unwrap());
-    assert_eq!(effects.resolutions, 0, "the key is read from reference identity");
+    assert_eq!(
+        effects.resolutions, 0,
+        "the key is read from reference identity"
+    );
 
     let name = run_fixture(
         include_str!("fixtures/row-reference-name.orna"),
@@ -191,7 +212,10 @@ fn references_keep_snapshot_identity_expose_keys_and_resolve_fields_through_the_
         environment.clone(),
         &mut effects,
     );
-    assert_eq!(updated_name, CanonicalValue::new(text("Ada Lovelace")).unwrap());
+    assert_eq!(
+        updated_name,
+        CanonicalValue::new(text("Ada Lovelace")).unwrap()
+    );
     assert_eq!(effects.resolutions, 2);
 
     environment.insert("same_owner".into(), owner.clone());
@@ -208,5 +232,8 @@ fn references_keep_snapshot_identity_expose_keys_and_resolve_fields_through_the_
         environment,
         &mut effects,
     );
-    assert_eq!(different_snapshot, CanonicalValue::new(Raw::Bool(false)).unwrap());
+    assert_eq!(
+        different_snapshot,
+        CanonicalValue::new(Raw::Bool(false)).unwrap()
+    );
 }

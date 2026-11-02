@@ -11,8 +11,14 @@ mod format3;
 #[path = "../../orna-cli-v1/tests/support/media_commit.rs"]
 mod media_commit;
 
-const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../orna-cli-v1/tests/fixtures/media");
-const IMPORT_FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../orna-cli-v1/tests/fixtures/media/import-song.orna");
+const MEDIA_FIXTURES: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../orna-cli-v1/tests/fixtures/media"
+);
+const IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../orna-cli-v1/tests/fixtures/media/import-song.orna"
+);
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -58,8 +64,11 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
     let state = RuntimeState::open(&repository, identity, initial_digest)
         .await
         .expect("open runtime state");
-    let mut filesystem = FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
-    filesystem.allow_root(media.path()).expect("allow media fixture root");
+    let mut filesystem =
+        FilesystemProvider::with_limits(1 << 20, 16).expect("bounded filesystem provider");
+    filesystem
+        .allow_root(media.path())
+        .expect("allow media fixture root");
     let capability = repository
         .capture_capability(relation_id)
         .expect("issue admitted capture capability");
@@ -94,8 +103,13 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         .await
         .expect("freeze captured row prefix");
 
-    let head = repository.head().expect("read head").expect("fixture has a head");
-    let index = repository.index_generation().expect("read index generation");
+    let head = repository
+        .head()
+        .expect("read head")
+        .expect("fixture has a head");
+    let index = repository
+        .index_generation()
+        .expect("read index generation");
     let prepared = || async {
         RuntimePublicationCoordinator::prepare(
             &repository,
@@ -140,13 +154,25 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         Some(winner.candidate().commit().clone())
     );
     assert_eq!(
-        repository.index_generation().expect("read index after race"),
+        repository
+            .index_generation()
+            .expect("read index after race"),
         winner_index
     );
-    let store_paths = git(repository_dir.path(), &["ls-tree", "-r", "--name-only", "HEAD"]);
-    assert!(store_paths.lines().any(|path| path.starts_with(".orna/store/")));
+    let store_paths = git(
+        repository_dir.path(),
+        &["ls-tree", "-r", "--name-only", "HEAD"],
+    );
+    assert!(
+        store_paths
+            .lines()
+            .any(|path| path.starts_with(".orna/store/"))
+    );
     assert_eq!(
-        git(repository_dir.path(), &["status", "--porcelain", "--untracked-files=all"]),
+        git(
+            repository_dir.path(),
+            &["status", "--porcelain", "--untracked-files=all"]
+        ),
         ""
     );
 
@@ -182,7 +208,10 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
         .freeze([0x82; 16], &checkpoint)
         .await
         .expect("freeze second captured row prefix");
-    let fresh_head = repository.head().expect("read fresh head").expect("head exists");
+    let fresh_head = repository
+        .head()
+        .expect("read fresh head")
+        .expect("head exists");
     let fresh_index = repository.index_generation().expect("read fresh index");
     let mut third = RuntimePublicationCoordinator::prepare(
         &repository,
@@ -195,7 +224,9 @@ async fn publication_cas_race_has_one_winner_and_consistent_state() {
     )
     .await
     .expect("prepare publication from fresh head");
-    third.publish(&repository).expect("fresh-head publication succeeds");
+    third
+        .publish(&repository)
+        .expect("fresh-head publication succeeds");
     third
         .complete(&repository, &state, &freeze_b)
         .await

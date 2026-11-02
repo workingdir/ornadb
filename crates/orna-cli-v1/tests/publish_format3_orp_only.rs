@@ -1,7 +1,10 @@
 //! Format-3 publication stores ORP rows under the store root, independently of
 //! legacy loose-row path limits; CLI history, query, and offline copies read them.
 
-use std::{path::Path, process::{Command, Output}};
+use std::{
+    path::Path,
+    process::{Command, Output},
+};
 
 use orna_evaluator_v1::SysHostBindingRegistry;
 use orna_runtime_v1::RuntimeState;
@@ -41,7 +44,10 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
     ] {
         command.env_remove(name);
     }
-    command.args(arguments).output().expect("CLI process starts")
+    command
+        .args(arguments)
+        .output()
+        .expect("CLI process starts")
 }
 
 fn import_expression(root: &Path) -> String {
@@ -64,6 +70,7 @@ fn stderr(output: &Output) -> String {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn publish_format3_orp_only() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let root = directory.path();
@@ -103,14 +110,26 @@ async fn publish_format3_orp_only() {
     drop(state);
 
     let published = run(root, &["publish"]);
-    assert_eq!(published.status.code(), Some(0), "publish failed: {}", stderr(&published));
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "publish failed: {}",
+        stderr(&published)
+    );
     let head = String::from_utf8(git_output(root, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
         .to_owned();
-    let tree = String::from_utf8(git_output(root, &["ls-tree", "-r", "--name-only", &head], None))
-        .unwrap();
-    assert!(tree.lines().any(|path| path.starts_with(".orna/store/")), "store root is committed: {tree}");
+    let tree = String::from_utf8(git_output(
+        root,
+        &["ls-tree", "-r", "--name-only", &head],
+        None,
+    ))
+    .unwrap();
+    assert!(
+        tree.lines().any(|path| path.starts_with(".orna/store/")),
+        "store root is committed: {tree}"
+    );
     assert!(
         tree.lines().all(|path| !path.starts_with("media/")),
         "format-3 rows have no loose row files in the commit: {tree}"
@@ -118,13 +137,23 @@ async fn publish_format3_orp_only() {
 
     let relation = relation_hex(relation_id);
     let query = run(root, &["query", &relation, "--format", "json"]);
-    assert_eq!(query.status.code(), Some(0), "query failed: {}", stderr(&query));
+    assert_eq!(
+        query.status.code(),
+        Some(0),
+        "query failed: {}",
+        stderr(&query)
+    );
     let report: serde_json::Value = serde_json::from_slice(&query.stdout).unwrap();
     assert_eq!(report["listings"].as_array().unwrap().len(), 1, "{report}");
     assert_eq!(report["listings"][0]["key"], key);
 
     let history = run(root, &["history", &relation, &key, "--format", "json"]);
-    assert_eq!(history.status.code(), Some(0), "history failed: {}", stderr(&history));
+    assert_eq!(
+        history.status.code(),
+        Some(0),
+        "history failed: {}",
+        stderr(&history)
+    );
     let revisions: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
     assert!(!revisions.as_array().unwrap().is_empty(), "{revisions}");
     assert_eq!(revisions[0]["commit"], head);
@@ -134,21 +163,48 @@ async fn publish_format3_orp_only() {
     let archive = outside.path().join("format3.orna");
     let archive_arg = archive.to_str().unwrap();
     let exported = run(root, &["export", archive_arg, "--at", "HEAD"]);
-    assert_eq!(exported.status.code(), Some(0), "export failed: {}", stderr(&exported));
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
     let restored = outside.path().join("restored");
     let restored_arg = restored.to_str().unwrap();
     let restore = run(
         outside.path(),
-        &["export", archive_arg, "--restore", restored_arg, "--worktree"],
+        &[
+            "export",
+            archive_arg,
+            "--restore",
+            restored_arg,
+            "--worktree",
+        ],
     );
-    assert_eq!(restore.status.code(), Some(0), "restore failed: {}", stderr(&restore));
+    assert_eq!(
+        restore.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&restore)
+    );
 
     let copied_query = run(&restored, &["query", &relation, "--format", "json"]);
-    assert_eq!(copied_query.status.code(), Some(0), "copied query failed: {}", stderr(&copied_query));
+    assert_eq!(
+        copied_query.status.code(),
+        Some(0),
+        "copied query failed: {}",
+        stderr(&copied_query)
+    );
     let copied_report: serde_json::Value = serde_json::from_slice(&copied_query.stdout).unwrap();
     assert_eq!(copied_report["listings"][0]["key"], key);
     let copied_history = run(&restored, &["history", &relation, &key, "--format", "json"]);
-    assert_eq!(copied_history.status.code(), Some(0), "copied history failed: {}", stderr(&copied_history));
-    let copied_revisions: serde_json::Value = serde_json::from_slice(&copied_history.stdout).unwrap();
+    assert_eq!(
+        copied_history.status.code(),
+        Some(0),
+        "copied history failed: {}",
+        stderr(&copied_history)
+    );
+    let copied_revisions: serde_json::Value =
+        serde_json::from_slice(&copied_history.stdout).unwrap();
     assert_eq!(copied_revisions[0]["commit"], head);
 }

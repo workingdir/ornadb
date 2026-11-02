@@ -55,7 +55,10 @@ fn initialized_project() -> TempDir {
     std::fs::write(directory.path().join("main.orna"), SOURCE).expect("project source");
     git(directory.path(), &["init", "-q"]);
     git(directory.path(), &["config", "user.name", "orna-test"]);
-    git(directory.path(), &["config", "user.email", "orna-test@example.invalid"]);
+    git(
+        directory.path(),
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     git(directory.path(), &["config", "commit.gpgsign", "false"]);
     directory
 }

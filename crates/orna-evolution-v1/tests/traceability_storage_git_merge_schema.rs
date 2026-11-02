@@ -3,8 +3,8 @@
 //! resolved typed snapshots, so those test inputs are constructed separately.
 
 use orna_evolution_v1::{
-    CanonicalValue, EvolutionVersion, Field, FieldRole, FieldType, MigrationOperation,
-    ObjectId, PlanningError, PlanningRequest, Schema, Table, VersionFence, plan,
+    CanonicalValue, EvolutionVersion, Field, FieldRole, FieldType, MigrationOperation, ObjectId,
+    PlanningError, PlanningRequest, Schema, Table, VersionFence, plan,
 };
 use orna_foundation_v1::OvbRaw;
 use orna_syntax_v1::parse_module;
@@ -69,11 +69,16 @@ fn declarative_schema_delta_yields_a_migration_plan() {
     parse_fixture(BASE);
     parse_fixture(OPTIONAL);
     let mut next = base_table("Contact", 1, "name");
-    next.fields.push(field(4, "email", FieldType::Str, FieldRole::Stored, true));
+    next.fields
+        .push(field(4, "email", FieldType::Str, FieldRole::Stored, true));
     assert!(matches!(
-        plan(&schema(base_table("Contact", 1, "name")), &schema(next), &request())
-            .unwrap()
-            .operations(),
+        plan(
+            &schema(base_table("Contact", 1, "name")),
+            &schema(next),
+            &request()
+        )
+        .unwrap()
+        .operations(),
         [MigrationOperation::AddOptionalField { .. }]
     ));
 }
@@ -111,11 +116,16 @@ fn optional_addition_plans_only_metadata_change() {
     parse_fixture(BASE);
     parse_fixture(OPTIONAL);
     let mut next = base_table("Contact", 1, "name");
-    next.fields.push(field(4, "email", FieldType::Str, FieldRole::Stored, true));
+    next.fields
+        .push(field(4, "email", FieldType::Str, FieldRole::Stored, true));
     assert_eq!(
-        plan(&schema(base_table("Contact", 1, "name")), &schema(next), &request())
-            .unwrap()
-            .operations(),
+        plan(
+            &schema(base_table("Contact", 1, "name")),
+            &schema(next),
+            &request()
+        )
+        .unwrap()
+        .operations(),
         &[MigrationOperation::AddOptionalField {
             table: id(1),
             field: field(4, "email", FieldType::Str, FieldRole::Stored, true),
@@ -142,9 +152,8 @@ fn introduction_fallback_is_immutable_after_schema_creation() {
         ..base_table("Contact", 1, "name")
     });
     let mut to = from.clone();
-    to.tables[0].fields[1].introduction_fallback = Some(
-        CanonicalValue::new(OvbRaw::Text("US".into())).unwrap(),
-    );
+    to.tables[0].fields[1].introduction_fallback =
+        Some(CanonicalValue::new(OvbRaw::Text("US".into())).unwrap());
     assert!(matches!(
         plan(&from, &to, &request()),
         Err(PlanningError::IncompatibleField {
@@ -159,12 +168,22 @@ fn introduction_fallback_is_immutable_after_schema_creation() {
 #[test]
 fn fallback_must_match_the_closed_field_scalar_type() {
     parse_fixture(REQUIRED);
-    let mut country = field(4, "country", FieldType::Custom("Country".into()), FieldRole::Stored, false);
+    let mut country = field(
+        4,
+        "country",
+        FieldType::Custom("Country".into()),
+        FieldRole::Stored,
+        false,
+    );
     country.introduction_fallback = Some(CanonicalValue::new(OvbRaw::Text("GB".into())).unwrap());
     let mut next = base_table("Contact", 1, "name");
     next.fields.push(country);
     assert!(matches!(
-        plan(&schema(base_table("Contact", 1, "name")), &schema(next), &request()),
+        plan(
+            &schema(base_table("Contact", 1, "name")),
+            &schema(next),
+            &request()
+        ),
         Err(PlanningError::IncompatibleField {
             reason: "field introduction fallback does not match field type",
             ..
@@ -179,7 +198,13 @@ fn required_addition_without_fallback_is_rejected() {
     parse_fixture(BASE);
     parse_fixture(REQUIRED);
     let mut next = base_table("Contact", 1, "name");
-    next.fields.push(field(4, "country", FieldType::Str, FieldRole::Stored, false));
+    next.fields.push(field(
+        4,
+        "country",
+        FieldType::Str,
+        FieldRole::Stored,
+        false,
+    ));
     assert!(matches!(
         plan(&schema(base_table("Contact", 1, "name")), &schema(next), &request()),
         Err(PlanningError::RequiredFieldNeedsBackfill {

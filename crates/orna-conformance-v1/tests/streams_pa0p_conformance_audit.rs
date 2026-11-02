@@ -98,10 +98,19 @@ fn nested_pair_key(
 ) -> Raw {
     Raw::Array(vec![
         Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(first_id.into()), Raw::Text(first_label.into())]),
-            Raw::Array(vec![Raw::Int(second_id.into()), Raw::Text(second_label.into())]),
+            Raw::Array(vec![
+                Raw::Int(first_id.into()),
+                Raw::Text(first_label.into()),
+            ]),
+            Raw::Array(vec![
+                Raw::Int(second_id.into()),
+                Raw::Text(second_label.into()),
+            ]),
         ]),
-        Raw::Array(vec![Raw::Int(third_id.into()), Raw::Text(third_label.into())]),
+        Raw::Array(vec![
+            Raw::Int(third_id.into()),
+            Raw::Text(third_label.into()),
+        ]),
     ])
 }
 
@@ -179,7 +188,10 @@ fn repository(source: &str) -> (TempDir, Repository) {
         .current_dir(directory.path())
         .output()
         .expect("start git init");
-    assert!(initialized.status.success(), "initialize temporary repository");
+    assert!(
+        initialized.status.success(),
+        "initialize temporary repository"
+    );
     test_support::configure_fixture_git_identity(directory.path());
     fs::write(directory.path().join("main.orna"), source).expect("write checked-in source fixture");
     git(directory.path(), &["add", "main.orna"]);
@@ -211,7 +223,11 @@ fn identity() -> RuntimeIdentity {
 fn list_checkpoint_key(function: &str, source_label: &str, values: &[i64]) -> CheckpointKey {
     let payloads = values
         .iter()
-        .map(|value| Value::int((*value).into()).encode().expect("encode list item"))
+        .map(|value| {
+            Value::int((*value).into())
+                .encode()
+                .expect("encode list item")
+        })
         .collect::<Vec<_>>();
     let mut digest = Sha256::new();
     digest.update(b"ORNA-LIST-STREAM-IDENTITY\0");
@@ -290,11 +306,20 @@ async fn finite_fixture_is_inert_until_dispatch_and_commits_each_item() {
     assert_eq!(state.capture().await, Ok(before_load));
     assert_eq!(state.latest_checkpoint().await, Ok(None));
     assert!(state.stream_observations().await.unwrap().is_empty());
-    assert!(state.committed_table_rows("Reading").await.unwrap().is_empty());
+    assert!(
+        state
+            .committed_table_rows("Reading")
+            .await
+            .unwrap()
+            .is_empty()
+    );
     drop(state);
 
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
-    assert_eq!(evaluator.admit_list_stream_source(&source_unit()), StageOutcome::Passed);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source_unit()),
+        StageOutcome::Passed
+    );
     assert_eq!(
         evaluator
             .execute_list_stream_source(
@@ -324,7 +349,9 @@ async fn finite_fixture_is_inert_until_dispatch_and_commits_each_item() {
         "the finite source returns at exhaustion after both item callbacks"
     );
     for value in [1, 2] {
-        let key = Value::int(value.into()).encode().expect("encoded table key");
+        let key = Value::int(value.into())
+            .encode()
+            .expect("encoded table key");
         assert!(
             state
                 .committed_table_row("Reading", &key)
@@ -345,7 +372,10 @@ async fn finite_item_calling_helper_function_commits_a_row_per_item() {
     let identity = identity();
     let source = source_unit_with(HELPER_ITEM_STREAM, "streams-s9-helper-item");
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
-    assert_eq!(evaluator.admit_list_stream_source(&source), StageOutcome::Passed);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source),
+        StageOutcome::Passed
+    );
     assert_eq!(
         evaluator
             .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &source)
@@ -357,7 +387,9 @@ async fn finite_item_calling_helper_function_commits_a_row_per_item() {
         .await
         .expect("reopen runtime state");
     for value in [1, 2] {
-        let key = Value::int(value.into()).encode().expect("encoded table key");
+        let key = Value::int(value.into())
+            .encode()
+            .expect("encoded table key");
         let row = state
             .committed_table_row("Reading", &key)
             .await
@@ -385,7 +417,10 @@ async fn refused_stream_item_names_its_owner_and_does_not_advance_checkpoint() {
     let identity = identity();
     let source = source_unit_with(REFUSED_ITEM_STREAM, "streams-s9-refused-item");
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
-    assert_eq!(evaluator.admit_list_stream_source(&source), StageOutcome::Passed);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source),
+        StageOutcome::Passed
+    );
     let outcome = evaluator
         .execute_list_stream_source(&repository, identity, [0x55; 16], [0x53; 32], &source)
         .await
@@ -439,7 +474,10 @@ async fn refused_table_assertion_item_names_its_owner_span_and_position() {
     let identity = identity();
     let source = source_unit_with(ASSERT_REFUSED_ITEM_STREAM, "streams-s10-assert-item");
     let evaluator = DurableTransactionalEvaluator::new("main", Limits::default());
-    assert_eq!(evaluator.admit_list_stream_source(&source), StageOutcome::Passed);
+    assert_eq!(
+        evaluator.admit_list_stream_source(&source),
+        StageOutcome::Passed
+    );
     let outcome = evaluator
         .execute_list_stream_source(&repository, identity, [0x56; 16], [0x57; 32], &source)
         .await
@@ -492,7 +530,11 @@ async fn refused_table_assertion_item_names_its_owner_span_and_position() {
         "the checkpoint must not advance past the refused item"
     );
     assert_eq!(
-        checkpoint.committed.expect("committed position").token.as_str(),
+        checkpoint
+            .committed
+            .expect("committed position")
+            .token
+            .as_str(),
         "1",
         "the checkpoint stays at the refused item's position"
     );
@@ -585,11 +627,13 @@ async fn finite_list_identity_is_stable_across_source_layout_changes() {
         .await
         .expect("stable source checkpoint");
     assert_eq!(
-        checkpoint.key.source,
-        key.source,
+        checkpoint.key.source, key.source,
         "ORNA-CONNECTOR-001: the built-in list source identity depends on stable source configuration and canonical items, not source layout"
     );
-    assert_eq!(checkpoint.version, 2, "the second layout resumes the same key");
+    assert_eq!(
+        checkpoint.version, 2,
+        "the second layout resumes the same key"
+    );
 }
 
 #[tokio::test]
@@ -652,13 +696,7 @@ async fn section9_predicates_fold_complete_nested_pairs_at_each_checkpoint() {
         "streams-jyy6a-predicate-nested-pairs",
     );
     let outcome = DurableTransactionalEvaluator::new("main", Limits::default())
-        .execute_list_stream_source(
-            &repository,
-            identity,
-            [0x54; 16],
-            [0x53; 32],
-            &fixture,
-        )
+        .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture)
         .await
         .expect("execute nested-pair source");
     let state = RuntimeState::open(&repository, identity, [0x53; 32])
@@ -713,13 +751,7 @@ async fn all_unique_rejects_a_nested_pair_duplicate_without_advancing_checkpoint
     );
     assert!(matches!(
         DurableTransactionalEvaluator::new("main", Limits::default())
-            .execute_list_stream_source(
-                &repository,
-                identity,
-                [0x54; 16],
-                [0x53; 32],
-                &fixture,
-            )
+            .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture,)
             .await
             .expect("execute duplicate nested-pair source"),
         StageOutcome::Failed(_)
@@ -768,13 +800,7 @@ async fn every_rejects_a_nested_pair_mismatch_at_its_checkpoint() {
     );
     assert!(matches!(
         DurableTransactionalEvaluator::new("main", Limits::default())
-            .execute_list_stream_source(
-                &repository,
-                identity,
-                [0x54; 16],
-                [0x53; 32],
-                &fixture,
-            )
+            .execute_list_stream_source(&repository, identity, [0x54; 16], [0x53; 32], &fixture,)
             .await
             .expect("execute nested-pair mismatch source"),
         StageOutcome::Failed(_)
@@ -933,7 +959,7 @@ fn multiple_checkpointed_roots_have_the_required_extraction_diagnostic() {
     assert!(
         analysis.diagnostics.iter().any(|diagnostic| {
             diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root"
+                "a durable consumer function may own only one checkpointed source root",
             )
         }),
         "ORNA-CONSUMER-005 requires the separate named-consumer refactoring guidance: {:?}",

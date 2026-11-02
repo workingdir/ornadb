@@ -10,8 +10,8 @@ use std::{
     fmt::{self, Write as _},
     io::{Read as IoRead, Write as IoWrite},
     sync::{
-        atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
         Arc,
+        atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
     },
 };
 
@@ -203,10 +203,7 @@ impl fmt::Debug for Value {
         match raw_debug_value(&self.0, 0, false) {
             Ok(raw) => formatter.debug_tuple("Value").field(&raw).finish(),
             // Invalid internal markers are never printed with their payload.
-            Err(_) => formatter
-                .debug_tuple("Value")
-                .field(&"<redacted>")
-                .finish(),
+            Err(_) => formatter.debug_tuple("Value").field(&"<redacted>").finish(),
         }
     }
 }
@@ -518,12 +515,8 @@ impl ContentReference {
 /// resolver never rebinds a value to another snapshot or HEAD and is retained
 /// only inside an owner-issued [`Format3Context`].
 pub trait BlobResolver: Send + Sync {
-    fn read_range(
-        &self,
-        reference: &ContentReference,
-        offset: u64,
-        length: u64,
-    ) -> Result<Vec<u8>>;
+    fn read_range(&self, reference: &ContentReference, offset: u64, length: u64)
+    -> Result<Vec<u8>>;
 }
 
 /// The single published format-3 coordinate set. It is intentionally closed:
@@ -872,9 +865,9 @@ fn validate_snapshot_pin(snapshot: &Snapshot) -> Result<()> {
                 return Err(Error::InvalidContext);
             }
         }
-        Snapshot::Commit {
-            algorithm, oid, ..
-        } if oid.len() != algorithm.oid_width() => return Err(Error::InvalidContext),
+        Snapshot::Commit { algorithm, oid, .. } if oid.len() != algorithm.oid_width() => {
+            return Err(Error::InvalidContext);
+        }
         Snapshot::Commit { .. } => {}
     }
     Ok(())
@@ -1110,7 +1103,6 @@ impl Blob {
         })
     }
 
-
     pub fn from_semantic_commitment(
         identity: ContentIdentity,
         media_type: &str,
@@ -1262,7 +1254,9 @@ impl Blob {
     pub fn read_to_end(&self) -> Result<Vec<u8>> {
         let capacity = usize::try_from(self.length()).map_err(|_| Error::Limit)?;
         let mut result = Vec::new();
-        result.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
+        result
+            .try_reserve_exact(capacity)
+            .map_err(|_| Error::Limit)?;
         let mut offset = 0_u64;
         let chunk_limit = self.read_chunk_limit();
         let mut digest = Sha256::new();
@@ -1318,7 +1312,11 @@ impl Blob {
                     let start = usize::try_from(offset).map_err(|_| Error::Limit)?;
                     let length = usize::try_from(size).map_err(|_| Error::Limit)?;
                     let end = start.checked_add(length).ok_or(Error::Limit)?;
-                    digest.update(content.get(start..end).ok_or(Error::ContentDigestMismatch)?);
+                    digest.update(
+                        content
+                            .get(start..end)
+                            .ok_or(Error::ContentDigestMismatch)?,
+                    );
                 }
                 BlobContent::Reference(reference) => {
                     let bytes = read_reference_range(reference, offset, size)?;
@@ -1377,7 +1375,9 @@ impl Blob {
                 Err(Error::ContentDigestMismatch)
             };
         }
-        if same_content_source(&self.content, &other.content) || self.shares_descriptor_witness(other) {
+        if same_content_source(&self.content, &other.content)
+            || self.shares_descriptor_witness(other)
+        {
             return Ok(true);
         }
         let mut left_digest = Sha256::new();
@@ -1611,7 +1611,9 @@ pub fn encode_ovb2_bounded(blob: &Blob, max_encoded_bytes: u64) -> Result<Vec<u8
     blob.preflight_ovb2(encoded_len, max_encoded_bytes)?;
     let capacity = usize::try_from(encoded_len).map_err(|_| Error::Limit)?;
     let mut encoded = Vec::new();
-    encoded.try_reserve_exact(capacity).map_err(|_| Error::Limit)?;
+    encoded
+        .try_reserve_exact(capacity)
+        .map_err(|_| Error::Limit)?;
     blob.write_ovb2_preflighted(&mut encoded, &prefix, &suffix, encoded_len)?;
     Ok(encoded)
 }
@@ -1883,7 +1885,9 @@ pub fn normalize_media_type(media_type: &str) -> Result<String> {
 }
 
 pub fn selected_suffix(media_type: &str, suffix: Option<&str>) -> Result<String> {
-    Ok(MediaAnnotation::new(media_type, suffix)?.selected_suffix().to_owned())
+    Ok(MediaAnnotation::new(media_type, suffix)?
+        .selected_suffix()
+        .to_owned())
 }
 
 fn mime_token_end(bytes: &[u8], start: usize) -> Option<usize> {
@@ -1898,7 +1902,24 @@ fn mime_token_end(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn is_mime_token(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || matches!(byte, b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+' | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~')
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'.'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'|'
+                | b'~'
+        )
 }
 
 fn valid_mime_token(bytes: &[u8]) -> bool {
@@ -1960,11 +1981,7 @@ impl ContextValue {
         Self::new_with_context(format, blob.to_raw(format)?, context)
     }
 
-    pub fn new_in_context(
-        context: &Format3Context,
-        format: ValueFormat,
-        raw: Raw,
-    ) -> Result<Self> {
+    pub fn new_in_context(context: &Format3Context, format: ValueFormat, raw: Raw) -> Result<Self> {
         Self::new_with_context(format, raw, Some(context.clone()))
     }
 
@@ -2136,14 +2153,19 @@ pub fn blob_metadata_from_raw(raw: &Raw) -> Result<BlobMetadata> {
         return Err(Error::InvalidProfile);
     };
     let fields = array(payload)?;
-    let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice()
+    let [
+        length,
+        sha,
+        Raw::Text(media_type),
+        suffix,
+        Raw::Bytes(descriptor),
+    ] = fields.as_slice()
     else {
         return Err(Error::InvalidTag);
     };
     let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
     let suffix = raw_suffix(suffix)?;
-    let annotation =
-        MimeRegistry::mime1().canonical_annotation(media_type, suffix.as_deref())?;
+    let annotation = MimeRegistry::mime1().canonical_annotation(media_type, suffix.as_deref())?;
     Ok(BlobMetadata {
         media_type: annotation.media_type().to_owned(),
         suffix: annotation.suffix().map(str::to_owned),
@@ -2198,7 +2220,10 @@ impl BlobMetadataFilter {
     /// unset suffix on a row never matches a named hint, because "no suffix"
     /// is the absence of that coordinate rather than a suffix value.
     #[must_use]
-    pub fn with_any_suffix(mut self, suffixes: impl IntoIterator<Item = impl Into<String>>) -> Self {
+    pub fn with_any_suffix(
+        mut self,
+        suffixes: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
         self.suffixes = suffixes.into_iter().map(Into::into).collect();
         self
     }
@@ -2231,13 +2256,16 @@ impl BlobMetadataFilter {
                 .iter()
                 .all(|media_type| metadata.media_type() != media_type)
             && self.suffix.as_deref().is_none_or(|suffix| {
-                metadata.suffix().is_some_and(|candidate| candidate == suffix)
+                metadata
+                    .suffix()
+                    .is_some_and(|candidate| candidate == suffix)
             })
             && (self.suffixes.is_empty()
-                || self
-                    .suffixes
-                    .iter()
-                    .any(|suffix| metadata.suffix().is_some_and(|candidate| candidate == suffix)))
+                || self.suffixes.iter().any(|suffix| {
+                    metadata
+                        .suffix()
+                        .is_some_and(|candidate| candidate == suffix)
+                }))
             && self.min_length.is_none_or(|min| metadata.length() >= min)
             && self.max_length.is_none_or(|max| metadata.length() <= max)
     }
@@ -2277,10 +2305,7 @@ pub fn decode_sov3_in_context(bytes: &[u8], context: &Format3Context) -> Result<
 }
 
 pub fn semantic_digest(domain: &str, value: &ContextValue) -> Result<[u8; 32]> {
-    if value.format != ValueFormat::Sov3
-        || domain.as_bytes().contains(&0)
-        || !domain.is_ascii()
-    {
+    if value.format != ValueFormat::Sov3 || domain.as_bytes().contains(&0) || !domain.is_ascii() {
         return Err(Error::InvalidProfile);
     }
     let payload = value.encode()?;
@@ -2365,7 +2390,14 @@ fn decode_blob_raw(
         }
         (ValueFormat::Rov3, Raw::Tag(ROV3_BLOB_TAG, payload)) => {
             let fields = array(payload)?;
-            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(descriptor)] = fields.as_slice() else {
+            let [
+                length,
+                sha,
+                Raw::Text(media_type),
+                suffix,
+                Raw::Bytes(descriptor),
+            ] = fields.as_slice()
+            else {
                 return Err(Error::InvalidTag);
             };
             let identity = ContentIdentity::new(int_u64(length)?, bytes32(sha)?)?;
@@ -2425,14 +2457,20 @@ fn validate_context_raw(
                 validate_context_raw(key, depth + 1, format, oid_algorithm, mime_registry)?;
                 validate_context_raw(value, depth + 1, format, oid_algorithm, mime_registry)?;
                 let encoded = encode_context_raw(key, format, oid_algorithm, mime_registry)?;
-                if previous.as_ref().is_some_and(|prior: &Vec<u8>| encoded <= *prior) {
+                if previous
+                    .as_ref()
+                    .is_some_and(|prior: &Vec<u8>| encoded <= *prior)
+                {
                     return Err(Error::DuplicateOrUnorderedMapKey);
                 }
                 previous = Some(encoded);
             }
         }
         Raw::Tag(number, payload)
-            if matches!(*number, OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG) =>
+            if matches!(
+                *number,
+                OVB2_BLOB_TAG | ROV3_BLOB_TAG | SOV3_BLOB_TAG | ROV3_OVERFLOW_TAG
+            ) =>
         {
             validate_context_tag(*number, payload, format, oid_algorithm, mime_registry)?;
         }
@@ -2472,7 +2510,9 @@ fn validate_context_tag(
             validate_annotation_fields(media_type, suffix, mime_registry)
         }
         ROV3_BLOB_TAG => {
-            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = array(payload)?.as_slice() else {
+            let [length, sha, Raw::Text(media_type), suffix, Raw::Bytes(oid)] =
+                array(payload)?.as_slice()
+            else {
                 return Err(Error::InvalidTag);
             };
             validate_length(length)?;
@@ -2654,7 +2694,9 @@ fn is_permitted_key(raw: &Raw) -> bool {
     match raw {
         Raw::Bool(_) | Raw::Int(_) | Raw::Text(_) => true,
         Raw::Tag(37 | 60000 | 60001 | 60002, _) => true,
-        Raw::Tag(60014, payload) => matches!(payload.as_ref(), Raw::Array(values) if values.is_empty()),
+        Raw::Tag(60014, payload) => {
+            matches!(payload.as_ref(), Raw::Array(values) if values.is_empty())
+        }
         Raw::Tag(60008, payload) => matches!(
             payload.as_ref(),
             Raw::Array(values) if matches!(
@@ -3621,10 +3663,12 @@ fn redact_trace_values(raw: &Raw, depth: usize, hide_wrappers: bool) -> Result<R
         return Ok(Raw::Text("<redacted>".into()));
     }
     Ok(match raw {
-        Raw::Tag(60016, _) => ErrorValue::from_value(Value::new(raw.clone())?)?
-            .redacted_for_trace()
-            .0
-            .0,
+        Raw::Tag(60016, _) => {
+            ErrorValue::from_value(Value::new(raw.clone())?)?
+                .redacted_for_trace()
+                .0
+                .0
+        }
         Raw::Array(values) => Raw::Array(
             values
                 .iter()
@@ -4496,11 +4540,7 @@ impl SchemaDescriptor {
     }
     /// Validates one canonical ORP key against this descriptor and relation.
     /// descriptor bytes and its snapshot.
-    pub fn validate_stored_key(
-        &self,
-        relation_id: [u8; 16],
-        canonical_key: &[u8],
-    ) -> Result<()> {
+    pub fn validate_stored_key(&self, relation_id: [u8; 16], canonical_key: &[u8]) -> Result<()> {
         validate_schema_stored_key(&self.0, relation_id, canonical_key)
     }
 
@@ -4559,8 +4599,7 @@ fn validate_schema_stored_row(
     canonical_key: &[u8],
     canonical_fields: &[u8],
 ) -> Result<()> {
-    let (key_types, declared_fields, definitions) =
-        schema_stored_key_types(schema, relation_id)?;
+    let (key_types, declared_fields, definitions) = schema_stored_key_types(schema, relation_id)?;
     let key = decode_canonical_storage_value(canonical_key)?;
     validate_stored_key_value(&key, &key_types, definitions)?;
     let values = decode_canonical_storage_value(canonical_fields)?;
@@ -4657,11 +4696,7 @@ fn schema_stored_key_types(
     Ok((key_types, declared_fields, definitions))
 }
 
-fn validate_stored_key_value(
-    key: &Raw,
-    key_types: &[&Raw],
-    definitions: &[Raw],
-) -> Result<()> {
+fn validate_stored_key_value(key: &Raw, key_types: &[&Raw], definitions: &[Raw]) -> Result<()> {
     if key_types.len() == 1 {
         validate_stored_value_as_type(key, key_types[0], definitions)
     } else {
@@ -4682,9 +4717,7 @@ fn validate_stored_value_as_type(value: &Raw, ty: &Raw, definitions: &[Raw]) -> 
         0 => {
             if matches!(node.get(1), Some(Raw::Text(name)) if name == "Blob") {
                 return match value {
-                    Raw::Tag(ROV3_BLOB_TAG, payload)
-                        if valid_stored_blob_reference(payload) =>
-                    {
+                    Raw::Tag(ROV3_BLOB_TAG, payload) if valid_stored_blob_reference(payload) => {
                         Ok(())
                     }
                     _ => Err(Error::InvalidValue),
@@ -4836,7 +4869,14 @@ fn valid_stored_blob_reference(payload: &Raw) -> bool {
     let Ok(fields) = array(payload) else {
         return false;
     };
-    let [length, digest, Raw::Text(media_type), suffix, Raw::Bytes(oid)] = fields.as_slice() else {
+    let [
+        length,
+        digest,
+        Raw::Text(media_type),
+        suffix,
+        Raw::Bytes(oid),
+    ] = fields.as_slice()
+    else {
         return false;
     };
     int_u64(length).is_ok_and(|length| length < MAX_BLOB_LENGTH)
@@ -6749,9 +6789,7 @@ mod tests {
         ] {
             let mut fields = Vec::new();
             write_raw(&Raw::Array(vec![malformed_reference]), &mut fields).unwrap();
-            assert!(schema
-                .validate_stored_row([9; 16], &key, &fields)
-                .is_err());
+            assert!(schema.validate_stored_row([9; 16], &key, &fields).is_err());
         }
     }
 
@@ -6764,7 +6802,12 @@ mod tests {
                 id,
                 3,
                 Raw::Array(vec![
-                    Raw::Array(dimensions.iter().map(|value| Raw::Int((*value).into())).collect()),
+                    Raw::Array(
+                        dimensions
+                            .iter()
+                            .map(|value| Raw::Int((*value).into()))
+                            .collect(),
+                    ),
                     Raw::Int(1.into()),
                     Raw::Int(1.into()),
                     Raw::Int(0.into()),
@@ -6799,31 +6842,45 @@ mod tests {
         let quantity = |unit_id| {
             Raw::Tag(
                 60006,
-                Box::new(Raw::Array(vec![Raw::Float(1.0_f64.to_bits()), uuid_raw(unit_id)])),
+                Box::new(Raw::Array(vec![
+                    Raw::Float(1.0_f64.to_bits()),
+                    uuid_raw(unit_id),
+                ])),
             )
         };
         let matching_fields =
             encode_canonical_storage_value(&Raw::Array(vec![quantity(unit_a)])).unwrap();
-        assert!(schema
-            .validate_stored_row([9; 16], &key, &matching_fields)
-            .is_ok());
+        assert!(
+            schema
+                .validate_stored_row([9; 16], &key, &matching_fields)
+                .is_ok()
+        );
 
         let different_dimension_fields =
             encode_canonical_storage_value(&Raw::Array(vec![quantity(unit_b)])).unwrap();
-        assert!(schema
-            .validate_stored_row([9; 16], &key, &different_dimension_fields)
-            .is_err());
+        assert!(
+            schema
+                .validate_stored_row([9; 16], &key, &different_dimension_fields)
+                .is_err()
+        );
 
-        assert!(SchemaDescriptor::new(schema_for_type(
-            quantity_type([3; 16]),
-            unit_definitions.clone(),
-        ))
-        .is_err());
-        assert!(SchemaDescriptor::new(schema_for_type(
-            quantity_type([3; 16]),
-            vec![unit_definitions[0].clone(), record_definition(3, Vec::new())],
-        ))
-        .is_err());
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                quantity_type([3; 16]),
+                unit_definitions.clone(),
+            ))
+            .is_err()
+        );
+        assert!(
+            SchemaDescriptor::new(schema_for_type(
+                quantity_type([3; 16]),
+                vec![
+                    unit_definitions[0].clone(),
+                    record_definition(3, Vec::new())
+                ],
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -6831,24 +6888,21 @@ mod tests {
         let key = encode_raw(&Raw::Int(7.into())).unwrap();
         let blob_type = schema_type(0, Raw::Text("Blob".into()));
 
-        let list_schema = SchemaDescriptor::new(schema_for_type(
-            schema_type(1, blob_type.clone()),
-            vec![],
-        ))
-        .unwrap();
+        let list_schema =
+            SchemaDescriptor::new(schema_for_type(schema_type(1, blob_type.clone()), vec![]))
+                .unwrap();
         let list_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Array(vec![
             stored_blob_reference("image/png", Raw::Null),
         ])]))
         .unwrap();
-        assert!(list_schema
-            .validate_stored_row([9; 16], &key, &list_fields)
-            .is_ok());
+        assert!(
+            list_schema
+                .validate_stored_row([9; 16], &key, &list_fields)
+                .is_ok()
+        );
 
-        let option_schema = SchemaDescriptor::new(schema_for_type(
-            schema_type(2, blob_type),
-            vec![],
-        ))
-        .unwrap();
+        let option_schema =
+            SchemaDescriptor::new(schema_for_type(schema_type(2, blob_type), vec![])).unwrap();
         let option_fields = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
             60013,
             Box::new(Raw::Array(vec![
@@ -6857,18 +6911,22 @@ mod tests {
             ])),
         )]))
         .unwrap();
-        assert!(option_schema
-            .validate_stored_row([9; 16], &key, &option_fields)
-            .is_ok());
+        assert!(
+            option_schema
+                .validate_stored_row([9; 16], &key, &option_fields)
+                .is_ok()
+        );
 
         let malformed_none = encode_canonical_storage_value(&Raw::Array(vec![Raw::Tag(
             60013,
             Box::new(Raw::Array(vec![Raw::Int(0.into()), Raw::Null])),
         )]))
         .unwrap();
-        assert!(option_schema
-            .validate_stored_row([9; 16], &key, &malformed_none)
-            .is_err());
+        assert!(
+            option_schema
+                .validate_stored_row([9; 16], &key, &malformed_none)
+                .is_err()
+        );
     }
 
     #[test]
@@ -6895,9 +6953,11 @@ mod tests {
             ])),
         );
         let valid_fields = encode_raw(&Raw::Array(vec![valid_value])).unwrap();
-        assert!(schema
-            .validate_stored_row([9; 16], &key, &valid_fields)
-            .is_ok());
+        assert!(
+            schema
+                .validate_stored_row([9; 16], &key, &valid_fields)
+                .is_ok()
+        );
 
         let malformed_values = [
             Raw::Tag(
@@ -6920,9 +6980,11 @@ mod tests {
         for malformed_value in malformed_values {
             let mut malformed_fields = Vec::new();
             write_raw(&Raw::Array(vec![malformed_value]), &mut malformed_fields).unwrap();
-            assert!(schema
-                .validate_stored_row([9; 16], &key, &malformed_fields)
-                .is_err());
+            assert!(
+                schema
+                    .validate_stored_row([9; 16], &key, &malformed_fields)
+                    .is_err()
+            );
         }
     }
 
@@ -7003,10 +7065,9 @@ mod tests {
 
     #[test]
     fn values_match_supplied_vectors() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "fixtures/reference/tests/value-vectors.json"
-        ))
-        .unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/reference/tests/value-vectors.json"))
+                .unwrap();
         for vector in fixture.as_array().unwrap() {
             let x = vector["hex"].as_str().unwrap();
             let b = h(x);
@@ -7143,10 +7204,9 @@ mod tests {
     }
     #[test]
     fn float_vectors() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "fixtures/reference/tests/float-vectors.json"
-        ))
-        .unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/reference/tests/float-vectors.json"))
+                .unwrap();
         let parse = |text: &str| u64::from_str_radix(text, 16).unwrap();
         let ordered: Vec<u64> = fixture["ascending_total_order"]
             .as_array()
@@ -7379,10 +7439,16 @@ mod tests {
             ]),
         );
 
-        assert_eq!(Value::new(row_reference.clone()), Err(Error::ProtectedValue));
+        assert_eq!(
+            Value::new(row_reference.clone()),
+            Err(Error::ProtectedValue)
+        );
         let mut unvalidated_bytes = Vec::new();
         write_raw(&row_reference, &mut unvalidated_bytes).unwrap();
-        assert_eq!(Value::decode(&unvalidated_bytes), Err(Error::ProtectedValue));
+        assert_eq!(
+            Value::decode(&unvalidated_bytes),
+            Err(Error::ProtectedValue)
+        );
         assert!(!Error::ProtectedValue.to_string().contains(fixture));
     }
 
@@ -7391,10 +7457,7 @@ mod tests {
         let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
         let raw = Raw::Map(vec![(
             Raw::Text("credential".into()),
-            Raw::Array(vec![Raw::Tag(
-                0,
-                Box::new(Raw::Text(fixture.to_owned())),
-            )]),
+            Raw::Array(vec![Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned())))]),
         )]);
 
         let debug = format!("{raw:?}");
@@ -7459,7 +7522,10 @@ mod tests {
                 (Raw::Int(1.into()), Raw::Int(3.into())),
                 (Raw::Int(2.into()), Raw::Text(fixture.into())),
                 (Raw::Int(3.into()), Raw::Array(vec![])),
-                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
                 (Raw::Int(5.into()), Raw::Array(vec![])),
                 (Raw::Int(6.into()), Raw::Bool(false)),
             ]),
@@ -7487,9 +7553,11 @@ mod tests {
             .expect("generic wrapper fixture is canonical");
 
         let trace_bytes = value.redacted_for_trace().unwrap().encode().unwrap();
-        assert!(!trace_bytes
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !trace_bytes
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         assert_eq!(
             Value::decode(&trace_bytes).unwrap().raw(),
             &Raw::Array(vec![
@@ -7499,11 +7567,8 @@ mod tests {
             ])
         );
 
-        let keyed = Value::new(Raw::Map(vec![(
-            diagnostic,
-            Raw::Text(fixture.into()),
-        )]))
-        .expect("a typed wrapper can be a canonical map key");
+        let keyed = Value::new(Raw::Map(vec![(diagnostic, Raw::Text(fixture.into()))]))
+            .expect("a typed wrapper can be a canonical map key");
         assert_eq!(
             keyed.redacted_for_trace().unwrap().raw(),
             &Raw::Text("<redacted>".into())
@@ -7575,15 +7640,19 @@ mod tests {
 
         // Local recovery remains lossless; trace serialization has its own
         // fail-closed projection because OVB cannot classify caller text.
-        assert!(error
-            .encode()
-            .unwrap()
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            error
+                .encode()
+                .unwrap()
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         let trace_bytes = error.encode_for_trace().unwrap();
-        assert!(!trace_bytes
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !trace_bytes
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         let traced = ErrorValue::decode(&trace_bytes).unwrap();
         assert_eq!(traced.code(), "<redacted>");
         assert_eq!(traced.message(), "<redacted>");
@@ -7596,9 +7665,11 @@ mod tests {
 
         let nested = Value::new(Raw::Array(vec![error.value().raw().clone()])).unwrap();
         let nested_bytes = nested.redacted_for_trace().unwrap().encode().unwrap();
-        assert!(!nested_bytes
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !nested_bytes
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
         assert!(!format!("{nested:?}").contains(fixture));
     }
 
@@ -8276,10 +8347,9 @@ mod tests {
 
     #[test]
     fn fixture_path_vectors() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "fixtures/reference/tests/path-vectors.json"
-        ))
-        .unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("fixtures/reference/tests/path-vectors.json"))
+                .unwrap();
         for vector in fixture["round_trip"].as_array().unwrap() {
             let source = vector["value"].as_str().unwrap();
             let encoded = vector["encoded"].as_str().unwrap();
@@ -8579,9 +8649,7 @@ mod resolver_integrity_tests {
                 let chunk = &self.bytes[chunk_start..chunk_end];
                 self.bytes_read
                     .fetch_add(chunk.len(), AtomicOrdering::SeqCst);
-                if ContentIdentity::from_bytes(chunk).sha256()
-                    != self.chunk_digests[chunk_index]
-                {
+                if ContentIdentity::from_bytes(chunk).sha256() != self.chunk_digests[chunk_index] {
                     return Err(Error::ContentDigestMismatch);
                 }
             }
@@ -8693,8 +8761,8 @@ mod resolver_integrity_tests {
         let identity = ContentIdentity::from_bytes(b"abcdef");
         let resolver = resolver(descriptor.clone(), identity, b"abcdef", b"abcdef");
         let context = context(resolver);
-        let left = Blob::from_reference(context.reference(identity, descriptor.clone()).unwrap())
-            .unwrap();
+        let left =
+            Blob::from_reference(context.reference(identity, descriptor.clone()).unwrap()).unwrap();
         let right = Blob::from_reference(context.reference(identity, descriptor).unwrap()).unwrap();
 
         assert!(left.same_content(&right).unwrap());
@@ -8721,7 +8789,10 @@ mod resolver_integrity_tests {
         )
         .unwrap();
 
-        assert_eq!(good.same_content(&tampered), Err(Error::ContentDigestMismatch));
+        assert_eq!(
+            good.same_content(&tampered),
+            Err(Error::ContentDigestMismatch)
+        );
     }
 
     #[test]
@@ -8801,9 +8872,7 @@ mod anonymous_record_order_tests {
                 Raw::Array(
                     entries
                         .into_iter()
-                        .map(|(name, value)| {
-                            Raw::Array(vec![Raw::Text(name.to_owned()), value])
-                        })
+                        .map(|(name, value)| Raw::Array(vec![Raw::Text(name.to_owned()), value]))
                         .collect(),
                 ),
             ])),

@@ -15,8 +15,8 @@ use orna_foundation_v1::{
 use orna_project_v1::{AttachedDatabaseSession, LoadedProject};
 use orna_semantic_v1::StandardDependencyProfile;
 use orna_semantic_v1::{
-    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind, Type,
-    SystemProviders, analyze_with_providers, unresolved_member, unresolved_name,
+    Analysis, Catalogue, EffectSummary, ModuleInput, ReplAdmission, ReplContext, SymbolKind,
+    SystemProviders, Type, analyze_with_providers, unresolved_member, unresolved_name,
 };
 use orna_syntax_v1::{
     Declaration, ImportSegment, ReplInput, SyntaxDiagnostic, TokenKind, TypeMember,
@@ -372,7 +372,8 @@ impl AdmittedReplSession {
             }
             None => Catalogue::authoritative_core(),
         };
-        let analysis = analyze_with_providers(project.modules(), &catalogue, SystemProviders::Production);
+        let analysis =
+            analyze_with_providers(project.modules(), &catalogue, SystemProviders::Production);
         if !analysis.is_ok() {
             return Err(semantic_error(analysis.diagnostics));
         }
@@ -1025,8 +1026,7 @@ pub fn effect_rejection(effects: &EffectSummary) -> ReplError {
         notes: vec!["the core REPL session never runs effects".to_owned()],
         help: vec![
             "evaluate a pure expression here".to_owned(),
-            "or run the input in a project repository REPL, where effects are committed"
-                .to_owned(),
+            "or run the input in a project repository REPL, where effects are committed".to_owned(),
         ],
     }));
     error
@@ -1193,13 +1193,17 @@ fn unresolved_member_detail(code: &str, module: &str, member: &str, source: &str
 /// Locates the first identifier `name` in `source` as a byte span. With
 /// `qualified`, only an occurrence directly after `.` (a member access) counts.
 fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::ops::Range<usize>> {
-    lex(source).ok()?.into_iter().find_map(|token| match &token.kind {
-        TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
-            let start = token.span.start;
-            (!qualified || source[..start].trim_end().ends_with('.')).then_some(start..token.span.end)
-        }
-        _ => None,
-    })
+    lex(source)
+        .ok()?
+        .into_iter()
+        .find_map(|token| match &token.kind {
+            TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
+                let start = token.span.start;
+                (!qualified || source[..start].trim_end().ends_with('.'))
+                    .then_some(start..token.span.end)
+            }
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -1252,7 +1256,10 @@ mod tests {
         let mut with_main = admitted_runtime_sources(
             vec![
                 (None, "pub fn add(value: Int) = value + 10;".into()),
-                (Some("main".into()), "pub fn add(value: Int) = value + 1;".into()),
+                (
+                    Some("main".into()),
+                    "pub fn add(value: Int) = value + 1;".into(),
+                ),
             ],
             Vec::new(),
             Vec::new(),
@@ -1260,7 +1267,9 @@ mod tests {
         )
         .expect("root and user main functions load");
         assert!(with_main.submit("main.add(1)").is_err());
-        with_main.submit("use main;").expect("user main module imports");
+        with_main
+            .submit("use main;")
+            .expect("user main module imports");
         assert_eq!(
             with_main.submit("main.add(1)"),
             Ok(Some(Value::int(2.into())))
@@ -1278,7 +1287,12 @@ mod tests {
 
         assert!(matches!(staged.input(), ReplInput::Expression(_)));
         assert!(staged.result_type().is_some());
-        assert!(staged.effects().effects.contains(&orna_semantic_v1::EffectKind::Network));
+        assert!(
+            staged
+                .effects()
+                .effects
+                .contains(&orna_semantic_v1::EffectKind::Network)
+        );
         assert!(staged.effects().may_fail);
 
         assert_eq!(
@@ -1823,7 +1837,10 @@ mod tests {
         let error = session.submit("use\n").unwrap_err();
 
         assert_eq!(error.code(), "ORNA-EVAL-PARSE");
-        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("parse errors carry a located detail");
         assert_eq!(detail.code, "ORNA-PARSE-001");
         assert_eq!(detail.message, "expected namespace path");
         assert_eq!(detail.span, Some(3..3));
@@ -1842,7 +1859,10 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error = session.submit("(1 + 2\n").unwrap_err();
 
-        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("parse errors carry a located detail");
         assert_eq!(detail.message, "expected `)`");
         assert_eq!(detail.span, Some(6..6));
         assert_eq!(
@@ -1865,7 +1885,10 @@ mod tests {
         let error = session.submit("nofn(1)\n").unwrap_err();
 
         assert_eq!(error.code(), "ORNA-S012-UNRESOLVED");
-        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("unresolved names carry a located detail");
         assert_eq!(detail.message, "name `nofn` cannot be resolved");
         assert_eq!(detail.span, Some(0..4));
         assert!(
@@ -1905,7 +1928,10 @@ mod tests {
         .unwrap();
         let error = session.submit("library.twice(\"x\")\n").unwrap_err();
 
-        let detail = error.detail.as_ref().expect("unresolved names carry a located detail");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("unresolved names carry a located detail");
         assert_eq!(detail.message, "name `library` cannot be resolved");
         assert_eq!(detail.span, Some(0..7));
         assert!(
@@ -1949,17 +1975,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(session.submit("use library;\n"), Ok(None));
-        assert_eq!(session.submit("library.local(40)\n"), Ok(Some(Value::int(41.into()))));
+        assert_eq!(
+            session.submit("library.local(40)\n"),
+            Ok(Some(Value::int(41.into())))
+        );
 
         let error = session.submit("library.twice(\"x\")\n").unwrap_err();
-        let detail = error.detail.as_ref().expect("unresolved members carry a located detail");
-        assert_eq!(detail.message, "`twice` is not a member of module `library`");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("unresolved members carry a located detail");
+        assert_eq!(
+            detail.message,
+            "`twice` is not a member of module `library`"
+        );
         assert_eq!(detail.span, Some(8..13));
         assert!(
-            detail
-                .help
-                .iter()
-                .any(|help| help == "check the spelling of `twice` against the exports of `library`"),
+            detail.help.iter().any(
+                |help| help == "check the spelling of `twice` against the exports of `library`"
+            ),
             "{:?}",
             detail.help
         );
@@ -1970,14 +2004,14 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         let error = session.submit("let = 3;").unwrap_err();
 
-        let detail = error.detail.as_ref().expect("parse errors carry a located detail");
+        let detail = error
+            .detail
+            .as_ref()
+            .expect("parse errors carry a located detail");
         assert_eq!(detail.message, "expected pattern");
         assert_eq!(detail.span, Some(4..5));
         assert!(
-            detail
-                .help
-                .iter()
-                .any(|help| help.contains("`let x = 3;`")),
+            detail.help.iter().any(|help| help.contains("`let x = 3;`")),
             "{:?}",
             detail.help
         );
@@ -2287,7 +2321,8 @@ mod tests {
         );
     }
 
-    const ROOT_TYPES: &str = "pub enum Availability { ready, busy, }\npub type Queue { pub size: Int, }\n";
+    const ROOT_TYPES: &str =
+        "pub enum Availability { ready, busy, }\npub type Queue { pub size: Int, }\n";
 
     fn root_types_session() -> (TempDir, AdmittedReplSession) {
         let (directory, project) = loaded_project(&[("main.orna", ROOT_TYPES)], None);
@@ -2336,10 +2371,8 @@ mod tests {
     fn repl_root_enum_identity_matches_the_committed_main_namespace() {
         let parsed = orna_syntax_v1::parse_module(ROOT_TYPES);
         assert!(parsed.is_ok(), "{:?}", parsed.diagnostics);
-        let committed = crate::source_enums::source_enum_definitions(
-            Some("main"),
-            &parsed.value.items,
-        );
+        let committed =
+            crate::source_enums::source_enum_definitions(Some("main"), &parsed.value.items);
         let definition = &committed["main.Availability"];
         let ready = definition
             .variants
@@ -2365,7 +2398,10 @@ mod tests {
     fn namespaced_protocols_are_rejected_before_repl_admission() {
         let (_directory, project) = loaded_project(
             &[
-                ("main.orna", "use sensors.greenhouse;\npub fn answer() = 1;\n"),
+                (
+                    "main.orna",
+                    "use sensors.greenhouse;\npub fn answer() = 1;\n",
+                ),
                 ("sensors/greenhouse/main.orna", "pub protocol Sink {}\n"),
             ],
             None,
@@ -2390,7 +2426,10 @@ mod tests {
         for (kind, source) in cases {
             let (_directory, project) = loaded_project(
                 &[
-                    ("main.orna", "use sensors.greenhouse;\npub fn answer() = 1;\n"),
+                    (
+                        "main.orna",
+                        "use sensors.greenhouse;\npub fn answer() = 1;\n",
+                    ),
                     ("sensors/greenhouse/main.orna", source),
                 ],
                 None,

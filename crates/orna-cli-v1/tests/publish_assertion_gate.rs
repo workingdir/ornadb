@@ -19,12 +19,10 @@ use std::process::Output;
 const BOOK_TABLE: &str = "pub table Book(id: Int) {\n    title: Str,\n}\n";
 
 /// The pending row `Dune` violates this assertion.
-const BOOK_REJECTING_DUNE: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"Dune\");\n}\n";
+const BOOK_REJECTING_DUNE: &str = "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"Dune\");\n}\n";
 
 /// The pending row `Dune` satisfies this assertion.
-const BOOK_ACCEPTING_DUNE: &str =
-    "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"\");\n}\n";
+const BOOK_ACCEPTING_DUNE: &str = "pub table Book(id: Int) {\n    title: Str,\n    assert every(book => book.title != \"\");\n}\n";
 
 /// Writes `main.orna` with `source`, stages it with the metadata, and runs
 /// `orna commit`, returning its output without asserting success.
@@ -41,7 +39,10 @@ fn publish_output(root: &Path, message: &str) -> Output {
 
 /// A database whose `Book` table commits the source `asserting` while the row
 /// `Dune` stays pending, so the publish gate is the first check that sees it.
-fn database_with_pending_dune(directory: &tempfile::TempDir, asserting: &str) -> std::path::PathBuf {
+fn database_with_pending_dune(
+    directory: &tempfile::TempDir,
+    asserting: &str,
+) -> std::path::PathBuf {
     let root = initialized_database(directory, BOOK_TABLE);
     commit_source(&root, "book table");
     repl_writes(&root, "main.Book.insert({ id: 1, title: \"Dune\" })");

@@ -103,7 +103,11 @@ fn keyword_completion_vocabulary_matches_lex_007_exactly() {
 fn model_drives_function_completions_hover_signature_navigation_and_rename_ranges() {
     let workspace = workspace(EXPRESSIONS_SOURCE);
     let file = workspace.file(0);
-    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    assert!(
+        file.parse.diagnostics.is_empty(),
+        "{:#?}",
+        file.parse.diagnostics
+    );
     let text = file.text();
     let mapper = PositionMapper::new(text);
     let symbols = document_symbols(&file.symbols, &mapper);
@@ -166,7 +170,11 @@ fn model_drives_function_completions_hover_signature_navigation_and_rename_range
 fn standard_library_exports_complete_and_hover_from_the_pinned_source_bundle() {
     let workspace = workspace(STANDARD_MATH_SOURCE);
     let file = workspace.file(0);
-    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    assert!(
+        file.parse.diagnostics.is_empty(),
+        "{:#?}",
+        file.parse.diagnostics
+    );
     let text = file.text();
 
     let import_offset = text.find("increment};").unwrap() + "inc".len();
@@ -280,7 +288,11 @@ fn diagnostic_help_and_notes_are_visible_in_the_lsp_message() {
 fn local_definitions_and_references_respect_shadowing_scopes() {
     let workspace = workspace(LOCAL_SCOPES_SOURCE);
     let file = workspace.file(0);
-    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    assert!(
+        file.parse.diagnostics.is_empty(),
+        "{:#?}",
+        file.parse.diagnostics
+    );
     let text = file.text();
     let mapper = PositionMapper::new(text);
 
@@ -405,7 +417,11 @@ fn keyword_completion_documentation_matches_the_keyword_hover_card() {
         );
         checked.push(keyword);
     }
-    assert_eq!(checked, Keyword::ALL.to_vec(), "every reserved word is checked");
+    assert_eq!(
+        checked,
+        Keyword::ALL.to_vec(),
+        "every reserved word is checked"
+    );
 }
 
 const SIGNATURE_KEYWORD_ARGS_SOURCE: &str =
@@ -415,14 +431,20 @@ const SIGNATURE_KEYWORD_ARGS_SOURCE: &str =
 fn signature_help_round_trips_through_a_reserved_word_argument() {
     let workspace = workspace(SIGNATURE_KEYWORD_ARGS_SOURCE);
     let file = workspace.file(0);
-    assert!(file.parse.diagnostics.is_empty(), "{:#?}", file.parse.diagnostics);
+    assert!(
+        file.parse.diagnostics.is_empty(),
+        "{:#?}",
+        file.parse.diagnostics
+    );
     let text = file.text();
     let mapper = PositionMapper::new(text);
 
     let keyword_byte = text.find("true").unwrap();
-    assert_eq!(mapper.byte_offset(mapper.position(keyword_byte)), keyword_byte);
-    let help =
-        signature_help(&workspace, 0, keyword_byte).expect("signature help inside the call");
+    assert_eq!(
+        mapper.byte_offset(mapper.position(keyword_byte)),
+        keyword_byte
+    );
+    let help = signature_help(&workspace, 0, keyword_byte).expect("signature help inside the call");
     assert_eq!(help.active_parameter, Some(0));
     assert!(
         help.signatures[0].label.contains("choose"),
@@ -443,7 +465,10 @@ const DIAGNOSTIC_KEYWORD_NAME_SOURCE: &str =
 fn reserved_word_declaration_name_reports_a_syntax_v1_error_anchor() {
     let mapper = PositionMapper::new(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
     let diagnostics = check(DIAGNOSTIC_KEYWORD_NAME_SOURCE);
-    assert!(!diagnostics.is_empty(), "a reserved word cannot name a declaration");
+    assert!(
+        !diagnostics.is_empty(),
+        "a reserved word cannot name a declaration"
+    );
 
     let keyword_start = DIAGNOSTIC_KEYWORD_NAME_SOURCE.find("in(").unwrap();
     let keyword_end = keyword_start + "in".len();

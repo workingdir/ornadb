@@ -30,7 +30,6 @@ use orna_value_v1::{
 };
 use sha2::{Digest, Sha256};
 
-
 /// Dead code: no caller yet; kept for the store surface it specifies.
 #[allow(dead_code)]
 pub const REPOSITORY_FORMAT: u8 = 3;
@@ -501,9 +500,7 @@ impl RepositoryCaptureCapability {
         media_type: &str,
         suffix: Option<&str>,
     ) -> Result<OrpBlobBinding, GraphError> {
-        let pin = self
-            .graph
-            .protect_captured_blob(candidate, &self.scope)?;
+        let pin = self.graph.protect_captured_blob(candidate, &self.scope)?;
         self.graph
             .accept_protected_blob_pin_with_annotation(pin, media_type, suffix)
     }
@@ -562,11 +559,9 @@ impl BlobResolver for RepositoryValueResolver {
         {
             return Err(ValueError::InvalidContext);
         }
-        let descriptor_oid = NativeOid::new(
-            self.graph.algorithm,
-            reference.descriptor_oid().as_bytes(),
-        )
-        .map_err(graph_error_to_value_error)?;
+        let descriptor_oid =
+            NativeOid::new(self.graph.algorithm, reference.descriptor_oid().as_bytes())
+                .map_err(graph_error_to_value_error)?;
         let identity = crate::blob_store::ContentIdentity::new(
             reference.identity().length(),
             reference.identity().sha256(),
@@ -697,8 +692,7 @@ impl NativeGraphContext {
         // The node records the `orna.schema.v3` identity of its descriptor
         // bytes (store-format-3 section 5), streamed here with the byte
         // index's chunk digests and boundaries.
-        let mut digest =
-            crate::blob_store::ContentDigest::domain_separated(SCHEMA_IDENTITY_DOMAIN);
+        let mut digest = crate::blob_store::ContentDigest::domain_separated(SCHEMA_IDENTITY_DOMAIN);
         let mut chunk_boundaries = GearBoundaryVerifier::new();
         self.walk_full_index(
             &byte_root,
@@ -863,7 +857,8 @@ impl NativeGraphContext {
         scope.authorize(self)?;
         let owner_version = containing_row.version();
         if owner_version.database_id() != &self.database_id
-            || self.lookup_row_in_version(owner_version, containing_row.key(), scope)?
+            || self
+                .lookup_row_in_version(owner_version, containing_row.key(), scope)?
                 .as_ref()
                 != Some(containing_row)
         {
@@ -953,7 +948,8 @@ impl NativeGraphContext {
             });
         };
         let mut schema_bytes = Vec::new();
-        let capacity = usize::try_from(encoded_length).map_err(|_| GraphError::ReadQuotaExceeded)?;
+        let capacity =
+            usize::try_from(encoded_length).map_err(|_| GraphError::ReadQuotaExceeded)?;
         if encoded_length > scope.metadata_quota.min(MAX_RANGE_METADATA_BYTES) {
             return Err(GraphError::ReadQuotaExceeded);
         }
@@ -971,8 +967,8 @@ impl NativeGraphContext {
         if schema_identity_v3(&schema_bytes) != schema_digest {
             return Err(GraphError::ContentIdentityMismatch);
         }
-        let descriptor = SchemaDescriptor::decode(&schema_bytes)
-            .map_err(|_| GraphError::NonCanonicalData)?;
+        let descriptor =
+            SchemaDescriptor::decode(&schema_bytes).map_err(|_| GraphError::NonCanonicalData)?;
         if schema_relation_id(&descriptor)? != relation_id {
             return Err(GraphError::ContextMismatch);
         }
@@ -1464,7 +1460,6 @@ impl NativeGraphContext {
             .collect()
     }
 
-
     /// Projects the payload-free Blob metadata of one admitted row field.
     ///
     /// This is the measured metadata-only read path a query over media rows
@@ -1670,9 +1665,15 @@ impl NativeGraphContext {
                     let root = reference
                         .native_root()
                         .ok_or(GraphError::UnsupportedRowValueForm)?;
-                    self.verify_value_overflow(root, scope, &mut objects, &mut BTreeSet::new(), true)?
-                        .encoded_value
-                        .ok_or(GraphError::ContextMismatch)?
+                    self.verify_value_overflow(
+                        root,
+                        scope,
+                        &mut objects,
+                        &mut BTreeSet::new(),
+                        true,
+                    )?
+                    .encoded_value
+                    .ok_or(GraphError::ContextMismatch)?
                 }
             };
             rows.push((key, fields));
@@ -1925,7 +1926,8 @@ impl NativeGraphContext {
                 return Err(GraphError::ContextMismatch);
             }
             if encoded_length <= crate::row_store::ROW_INLINE_LIMIT as u64
-                && direct_blob_reference_count(&rov_value)? <= crate::row_store::ROW_INLINE_REF_LIMIT
+                && direct_blob_reference_count(&rov_value)?
+                    <= crate::row_store::ROW_INLINE_REF_LIMIT
             {
                 return Err(GraphError::NonCanonicalData);
             }
@@ -2192,8 +2194,13 @@ impl NativeGraphContext {
     ) -> Result<ObjectStats, GraphError> {
         scope.authorize(self)?;
         let mut objects = self.stats_budget(scope);
-        let (_, earlier) =
-            self.walk_stats(since_root, scope, &mut objects, &Reachable::default(), u64::MAX)?;
+        let (_, earlier) = self.walk_stats(
+            since_root,
+            scope,
+            &mut objects,
+            &Reachable::default(),
+            u64::MAX,
+        )?;
         let (stats, _) =
             self.walk_stats(&self.store_root, scope, &mut objects, &earlier, u64::MAX)?;
         Ok(stats)
@@ -2731,8 +2738,7 @@ impl NativeGraphContext {
         let mut digest = crate::blob_store::ContentDigest::new();
         let mut chunker = StreamingGearChunker::new();
         let mut written = BTreeSet::new();
-        let mut index =
-            CaptureIndexBuilder::new(self, &mut written, scope.max_objects, scope);
+        let mut index = CaptureIndexBuilder::new(self, &mut written, scope.max_objects, scope);
         let mut total = 0u64;
         let mut input = [0u8; 64 * 1024];
 
@@ -3238,13 +3244,15 @@ impl NativeGraphContext {
             Err(graph) => {
                 let mut cleanup_failures = Vec::new();
                 if let Some(candidate_cleanup) = candidate_cleanup.as_mut()
-                    && let Err(failure) = candidate_cleanup.cleanup_with_identity() {
-                        cleanup_failures.push(failure);
-                    }
+                    && let Err(failure) = candidate_cleanup.cleanup_with_identity()
+                {
+                    cleanup_failures.push(failure);
+                }
                 if let Some(pin_cleanup) = pin_cleanup.as_mut()
-                    && let Err(failure) = pin_cleanup.cleanup_with_identity() {
-                        cleanup_failures.push(failure);
-                    }
+                    && let Err(failure) = pin_cleanup.cleanup_with_identity()
+                {
+                    cleanup_failures.push(failure);
+                }
                 if cleanup_failures.is_empty() {
                     Err(ProtectedBlobRowPreparationError::Graph(graph))
                 } else {
@@ -3396,12 +3404,13 @@ impl NativeGraphContext {
             return Err(GraphError::InvalidEmptyBlob);
         }
         if let Some(root) = &byte_root
-            && root.algorithm() != self.algorithm {
-                return Err(GraphError::InvalidOidWidth {
-                    expected: self.algorithm.width(),
-                    actual: root.as_bytes().len(),
-                });
-            }
+            && root.algorithm() != self.algorithm
+        {
+            return Err(GraphError::InvalidOidWidth {
+                expected: self.algorithm.width(),
+                actual: root.as_bytes().len(),
+            });
+        }
         Ok(VerifiedBlobDescriptor {
             descriptor_oid: descriptor_oid.clone(),
             identity,
@@ -3745,8 +3754,7 @@ impl NativeGraphContext {
                 data.as_ref().clone()
             }
             None => {
-                let data =
-                    read_checked_object(&self.repository, self.algorithm, kind, oid, admit)?;
+                let data = read_checked_object(&self.repository, self.algorithm, kind, oid, admit)?;
                 self.node_cache
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3987,8 +3995,7 @@ impl NativeGraphContext {
     }
 
     fn delete_protected_ref(&self, reference: &str, oid: &NativeOid) -> Result<(), GraphError> {
-        self.private_ref_owner
-            .delete_protected_ref(reference, oid)
+        self.private_ref_owner.delete_protected_ref(reference, oid)
     }
 
     fn sync_git_ref(&self, reference: &str) -> Result<(), GraphError> {
@@ -4119,11 +4126,9 @@ impl RepositoryReadScope {
 
     fn charge_structured_metadata_read(&self, bytes: u64) -> Result<(), GraphError> {
         self.structured_metadata_bytes_read
-            .fetch_update(
-                AtomicOrdering::AcqRel,
-                AtomicOrdering::Acquire,
-                |used| used.checked_add(bytes),
-            )
+            .fetch_update(AtomicOrdering::AcqRel, AtomicOrdering::Acquire, |used| {
+                used.checked_add(bytes)
+            })
             .map(|_| ())
             .map_err(|_| GraphError::ReadQuotaExceeded)
     }
@@ -4326,7 +4331,6 @@ impl GearBoundaryVerifier {
         self.chunks_seen = true;
         Ok(())
     }
-
 }
 
 struct StreamingGearChunker {
@@ -4402,12 +4406,9 @@ impl<'a> CaptureIndexBuilder<'a> {
     fn push_chunk_bytes(&mut self, chunk: Vec<u8>) -> Result<(), GraphError> {
         let length = chunk.len() as u64;
         let chunk_sha256 = crate::blob_store::digest_bytes(&chunk).sha256();
-        let target = self.graph.write_capture_object(
-            "blob",
-            &chunk,
-            self.written,
-            self.object_limit,
-        )?;
+        let target =
+            self.graph
+                .write_capture_object("blob", &chunk, self.written, self.object_limit)?;
         // The write-seam measurement: only an actual payload chunk is charged,
         // so a metadata-only commit through this scope reports zero.
         self.scope.charge_payload_written(length);
@@ -4512,9 +4513,10 @@ fn byte_index_anchor(level: u32, entry: &ByteIndexEntry) -> Result<bool, GraphEr
 
 fn encode_git_tree(mut entries: Vec<ParsedGitTreeEntry>) -> Result<Vec<u8>, GraphError> {
     entries.sort_by(git_tree_cmp);
-    if entries.windows(2).any(|pair| {
-        git_tree_cmp(&pair[0], &pair[1]) != std::cmp::Ordering::Less
-    }) {
+    if entries
+        .windows(2)
+        .any(|pair| git_tree_cmp(&pair[0], &pair[1]) != std::cmp::Ordering::Less)
+    {
         return Err(GraphError::InvalidTreeEnvelope);
     }
     let mut output = Vec::new();
@@ -4759,7 +4761,8 @@ fn reclaim_owner_pin_refs_locked(
         let resolved = owner
             .git_output(&["rev-parse", "--verify", reference])
             .map_err(|_| GraphError::InvalidProtectedRef)?;
-        let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved =
+            String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
         let resolved = resolved.trim();
         let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
         let oid = NativeOid::from_hex(algorithm, resolved)?;
@@ -4769,7 +4772,11 @@ fn reclaim_owner_pin_refs_locked(
     }
 
     let mut reclaimed = 0;
-    for name in listing.lines().map(str::trim).filter(|line| !line.is_empty()) {
+    for name in listing
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
         if !name.starts_with(&prefix) {
             continue;
         }
@@ -4777,7 +4784,8 @@ fn reclaim_owner_pin_refs_locked(
             continue;
         }
         let resolved = owner.git_output(&["rev-parse", "--verify", name])?;
-        let resolved = String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
+        let resolved =
+            String::from_utf8(resolved).map_err(|_| GraphError::MalformedReferenceName)?;
         let resolved = resolved.trim();
         let algorithm = algorithm_for_hex(resolved).ok_or(GraphError::MalformedReferenceName)?;
         let oid = NativeOid::from_hex(algorithm, resolved)?;
@@ -4813,15 +4821,9 @@ pub(crate) fn list_mount_snapshot_pins(
     let owner = PrivateRefCleanupOwner {
         repository: repository.clone(),
     };
-    let prefix = format!(
-        "refs/orna/pins/{}/mounts/",
-        hex_encode(registry_owner_id)
-    );
-    let listing = owner.git_output(&[
-        "for-each-ref",
-        "--format=%(refname) %(objectname)",
-        &prefix,
-    ])?;
+    let prefix = format!("refs/orna/pins/{}/mounts/", hex_encode(registry_owner_id));
+    let listing =
+        owner.git_output(&["for-each-ref", "--format=%(refname) %(objectname)", &prefix])?;
     let listing = String::from_utf8(listing).map_err(|_| GraphError::MalformedReferenceName)?;
     let mut pins = Vec::new();
     for line in listing.lines() {
@@ -4934,7 +4936,8 @@ pub(crate) fn delete_mount_snapshot_pin(
 ) -> Result<(), GraphError> {
     let algorithm = algorithm_for_hex(commit_oid_hex).ok_or(GraphError::MalformedOid)?;
     let oid = NativeOid::from_hex(algorithm, commit_oid_hex)?;
-    let Some(actual) = mount_snapshot_pin_oid(repository, registry_owner_id, owner_id, view_id)? else {
+    let Some(actual) = mount_snapshot_pin_oid(repository, registry_owner_id, owner_id, view_id)?
+    else {
         return Ok(());
     };
     if actual != oid.to_hex() {
@@ -5217,9 +5220,7 @@ impl RowRevision {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowIndexMutation {
     /// Removes one logical key. The pinned root must hold it.
-    Delete {
-        key: crate::row_store::TypedKey,
-    },
+    Delete { key: crate::row_store::TypedKey },
     /// Moves one logical key and its stored value to a new logical key. The
     /// source must be present, the destination absent and the two distinct.
     Rekey {
@@ -5753,9 +5754,7 @@ impl PreparedOrpGraphCandidate {
         &self.candidate
     }
 
-    pub(crate) fn cleanup_rejected_callback(
-        mut self,
-    ) -> Result<(), Vec<(String, GraphError)>> {
+    pub(crate) fn cleanup_rejected_callback(mut self) -> Result<(), Vec<(String, GraphError)>> {
         let mut cleanup_failures = Vec::new();
         if let Err(failure) = self._cleanup.cleanup_with_identity() {
             cleanup_failures.push(failure);
@@ -5954,7 +5953,10 @@ impl ObjectStats {
         for (name, count) in rows {
             out.push_str(&format!("{name:<width$}  {count}\n"));
         }
-        out.push_str(&format!("{:<width$}  {}\n", "blob_references", self.blob_references));
+        out.push_str(&format!(
+            "{:<width$}  {}\n",
+            "blob_references", self.blob_references
+        ));
         out
     }
 
@@ -6525,9 +6527,10 @@ pub(crate) fn validate_native_node(
     let mut expected = BTreeMap::new();
     for dependency in &dependencies {
         if let Some(kind) = expected.insert(dependency.oid.clone(), dependency.kind)
-            && kind != dependency.kind {
-                return Err(GraphError::WrongReferenceKind);
-            }
+            && kind != dependency.kind
+        {
+            return Err(GraphError::WrongReferenceKind);
+        }
     }
     let mut actual = BTreeMap::new();
     for entry in &envelope.refs {
@@ -6614,7 +6617,6 @@ pub(crate) fn load_format3_row_map(
         return Err(GraphError::ContextMismatch);
     }
 
-
     let rows_domain = canonical_domain(vec![
         CborValue::Text("rows".to_owned()),
         CborValue::Bytes(relation_id.to_vec()),
@@ -6652,9 +6654,6 @@ pub(crate) fn load_format3_row_map(
     crate::row_store::RowMapSnapshot::issue_lazy(version, authority.finalize().into())
         .map_err(|_| GraphError::ContextMismatch)
 }
-
-
-
 
 fn schema_relation_id(schema: &SchemaDescriptor) -> Result<[u8; 16], GraphError> {
     let relation_key = Raw::Int(1.into());
@@ -6730,7 +6729,6 @@ impl PinnedNativeGraphReader {
             metadata_bytes: 0,
         }
     }
-
 
     fn validate_map_root(
         &mut self,
@@ -6875,7 +6873,6 @@ impl PinnedNativeGraphReader {
         })
     }
 
-
     /// Reads a kind-6 node's descriptor bytes and checks them against the
     /// node's `orna.schema.v3` identity (store-format-3 section 5), hashed
     /// while the byte index streams.
@@ -7000,7 +6997,6 @@ impl PinnedNativeGraphReader {
         }
         Ok((total, height))
     }
-
 }
 
 fn find_ordered_entry_with(
@@ -7139,7 +7135,10 @@ fn replace_ordered_entry_with(
     value: Vec<u8>,
 ) -> Result<NativeOid, GraphError> {
     match node {
-        NodeData::OrderedLeaf { domain, mut entries } => {
+        NodeData::OrderedLeaf {
+            domain,
+            mut entries,
+        } => {
             if domain != expected_domain || expected_height.is_some_and(|height| height != 0) {
                 return Err(GraphError::InvalidDomain);
             }
@@ -8119,11 +8118,7 @@ mod persisted_orp_tests {
         let (directory, graph) = capture_test_context();
         crate::test_support::configure_fixture_git_identity(directory.path());
         let deep = crate::test_support::deep_nested_commit(directory.path(), 300);
-        crate::test_support::git_with_input(
-            directory.path(),
-            &["update-ref", "HEAD", &deep],
-            "",
-        );
+        crate::test_support::git_with_input(directory.path(), &["update-ref", "HEAD", &deep], "");
         let repository = crate::Repository::discover(directory.path()).expect("open repository");
         let head = repository.head().expect("read head").expect("born head");
         assert!(matches!(
@@ -8235,7 +8230,7 @@ mod persisted_orp_tests {
         let snapshot = crate::row_store::RowMapSnapshot::issue(version, [0x34; 32], Vec::new())
             .expect("sealed empty fixture row map");
         let repository = crate::Repository::discover(root).expect("discover capture repository");
-        
+
         NativeGraphContext::issue(
             repository,
             [0x35; 32],
@@ -8331,10 +8326,7 @@ mod persisted_orp_tests {
                 }],
             },
         );
-        let store_root = fixture_git_node(
-            directory.path(),
-            &NodeData::StoreRoot { relation_map },
-        );
+        let store_root = fixture_git_node(directory.path(), &NodeData::StoreRoot { relation_map });
 
         let loaded = load_format3_row_map(
             &graph.repository,
@@ -8381,11 +8373,7 @@ mod persisted_orp_tests {
     fn pending_refs(directory: &Path) -> Vec<u8> {
         let output = Command::new("git")
             .current_dir(directory)
-            .args([
-                "for-each-ref",
-                "--format=%(refname)",
-                "refs/orna/pins",
-            ])
+            .args(["for-each-ref", "--format=%(refname)", "refs/orna/pins"])
             .output()
             .expect("list pending refs");
         assert!(output.status.success());
@@ -8633,7 +8621,7 @@ mod persisted_orp_tests {
         }
     }
 
-/// ORNA-CAP-001: newly captured row content is verified and protected by a durable native ref before acknowledgement.
+    /// ORNA-CAP-001: newly captured row content is verified and protected by a durable native ref before acknowledgement.
     #[test]
     fn captured_blob_candidate_is_promoted_to_a_durable_pin() {
         let (directory, graph) = capture_test_context();
@@ -8728,7 +8716,10 @@ mod persisted_orp_tests {
         // The generator captures `abc`; the vector records its length and digest.
         let payload = b"abc";
         assert_eq!(expected["blob_length"], payload.len());
-        assert_eq!(expected["blob_sha256"], hex_encode(&Sha256::digest(payload)));
+        assert_eq!(
+            expected["blob_sha256"],
+            hex_encode(&Sha256::digest(payload))
+        );
 
         let (directory, graph) = capture_test_context();
         assert_eq!(graph.algorithm, GitHashAlgorithm::Sha1);
@@ -8748,7 +8739,9 @@ mod persisted_orp_tests {
             .expect("accept with the published annotation");
         assert_eq!(
             binding.descriptor_oid().to_hex(),
-            expected["descriptor_oid"].as_str().expect("a descriptor OID")
+            expected["descriptor_oid"]
+                .as_str()
+                .expect("a descriptor OID")
         );
         assert_eq!(
             binding.encoded_value(),
@@ -8787,12 +8780,16 @@ mod persisted_orp_tests {
         for object in objects {
             let oid = object["oid"].as_str().expect("an object ID");
             let (kind, bytes) = stored_git_object(directory.path(), oid);
-            assert_eq!(kind, object["kind"].as_str().expect("an object kind"), "{oid}");
+            assert_eq!(
+                kind,
+                object["kind"].as_str().expect("an object kind"),
+                "{oid}"
+            );
             assert_eq!(bytes, vector_hex(&object["bytes_hex"]), "{oid}");
         }
     }
 
-/// ORNA-CAP-003: accepted pins transfer to an owner-scoped local ref namespace, never an ordinary remote ref.
+    /// ORNA-CAP-003: accepted pins transfer to an owner-scoped local ref namespace, never an ordinary remote ref.
     #[test]
     fn capture_acceptance_transfers_owner_scoped_scratch_to_annotated_pending_binding() {
         let (directory, graph) = capture_test_context();
@@ -8813,11 +8810,16 @@ mod persisted_orp_tests {
             .expect("promote and annotate captured Blob");
         let transfer = binding.transfer_record();
         let pending_ref = accepted_content_ref(transfer.owner_id(), transfer.pin_id());
-        assert_eq!(transfer.content_identity(), crate::blob_store::digest_bytes(payload));
-        assert!(binding
-            .encoded_value()
-            .windows(b"application/json".len())
-            .any(|window| window == b"application/json"));
+        assert_eq!(
+            transfer.content_identity(),
+            crate::blob_store::digest_bytes(payload)
+        );
+        assert!(
+            binding
+                .encoded_value()
+                .windows(b"application/json".len())
+                .any(|window| window == b"application/json")
+        );
         assert!(fixture_ref_exists(directory.path(), &pending_ref));
         assert!(!fixture_ref_exists(directory.path(), &scratch_ref));
         drop(binding);
@@ -9041,11 +9043,7 @@ mod persisted_orp_tests {
             move |_| async move {
                 let output = Command::new("git")
                     .current_dir(&worktree)
-                    .args([
-                        "for-each-ref",
-                        "--format=%(refname)",
-                        "refs/orna/pins",
-                    ])
+                    .args(["for-each-ref", "--format=%(refname)", "refs/orna/pins"])
                     .output()
                     .expect("list provisional row refs");
                 assert!(output.status.success());
@@ -9080,7 +9078,11 @@ mod persisted_orp_tests {
             other => panic!("expected aggregate cleanup error, got {other:?}"),
         };
         assert_eq!(cleanup.len(), 2);
-        assert!(cleanup.iter().all(|(_, error)| *error == GraphError::GitCommandFailed));
+        assert!(
+            cleanup
+                .iter()
+                .all(|(_, error)| *error == GraphError::GitCommandFailed)
+        );
         assert!(cleanup.iter().any(|(reference, _)| reference == &pin_ref));
         let candidate_ref = cleanup
             .iter()
@@ -9110,10 +9112,10 @@ mod persisted_orp_tests {
                 },
             ],
         };
-        let child_oid = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x33; 20])
-            .expect("valid child object id");
-        let root_oid = NativeOid::new(GitHashAlgorithm::Sha1, vec![0x44; 20])
-            .expect("valid root object id");
+        let child_oid =
+            NativeOid::new(GitHashAlgorithm::Sha1, vec![0x33; 20]).expect("valid child object id");
+        let root_oid =
+            NativeOid::new(GitHashAlgorithm::Sha1, vec![0x44; 20]).expect("valid root object id");
         let branch = NodeData::OrderedBranch {
             domain: domain.clone(),
             height: 1,
@@ -9269,10 +9271,12 @@ mod persisted_orp_tests {
         assert_eq!(selected.version().schema(), original.schema());
         assert_eq!(selected.version().primary_root(), original.primary_root());
         assert_eq!(selected.version().row_count(), original.row_count());
-        assert!(graph
-            .lookup_row(&key, &scope)
-            .expect("lookup selected source map")
-            .is_none());
+        assert!(
+            graph
+                .lookup_row(&key, &scope)
+                .expect("lookup selected source map")
+                .is_none()
+        );
         assert!(pending_refs(directory.path()).is_empty());
 
         let candidate_store_root = graph
@@ -9295,10 +9299,12 @@ mod persisted_orp_tests {
         assert_eq!(successor.version().schema(), original.schema());
         assert_eq!(successor.version().row_count(), Some(1));
         assert_eq!(graph.store_root, *original.store_root());
-        assert!(graph
-            .lookup_row(&TypedKey::Text("must-not-be-written".to_owned()), &scope)
-            .expect("source root remains selected")
-            .is_none());
+        assert!(
+            graph
+                .lookup_row(&TypedKey::Text("must-not-be-written".to_owned()), &scope)
+                .expect("source root remains selected")
+                .is_none()
+        );
     }
 
     #[test]
@@ -9322,23 +9328,20 @@ mod persisted_orp_tests {
             CborValue::Text("relations".to_owned()),
             CborValue::Bytes(original.database_id().to_vec()),
         ]));
-        let relation_entry = |
-            relation_id: [u8; 16],
-            schema_oid: &NativeOid,
-            primary_root: &NativeOid,
-        | {
-            OrderedLeafEntry {
-                key: TypedKey::Bytes(relation_id.to_vec())
-                    .canonical_bytes()
-                    .expect("canonical relation key"),
-                value: canonical_value_bytes(&CborValue::Array(vec![
-                    CborValue::Bytes(schema_oid.as_bytes().to_vec()),
-                    CborValue::Bytes(primary_root.as_bytes().to_vec()),
-                    CborValue::Null,
-                    CborValue::Unsigned(0),
-                ])),
-            }
-        };
+        let relation_entry =
+            |relation_id: [u8; 16], schema_oid: &NativeOid, primary_root: &NativeOid| {
+                OrderedLeafEntry {
+                    key: TypedKey::Bytes(relation_id.to_vec())
+                        .canonical_bytes()
+                        .expect("canonical relation key"),
+                    value: canonical_value_bytes(&CborValue::Array(vec![
+                        CborValue::Bytes(schema_oid.as_bytes().to_vec()),
+                        CborValue::Bytes(primary_root.as_bytes().to_vec()),
+                        CborValue::Null,
+                        CborValue::Unsigned(0),
+                    ])),
+                }
+            };
         let relation_map = fixture_git_node(
             directory.path(),
             &NodeData::OrderedLeaf {
@@ -9353,10 +9356,7 @@ mod persisted_orp_tests {
                 ],
             },
         );
-        let source_root = fixture_git_node(
-            directory.path(),
-            &NodeData::StoreRoot { relation_map },
-        );
+        let source_root = fixture_git_node(directory.path(), &NodeData::StoreRoot { relation_map });
         let first_snapshot = load_format3_row_map(
             &graph.repository,
             algorithm,
@@ -9447,7 +9447,10 @@ mod persisted_orp_tests {
         assert_ne!(published_root, graph.store_root);
         graph.store_root = published_root.clone();
         for (relation_id, key) in [
-            (*first_version.relation_id(), TypedKey::Text("first".to_owned())),
+            (
+                *first_version.relation_id(),
+                TypedKey::Text("first".to_owned()),
+            ),
             (second_relation, TypedKey::Text("second".to_owned())),
         ] {
             graph.row_snapshot = load_format3_row_map(
@@ -9460,10 +9463,12 @@ mod persisted_orp_tests {
             )
             .expect("load updated relation from shared published root");
             assert_eq!(graph.row_snapshot.version().row_count(), Some(1));
-            assert!(graph
-                .lookup_row(&key, &scope)
-                .expect("read published native row")
-                .is_some());
+            assert!(
+                graph
+                    .lookup_row(&key, &scope)
+                    .expect("read published native row")
+                    .is_some()
+            );
         }
     }
 
@@ -10587,8 +10592,8 @@ mod persisted_orp_tests {
             .expect("protect complete OGB-2 closure");
         let mut tampered_oid = pin.descriptor_oid.as_bytes().to_vec();
         tampered_oid[0] ^= 1;
-        pin.descriptor_oid = NativeOid::new(graph.algorithm, tampered_oid)
-            .expect("valid-width tampered OID");
+        pin.descriptor_oid =
+            NativeOid::new(graph.algorithm, tampered_oid).expect("valid-width tampered OID");
 
         assert!(matches!(
             graph.accept_protected_blob_pin(pin),
@@ -10862,7 +10867,11 @@ mod persisted_orp_tests {
             .expect("protect complete OGB-2 closure");
         let other_payload = b"a different Blob supplies the mismatched descriptor";
         let other_candidate = derived
-            .capture_blob_candidate(&other_payload[..], other_payload.len() as u64, &derived_scope)
+            .capture_blob_candidate(
+                &other_payload[..],
+                other_payload.len() as u64,
+                &derived_scope,
+            )
             .expect("capture authorized stream");
         let other = derived
             .protect_captured_blob(other_candidate, &derived_scope)
@@ -10875,7 +10884,11 @@ mod persisted_orp_tests {
         let own_ref = accepted_content_ref(&lease_owner, pin.pin_id());
         let written = Command::new("git")
             .current_dir(directory.path())
-            .args(["update-ref", own_ref.as_str(), other.descriptor_oid.to_hex().as_str()])
+            .args([
+                "update-ref",
+                own_ref.as_str(),
+                other.descriptor_oid.to_hex().as_str(),
+            ])
             .status()
             .expect("write the lease owner's mismatched accepted ref");
         assert!(written.success(), "write {own_ref}");
@@ -10909,7 +10922,9 @@ mod persisted_orp_tests {
     fn accepted_blob_pin_reclaimed_after_its_owner_departed_is_refused() {
         let (directory, derived) = capture_test_context();
         let departed = lease_owned_graph(&derived, [0xd0; 16]);
-        let departed_scope = departed.open_read_scope().expect("departed owner read scope");
+        let departed_scope = departed
+            .open_read_scope()
+            .expect("departed owner read scope");
         let payload = b"pin captured under an owner that departs";
         let candidate = departed
             .capture_blob_candidate(&payload[..], payload.len() as u64, &departed_scope)
@@ -10983,7 +10998,7 @@ mod persisted_orp_tests {
             .expect("accept the described pin");
     }
 
-/// ORNA-CAP-005: cancellation removes only unaccepted scratch and does not admit a dependent row.
+    /// ORNA-CAP-005: cancellation removes only unaccepted scratch and does not admit a dependent row.
     #[test]
     fn cancelled_captured_candidate_cleans_its_provisional_ref() {
         let (directory, graph) = capture_test_context();
@@ -11039,7 +11054,7 @@ mod persisted_orp_tests {
         assert!(!fixture_ref_exists(directory.path(), &pending_ref));
     }
 
-/// ORNA-CAP-006: reclamation coordinates with publication ownership before deleting protected Git objects.
+    /// ORNA-CAP-006: reclamation coordinates with publication ownership before deleting protected Git objects.
     #[test]
     fn owner_pin_reclaim_defers_across_publication_journal_interleaving() {
         let (directory, graph) = capture_test_context();
@@ -11055,14 +11070,16 @@ mod persisted_orp_tests {
             .protect_captured_blob(accepted_candidate, &scope)
             .expect("protect accepted payload");
         let accepted_ref = accepted_pin.protected_ref.clone();
-        let accepted_pending = BTreeMap::from([(
-            *accepted_pin.pin_id(),
-            accepted_pin.descriptor_oid.clone(),
-        )]);
+        let accepted_pending =
+            BTreeMap::from([(*accepted_pin.pin_id(), accepted_pin.descriptor_oid.clone())]);
 
         let unaccepted_payload = b"unaccepted graph pin awaiting safe cleanup";
         let unaccepted_candidate = graph
-            .capture_blob_candidate(&unaccepted_payload[..], unaccepted_payload.len() as u64, &scope)
+            .capture_blob_candidate(
+                &unaccepted_payload[..],
+                unaccepted_payload.len() as u64,
+                &scope,
+            )
             .expect("capture unaccepted payload");
         let unaccepted_pin = graph
             .protect_captured_blob(unaccepted_candidate, &scope)
@@ -11230,7 +11247,6 @@ mod persisted_orp_tests {
         assert!(pins.iter().all(|(owner, pin_id)| exists(*owner, *pin_id)));
         drop(publication_lock);
 
-
         assert_eq!(
             reclaim_departed_owner_pin_refs(&repository, &departed),
             Ok(3),
@@ -11244,8 +11260,7 @@ mod persisted_orp_tests {
     }
 
     const KILLED_OWNER_ROOT: &str = "ORNA_DEAD_OWNER_CAPTURE_ROOT";
-    const KILLED_OWNER_TEST: &str =
-        "native_graph::persisted_orp_tests::restart_preserves_accepted_pin_and_reclaims_unaccepted_pin";
+    const KILLED_OWNER_TEST: &str = "native_graph::persisted_orp_tests::restart_preserves_accepted_pin_and_reclaims_unaccepted_pin";
 
     /// Captures two protected fixtures, then kills this process without
     /// unwinding, exactly as an operator `SIGKILL` does.
@@ -11266,7 +11281,11 @@ mod persisted_orp_tests {
             .expect("protect accepted OGB-2 closure");
         let unaccepted_payload = b"captured but not accepted before process death";
         let unaccepted_candidate = graph
-            .capture_blob_candidate(&unaccepted_payload[..], unaccepted_payload.len() as u64, &scope)
+            .capture_blob_candidate(
+                &unaccepted_payload[..],
+                unaccepted_payload.len() as u64,
+                &scope,
+            )
             .expect("capture unaccepted fixture stream");
         let unaccepted_pin = graph
             .protect_captured_blob(unaccepted_candidate, &scope)
@@ -11307,18 +11326,16 @@ mod persisted_orp_tests {
     fn decode_pin_id(hex: &str) -> [u8; 16] {
         let mut pin_id = [0; 16];
         for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
-            pin_id[index] = u8::from_str_radix(
-                std::str::from_utf8(pair).expect("pin ID is ASCII"),
-                16,
-            )
-            .expect("pin ID is hexadecimal");
+            pin_id[index] =
+                u8::from_str_radix(std::str::from_utf8(pair).expect("pin ID is ASCII"), 16)
+                    .expect("pin ID is hexadecimal");
         }
         pin_id
     }
 
     /// Restart must keep refs named by durable accepted-pin evidence, reclaim
     /// unaccepted refs, and still read the accepted OGB-2 bytes after reopen.
-/// ORNA-CAP-004: restart recovery distinguishes accepted pending pins from unaccepted scratch.
+    /// ORNA-CAP-004: restart recovery distinguishes accepted pending pins from unaccepted scratch.
     #[test]
     fn restart_preserves_accepted_pin_and_reclaims_unaccepted_pin() {
         if let Some(root) = std::env::var_os(KILLED_OWNER_ROOT) {
@@ -11399,7 +11416,12 @@ mod persisted_orp_tests {
             .acquire_runtime_owner_lock([0x42; 16])
             .expect("takeover after the owner was killed");
         assert_eq!(second.previous_owner(), Some(decode_pin_id(&owner_hex)));
-        assert_eq!(second.reclaim_previous_owner_pins(&accepted_pending).unwrap(), 1);
+        assert_eq!(
+            second
+                .reclaim_previous_owner_pins(&accepted_pending)
+                .unwrap(),
+            1
+        );
         let accepted_ref = accepted_content_ref(&decode_pin_id(&owner_hex), &accepted_pin_id);
         assert_eq!(pin_ref_names(root, &owner_hex), vec![accepted_ref]);
         assert!(
@@ -11518,7 +11540,9 @@ mod persisted_orp_tests {
         loop {
             let base = crate::row_store::KeyRange::new(None, None, 256).expect("valid page");
             let range = match cursor.take() {
-                Some(after) => base.with_resume_after(after).expect("cursor inside the map"),
+                Some(after) => base
+                    .with_resume_after(after)
+                    .expect("cursor inside the map"),
                 None => base,
             };
             let page = read(&range);
@@ -11550,7 +11574,10 @@ mod persisted_orp_tests {
         let bounded = crate::row_store::KeyRange::new(None, Some(keys[200].clone()), 256)
             .expect("valid bounded page");
         assert!(
-            bounded.clone().with_resume_after(keys[200].clone()).is_err(),
+            bounded
+                .clone()
+                .with_resume_after(keys[200].clone())
+                .is_err(),
             "a cursor at the upper bound is refused"
         );
         let inside = bounded
@@ -11592,12 +11619,19 @@ mod persisted_orp_tests {
             TypedKey::Text("alpha".to_owned()),
             TypedKey::Text("zzz".to_owned()),
         ]);
-        assert_eq!(resumed(first_below), keys, "a first component below every row skips none");
+        assert_eq!(
+            resumed(first_below),
+            keys,
+            "a first component below every row skips none"
+        );
         let first_above = TypedKey::Tuple(vec![
             TypedKey::Text("south".to_owned()),
             TypedKey::Text("aaa".to_owned()),
         ]);
-        assert!(resumed(first_above).is_empty(), "a first component above every row skips all");
+        assert!(
+            resumed(first_above).is_empty(),
+            "a first component above every row skips all"
+        );
     }
 
     #[test]
@@ -11647,8 +11681,8 @@ mod persisted_orp_tests {
             ),
             (Some(TypedKey::Text("row-0512".to_owned())), None),
         ] {
-            let page = crate::row_store::KeyRange::new(lower, upper, 256)
-                .expect("valid bounded key page");
+            let page =
+                crate::row_store::KeyRange::new(lower, upper, 256).expect("valid bounded key page");
             full_rows.extend(
                 graph
                     .range_rows(&page, &full_scope)
@@ -11950,7 +11984,10 @@ mod persisted_orp_tests {
         let spans = crate::blob_store::GearChunker::new()
             .spans(&payload)
             .expect("chunk valid expanded PCM waveform");
-        assert!(spans.len() > 1, "waveform fixture must span multiple chunks");
+        assert!(
+            spans.len() > 1,
+            "waveform fixture must span multiple chunks"
+        );
         let candidate = graph
             .capture_blob_candidate(&payload[..], payload.len() as u64, &scope)
             .expect("capture actual WAV media payload");
@@ -12231,7 +12268,10 @@ mod persisted_orp_tests {
         let tuple = |fields: Vec<CborValue>| canonical_value_bytes(&CborValue::Array(fields));
         let rows = [
             ("blobs", tuple(vec![blob.clone(); 40])),
-            ("list", tuple(vec![CborValue::Array(vec![text(10_000), text(3)])])),
+            (
+                "list",
+                tuple(vec![CborValue::Array(vec![text(10_000), text(3)])]),
+            ),
             ("long", tuple(vec![text(20_000), CborValue::Unsigned(7)])),
             ("small", tuple(vec![text(10)])),
             ("wide", tuple(vec![text(5_000), text(5_000), text(5_000)])),
@@ -12296,7 +12336,11 @@ mod persisted_orp_tests {
                 .len(),
             40
         );
-        assert_eq!(read_scope.payload_bytes_read(), 0, "no Blob payload is read");
+        assert_eq!(
+            read_scope.payload_bytes_read(),
+            0,
+            "no Blob payload is read"
+        );
 
         // A tuple that already names an overflow node is not a logical value.
         let RowValue::Overflow(stored) = blob_row.value() else {
@@ -12923,7 +12967,7 @@ mod persisted_orp_tests {
         assert_eq!(promised_scope.payload_bytes_read(), 0);
     }
 
-/// ORNA-CAP-002: promisor evidence distinguishes inherited promised objects from unknown missing content.
+    /// ORNA-CAP-002: promisor evidence distinguishes inherited promised objects from unknown missing content.
     #[test]
     fn a_deferred_node_reads_as_promised_and_never_as_an_unknown_missing_object() {
         let (directory, graph) = capture_test_context();
@@ -12977,14 +13021,18 @@ mod persisted_orp_tests {
         let reference_value = CborValue::Tag(
             60021,
             Box::new(CborValue::Array(vec![
-                CborValue::Tag(37, Box::new(CborValue::Bytes(original.database_id().to_vec()))),
-                CborValue::Tag(37, Box::new(CborValue::Bytes(original.relation_id().to_vec()))),
+                CborValue::Tag(
+                    37,
+                    Box::new(CborValue::Bytes(original.database_id().to_vec())),
+                ),
+                CborValue::Tag(
+                    37,
+                    Box::new(CborValue::Bytes(original.relation_id().to_vec())),
+                ),
                 CborValue::Text("old-address".to_owned()),
             ])),
         );
-        let owner_fields = canonical_value_bytes(&CborValue::Array(vec![
-            reference_value.clone(),
-        ]));
+        let owner_fields = canonical_value_bytes(&CborValue::Array(vec![reference_value.clone()]));
         row_fields_dependencies(&owner_fields)
             .expect("stored table reference has no native-object dependencies");
         let initial = [
@@ -13063,14 +13111,18 @@ mod persisted_orp_tests {
             .lookup_row(&owner_key, &scope)
             .expect("read current owner row")
             .expect("owner remains present");
-        assert!(graph
-            .resolve_table_reference(&owner_after_rekey, &encoded_reference, &scope)
-            .expect("resolve the old address in current snapshot")
-            .is_none());
-        assert!(graph
-            .lookup_row(&new_key, &scope)
-            .expect("read moved target")
-            .is_some());
+        assert!(
+            graph
+                .resolve_table_reference(&owner_after_rekey, &encoded_reference, &scope)
+                .expect("resolve the old address in current snapshot")
+                .is_none()
+        );
+        assert!(
+            graph
+                .lookup_row(&new_key, &scope)
+                .expect("read moved target")
+                .is_some()
+        );
         drop(maintenance);
         drop(seeded);
         drop(directory);
@@ -13623,7 +13675,6 @@ mod persisted_orp_tests {
             );
         }
     }
-
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -14156,7 +14207,8 @@ mod exit_code_tests {
         assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
         for code in [0, 1, 2, 3] {
             assert!(
-                help.lines().any(|line| line.starts_with(&format!("  {code}  "))),
+                help.lines()
+                    .any(|line| line.starts_with(&format!("  {code}  "))),
                 "help must document exit code {code}: {help}"
             );
         }
@@ -14166,11 +14218,14 @@ mod exit_code_tests {
     fn corrupt_index_exits_2_and_other_failures_exit_1() {
         assert_eq!(GraphError::GitObjectHashMismatch.exit_code(), 2);
         assert_eq!(GraphError::InvalidByteIndex.exit_code(), 2);
-        assert_eq!(GraphError::WrongNodeKind {
-            expected: super::NodeKind::StoreRoot,
-            actual: super::NodeKind::OrderedLeaf,
-        }
-        .exit_code(), 2);
+        assert_eq!(
+            GraphError::WrongNodeKind {
+                expected: super::NodeKind::StoreRoot,
+                actual: super::NodeKind::OrderedLeaf,
+            }
+            .exit_code(),
+            2
+        );
         assert_eq!(GraphError::ReadQuotaExceeded.exit_code(), 1);
         assert_eq!(GraphError::ObjectUnavailable.exit_code(), 3);
         assert_eq!(GraphError::UnknownObjectAvailability.exit_code(), 3);
@@ -14729,9 +14784,10 @@ pub(crate) fn sov3_value(
                 })
                 .collect::<Result<Vec<_>, GraphError>>()?;
             transformed.sort_by_cached_key(|(key, _)| canonical_value_bytes(key));
-            if transformed.windows(2).any(|pair| {
-                canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0)
-            }) {
+            if transformed
+                .windows(2)
+                .any(|pair| canonical_value_bytes(&pair[0].0) == canonical_value_bytes(&pair[1].0))
+            {
                 return Err(GraphError::NonCanonicalData);
             }
             Ok(CborValue::Map(transformed))
@@ -14787,7 +14843,10 @@ fn stored_uuid(value: &CborValue) -> Result<[u8; 16], GraphError> {
     let CborValue::Bytes(bytes) = payload.as_ref() else {
         return Err(GraphError::NonCanonicalData);
     };
-    bytes.as_slice().try_into().map_err(|_| GraphError::NonCanonicalData)
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| GraphError::NonCanonicalData)
 }
 
 pub(crate) fn row_fields_dependencies(value: &[u8]) -> Result<Vec<NativeDependency>, GraphError> {
@@ -14921,7 +14980,7 @@ pub(crate) fn direct_blob_reference_count(value: &CborValue) -> Result<usize, Gr
                 [CborValue::Unsigned(1), value] => direct_blob_reference_count(value),
                 _ => Err(GraphError::NonCanonicalData),
             }
-        },
+        }
         CborValue::Tag(60110 | 60112, _) => Err(GraphError::NonCanonicalData),
         CborValue::Tag(_, payload) => direct_blob_reference_count(payload),
         CborValue::Array(values) => values.iter().try_fold(0usize, |count, value| {
@@ -15478,7 +15537,10 @@ mod option_value_tests {
     }
 
     fn option_none() -> CborValue {
-        CborValue::Tag(60013, Box::new(CborValue::Array(vec![CborValue::Unsigned(0)])))
+        CborValue::Tag(
+            60013,
+            Box::new(CborValue::Array(vec![CborValue::Unsigned(0)])),
+        )
     }
 
     #[test]
@@ -15498,7 +15560,10 @@ mod option_value_tests {
         );
         let option_some = CborValue::Tag(
             60013,
-            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), blob_metadata])),
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(1),
+                blob_metadata,
+            ])),
         );
         collect_blob_value_fields(&option_some, &mut metadata).unwrap();
         assert_eq!(metadata.len(), 1);
@@ -15543,7 +15608,10 @@ mod option_value_tests {
         let mut some = Vec::new();
         CborValue::Array(vec![CborValue::Tag(
             60013,
-            Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+            Box::new(CborValue::Array(vec![
+                CborValue::Unsigned(1),
+                rov3_blob(vec![0x44; 20]),
+            ])),
         )])
         .encode(&mut some);
         assert_eq!(row_fields_dependencies(&some).unwrap().len(), 1);
@@ -15555,10 +15623,16 @@ mod option_value_tests {
             .map(|_| {
                 CborValue::Tag(
                     60013,
-                    Box::new(CborValue::Array(vec![CborValue::Unsigned(1), rov3_blob(vec![0x44; 20])])),
+                    Box::new(CborValue::Array(vec![
+                        CborValue::Unsigned(1),
+                        rov3_blob(vec![0x44; 20]),
+                    ])),
                 )
             })
             .collect();
-        assert_eq!(direct_blob_reference_count(&CborValue::Array(references)).unwrap(), 33);
+        assert_eq!(
+            direct_blob_reference_count(&CborValue::Array(references)).unwrap(),
+            33
+        );
     }
 }

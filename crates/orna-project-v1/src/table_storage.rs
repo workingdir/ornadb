@@ -24,7 +24,7 @@ use orna_repository_v1::{
 use orna_runtime_v1::TableObjectId;
 use orna_semantic_v1::{ModuleHeader, SymbolKind, TableSchema, Type};
 use orna_value_v1::{
-    decode_canonical_storage_value, encode_canonical_storage_value, Raw, Value, ROV3_BLOB_TAG,
+    ROV3_BLOB_TAG, Raw, Value, decode_canonical_storage_value, encode_canonical_storage_value,
 };
 
 use crate::{ProjectLoadError, ProjectLoader, ResolvedTableSchema};
@@ -155,11 +155,8 @@ pub fn private_candidate_tables(
     limits: CommittedReadLimits,
 ) -> Result<BTreeMap<String, CommittedTable>, CommittedReadError> {
     read_tables(format_context, tables, table_ids, limits, |object_id| {
-        ProjectLoader::default().resolve_private_candidate_source_table_schema(
-            repository,
-            candidate,
-            object_id,
-        )
+        ProjectLoader::default()
+            .resolve_private_candidate_source_table_schema(repository, candidate, object_id)
     })
 }
 
@@ -522,9 +519,7 @@ pub fn storage_row_from_record(
 
 /// Field names of a table descriptor: by field id, and the stored (non-key)
 /// fields' names in storage order.
-pub fn stored_field_names(
-    descriptor: &Raw,
-) -> Result<StoredFieldNames, TableStorageError> {
+pub fn stored_field_names(descriptor: &Raw) -> Result<StoredFieldNames, TableStorageError> {
     let Raw::Map(entries) = descriptor else {
         return Err(TableStorageError);
     };

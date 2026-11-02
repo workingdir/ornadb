@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bytes::Bytes;
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
 use orna_repository_v1::Uuid;
@@ -18,12 +18,10 @@ use parquet::{
 };
 const TABLE: Uuid = Uuid::from_u128(1);
 const KEY_A: [u8; 16] = [
-    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e,
-    0x1f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
 ];
 const KEY_B: [u8; 16] = [
-    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e,
-    0x2f,
+    0x20, 0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x29, 0x2a, 0x2b, 0x2c, 0x2d, 0x2e, 0x2f,
 ];
 
 fn uuid_raw(value: [u8; 16]) -> OvbRaw {
@@ -234,10 +232,8 @@ fn with_page_checksums(bytes: Vec<u8>) -> Vec<u8> {
         }
         *group = builder.set_column_metadata(columns).build().unwrap();
     }
-    let metadata = parquet::file::metadata::ParquetMetaData::new(
-        metadata.file_metadata().clone(),
-        row_groups,
-    );
+    let metadata =
+        parquet::file::metadata::ParquetMetaData::new(metadata.file_metadata().clone(), row_groups);
     let mut footer_bytes = Vec::new();
     parquet::file::metadata::ParquetMetaDataWriter::new(&mut footer_bytes, &metadata)
         .finish()
@@ -265,8 +261,7 @@ fn checksummed_chunk(bytes: &[u8], data_offset: usize) -> (Vec<u8>, usize, usize
             let delta = 4_u8.checked_sub(header.checksum_predecessor).unwrap();
             let mut checksum_field = vec![(delta << 4) | 5];
             compact_varint(
-                ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31))
-                    as u64,
+                ((i64::from(checksum as i32) << 1) ^ (i64::from(checksum as i32) >> 31)) as u64,
                 &mut checksum_field,
             );
             let mut page_header = bytes[cursor..body_start].to_vec();
@@ -336,8 +331,7 @@ fn page_header(bytes: &[u8]) -> PageHeader {
 }
 
 fn footer_start(bytes: &[u8]) -> usize {
-    let length =
-        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
+    let length = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
     bytes.len() - 8 - length as usize
 }
 
@@ -427,13 +421,18 @@ fn compact_skip(bytes: &[u8], cursor: &mut usize, kind: u8) {
 }
 
 fn expected_uuid(value: [u8; 16]) -> Vec<u8> {
-    CanonicalValue::new(uuid_raw(value)).unwrap().encode().unwrap()
+    CanonicalValue::new(uuid_raw(value))
+        .unwrap()
+        .encode()
+        .unwrap()
 }
 
 fn expected_tuple(values: &[[u8; 16]]) -> Vec<u8> {
     CanonicalValue::new(OvbRaw::Tag(
         60015,
-        Box::new(OvbRaw::Array(values.iter().copied().map(uuid_raw).collect())),
+        Box::new(OvbRaw::Array(
+            values.iter().copied().map(uuid_raw).collect(),
+        )),
     ))
     .unwrap()
     .encode()
@@ -502,13 +501,10 @@ fn malformed_uuid_width_annotation_null_encoding_and_row_count_fail_closed() {
         false,
         Encoding::PLAIN,
     );
-    assert!(CompactParquetKeySource::decode_verified_bytes(
-        &profile,
-        TABLE,
-        &missing_annotation,
-        1
-    )
-    .is_err());
+    assert!(
+        CompactParquetKeySource::decode_verified_bytes(&profile, TABLE, &missing_annotation, 1)
+            .is_err()
+    );
 
     let nullable = parquet(
         &profile,

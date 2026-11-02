@@ -45,7 +45,6 @@ fn decimal_key_table_assertion_source(assertion: &str, parent_body: &str) -> Sou
     }
 }
 
-
 fn source_with_module_assertion(assertion: &str, parent_body: &str) -> SourceUnit {
     SourceUnit {
         fixture_id: "txn-source".into(),
@@ -77,7 +76,6 @@ fn quantifier_source(fixture_id: &str, definitions: &str, parent_body: &str) -> 
         ),
     }
 }
-
 
 #[test]
 fn parsed_nested_insert_is_rolled_back_when_parent_assertion_escapes() {
@@ -473,8 +471,16 @@ fn parsed_paired_subscription_handoffs_retain_scopes_across_read_your_writes() {
         let row = runtime
             .committed_row("Note", &Value::int(id.into()))
             .unwrap_or_else(|| panic!("paired handoff should commit Note row {id}"));
-        assert_eq!(row_field(row, "amount"), &Raw::Int(amount.into()), "row {id}");
-        assert_eq!(row_field(row, "label"), &Raw::Text(label.into()), "row {id}");
+        assert_eq!(
+            row_field(row, "amount"),
+            &Raw::Int(amount.into()),
+            "row {id}"
+        );
+        assert_eq!(
+            row_field(row, "label"),
+            &Raw::Text(label.into()),
+            "row {id}"
+        );
     }
 }
 
@@ -505,9 +511,8 @@ fn parsed_undocumented_table_count_where_member_fails_closed() {
 #[test]
 fn parsed_pipeline_count_bare_statement_observes_activation_writes() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
-    let outcome = runtime.execute_source(&source(include_str!(
-        "fixtures/pipeline-count-bare.orna"
-    )));
+    let outcome =
+        runtime.execute_source(&source(include_str!("fixtures/pipeline-count-bare.orna")));
 
     assert!(matches!(outcome, StageOutcome::Passed));
     assert!(
@@ -575,7 +580,9 @@ fn section9_relation_operators_return_documented_values() {
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
     for id in [1, 2, 3] {
         assert!(
-            runtime.committed_row("Reading", &Value::int(id.into())).is_some(),
+            runtime
+                .committed_row("Reading", &Value::int(id.into()))
+                .is_some(),
             "section 9 operations should publish the candidate row {id} after all value proofs pass"
         );
     }
@@ -619,7 +626,6 @@ fn parsed_map_window_count_preserves_order_before_late_failure_rolls_back() {
         );
     }
 }
-
 
 #[test]
 fn parsed_delete_removes_the_candidate_row() {
@@ -797,8 +803,8 @@ fn table_all_unique_assertion_permits_atomic_publication() {
     );
     assert!(
         runtime
-        .committed_row("Note", &Value::int(8.into()))
-        .is_some()
+            .committed_row("Note", &Value::int(8.into()))
+            .is_some()
     );
 }
 
@@ -810,8 +816,16 @@ fn all_unique_factory_treats_null_as_a_selected_key_value() {
     )));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(unique.committed_row("Account", &Value::int(1.into())).is_some());
-    assert!(unique.committed_row("Account", &Value::int(2.into())).is_some());
+    assert!(
+        unique
+            .committed_row("Account", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        unique
+            .committed_row("Account", &Value::int(2.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -825,8 +839,14 @@ fn all_unique_factory_rejects_a_second_null_key_and_rolls_back_both_rows() {
         outcome,
         StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-TABLE-ASSERT"
     ));
-    assert_eq!(duplicate.committed_row("Account", &Value::int(1.into())), None);
-    assert_eq!(duplicate.committed_row("Account", &Value::int(2.into())), None);
+    assert_eq!(
+        duplicate.committed_row("Account", &Value::int(1.into())),
+        None
+    );
+    assert_eq!(
+        duplicate.committed_row("Account", &Value::int(2.into())),
+        None
+    );
 }
 
 #[test]
@@ -1040,7 +1060,8 @@ fn table_all_unique_decimal_body_permits_distinct_values() {
 }
 
 #[test]
-fn table_all_unique_decimal_primary_key_rejects_scale_alias_before_assertion_and_rolls_back_candidates() {
+fn table_all_unique_decimal_primary_key_rejects_scale_alias_before_assertion_and_rolls_back_candidates()
+ {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
     let outcome = runtime.execute_source(&decimal_key_table_assertion_source(
         "all_unique(reading => reading.value)",
@@ -1214,7 +1235,10 @@ fn nested_relation_predicate_depth_fails_with_the_evaluator_limit() {
         StageOutcome::Failed(ref diagnostic) if diagnostic.code() == "ORNA-EVAL-LIMIT"
     ));
     assert_eq!(runtime.committed_row("Org", &Value::int(1.into())), None);
-    assert_eq!(runtime.committed_row("Audit", &Value::int(1000.into())), None);
+    assert_eq!(
+        runtime.committed_row("Audit", &Value::int(1000.into())),
+        None
+    );
 }
 
 #[test]
@@ -1264,7 +1288,12 @@ fn module_decimal_assertion_rejects_nonmatching_candidate_and_rolls_back_all_wri
         ),
         "nonmatching Decimal candidate did not fail module assertion: {outcome:?}"
     );
-    for (table, id) in [("Invoice", 1), ("Invoice", 2), ("Payment", 1), ("Payment", 2)] {
+    for (table, id) in [
+        ("Invoice", 1),
+        ("Invoice", 2),
+        ("Payment", 1),
+        ("Payment", 2),
+    ] {
         assert_eq!(
             runtime.committed_row(table, &Value::int(id.into())),
             None,
@@ -1364,8 +1393,16 @@ fn ordinary_function_quantifiers_short_circuit_in_canonical_key_order() {
         matches!(outcome, StageOutcome::Passed),
         "a later callback failure must be skipped after the canonical decisive row: {outcome:?}"
     );
-    assert!(runtime.committed_row("Note", &Value::int(1.into())).is_some());
-    assert!(runtime.committed_row("Note", &Value::int(2.into())).is_some());
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Note", &Value::int(2.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -1374,8 +1411,7 @@ fn ordinary_function_quantifier_callback_failures_propagate_and_roll_back() {
         ("every", "txn-quantifier-every-failure"),
         ("exists", "txn-quantifier-exists-failure"),
     ] {
-        let definitions =
-            format!(r#"fn failing() = {operator}(Note, note => 1 / 0 == 0);"#);
+        let definitions = format!(r#"fn failing() = {operator}(Note, note => 1 / 0 == 0);"#);
         let unit = quantifier_source(
             fixture_id,
             &definitions,
@@ -1412,8 +1448,7 @@ fn ordinary_function_quantifiers_share_collection_limit_and_roll_back() {
         ("every", "txn-quantifier-every-limit"),
         ("exists", "txn-quantifier-exists-limit"),
     ] {
-        let definitions =
-            format!(r#"fn bounded() = {operator}(Note, note => note.id > 0);"#);
+        let definitions = format!(r#"fn bounded() = {operator}(Note, note => note.id > 0);"#);
         let unit = quantifier_source(
             fixture_id,
             &definitions,
@@ -1724,7 +1759,6 @@ fn parsed_relation_map_flat_map_preserves_order_and_count_before_rollback() {
     }
 }
 
-
 #[test]
 fn parsed_decimal_relation_distinct_is_scale_insensitive_and_keeps_canonical_first_order() {
     let mut runtime = TransactionalEvaluator::new("parent", Limits::default());
@@ -1779,8 +1813,6 @@ fn parsed_decimal_relation_distinct_rolls_back_rows_after_later_failure() {
         );
     }
 }
-
-
 
 #[test]
 fn parsed_decimal_reversed_filtered_count_is_scale_insensitive_and_canonical() {
@@ -1970,8 +2002,16 @@ fn parsed_decimal_filtered_first_is_scale_insensitive_and_canonical() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
-    assert!(runtime.committed_row("Reading", &Value::int(2.into())).is_some());
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(2.into()))
+            .is_some()
+    );
     assert_eq!(
         runtime.committed_row("Reading", &Value::int(99.into())),
         None,
@@ -1991,8 +2031,16 @@ fn parsed_decimal_filtered_first_returns_null_for_no_match() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
-    assert!(runtime.committed_row("Reading", &Value::int(99.into())).is_some());
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(99.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -2084,8 +2132,16 @@ fn parsed_decimal_reversed_filtered_first_is_scale_insensitive_and_canonical() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
-    assert!(runtime.committed_row("Reading", &Value::int(2.into())).is_some());
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(2.into()))
+            .is_some()
+    );
     assert_eq!(
         runtime.committed_row("Reading", &Value::int(99.into())),
         None,
@@ -2105,8 +2161,16 @@ fn parsed_decimal_reversed_filtered_first_returns_fallback_for_no_match() {
     ));
 
     assert!(matches!(outcome, StageOutcome::Passed), "{outcome:?}");
-    assert!(runtime.committed_row("Reading", &Value::int(1.into())).is_some());
-    assert!(runtime.committed_row("Reading", &Value::int(99.into())).is_some());
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(1.into()))
+            .is_some()
+    );
+    assert!(
+        runtime
+            .committed_row("Reading", &Value::int(99.into()))
+            .is_some()
+    );
 }
 
 #[test]
@@ -2260,7 +2324,6 @@ fn parsed_decimal_primary_key_reversed_filtered_one_reports_no_match() {
             if diagnostic.code() == "ORNA-EVAL-RELATION-ONE-ZERO"
     ));
 }
-
 
 #[test]
 fn parsed_decimal_primary_key_reversed_noncanonical_predicates_use_generic_evaluation() {
@@ -2517,7 +2580,8 @@ fn parsed_decimal_primary_key_delete_absent_key_fails_and_rolls_back_candidates(
         ),
         "absent Decimal delete did not fail with missing-row diagnostic: {outcome:?}"
     );
-    let candidate_key = Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
+    let candidate_key =
+        Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
     assert_eq!(runtime.committed_row("Reading", &candidate_key), None);
 }
 
@@ -2538,7 +2602,8 @@ fn parsed_decimal_primary_key_delete_invalid_key_fails_and_rolls_back_candidates
         ),
         "invalid Decimal delete key did not fail during source admission: {outcome:?}"
     );
-    let candidate_key = Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
+    let candidate_key =
+        Value::decimal(1.into(), 0.into()).expect("canonical candidate Decimal key");
     assert_eq!(runtime.committed_row("Reading", &candidate_key), None);
 }
 #[test]
@@ -2661,7 +2726,6 @@ fn parsed_decimal_primary_key_update_rejects_key_patch_and_rolls_back_candidate_
         );
     }
 }
-
 
 #[test]
 fn parsed_decimal_primary_key_filtered_lookup_and_first_use_scale_insensitive_canonical_order() {

@@ -2,13 +2,12 @@ use orna_semantic_v1::{Catalogue, ModuleInput, analyze_with_catalogue};
 use orna_sys_v1::{
     Admission, AdmissionRequest, ArgumentMap, ExecutionBoundary, FunctionDescriptor, FunctionId,
     FunctionIdentity, InvocationContext, InvocationExecutor, InvocationMode, InvocationResult,
-    InvocationStatus, InvocationState, RetainedInvocationResult, RevisionId, Runtime, RuntimeId,
+    InvocationState, InvocationStatus, RetainedInvocationResult, RevisionId, Runtime, RuntimeId,
     SnapshotId, TransactionMode, TypeId, TypeWitness, TypedValue,
 };
 use std::{thread, time::Duration};
 
-const SYSTEM_REFERENCE: &str =
-    include_str!("fixtures/reference/source/15-system.md");
+const SYSTEM_REFERENCE: &str = include_str!("fixtures/reference/source/15-system.md");
 const START_FIXTURE: &str = include_str!("fixtures/typed-start-valid.orna");
 
 struct Case {
@@ -19,16 +18,66 @@ struct Case {
 }
 
 const CASES: [Case; 10] = [
-    Case { id: "ORNA-SYS-016", source_line: 88, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "opaque RuntimeId has stable canonical encoding and distinct Rust type" },
-    Case { id: "ORNA-SYS-020", source_line: 96, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "a handle from another runtime fails with the foreign-runtime code" },
-    Case { id: "ORNA-SYS-027", source_line: 70, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "restart advances the runtime generation and fences the old handle" },
-    Case { id: "ORNA-SYS-032", source_line: 130, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "terminal idempotent invocation replay remains terminal" },
-    Case { id: "ORNA-SYS-056", source_line: 214, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "start creates an invocation identity before executor entry" },
-    Case { id: "ORNA-SYS-057", source_line: 216, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "ordinary executor failure is retained as a terminal Failed result" },
-    Case { id: "ORNA-SYS-058", source_line: 218, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "cancelled completion remains distinct from ordinary failure" },
-    Case { id: "ORNA-SYS-081", source_line: 285, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "start returns a handle bound to its runtime and invocation identities" },
-    Case { id: "ORNA-SYS-082", source_line: 287, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "await timeout leaves the invocation running and awaitable" },
-    Case { id: "ORNA-SYS-133", source_line: 299, fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna", boundary: "terminal outcome shape preserves the success/failure/cancellation distinction" },
+    Case {
+        id: "ORNA-SYS-016",
+        source_line: 88,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "opaque RuntimeId has stable canonical encoding and distinct Rust type",
+    },
+    Case {
+        id: "ORNA-SYS-020",
+        source_line: 96,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "a handle from another runtime fails with the foreign-runtime code",
+    },
+    Case {
+        id: "ORNA-SYS-027",
+        source_line: 70,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "restart advances the runtime generation and fences the old handle",
+    },
+    Case {
+        id: "ORNA-SYS-032",
+        source_line: 130,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "terminal idempotent invocation replay remains terminal",
+    },
+    Case {
+        id: "ORNA-SYS-056",
+        source_line: 214,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "start creates an invocation identity before executor entry",
+    },
+    Case {
+        id: "ORNA-SYS-057",
+        source_line: 216,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "ordinary executor failure is retained as a terminal Failed result",
+    },
+    Case {
+        id: "ORNA-SYS-058",
+        source_line: 218,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "cancelled completion remains distinct from ordinary failure",
+    },
+    Case {
+        id: "ORNA-SYS-081",
+        source_line: 285,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "start returns a handle bound to its runtime and invocation identities",
+    },
+    Case {
+        id: "ORNA-SYS-082",
+        source_line: 287,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "await timeout leaves the invocation running and awaitable",
+    },
+    Case {
+        id: "ORNA-SYS-133",
+        source_line: 299,
+        fixture: "crates/orna-conformance-v1/tests/fixtures/typed-start-valid.orna",
+        boundary: "terminal outcome shape preserves the success/failure/cancellation distinction",
+    },
 ];
 
 fn request(mode: InvocationMode) -> AdmissionRequest<TypedValue> {
@@ -95,7 +144,11 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
         &[ModuleInput::new("typed-start-valid.orna", START_FIXTURE)],
         &Catalogue::authoritative_fixture(),
     );
-    assert!(parsed.is_ok(), "typed start fixture: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "typed start fixture: {:?}",
+        parsed.diagnostics
+    );
 
     let runtime_id = RuntimeId::new("runtime-a");
     let encoded_first = serde_json::to_vec(&runtime_id).unwrap();
@@ -121,7 +174,10 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
     let restarted_id = owner.restart();
     assert_ne!(restarted_id, prior_id);
     assert_eq!(owner.generation(), prior_generation + 1);
-    assert_eq!(owner.check_handle(&handle).unwrap_err().code(), "sys.handle.foreign_runtime");
+    assert_eq!(
+        owner.check_handle(&handle).unwrap_err().code(),
+        "sys.handle.foreign_runtime"
+    );
 
     let mut idempotent = Runtime::new(RuntimeId::new("idempotent"));
     let mut idempotent_request = request(InvocationMode::Invoke);
@@ -143,11 +199,15 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
 
     let supervisor = orna_sys_v1::RuntimeSupervisor::new(RuntimeId::new("supervisor"));
     assert!(matches!(
-        supervisor.run(request(InvocationMode::Invoke), &mut IdentityFirst).unwrap(),
+        supervisor
+            .run(request(InvocationMode::Invoke), &mut IdentityFirst)
+            .unwrap(),
         InvocationState::Terminal(RetainedInvocationResult::Success(_))
     ));
 
-    let failed = supervisor.run(request(InvocationMode::Invoke), &mut OrdinaryFailure).unwrap();
+    let failed = supervisor
+        .run(request(InvocationMode::Invoke), &mut OrdinaryFailure)
+        .unwrap();
     assert!(matches!(
         failed,
         InvocationState::Terminal(RetainedInvocationResult::OrdinaryFailure(ref diagnostic))
@@ -160,17 +220,16 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
         _ => unreachable!(),
     };
     cancelled
-        .retain_terminal(
-            &cancellation_handle,
-            InvocationResult::Cancelled(None),
-        )
+        .retain_terminal(&cancellation_handle, InvocationResult::Cancelled(None))
         .unwrap();
     assert!(matches!(
         cancelled.invocation_state(&cancellation_handle).unwrap(),
         InvocationState::Terminal(RetainedInvocationResult::Cancelled(None))
     ));
 
-    let started = supervisor.start(request(InvocationMode::Start), DelayedSuccess).unwrap();
+    let started = supervisor
+        .start(request(InvocationMode::Start), DelayedSuccess)
+        .unwrap();
     assert_eq!(started.runtime(), &supervisor.id().unwrap());
     assert!(!started.invocation().as_str().is_empty());
     assert!(!started.resumable);
@@ -178,7 +237,10 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
         supervisor.await_invocation(&started, Some(Duration::from_millis(1))),
         Err(orna_sys_v1::AwaitError::Timeout)
     ));
-    assert_eq!(supervisor.invocation_metadata(&started).unwrap().status(), InvocationStatus::Running);
+    assert_eq!(
+        supervisor.invocation_metadata(&started).unwrap().status(),
+        InvocationStatus::Running
+    );
     let awaited = supervisor
         .await_invocation(&started, Some(Duration::from_secs(1)))
         .unwrap();
@@ -187,7 +249,10 @@ fn ten_sys_gap_rows_have_bounded_runtime_and_fixture_evidence() {
     for row in CASES {
         let anchor = format!("**{}**", row.id);
         assert!(
-            SYSTEM_REFERENCE.lines().nth(row.source_line - 1).is_some_and(|line| line.contains(&anchor)),
+            SYSTEM_REFERENCE
+                .lines()
+                .nth(row.source_line - 1)
+                .is_some_and(|line| line.contains(&anchor)),
             "{} missing at source/15-system.md:{}",
             row.id,
             row.source_line

@@ -15,9 +15,9 @@
 #![allow(clippy::result_large_err)]
 
 use orna_evolution_v1::{
-    CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId, RowMergeConflict,
-    RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema, SchemaMergeConflict,
-    merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
+    CanonicalValue, CheckpointGeneration, CheckpointMergeConflict, KeyedRow, ObjectId,
+    RowMergeConflict, RowMergeOperation, RowSnapshotMergeError, RowSnapshotState, Schema,
+    SchemaMergeConflict, merge_checkpoint_generation, merge_keyed_row_states, merge_schema_bounded,
 };
 use orna_foundation_v1::{OvbRaw, compare_primary_keys};
 use sha2::{Digest, Sha256};
@@ -47,7 +47,10 @@ pub struct KeyRange {
 
 impl KeyRange {
     pub fn all() -> Self {
-        Self { start: None, end: None }
+        Self {
+            start: None,
+            end: None,
+        }
     }
 
     pub fn new(start: Option<Vec<u8>>, end: Option<Vec<u8>>) -> Option<Self> {
@@ -56,9 +59,10 @@ impl KeyRange {
             compare_primary_keys(&value, &value).ok()?;
         }
         if let (Some(start), Some(end)) = (&start, &end)
-            && compare_encoded_primary_keys(start, end)? != Ordering::Less {
-                return None;
-            }
+            && compare_encoded_primary_keys(start, end)? != Ordering::Less
+        {
+            return None;
+        }
         Some(Self { start, end })
     }
 
@@ -69,16 +73,12 @@ impl KeyRange {
         if compare_primary_keys(&key_value, &key_value).is_err() {
             return false;
         }
-        self.start
-            .as_deref()
-            .is_none_or(|start| {
-                compare_key_to_encoded_primary_key(&key_value, start)
-                    .is_some_and(|order| order != Ordering::Less)
-            })
-            && self
-                .end
-                .as_deref()
-                .is_none_or(|end| compare_key_to_encoded_primary_key(&key_value, end) == Some(Ordering::Less))
+        self.start.as_deref().is_none_or(|start| {
+            compare_key_to_encoded_primary_key(&key_value, start)
+                .is_some_and(|order| order != Ordering::Less)
+        }) && self.end.as_deref().is_none_or(|end| {
+            compare_key_to_encoded_primary_key(&key_value, end) == Some(Ordering::Less)
+        })
     }
 }
 
@@ -395,12 +395,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamS
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamSlotSnapshot>,
 }
 
 /// A compacted run scoped to one merge source stream and fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionRunSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionRunSnapshot
+{
     pub merge_ordinal: usize,
     pub source_stream_ordinal: usize,
     pub fold_ordinal: usize,
@@ -416,7 +418,9 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamC
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionRunSnapshot>,
+    pub runs: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionRunSnapshot,
+    >,
 }
 
 /// A restored occurrence with independent restore, stream, run, merge, and fold coordinates.
@@ -440,7 +444,9 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamR
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSlotSnapshot,
+    >,
 }
 
 /// Malformed run data rejected when restoring source-stream-scoped rotations.
@@ -488,7 +494,9 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCom
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot>,
+    pub runs: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionRunSnapshot,
+    >,
 }
 
 /// A malformed compacted merged segment run cannot be restored losslessly.
@@ -671,14 +679,14 @@ pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionHan
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionHandoffSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<
-        BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionHandoffRunSnapshot,
-    >,
+    pub runs:
+        Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionHandoffRunSnapshot>,
 }
 
 /// One restored occurrence retaining paired pins and rollback identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionRestoreHandoffSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionRestoreHandoffSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub stream_ordinal: usize,
     pub compaction_ordinal: usize,
@@ -1016,7 +1024,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFo
 
 /// Restored nested spill chains grouped by checkpoint with replay identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
     pub slots:
         Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinSlotSnapshot>,
@@ -1024,7 +1033,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFo
 
 /// One restored order retaining both paired spill and replay identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub restore_ordinal: usize,
     pub spill_ordinal: usize,
@@ -1046,10 +1056,12 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRest
 
 /// Restored replay chains grouped by checkpoint with paired spill identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
-    pub slots:
-        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot,
+    >,
 }
 
 /// A malformed spill nested compaction tagged with its outer restore fold.
@@ -1158,7 +1170,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactio
 
 /// One paired-pinned compaction order retaining its enclosing spill-fold path.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldPinSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldPinSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub restore_ordinal: usize,
     pub spill_ordinal: usize,
@@ -1189,23 +1202,25 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompact
 pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldError {
     RestoreFold {
         restore_fold_ordinal: usize,
-        source: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
+        source:
+            BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
     },
 }
 
 /// One independently scoped restore fold over paired nested-compaction spills.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentitySnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentitySnapshot
+{
     pub restore_fold_identity: Vec<u8>,
     pub known_checkpoint_ids: Vec<CheckpointId>,
-    pub restore_batches: Vec<Vec<
-        BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionSnapshot,
-    >>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionSnapshot>>,
 }
 
 /// One restored order carrying its opaque restore-fold identity and paired pins.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub restore_fold_identity: Vec<u8>,
     pub restore_ordinal: usize,
@@ -1249,12 +1264,15 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityResto
 
 /// A checkpoint result retaining the paired identity of its restore fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityRestoreFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityRestoreFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityRestoreFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityRestoreFoldSlotSnapshot,
+    >,
 }
 
 /// A nested restore error tagged with the paired checkpoint identity.
@@ -1269,16 +1287,20 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityRestore
 
 /// One nested replay restore fold bound to its paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSnapshot
+{
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restore_batches: Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot>>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot>>,
 }
 
 /// One restored replay order retaining its enclosing checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSlotSnapshot
+{
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinSlotSnapshot,
 }
 
 /// A checkpoint result retaining its paired identity and nested replay slots.
@@ -1302,9 +1324,11 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayR
 
 /// One nested replay fold with independent paired restore and checkpoint identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreFoldSnapshot
+{
     pub restore_identity: BranchMergePairedRestoreIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldSnapshot,
 }
 
 /// One restored replay slot retaining its paired restore identity.
@@ -1326,7 +1350,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpoi
 
 /// A malformed nested replay fold tagged with its paired restore identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         restore_identity: BranchMergePairedRestoreIdentity,
@@ -1347,7 +1372,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityRestoreFol
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub known_checkpoint_ids: Vec<CheckpointId>,
-    pub restore_batches: Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentitySnapshot>>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentitySnapshot>>,
 }
 
 /// One restored nested spill order retaining both outer checkpoint and spill identities.
@@ -1365,7 +1391,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityRestoreFol
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityRestoreFoldSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityRestoreFoldSlotSnapshot>,
 }
 
 /// A malformed nested spill restore tagged with its paired checkpoint and spill identities.
@@ -1419,7 +1446,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreErr
 
 /// A family restore fold carrying an independent nested checkpoint identity pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSnapshot
+{
     pub nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold:
         BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSnapshot,
@@ -1427,7 +1455,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdenti
 
 /// A restored spill slot retaining its nested checkpoint identity pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSlotSnapshot
+{
     pub nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restored_slot:
         BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSlotSnapshot,
@@ -1457,7 +1486,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentity
 
 /// One nested checkpoint restore fold with an independent outer spill pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot
+{
     pub outer_spill_identity: BranchMergePairedSpillIdentity,
     pub restore_fold:
         BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldSnapshot,
@@ -1486,7 +1516,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityResto
 
 /// A malformed nested restore tagged with its outer spill identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_spill_identity: BranchMergePairedSpillIdentity,
@@ -1526,7 +1557,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpi
 
 /// A malformed nested fold tagged with its independent nested restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_restore_identity: BranchMergePairedRestoreIdentity,
@@ -1567,7 +1599,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentity
 
 /// A malformed nested compaction tagged with its outer checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -1609,7 +1642,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheck
 
 /// A malformed nested compaction tagged with its fold-scoped nested spill pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_spill_identity: BranchMergePairedSpillIdentity,
@@ -1652,7 +1686,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNes
 
 /// A malformed nested compaction tagged with its outer restore identity pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_restore_identity: BranchMergePairedRestoreIdentity,
@@ -1696,7 +1731,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuter
 
 /// A malformed checkpoint fold tagged with its nested compaction identity pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -1741,7 +1777,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuter
 
 /// A malformed nested restore/compaction fold tagged with its outer checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -1787,7 +1824,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityNestedCo
 
 /// A malformed checkpoint/compaction fold tagged with its nested restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_restore_identity: BranchMergePairedRestoreIdentity,
@@ -1834,7 +1872,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillPairedCompactionIdentityNeste
 
 /// A malformed nested restore/checkpoint fold tagged with its paired compaction identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         paired_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -1882,7 +1921,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityPairedCo
 
 /// A malformed nested restore fold tagged with its enclosing restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_restore_identity: BranchMergePairedRestoreIdentity,
@@ -1927,7 +1967,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed paired restore/compaction fold tagged with its nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -1971,7 +2012,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCh
 
 /// A malformed F158 fold tagged with its nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
@@ -2016,7 +2058,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNeste
 
 /// A malformed F159 fold tagged with its nested compaction pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -2062,7 +2105,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCom
 
 /// A malformed F160 fold tagged with its nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
@@ -2109,7 +2153,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRe
 
 /// A malformed F161 fold tagged with its enclosing nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
@@ -2157,7 +2202,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed F162 fold tagged with its enclosing nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -2206,7 +2252,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNeste
 
 /// A malformed F163 fold tagged with its enclosing nested compaction pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -2256,14 +2303,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCo
 
 /// A malformed F164 fold tagged with its enclosing nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F165 paired handoff/rewind fold-chain with its own nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2308,14 +2355,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed F165 fold tagged with its enclosing nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F166 paired checkpoint/handoff fold chain with its own nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2361,14 +2408,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedChe
 
 /// A malformed F166 fold tagged with its enclosing nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F167 rewind/checkpoint chain carrying its own enclosing handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2415,7 +2462,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRe
 
 /// A malformed F167 fold tagged with its enclosing nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
@@ -2468,7 +2516,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHan
 
 /// A malformed F168 fold tagged with its enclosing nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
@@ -2523,14 +2572,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed F169 fold tagged with its enclosing nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F170 checkpoint fold chain carrying an outer nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2580,14 +2629,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedChe
 
 /// A malformed F170 fold tagged with its enclosing nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F171 rewind/checkpoint fold chain carrying an outer nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2638,14 +2687,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRe
 
 /// A malformed F171 fold tagged with its enclosing nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
         source: BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
     },
 }
-
 
 /// One F172 handoff/rewind fold chain carrying an outer nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2697,7 +2746,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed F172 fold tagged with its enclosing nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -2756,7 +2806,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedChe
 
 /// A malformed F173 fold tagged with its enclosing nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
@@ -2816,7 +2867,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRe
 
 /// A malformed F174 fold tagged with its enclosing nested handoff pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
@@ -2877,7 +2929,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHan
 
 /// A malformed F175 fold tagged with its enclosing nested rewind pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_rewind_identity: BranchMergePairedUndoChainIdentity,
@@ -2939,7 +2992,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNeste
 
 /// A malformed F176 fold tagged with its enclosing nested checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -2948,7 +3002,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedR
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRunSnapshot {
-    pub compaction: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
+    pub compaction:
+        BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
     pub replay_identity: BranchMergePairedReplayIdentity,
 }
 
@@ -2965,7 +3020,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentitySt
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentitySpillSnapshot {
     pub spill_id: Vec<u8>,
     pub spill_identity: BranchMergePairedSpillIdentity,
-    pub streams: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityStreamSnapshot>,
+    pub streams:
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityStreamSnapshot>,
 }
 
 /// One checkpoint and restore fold containing paired spills with replay IDs.
@@ -2975,7 +3031,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRe
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub known_checkpoint_ids: Vec<CheckpointId>,
-    pub restore_batches: Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentitySpillSnapshot>>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentitySpillSnapshot>>,
 }
 
 /// One restored order retaining restore, checkpoint, spill, and replay identities.
@@ -2990,13 +3047,16 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRe
 
 /// A restored checkpoint stream retaining each identity layer of its fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub restore_identity: BranchMergePairedRestoreIdentity,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed restore fold tagged with the replay identity from its exact run.
@@ -3011,16 +3071,20 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRest
 
 /// One nested restore/replay/spill fold with an independent outer checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSnapshot
+{
     pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSnapshot,
 }
 
 /// One restored nested slot retaining its independent outer checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot
+{
     pub outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
 }
 
 /// A checkpoint stream retaining outer and nested identity pairs.
@@ -3037,7 +3101,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentity
 
 /// A malformed nested restore/replay/spill fold tagged with its outer checkpoint pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -3047,16 +3112,20 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRe
 
 /// One nested replay/spill/checkpoint fold with an independent outer restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldSnapshot
+{
     pub outer_restore_identity: BranchMergePairedRestoreIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSnapshot,
 }
 
 /// One restored nested slot retaining its independent outer restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldSlotSnapshot
+{
     pub outer_restore_identity: BranchMergePairedRestoreIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldSlotSnapshot,
 }
 
 /// A checkpoint stream retaining both outer and nested paired restore identities.
@@ -3073,7 +3142,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRes
 
 /// A malformed replay/spill/checkpoint fold tagged with its outer restore pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_restore_identity: BranchMergePairedRestoreIdentity,
@@ -3083,17 +3153,21 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityResto
 
 /// One paired replay-spill restore fold with an independent restore identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreFoldSnapshot
+{
     pub restore_identity: BranchMergePairedRestoreIdentity,
     pub known_checkpoint_ids: Vec<CheckpointId>,
-    pub restore_batches: Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentitySnapshot>>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentitySnapshot>>,
 }
 
 /// One restored replay-spill order retaining its enclosing restore identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreFoldSlotSnapshot
+{
     pub restore_identity: BranchMergePairedRestoreIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinSlotSnapshot,
 }
 
 /// A checkpoint stream scoped to one paired restore identity and replay fold.
@@ -3107,7 +3181,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySp
 
 /// A malformed replay-spill fold tagged with its paired restore identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         restore_identity: BranchMergePairedRestoreIdentity,
@@ -3121,26 +3196,32 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpil
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSnapshot {
     pub replay_identity: BranchMergePairedReplayIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSnapshot,
 }
 
 /// One restored spill order retaining its outer replay identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot
+{
     pub replay_identity: BranchMergePairedReplayIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityRestoreFoldSlotSnapshot,
 }
 
 /// A restored checkpoint stream retaining the replay pair for its restore fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub replay_identity: BranchMergePairedReplayIdentity,
     pub restore_identity: BranchMergePairedRestoreIdentity,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
     pub restore_fold_identity: Vec<u8>,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed restore spill fold tagged with its outer replay identity.
@@ -3155,16 +3236,20 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestor
 
 /// One paired replay/restore fold with an independent enclosing spill pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreFoldSnapshot
+{
     pub outer_spill_identity: BranchMergePairedSpillIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSnapshot,
 }
 
 /// One restored spill order retaining its enclosing spill pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreFoldSlotSnapshot
+{
     pub outer_spill_identity: BranchMergePairedSpillIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoFoldSpillNestedOuterReplayIdentityRestoreFoldSlotSnapshot,
 }
 
 /// A checkpoint stream retaining outer spill and replay pairs across its restore fold.
@@ -3182,7 +3267,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuter
 
 /// A malformed replay/restore fold tagged with its enclosing spill pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         outer_spill_identity: BranchMergePairedSpillIdentity,
@@ -3233,25 +3319,29 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestore
 
 /// A malformed nested paired compaction tagged with its restore-fold identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         restore_fold_identity: Vec<u8>,
-        source: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
+        source:
+            BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
     },
 }
 
 /// A nested paired-checkpoint compaction carrying its opaque merge identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRunSnapshot {
-    pub compaction: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
+    pub compaction:
+        BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
     pub merge_identity: BranchMergePairedMergeIdentity,
 }
 
 /// One nested merge run carrying its independent paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRunSnapshot {
-    pub compaction: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
+    pub compaction:
+        BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRunSnapshot,
     pub merge_identity: BranchMergePairedMergeIdentity,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
 }
@@ -3283,7 +3373,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentitySnapshot {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentitySnapshot {
     pub spill_id: Vec<u8>,
-    pub streams: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityStreamSnapshot>,
+    pub streams:
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityStreamSnapshot>,
 }
 
 /// One nested merge run carrying checkpoint and deeper spill identity pairs.
@@ -3331,7 +3422,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRestorePin
 
 /// One restored order retaining its exact nested paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub spill_ordinal: usize,
     pub spill_id: Vec<u8>,
@@ -3354,14 +3446,18 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentity
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRestorePinStreamSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRestorePinSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentityRestorePinSlotSnapshot>,
 }
 
 /// Restored nested merge spill chains grouped by output checkpoint.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinSlotSnapshot,
+    >,
 }
 
 /// One input restore fold with a local checkpoint catalog and nested spills.
@@ -3397,7 +3493,8 @@ pub enum BranchMergePairedNestedMergeSpillIdentityRestoreFoldError {
     RestoreFold {
         restore_fold_ordinal: usize,
         restore_fold_identity: Vec<u8>,
-        source: BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
+        source:
+            BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
     },
 }
 
@@ -3410,7 +3507,8 @@ pub enum BranchMergePairedNestedMergeSpillIdentityRestoreFoldError {
 pub struct BranchMergePairedCheckpointRedoNestedRestoreFoldSnapshot {
     pub restore_fold_identity: Vec<u8>,
     pub known_checkpoint_ids: Vec<CheckpointId>,
-    pub restore_batches: Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentitySnapshot>>,
+    pub restore_batches:
+        Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeIdentitySnapshot>>,
 }
 
 /// One restored order carrying all three paired identity layers.
@@ -3916,8 +4014,7 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotS
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffStreamSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots:
-        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotSnapshot>,
+    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffSlotSnapshot>,
 }
 
 /// A malformed rotation run cannot be restored without losing lineage.
@@ -3972,14 +4069,17 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHa
 
 /// A checkpoint stream restored with its sparse rotation source coordinates.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffSlotSnapshot>,
 }
 
 /// One restored compacted segment occurrence with checkpoint-bound side pins.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub handoff_ordinal: usize,
     pub stream_ordinal: usize,
@@ -3996,9 +4096,12 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePi
 
 /// A compacted checkpoint stream restored with complete paired pin lineage.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffSlotSnapshot,
+    >,
 }
 
 /// A malformed compacted rotation run cannot be expanded losslessly.
@@ -4098,14 +4201,14 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHand
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffStreamSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<
-        BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffSlotSnapshot,
-    >,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffSlotSnapshot>,
 }
 
 /// One nested compaction restore occurrence retaining every source coordinate.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestorePinHandoffSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestorePinHandoffSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub handoff_ordinal: usize,
     pub stream_ordinal: usize,
@@ -4156,7 +4259,8 @@ pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionResto
 
 /// One nested compaction slot with its outer paired-restore-fold identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldSlotSnapshot
+{
     /// Position of the paired checkpoint restore fold containing this slot.
     pub restore_fold_ordinal: usize,
     pub restore_ordinal: usize,
@@ -4176,9 +4280,12 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRes
 
 /// A checkpoint stream restored across paired folds of nested compactions.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed nested compaction in a paired restore fold.
@@ -4186,7 +4293,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRes
 pub enum BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldError {
     RestoreFold {
         restore_fold_ordinal: usize,
-        source: BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreHandoffError,
+        source:
+            BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreHandoffError,
     },
 }
 
@@ -4209,14 +4317,14 @@ pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHan
 pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffStreamSnapshot {
     pub checkpoint_id: CheckpointId,
     pub source_stream_id: Vec<u8>,
-    pub runs: Vec<
-        BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRunSnapshot,
-    >,
+    pub runs:
+        Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRunSnapshot>,
 }
 
 /// One restored nested occurrence with complete coordinates and rollback identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub handoff_ordinal: usize,
     pub stream_ordinal: usize,
@@ -4298,9 +4406,7 @@ pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffR
 pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot {
     pub checkpoint_id: CheckpointId,
     pub source_stream_id: Vec<u8>,
-    pub runs: Vec<
-        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot,
-    >,
+    pub runs: Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRunSnapshot>,
 }
 
 /// One restored nested occurrence with complete coordinates and both identities.
@@ -4323,7 +4429,8 @@ pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffR
 
 /// A checkpoint restored across paired rewind/compaction handoffs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot
+{
     pub checkpoint_id: CheckpointId,
     pub slots: Vec<
         BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreSlotSnapshot,
@@ -4365,12 +4472,14 @@ pub enum BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRes
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot {
     pub handoff_identity: BranchMergePairedHandoffIdentity,
-    pub streams: Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot>,
+    pub streams:
+        Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot>,
 }
 
 /// One restored occurrence retaining both the handoff and rewind/compaction identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffIdentityRestoreSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffIdentityRestoreSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub handoff_ordinal: usize,
     pub stream_ordinal: usize,
@@ -4404,7 +4513,8 @@ pub enum BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffIde
 
 /// One outer restore fold with a nested compaction identity and paired handoffs.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldSnapshot
+{
     pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
     pub handoffs: Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot>,
 }
@@ -4428,7 +4538,8 @@ pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCom
 
 /// A malformed handoff rewind fold rejected with its nested compaction pair.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldError {
+pub enum BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -4453,11 +4564,14 @@ pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHan
 
 /// A checkpoint stream restored with the identity of its enclosing rewind fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed compaction handoff fold rejected with its nested rewind pair.
@@ -4472,17 +4586,21 @@ pub enum BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHando
 
 /// One compaction-chain/handoff restore fold bound to a paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSnapshot
+{
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot,
 }
 
 /// One restored slot retaining its enclosing paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot,
 }
 
 /// A checkpoint stream retaining checkpoint identity across nested rewind, compaction, and handoff folds.
@@ -4509,24 +4627,30 @@ pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainH
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSnapshot {
     pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot,
 }
 
 /// One restored slot retaining its enclosing handoff identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSlotSnapshot,
 }
 
 /// A checkpoint stream restored with its enclosing handoff identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed rewind/compaction fold rejected with its enclosing handoff identity.
@@ -4543,7 +4667,8 @@ pub enum BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionCha
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot {
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
-    pub handoff_chains: Vec<Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot>>,
+    pub handoff_chains:
+        Vec<Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffSnapshot>>,
 }
 
 /// One restored slot retaining its restore-fold and handoff-chain coordinates.
@@ -4557,12 +4682,15 @@ pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompac
 
 /// A checkpoint stream restored with the identity of its outer rewind fold and handoff chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub handoff_chain_ordinal: usize,
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed handoff-chain compaction fold rejected with its rewind identity.
@@ -4580,28 +4708,34 @@ pub enum BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompacti
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSnapshot {
     pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot,
 }
 
 /// One restored slot retaining both outer compaction and rewind identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub handoff_chain_ordinal: usize,
     pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot,
 }
 
 /// A checkpoint stream restored with its paired compaction and rewind identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldStreamSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldStreamSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub handoff_chain_ordinal: usize,
     pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot>,
+    pub slots: Vec<
+        BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot,
+    >,
 }
 
 /// A malformed rewind/handoff-chain fold rejected with its paired compaction identity.
@@ -4616,20 +4750,24 @@ pub enum BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffCha
 
 /// One outer paired handoff identity enclosing a compaction/rewind fold chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldSnapshot
+{
     pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSnapshot,
 }
 
 /// One restored slot retaining outer handoff and nested compaction/rewind identities.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub handoff_chain_ordinal: usize,
     pub nested_handoff_identity: BranchMergePairedHandoffIdentity,
     pub nested_compaction_identity: BranchMergePairedCompactionIdentity,
     pub nested_rewind_identity: BranchMergePairedUndoChainIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSlotSnapshot,
 }
 
 /// A checkpoint stream restored with its outer handoff and nested compaction/rewind identities.
@@ -4685,7 +4823,8 @@ pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompact
 
 /// A malformed nested fold rejected with its enclosing paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompactionRewindHandoffChainFoldError {
+pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompactionRewindHandoffChainFoldError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -4695,18 +4834,22 @@ pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompactio
 
 /// One nested rewind/handoff-chain/compaction fold bound to its paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldSnapshot
+{
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restore_fold: BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot,
+    pub restore_fold:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot,
 }
 
 /// One restored slot retaining its enclosing paired checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldSlotSnapshot
+{
     pub restore_fold_ordinal: usize,
     pub handoff_chain_ordinal: usize,
     pub checkpoint_identity: BranchMergePairedCheckpointIdentity,
-    pub restored_slot: BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot,
+    pub restored_slot:
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSlotSnapshot,
 }
 
 /// A checkpoint stream retaining checkpoint and nested rewind identities.
@@ -4722,7 +4865,8 @@ pub struct BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffC
 
 /// A malformed rewind/handoff-chain/compaction fold rejected with checkpoint identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldError {
+pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         checkpoint_identity: BranchMergePairedCheckpointIdentity,
@@ -4732,7 +4876,8 @@ pub enum BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffCha
 
 /// A nested source-stream rotation restored with every compaction scope intact.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestorePinHandoffSlotSnapshot {
+pub struct BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestorePinHandoffSlotSnapshot
+{
     pub restore_ordinal: usize,
     pub handoff_ordinal: usize,
     pub restore_stream_ordinal: usize,
@@ -4986,7 +5131,8 @@ pub struct BranchMergePairedCheckpointRedoFoldChainCompactionIdentitySparseChain
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldChainCompactionIdentitySparseStreamChainSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoFoldChainCompactionIdentitySparseChainSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoFoldChainCompactionIdentitySparseChainSlotSnapshot>,
 }
 
 /// One compacted state run preserving fold and per-order compaction lineage.
@@ -5127,7 +5273,8 @@ pub struct BranchMergePairedCheckpointRedoUndoCompactionSparseStreamChainCompact
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoUndoCompactionSparseStreamChainCompactionSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<BranchMergePairedCheckpointRedoUndoCompactionSparseStreamChainCompactionRunSnapshot>,
+    pub runs:
+        Vec<BranchMergePairedCheckpointRedoUndoCompactionSparseStreamChainCompactionRunSnapshot>,
 }
 
 /// Opaque active write-ahead segment identities for both redo sides.
@@ -5218,12 +5365,14 @@ pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamS
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub slots: Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamSlotSnapshot>,
+    pub slots:
+        Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamSlotSnapshot>,
 }
 
 /// One compacted state run scoped to a source stream and sparse fold.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamCompactionRunSnapshot {
+pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamCompactionRunSnapshot
+{
     pub merge_ordinal: usize,
     pub source_stream_ordinal: usize,
     pub fold_ordinal: usize,
@@ -5239,7 +5388,9 @@ pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamC
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamCompactionSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamCompactionRunSnapshot>,
+    pub runs: Vec<
+        BranchMergePairedCheckpointRedoUndoSegmentRotationSparseSourceStreamCompactionRunSnapshot,
+    >,
 }
 
 /// A paired redo frame with its log IDs atomically bound to segment IDs.
@@ -5441,7 +5592,8 @@ pub struct BranchMergePairedCheckpointRedoChainIdentitySparseStreamChainCompacti
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoChainIdentitySparseStreamChainCompactionSnapshot {
     pub checkpoint_id: CheckpointId,
-    pub runs: Vec<BranchMergePairedCheckpointRedoChainIdentitySparseStreamChainCompactionRunSnapshot>,
+    pub runs:
+        Vec<BranchMergePairedCheckpointRedoChainIdentitySparseStreamChainCompactionRunSnapshot>,
 }
 
 /// Opaque compaction identities for the left and right redo histories.
@@ -5513,7 +5665,8 @@ pub struct BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamCha
 
 /// One compacted run retaining chain identity and optional lineage per order.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamChainCompactionRunSnapshot {
+pub struct BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamChainCompactionRunSnapshot
+{
     /// Zero-based position of the sparse fold containing this run.
     pub fold_ordinal: usize,
     pub first_order: u64,
@@ -5573,7 +5726,10 @@ pub fn compress_paired_checkpoint_redo_chain(
                     });
                 }
             }
-            BranchMergePairedCheckpointRedoChainSnapshot { checkpoint_id, runs }
+            BranchMergePairedCheckpointRedoChainSnapshot {
+                checkpoint_id,
+                runs,
+            }
         })
         .collect()
 }
@@ -5626,7 +5782,10 @@ pub fn compress_paired_checkpoint_redo_chain_preserving_write_ahead_identity(
                     });
                 }
             }
-            BranchMergePairedCheckpointRedoIdentityChainSnapshot { checkpoint_id, runs }
+            BranchMergePairedCheckpointRedoIdentityChainSnapshot {
+                checkpoint_id,
+                runs,
+            }
         })
         .collect()
 }
@@ -5664,12 +5823,14 @@ pub fn fold_paired_checkpoint_redo_sparse_streams(
         .map(|checkpoint_id| {
             let slots = frames
                 .iter()
-                .map(|(&order, frame)| BranchMergePairedCheckpointRedoSparseSlotSnapshot {
-                    order,
-                    left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
-                    right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
-                    write_ahead_identity: frame.write_ahead_identity.clone(),
-                })
+                .map(
+                    |(&order, frame)| BranchMergePairedCheckpointRedoSparseSlotSnapshot {
+                        order,
+                        left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
+                        right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
+                        write_ahead_identity: frame.write_ahead_identity.clone(),
+                    },
+                )
                 .collect();
             BranchMergePairedCheckpointRedoSparseStreamSnapshot {
                 checkpoint_id,
@@ -5749,9 +5910,9 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_identity
         .iter()
         .cloned()
         .chain(folds.iter().flat_map(|fold| {
-            fold.frames.values().flat_map(|frame| {
-                frame.left.keys().chain(frame.right.keys()).cloned()
-            })
+            fold.frames
+                .values()
+                .flat_map(|frame| frame.left.keys().chain(frame.right.keys()).cloned())
         }))
         .collect::<BTreeSet<_>>();
 
@@ -5908,7 +6069,9 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_checkpoint_p
 /// projection, so source-chain order is the stable provenance rule.
 pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_identity(
     known_checkpoint_ids: &[CheckpointId],
-    merge_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot>],
+    merge_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot,
+    >],
 ) -> Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainSnapshot> {
     let checkpoint_ids = known_checkpoint_ids
         .iter()
@@ -6023,14 +6186,18 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_seg
 /// distinct side pins therefore remain distinguishable through compaction.
 pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_source_identity(
     known_checkpoint_ids: &[CheckpointId],
-    merge_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot>],
+    merge_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseStreamChainSnapshot,
+    >],
 ) -> Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamSnapshot> {
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(merge_chains.iter().flat_map(|chain| {
-            chain.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            merge_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     checkpoint_ids
@@ -6129,14 +6296,18 @@ pub fn compress_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_s
 /// Malformed ranges and segment counts are rejected rather than inferred.
 pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_source_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionSnapshot>],
+    restore_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamCompactionSnapshot,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreError,
 > {
     let mut restored = BTreeMap::<
         CheckpointId,
-        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSlotSnapshot>,
+        Vec<
+            BranchMergePairedCheckpointRedoFoldSegmentRotationSparseSourceStreamRestoreSlotSnapshot,
+        >,
     >::new();
     for checkpoint_id in known_checkpoint_ids {
         restored.entry(checkpoint_id.clone()).or_default();
@@ -6353,7 +6524,9 @@ pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_se
 /// provenance scope.
 pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>],
+    restore_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainError,
@@ -6400,9 +6573,11 @@ pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_se
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(restored_chains.iter().flat_map(|batch| {
-            batch.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            restored_chains
+                .iter()
+                .flat_map(|batch| batch.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     Ok(checkpoint_ids
@@ -6473,14 +6648,18 @@ pub fn restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_se
 /// unioned; no runs or checkpoint values are synthesized.
 pub fn merge_paired_checkpoint_redo_sparse_compaction_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
-    handoff_chains: &[Vec<BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot>],
+    handoff_chains: &[Vec<
+        BranchMergePairedCheckpointRedoFoldSparseStreamChainCompactionSnapshot,
+    >],
 ) -> Vec<BranchMergePairedCheckpointRedoFoldSparseCompactionHandoffSnapshot> {
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(handoff_chains.iter().flat_map(|chain| {
-            chain.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            handoff_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     checkpoint_ids
@@ -6611,9 +6790,11 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(restored_handoffs.iter().flat_map(|batch| {
-            batch.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            restored_handoffs
+                .iter()
+                .flat_map(|batch| batch.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     Ok(checkpoint_ids
@@ -6680,9 +6861,11 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            restore_handoffs
+                .iter()
+                .flat_map(|batch| batch.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     let mut restored = Vec::with_capacity(checkpoint_ids.len());
@@ -6765,13 +6948,15 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionRestoreHandoffError,
-> {
+>{
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            restore_handoffs
+                .iter()
+                .flat_map(|batch| batch.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     let mut restored = Vec::with_capacity(checkpoint_ids.len());
@@ -6798,8 +6983,7 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                             },
                         );
                     }
-                    let expected =
-                        u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                    let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                     if expected != run.identities.len() as u128 {
                         return Err(
                             BranchMergePairedCheckpointRedoUndoSegmentRotationSparseCompactionRestoreHandoffError::IdentityCountMismatch {
@@ -7202,9 +7386,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_chains_preserving_checkpoint_
 /// and source-stream IDs remain opaque, and missing sides stay unpinned.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compactions_preserving_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_spills: &[Vec<
-        BranchMergePairedCheckpointRedoFoldSpillNestedCompactionSnapshot,
-    >],
+    restore_spills: &[Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionSnapshot>],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestorePinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestoreError,
@@ -7250,8 +7432,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compactions_preserving
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestoreError::SegmentIdentityCountMismatch {
@@ -7421,7 +7602,9 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_restore_fol
 /// are kept opaque and unchanged.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_replay_identity_restore_folds_preserving_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_folds: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot>>],
+    restore_folds: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentitySnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplayIdentityRestoreFoldPinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestoreFoldError,
@@ -7518,7 +7701,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_re
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityReplayRestoreError,
-> {
+>{
     let mut restored = Vec::new();
     for (restore_fold_ordinal, fold) in restore_folds.iter().enumerate() {
         let fold_streams = restore_paired_checkpoint_redo_sparse_spill_nested_replay_identity_restore_folds_preserving_pin_identity(
@@ -7575,7 +7758,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_check
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityCheckpointIdentityReplayRestoreError,
-> {
+>{
     let checkpoint_replay_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -7641,7 +7824,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_replay_spill_identity_
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedReplaySpillIdentityRestoreFoldPinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionRestoreFoldError,
-> {
+>{
     let replay_restore_folds = restore_folds
         .iter()
         .map(|fold| {
@@ -7718,7 +7901,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_repla
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityReplaySpillIdentityRestoreError,
-> {
+>{
     let mut restored = Vec::new();
     for (restore_fold_ordinal, fold) in restore_folds.iter().enumerate() {
         let fold_streams = restore_paired_checkpoint_redo_sparse_spill_nested_replay_spill_identity_restore_folds_preserving_pin_identity(
@@ -7940,7 +8123,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_paired_checkpoint_comp
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldPinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldError,
-> {
+>{
     let mut by_checkpoint = known_checkpoint_ids
         .iter()
         .cloned()
@@ -8022,7 +8205,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_paired_checkpoint_comp
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityPinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreFoldIdentityError,
-> {
+>{
     let mut restored_folds = Vec::new();
     for (restore_fold_ordinal, restore_fold) in restore_folds.iter().enumerate() {
         let restored =
@@ -8379,7 +8562,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_o
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityOuterReplayIdentityRestoreError,
-> {
+>{
     let replay_restore_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8444,7 +8627,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_checkpoint_ide
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8510,7 +8693,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_r
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let checkpoint_restore_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8576,7 +8759,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_outer
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let spill_checkpoint_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8641,7 +8824,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_ident
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8710,7 +8893,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_spill_identity_outer_c
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let checkpoint_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8780,7 +8963,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8851,7 +9034,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_ou
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8923,7 +9106,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_ou
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -8996,7 +9179,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_neste
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9070,7 +9253,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_paired_compaction_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9145,7 +9328,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_paire
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreIdentityPairedCompactionIdentityNestedRestoreIdentityNestedCompactionIdentityOuterCheckpointIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9221,7 +9404,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9293,7 +9476,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9366,7 +9549,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let handoff_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9440,7 +9623,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let compaction_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9514,7 +9697,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let rewind_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9589,7 +9772,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let handoff_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9666,7 +9849,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let checkpoint_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9744,7 +9927,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9808,7 +9991,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
         .collect())
 }
 
-
 /// Restores F165 paired handoff/rewind fold chains with an independent
 /// nested checkpoint pair.
 ///
@@ -9820,7 +10002,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9886,7 +10068,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
         .collect())
 }
 
-
 /// Restores F166 paired checkpoint/handoff fold chains with an independent
 /// nested rewind pair.
 ///
@@ -9898,7 +10079,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError,
-> {
+>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -9964,7 +10145,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
         .collect())
 }
 
-
 /// Restores F167 rewind/checkpoint fold chains with an independent nested
 /// handoff pair.
 ///
@@ -9973,7 +10153,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 /// already carried by the F167 chain, and errors preserve F167's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10047,7 +10227,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 /// already carried by the F168 chain, and errors preserve F168's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10124,7 +10304,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 /// F169's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10191,7 +10371,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
         .collect())
 }
 
-
 /// Restores F170 checkpoint fold-chain handoffs with an independent nested
 /// rewind pair.
 ///
@@ -10200,7 +10379,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
 /// already carried by the F170 chain, and errors preserve F170's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10268,7 +10447,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
         .collect())
 }
 
-
 /// Restores F171 checkpoint fold-chain handoffs with an independent nested
 /// handoff pair.
 ///
@@ -10277,7 +10455,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 /// already carried by the F171 chain, and errors preserve F171's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10346,7 +10524,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
         .collect())
 }
 
-
 /// Restores F172 rewind-chain fold handoffs with an independent nested
 /// checkpoint pair.
 ///
@@ -10356,7 +10533,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 /// F172's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10434,7 +10611,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_ne
 /// already carried by the F173 chain, and errors preserve F173's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10513,7 +10690,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 /// already carried by the F174 chain, and errors preserve F174's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10593,7 +10770,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
 /// already carried by the F175 chain, and errors preserve F175's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10674,7 +10851,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested
 /// already carried by the F176 chain, and errors preserve F176's source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10809,7 +10986,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_restore_replay_identit
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedRestoreReplayIdentityRestoreError,
-> {
+>{
     let checkpoint_restore_folds = restore_folds
         .iter()
         .map(|fold| {
@@ -10922,7 +11099,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterRestoreIdentityRestoreReplayIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -10986,7 +11163,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_ident
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedOuterCheckpointIdentityRestoreReplayIdentityRestoreError,
-> {
+>{
     let nested_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -11206,7 +11383,7 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_merge_checkpoint_ident
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSpillNestedMergeCheckpointIdentityRestorePinStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionRestoreError,
-> {
+>{
     let merge_identity_spills = restore_spills
         .iter()
         .map(|batch| {
@@ -11399,8 +11576,8 @@ pub fn restore_paired_checkpoint_redo_nested_spill_three_way_identity_folds_pres
             let slots = stream
                 .slots
                 .into_iter()
-                .map(|slot| {
-                    BranchMergePairedCheckpointRedoNestedRestoreFoldIdentitySlotSnapshot {
+                .map(
+                    |slot| BranchMergePairedCheckpointRedoNestedRestoreFoldIdentitySlotSnapshot {
                         restore_fold_ordinal,
                         restore_fold_identity: restore_fold.restore_fold_identity.clone(),
                         restore_ordinal: slot.restore_ordinal,
@@ -11420,8 +11597,8 @@ pub fn restore_paired_checkpoint_redo_nested_spill_three_way_identity_folds_pres
                             redo_fold_identity: slot.redo_fold_identity,
                         },
                         segment_identity: slot.segment_identity,
-                    }
-                })
+                    },
+                )
                 .collect();
             BranchMergePairedCheckpointRedoNestedRestoreFoldIdentityStreamSnapshot {
                 restore_fold_ordinal,
@@ -11490,8 +11667,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_spill_chains_preserving_pin
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentSpillRestoreError::SegmentIdentityCountMismatch {
@@ -11622,8 +11798,7 @@ pub fn restore_paired_checkpoint_redo_sparse_undo_segment_spill_chains_preservin
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoUndoSegmentSpillRestoreError::IdentityCountMismatch {
@@ -11643,41 +11818,37 @@ pub fn restore_paired_checkpoint_redo_sparse_undo_segment_spill_chains_preservin
                                 },
                             );
                         }
-                        slots.extend(run.identities.iter().enumerate().map(
-                            |(offset, identity)| {
-                                let pin = |generation: &Option<CheckpointGeneration>,
-                                           segment_id: &[u8]| {
-                                    generation.clone().map(|generation| {
-                                        BranchMergePairedCheckpointSegmentPinIdentity {
-                                            checkpoint_id: checkpoint_id.clone(),
-                                            generation,
-                                            segment_id: segment_id.to_vec(),
-                                        }
-                                    })
-                                };
-                                BranchMergePairedCheckpointRedoUndoSegmentSpillRestorePinSlotSnapshot {
-                                    restore_ordinal,
-                                    spill_ordinal,
-                                    spill_id: spill.spill_id.clone(),
-                                    stream_ordinal,
-                                    source_stream_id: stream.source_stream_id.clone(),
-                                    compaction_ordinal,
-                                    handoff_ordinal: run.handoff_ordinal,
-                                    fold_ordinal: run.fold_ordinal,
-                                    order: run.first_order + offset as u64,
-                                    left_pin: pin(
-                                        &run.left,
-                                        &identity.segment_identity.left_segment,
-                                    ),
-                                    right_pin: pin(
-                                        &run.right,
-                                        &identity.segment_identity.right_segment,
-                                    ),
-                                    redo_fold_identity: run.redo_fold_identity.clone(),
-                                    identity: identity.clone(),
-                                }
-                            },
-                        ));
+                        slots
+                            .extend(run.identities.iter().enumerate().map(|(offset, identity)| {
+                            let pin = |generation: &Option<CheckpointGeneration>,
+                                       segment_id: &[u8]| {
+                                generation.clone().map(|generation| {
+                                    BranchMergePairedCheckpointSegmentPinIdentity {
+                                        checkpoint_id: checkpoint_id.clone(),
+                                        generation,
+                                        segment_id: segment_id.to_vec(),
+                                    }
+                                })
+                            };
+                            BranchMergePairedCheckpointRedoUndoSegmentSpillRestorePinSlotSnapshot {
+                                restore_ordinal,
+                                spill_ordinal,
+                                spill_id: spill.spill_id.clone(),
+                                stream_ordinal,
+                                source_stream_id: stream.source_stream_id.clone(),
+                                compaction_ordinal,
+                                handoff_ordinal: run.handoff_ordinal,
+                                fold_ordinal: run.fold_ordinal,
+                                order: run.first_order + offset as u64,
+                                left_pin: pin(&run.left, &identity.segment_identity.left_segment),
+                                right_pin: pin(
+                                    &run.right,
+                                    &identity.segment_identity.right_segment,
+                                ),
+                                redo_fold_identity: run.redo_fold_identity.clone(),
+                                identity: identity.clone(),
+                            }
+                        }));
                     }
                 }
             }
@@ -11731,11 +11902,9 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
                     .into_iter()
                     .map(|slot| {
                         let pin = |generation: Option<CheckpointGeneration>| {
-                            generation.map(|generation| {
-                                BranchMergePairedCheckpointPinIdentity {
-                                    checkpoint_id: checkpoint_id.clone(),
-                                    generation,
-                                }
+                            generation.map(|generation| BranchMergePairedCheckpointPinIdentity {
+                                checkpoint_id: checkpoint_id.clone(),
+                                generation,
                             })
                         };
                         BranchMergePairedCheckpointRedoFoldSparseRestorePinHandoffSlotSnapshot {
@@ -11770,7 +11939,9 @@ pub fn restore_paired_checkpoint_redo_sparse_compaction_handoff_chains_preservin
 /// occurrence key.
 pub fn restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldLogSegmentIdentityCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldWalRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldWalRestoreHandoffError,
@@ -11779,9 +11950,9 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_ident
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -11806,8 +11977,7 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_ident
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.log_segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldWalRestoreHandoffError::LogSegmentIdentityCountMismatch {
@@ -11847,10 +12017,12 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_ident
                 slot.order,
             )
         });
-        restored.push(BranchMergePairedCheckpointRedoFoldWalRestoreHandoffStreamSnapshot {
-            checkpoint_id,
-            slots,
-        });
+        restored.push(
+            BranchMergePairedCheckpointRedoFoldWalRestoreHandoffStreamSnapshot {
+                checkpoint_id,
+                slots,
+            },
+        );
     }
     Ok(restored)
 }
@@ -11867,7 +12039,9 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_handoff_chains_preserving_ident
 /// stable restore, handoff, stream, and compaction ordinals.
 pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError,
@@ -11876,9 +12050,9 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -11907,8 +12081,7 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.log_segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError::LogSegmentIdentityCountMismatch {
@@ -11980,7 +12153,9 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
 /// reference, so source coordinates and same-side bindings are used directly.
 pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldWalSparseMergeChainCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldWalMergeRestorePinHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldWalMergeRestoreHandoffError,
@@ -12064,7 +12239,9 @@ pub fn restore_paired_checkpoint_redo_sparse_wal_merge_handoff_chains_preserving
 /// across checkpoint streams.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_preserving_fold_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError,
@@ -12073,9 +12250,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12105,8 +12282,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationRestoreHandoffError::SegmentIdentityCountMismatch {
@@ -12178,7 +12354,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_handoff_chains_pre
 /// include checkpoint identity when repeated source ordinals are malformed.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError,
@@ -12187,9 +12365,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12218,8 +12396,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
@@ -12288,9 +12465,13 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
 /// remain unpinned and are never filled from a sibling or adjacent order.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionSnapshot>,
+    >],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestorePinHandoffStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoFoldSegmentRotationCompactionRestoreHandoffError,
 > {
     restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoffs_preserving_identity(
@@ -12355,7 +12536,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_compaction_handoff
 /// the reference; input order supplies the stable handoff ordinal.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError,
@@ -12364,9 +12547,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_pre
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12392,8 +12575,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_pre
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::SegmentIdentityCountMismatch {
@@ -12456,7 +12638,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_pre
 /// absent generations stay unpinned instead of receiving synthetic pins.
 pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>,
+    >],
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestorePinHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError,
@@ -12526,14 +12710,14 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_nested_compaction_
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestorePinHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreHandoffError,
-> {
+>{
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12561,8 +12745,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_nested_compaction_
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreHandoffError::SegmentIdentityCountMismatch {
@@ -12647,7 +12830,9 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_nested_compaction_
     known_checkpoint_ids: &[CheckpointId],
     restore_folds: &[Vec<Vec<Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationSparseMergeChainCompactionSnapshot>>>],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoFoldSegmentRotationNestedCompactionRestoreFoldError,
 > {
     let mut restored = known_checkpoint_ids
@@ -12729,14 +12914,14 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestorePinStreamSnapshot>,
     BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestoreError,
-> {
+>{
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12766,8 +12951,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoUndoSegmentRotationNestedCompactionHandoffRestoreError::IdentityCountMismatch {
@@ -12856,22 +13040,20 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
 /// source coordinates; container positions remain local ordinals.
 pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_and_compaction_identity(
     known_checkpoint_ids: &[CheckpointId],
-    restore_handoffs: &[Vec<Vec<
-        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot,
-    >>],
+    restore_handoffs: &[Vec<
+        Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffStreamSnapshot>,
+    >],
 ) -> Result<
-    Vec<
-        BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot,
-    >,
+    Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreStreamSnapshot>,
     BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError,
 > {
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -12901,8 +13083,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffRestoreError::IdentityCountMismatch {
@@ -12978,10 +13159,15 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_pr
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffIdentityRestoreStreamSnapshot>,
     BranchMergePairedCheckpointRedoUndoCompactionNestedCompactionHandoffIdentityRestoreError,
-> {
+>{
     let stream_handoffs = restore_handoffs
         .iter()
-        .map(|batch| batch.iter().map(|handoff| handoff.streams.clone()).collect::<Vec<_>>())
+        .map(|batch| {
+            batch
+                .iter()
+                .map(|handoff| handoff.streams.clone())
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     let restored = restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_and_compaction_identity(
         known_checkpoint_ids,
@@ -13054,7 +13240,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_identity_across_h
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoNestedCompactionIdentityHandoffUndoCompactionRestoreFoldError,
-> {
+>{
     let mut restored = Vec::new();
     for (restore_fold_ordinal, restore_fold) in restore_folds.iter().enumerate() {
         let fold_streams = restore_paired_checkpoint_redo_sparse_nested_compaction_handoff_chains_preserving_undo_compaction_and_handoff_identity(
@@ -13103,7 +13289,9 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_rewind_identity_across_compa
     known_checkpoint_ids: &[CheckpointId],
     restore_folds: &[BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldSnapshot],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoNestedRewindIdentityCompactionChainHandoffFoldError,
 > {
     let mut restored = Vec::new();
@@ -13154,7 +13342,9 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_handoff_identity_across_rewi
     known_checkpoint_ids: &[CheckpointId],
     restore_folds: &[BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldSnapshot],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoNestedHandoffIdentityRewindCompactionChainFoldError,
 > {
     let rewind_folds = restore_folds
@@ -13219,7 +13409,9 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_rewind_identity_across_hando
     known_checkpoint_ids: &[CheckpointId],
     restore_folds: &[BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldSnapshot],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoNestedRewindIdentityHandoffChainCompactionFoldError,
 > {
     let mut restored = Vec::new();
@@ -13274,7 +13466,9 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_compaction_identity_across_r
     known_checkpoint_ids: &[CheckpointId],
     restore_folds: &[BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldSnapshot],
 ) -> Result<
-    Vec<BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldStreamSnapshot>,
+    Vec<
+        BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldStreamSnapshot,
+    >,
     BranchMergePairedCheckpointRedoNestedCompactionIdentityRewindHandoffChainFoldError,
 > {
     let rewind_folds = restore_folds
@@ -13346,7 +13540,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_handoff_identity_across_comp
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoNestedHandoffIdentityCompactionRewindHandoffChainFoldError,
-> {
+>{
     let compaction_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -13419,7 +13613,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_checkpoint_identity_across_h
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompactionRewindHandoffChainFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoNestedCheckpointIdentityHandoffCompactionRewindHandoffChainFoldError,
-> {
+>{
     let handoff_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -13491,7 +13685,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_checkpoint_identity_across_r
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoNestedCheckpointIdentityRewindHandoffChainCompactionFoldError,
-> {
+>{
     let rewind_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -13560,7 +13754,7 @@ pub fn restore_paired_checkpoint_redo_sparse_nested_checkpoint_identity_across_c
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldStreamSnapshot>,
     BranchMergePairedCheckpointRedoNestedCheckpointIdentityCompactionChainHandoffFoldError,
-> {
+>{
     let rewind_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -13628,14 +13822,14 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_nested_source_stre
 ) -> Result<
     Vec<BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestorePinHandoffStreamSnapshot>,
     BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestoreHandoffError,
-> {
+>{
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
         .chain(restore_handoffs.iter().flat_map(|batch| {
-            batch.iter().flat_map(|handoff| {
-                handoff.iter().map(|stream| stream.checkpoint_id.clone())
-            })
+            batch
+                .iter()
+                .flat_map(|handoff| handoff.iter().map(|stream| stream.checkpoint_id.clone()))
         }))
         .collect::<BTreeSet<_>>();
 
@@ -13664,8 +13858,7 @@ pub fn restore_paired_checkpoint_redo_sparse_segment_rotation_nested_source_stre
                                 },
                             );
                         }
-                        let expected =
-                            u128::from(run.last_order) - u128::from(run.first_order) + 1;
+                        let expected = u128::from(run.last_order) - u128::from(run.first_order) + 1;
                         if expected != run.segment_identities.len() as u128 {
                             return Err(
                                 BranchMergePairedCheckpointRedoFoldSegmentRotationNestedSourceStreamRestoreHandoffError::SegmentIdentityCountMismatch {
@@ -13819,16 +14012,8 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_log
                         BranchMergePairedCheckpointRedoChainIdentitySparseChainSlotSnapshot {
                             fold_ordinal,
                             order,
-                            left: frame
-                                .checkpoints
-                                .left
-                                .get(stream_checkpoint_id)
-                                .cloned(),
-                            right: frame
-                                .checkpoints
-                                .right
-                                .get(stream_checkpoint_id)
-                                .cloned(),
+                            left: frame.checkpoints.left.get(stream_checkpoint_id).cloned(),
+                            right: frame.checkpoints.right.get(stream_checkpoint_id).cloned(),
                             redo_chain_identity: frame.redo_chain_identity.clone(),
                             log_segment_identity: frame.log_segment_identity.clone(),
                         }
@@ -13999,7 +14184,8 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_com
 /// state changes, chain changes, and sparse gaps split runs.
 pub fn compress_paired_checkpoint_redo_sparse_stream_chains_preserving_chain_and_compaction_identity(
     streams: &[BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamChainSnapshot],
-) -> Vec<BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamChainCompactionSnapshot> {
+) -> Vec<BranchMergePairedCheckpointRedoChainCompactionIdentitySparseStreamChainCompactionSnapshot>
+{
     streams
         .iter()
         .map(|stream| {
@@ -14189,14 +14375,14 @@ pub fn fold_paired_checkpoint_redo_sparse_streams_preserving_undo_chain_identity
         .map(|checkpoint_id| {
             let slots = frames
                 .iter()
-                .map(|(&order, frame)| {
-                    BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
+                .map(
+                    |(&order, frame)| BranchMergePairedCheckpointRedoUndoSparseSlotSnapshot {
                         order,
                         left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
                         right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
                         undo_chain_identity: frame.undo_chain_identity.clone(),
-                    }
-                })
+                    },
+                )
                 .collect();
             BranchMergePairedCheckpointRedoUndoSparseStreamSnapshot {
                 checkpoint_id,
@@ -14244,16 +14430,8 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_chain_id
                         BranchMergePairedCheckpointRedoUndoSparseChainSlotSnapshot {
                             fold_ordinal,
                             order,
-                            left: frame
-                                .checkpoints
-                                .left
-                                .get(stream_checkpoint_id)
-                                .cloned(),
-                            right: frame
-                                .checkpoints
-                                .right
-                                .get(stream_checkpoint_id)
-                                .cloned(),
+                            left: frame.checkpoints.left.get(stream_checkpoint_id).cloned(),
+                            right: frame.checkpoints.right.get(stream_checkpoint_id).cloned(),
                             undo_chain_identity: frame.undo_chain_identity.clone(),
                         }
                     })
@@ -14435,9 +14613,11 @@ pub fn merge_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_seg
     let checkpoint_ids = known_checkpoint_ids
         .iter()
         .cloned()
-        .chain(merge_chains.iter().flat_map(|chain| {
-            chain.iter().map(|stream| stream.checkpoint_id.clone())
-        }))
+        .chain(
+            merge_chains
+                .iter()
+                .flat_map(|chain| chain.iter().map(|stream| stream.checkpoint_id.clone())),
+        )
         .collect::<BTreeSet<_>>();
 
     checkpoint_ids
@@ -14566,16 +14746,8 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_comp
                         BranchMergePairedCheckpointRedoUndoCompactionSparseChainSlotSnapshot {
                             fold_ordinal,
                             order,
-                            left: frame
-                                .checkpoints
-                                .left
-                                .get(stream_checkpoint_id)
-                                .cloned(),
-                            right: frame
-                                .checkpoints
-                                .right
-                                .get(stream_checkpoint_id)
-                                .cloned(),
+                            left: frame.checkpoints.left.get(stream_checkpoint_id).cloned(),
+                            right: frame.checkpoints.right.get(stream_checkpoint_id).cloned(),
                             undo_chain_identity: frame.undo_chain_identity.clone(),
                             compaction_identity: frame.compaction_identity.clone(),
                         }
@@ -14671,14 +14843,14 @@ pub fn fold_paired_checkpoint_redo_sparse_streams_preserving_segment_rotation_id
         .map(|checkpoint_id| {
             let slots = frames
                 .iter()
-                .map(|(&order, frame)| {
-                    BranchMergePairedCheckpointRedoSegmentSparseSlotSnapshot {
+                .map(
+                    |(&order, frame)| BranchMergePairedCheckpointRedoSegmentSparseSlotSnapshot {
                         order,
                         left: frame.checkpoints.left.get(&checkpoint_id).cloned(),
                         right: frame.checkpoints.right.get(&checkpoint_id).cloned(),
                         segment_identity: frame.segment_identity.clone(),
-                    }
-                })
+                    },
+                )
                 .collect();
             BranchMergePairedCheckpointRedoSegmentSparseStreamSnapshot {
                 checkpoint_id,
@@ -14829,16 +15001,8 @@ pub fn fold_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segm
                             merge_ordinal: 0,
                             fold_ordinal,
                             order,
-                            left: frame
-                                .checkpoints
-                                .left
-                                .get(stream_checkpoint_id)
-                                .cloned(),
-                            right: frame
-                                .checkpoints
-                                .right
-                                .get(stream_checkpoint_id)
-                                .cloned(),
+                            left: frame.checkpoints.left.get(stream_checkpoint_id).cloned(),
+                            right: frame.checkpoints.right.get(stream_checkpoint_id).cloned(),
                             redo_fold_identity: fold.redo_fold_identity.clone(),
                             segment_identity: frame.segment_identity.clone(),
                         }
@@ -15227,13 +15391,15 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_segment_rotation
                     last.last_order = order;
                     last.segment_identities.push(frame.segment_identity.clone());
                 } else {
-                    runs.push(BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot {
-                        first_order: order,
-                        last_order: order,
-                        left,
-                        right,
-                        segment_identities: vec![frame.segment_identity.clone()],
-                    });
+                    runs.push(
+                        BranchMergePairedCheckpointRedoSegmentCompactionRunSnapshot {
+                            first_order: order,
+                            last_order: order,
+                            left,
+                            right,
+                            segment_identities: vec![frame.segment_identity.clone()],
+                        },
+                    );
                 }
             }
             BranchMergePairedCheckpointRedoSegmentCompactionChainSnapshot {
@@ -15273,9 +15439,8 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_iden
     checkpoint_ids
         .into_iter()
         .map(|checkpoint_id| {
-            let mut runs = Vec::<
-                BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot,
-            >::new();
+            let mut runs =
+                Vec::<BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot>::new();
             for (&order, frame) in frames {
                 let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
                 let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
@@ -15288,13 +15453,15 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_log_segment_iden
                     last.log_segment_identities
                         .push(frame.log_segment_identity.clone());
                 } else {
-                    runs.push(BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot {
-                        first_order: order,
-                        last_order: order,
-                        left,
-                        right,
-                        log_segment_identities: vec![frame.log_segment_identity.clone()],
-                    });
+                    runs.push(
+                        BranchMergePairedCheckpointRedoLogSegmentCompactionRunSnapshot {
+                            first_order: order,
+                            last_order: order,
+                            left,
+                            right,
+                            log_segment_identities: vec![frame.log_segment_identity.clone()],
+                        },
+                    );
                 }
             }
             BranchMergePairedCheckpointRedoLogSegmentCompactionChainSnapshot {
@@ -15397,7 +15564,8 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_ident
     checkpoint_ids
         .into_iter()
         .map(|checkpoint_id| {
-            let mut runs = Vec::<BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot>::new();
+            let mut runs =
+                Vec::<BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot>::new();
             for (&order, frame) in frames {
                 let left = frame.checkpoints.left.get(&checkpoint_id).cloned();
                 let right = frame.checkpoints.right.get(&checkpoint_id).cloned();
@@ -15413,15 +15581,17 @@ pub fn compress_paired_checkpoint_redo_sparse_chains_preserving_compaction_ident
                     last.log_segment_identities
                         .push(frame.log_segment_identity.clone());
                 } else {
-                    runs.push(BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot {
-                        first_order: order,
-                        last_order: order,
-                        left,
-                        right,
-                        redo_chain_identity: frame.redo_chain_identity.clone(),
-                        compaction_identities: vec![frame.compaction_identity.clone()],
-                        log_segment_identities: vec![frame.log_segment_identity.clone()],
-                    });
+                    runs.push(
+                        BranchMergePairedCheckpointRedoCompactionIdentityRunSnapshot {
+                            first_order: order,
+                            last_order: order,
+                            left,
+                            right,
+                            redo_chain_identity: frame.redo_chain_identity.clone(),
+                            compaction_identities: vec![frame.compaction_identity.clone()],
+                            log_segment_identities: vec![frame.log_segment_identity.clone()],
+                        },
+                    );
                 }
             }
             BranchMergePairedCheckpointRedoCompactionIdentitySnapshot {
@@ -15466,17 +15636,29 @@ pub struct BranchMergeBudget {
 
 impl Default for BranchMergeBudget {
     fn default() -> Self {
-        Self { max_rows_examined: 1_000_000, max_conflicts: 1_000 }
+        Self {
+            max_rows_examined: 1_000_000,
+            max_conflicts: 1_000,
+        }
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergeConflict {
     Schema(SchemaMergeConflict),
-    Table { table: ObjectId, reason: &'static str },
-    Row { range: KeyRange, conflict: RowMergeConflict },
+    Table {
+        table: ObjectId,
+        reason: &'static str,
+    },
+    Row {
+        range: KeyRange,
+        conflict: RowMergeConflict,
+    },
     /// Projects to the user-facing `sys.CheckpointConflict` diagnostic.
-    CheckpointConflict { id: CheckpointId, conflict: CheckpointMergeConflict },
+    CheckpointConflict {
+        id: CheckpointId,
+        conflict: CheckpointMergeConflict,
+    },
 }
 
 impl BranchMergeConflict {
@@ -15501,17 +15683,31 @@ pub struct BranchMergeReport {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BranchMergeError {
-    Conflicts { conflicts: Vec<BranchMergeConflict>, report: BranchMergeReport },
-    BudgetExceeded { report: BranchMergeReport },
-    InvalidManifest { table: ObjectId },
-    RowRead { message: String },
-    InvalidRow { table: ObjectId },
+    Conflicts {
+        conflicts: Vec<BranchMergeConflict>,
+        report: BranchMergeReport,
+    },
+    BudgetExceeded {
+        report: BranchMergeReport,
+    },
+    InvalidManifest {
+        table: ObjectId,
+    },
+    RowRead {
+        message: String,
+    },
+    InvalidRow {
+        table: ObjectId,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MergedSegment {
     /// Reuse an immutable segment without decompressing or comparing rows.
-    Reuse { from: MergeSide, manifest: RowSegmentManifest },
+    Reuse {
+        from: MergeSide,
+        manifest: RowSegmentManifest,
+    },
     /// Materialized logical rows for a range where all three sides changed.
     /// `tombstones` are canonical keys present in the common base but absent
     /// from the merged live rows. They are this plan's versioned deletion
@@ -15559,9 +15755,9 @@ impl BranchMergePlan {
             }
         }
         ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
-            left_table.cmp(right_table).then_with(|| {
-                compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
-            })
+            left_table
+                .cmp(right_table)
+                .then_with(|| compare_primary_keys_with_encoding_tiebreak(left_key, right_key))
         });
         ordered
     }
@@ -16068,11 +16264,18 @@ pub enum BranchMergeTombstoneHistoryError {
     /// This position is already buffered or has already been released.
     DuplicateOrStale { order: u64 },
     /// A depth fragment index is outside its declared fragment count.
-    InvalidFragment { fragment: usize, fragment_count: usize },
+    InvalidFragment {
+        fragment: usize,
+        fragment_count: usize,
+    },
     /// A depth fragment repeats a fragment already buffered for this position.
     DuplicateFragment { order: u64, fragment: usize },
     /// Fragments for one position disagree about how many pieces it contains.
-    FragmentCountMismatch { order: u64, expected: usize, actual: usize },
+    FragmentCountMismatch {
+        order: u64,
+        expected: usize,
+        actual: usize,
+    },
     /// No incomplete buffered depth wave exists at this lineage position.
     NoIncompleteDepthWave { order: u64 },
     /// A batch wave-restart request must include at least one position.
@@ -16185,10 +16388,8 @@ enum BranchMergeTombstoneSubmissionMode {
 type TabularFragmentRetryIdentity = BTreeMap<ObjectId, (usize, BTreeMap<usize, [u8; 32]>)>;
 type TabularColumnFragmentRetryIdentity =
     BTreeMap<(ObjectId, ObjectId), (usize, BTreeMap<usize, [u8; 32]>)>;
-type MultiParentColumnFragmentRetryIdentity = BTreeMap<
-    ObjectId,
-    BTreeMap<(ObjectId, ObjectId), (usize, BTreeMap<usize, [u8; 32]>)>,
->;
+type MultiParentColumnFragmentRetryIdentity =
+    BTreeMap<ObjectId, BTreeMap<(ObjectId, ObjectId), (usize, BTreeMap<usize, [u8; 32]>)>>;
 
 type PairedRetryPlanSignature = (u64, [u8; 32], [u8; 32]);
 type DepthFragmentRetrySignature = (u64, usize, usize, [u8; 32]);
@@ -16246,10 +16447,7 @@ impl AppliedDepthFragmentRetryTransaction {
             .iter()
             .chain(&self.appends)
             .any(|(transaction_order, _, _)| *transaction_order == order)
-            || self
-                .recoveries
-                .iter()
-                .any(|recovery| recovery.0 == order)
+            || self.recoveries.iter().any(|recovery| recovery.0 == order)
     }
 }
 
@@ -16416,9 +16614,7 @@ impl BranchMergeTombstoneHistory {
             BranchMergeTombstoneSubmissionMode::WholePlan,
         )?;
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
-            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
-                order: step.order,
-            });
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: step.order });
         }
         if let Some(other_order) =
             self.pending_duplicate_order(step.order, &step.ordered_row_tombstones)
@@ -16497,17 +16693,19 @@ impl BranchMergeTombstoneHistory {
         }
 
         match self.pending_deltas.get(&order) {
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
-                "whole-plan mode conflicts are classified before fragment validation"
-            ),
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                unreachable!("whole-plan mode conflicts are classified before fragment validation")
+            }
             Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
                 "tabular-wave mode conflicts are classified before fragment validation"
             ),
-            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => unreachable!(
-                "column-wave mode conflicts are classified before fragment validation"
-            ),
+            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => {
+                unreachable!("column-wave mode conflicts are classified before fragment validation")
+            }
             Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
-                unreachable!("multi-parent mode conflicts are classified before fragment validation")
+                unreachable!(
+                    "multi-parent mode conflicts are classified before fragment validation"
+                )
             }
             Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count: expected_count,
@@ -16789,22 +16987,18 @@ impl BranchMergeTombstoneHistory {
                     }
                 })
                 .collect();
-            waves
-                .entry(ladder.order)
-                .or_insert_with(Vec::new)
-                .push(BranchMergeColumnDepthLadderSnapshot {
+            waves.entry(ladder.order).or_insert_with(Vec::new).push(
+                BranchMergeColumnDepthLadderSnapshot {
                     table: ladder.table,
                     column: ladder.column,
                     fragments,
-                });
+                },
+            );
         }
 
         waves
             .into_iter()
-            .map(|(order, columns)| BranchMergeTabularColumnRestoreWaveSnapshot {
-                order,
-                columns,
-            })
+            .map(|(order, columns)| BranchMergeTabularColumnRestoreWaveSnapshot { order, columns })
             .collect()
     }
 
@@ -16814,9 +17008,7 @@ impl BranchMergeTombstoneHistory {
     /// at zero for every wave and are never combined with labels from another
     /// order or sibling column. The reference is silent about this cross-wave
     /// view, so v1 folds by stable `(table, column)` identity only.
-    pub fn column_restore_ladder_folds(
-        &self,
-    ) -> Vec<BranchMergeColumnRestoreLadderFoldSnapshot> {
+    pub fn column_restore_ladder_folds(&self) -> Vec<BranchMergeColumnRestoreLadderFoldSnapshot> {
         let mut folds = BTreeMap::new();
         for wave in self.column_restore_waves() {
             for column in wave.columns {
@@ -16831,11 +17023,13 @@ impl BranchMergeTombstoneHistory {
         }
         folds
             .into_iter()
-            .map(|((table, column), waves)| BranchMergeColumnRestoreLadderFoldSnapshot {
-                table,
-                column,
-                waves,
-            })
+            .map(
+                |((table, column), waves)| BranchMergeColumnRestoreLadderFoldSnapshot {
+                    table,
+                    column,
+                    waves,
+                },
+            )
             .collect()
     }
 
@@ -16930,14 +17124,13 @@ impl BranchMergeTombstoneHistory {
                             .filter(|wave| wave.order >= first_order && wave.order <= last_order)
                             .cloned()
                             .collect::<Vec<_>>();
-                        waves
-                            .iter()
-                            .any(|wave| wave.fragments.is_some())
-                            .then_some(BranchMergeColumnRestoreLadderTimelineSnapshot {
+                        waves.iter().any(|wave| wave.fragments.is_some()).then_some(
+                            BranchMergeColumnRestoreLadderTimelineSnapshot {
                                 table: timeline.table,
                                 column: timeline.column,
                                 waves,
-                            })
+                            },
+                        )
                     })
                     .collect();
                 BranchMergeColumnRestoreStormSnapshot {
@@ -16957,9 +17150,7 @@ impl BranchMergeTombstoneHistory {
     /// slot. MERGE-1 is silent about cross-storm label continuity; v1 keeps
     /// every storm's labels local and never carries a depth index across a
     /// non-column submission boundary.
-    pub fn column_restore_storm_folds(
-        &self,
-    ) -> Vec<BranchMergeColumnRestoreStormFoldSnapshot> {
+    pub fn column_restore_storm_folds(&self) -> Vec<BranchMergeColumnRestoreStormFoldSnapshot> {
         let storms = self.column_restore_storms();
         let mut identities = BTreeMap::new();
         for storm in &storms {
@@ -17146,9 +17337,7 @@ impl BranchMergeTombstoneHistory {
                 let mut snapshot_paths = Vec::new();
                 for wave in &storm.waves {
                     if let Some(fragments) = &wave.fragments {
-                        for (path, _) in fragments
-                            .iter()
-                            .flat_map(|fragment| fragment.cells.iter())
+                        for (path, _) in fragments.iter().flat_map(|fragment| fragment.cells.iter())
                         {
                             if !snapshot_paths.contains(path) {
                                 snapshot_paths.push(path.clone());
@@ -17214,9 +17403,7 @@ impl BranchMergeTombstoneHistory {
             for storm in &column_fold.storms {
                 for wave in &storm.waves {
                     if let Some(fragments) = &wave.fragments {
-                        for (path, _) in fragments
-                            .iter()
-                            .flat_map(|fragment| fragment.cells.iter())
+                        for (path, _) in fragments.iter().flat_map(|fragment| fragment.cells.iter())
                         {
                             if !snapshot_paths.contains(path) {
                                 snapshot_paths.push(path.clone());
@@ -17294,9 +17481,8 @@ impl BranchMergeTombstoneHistory {
             for storm in &column_fold.storms {
                 for wave in &storm.waves {
                     if let Some(fragments) = &wave.fragments {
-                        for (snapshot_path, _) in fragments
-                            .iter()
-                            .flat_map(|fragment| fragment.cells.iter())
+                        for (snapshot_path, _) in
+                            fragments.iter().flat_map(|fragment| fragment.cells.iter())
                         {
                             let identity = (column_fold.table, snapshot_path.clone());
                             if !identities.contains(&identity) {
@@ -17332,9 +17518,7 @@ impl BranchMergeTombstoneHistory {
                                                         fragment
                                                             .cells
                                                             .iter()
-                                                            .any(|(path, _)| {
-                                                                path == &snapshot_path
-                                                            })
+                                                            .any(|(path, _)| path == &snapshot_path)
                                                             .then_some(fragment.label)
                                                     })
                                                     .collect()
@@ -17505,9 +17689,17 @@ impl BranchMergeTombstoneHistory {
                                     .into_iter()
                                     .map(|wave| {
                                         let occurrence = match wave.depth_labels {
-                                            None => BranchMergeSnapshotPathOccurrence::ColumnOmitted,
-                                            Some(labels) if labels.is_empty() => BranchMergeSnapshotPathOccurrence::PathOmitted,
-                                            Some(labels) => BranchMergeSnapshotPathOccurrence::DepthLabels(labels),
+                                            None => {
+                                                BranchMergeSnapshotPathOccurrence::ColumnOmitted
+                                            }
+                                            Some(labels) if labels.is_empty() => {
+                                                BranchMergeSnapshotPathOccurrence::PathOmitted
+                                            }
+                                            Some(labels) => {
+                                                BranchMergeSnapshotPathOccurrence::DepthLabels(
+                                                    labels,
+                                                )
+                                            }
                                         };
                                         BranchMergeColumnRestoreSnapshotPathOccurrenceWaveSnapshot {
                                             order: wave.order,
@@ -17671,8 +17863,9 @@ impl BranchMergeTombstoneHistory {
         {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
-        if let Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(existing)) =
-            self.pending_deltas.get(&order)
+        if let Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(
+            existing,
+        )) = self.pending_deltas.get(&order)
         {
             if parent_column_depth_wave_retry_identity(existing) != incoming_identity {
                 return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
@@ -17734,7 +17927,13 @@ impl BranchMergeTombstoneHistory {
             for ladder in &wave.ladders {
                 for label in &ladder.depth_labels {
                     cells_by_depth.insert(
-                        (wave.order, ladder.parent, ladder.table, ladder.column, *label),
+                        (
+                            wave.order,
+                            ladder.parent,
+                            ladder.table,
+                            ladder.column,
+                            *label,
+                        ),
                         Vec::new(),
                     );
                 }
@@ -17828,13 +18027,16 @@ impl BranchMergeTombstoneHistory {
                 Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
             }
             _ if self.committed_modes.get(&order)
-                == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) => Some(
+                == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) =>
+            {
+                Some(
                     self.events
                         .iter()
                         .filter(|event| event.order == order)
                         .map(|event| (event.table, event.key.clone()))
                         .collect::<Vec<_>>(),
-                ),
+                )
+            }
             _ => None,
         };
         let Some(existing) = existing else {
@@ -17852,7 +18054,10 @@ impl BranchMergeTombstoneHistory {
         } else {
             &mut self.pending_plan_identities
         };
-        if identities.get(&order).is_some_and(|previous| *previous != identity) {
+        if identities
+            .get(&order)
+            .is_some_and(|previous| *previous != identity)
+        {
             return Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order });
         }
         identities.insert(order, identity);
@@ -17875,9 +18080,7 @@ impl BranchMergeTombstoneHistory {
         steps: &[SequencedBranchMergePlan],
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
         if steps.is_empty() {
-            return Err(
-                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
-            );
+            return Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch);
         }
 
         let mut steps = steps.to_vec();
@@ -17943,13 +18146,14 @@ impl BranchMergeTombstoneHistory {
         let identity = paired_plan_retry_identity(&step.plan);
         if previous != identity {
             self.pending_plan_identities.insert(order, identity);
-            self.applied_fragment_retry_transactions.retain(|transaction| {
-                !transaction
-                    .bindings
-                    .iter()
-                    .chain(&transaction.appends)
-                    .any(|(transaction_order, _, _)| *transaction_order == order)
-            });
+            self.applied_fragment_retry_transactions
+                .retain(|transaction| {
+                    !transaction
+                        .bindings
+                        .iter()
+                        .chain(&transaction.appends)
+                        .any(|(transaction_order, _, _)| *transaction_order == order)
+                });
         }
         Ok(())
     }
@@ -17964,9 +18168,7 @@ impl BranchMergeTombstoneHistory {
         steps: &[SequencedBranchMergePlan],
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
         if steps.is_empty() {
-            return Err(
-                BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch,
-            );
+            return Err(BranchMergeTombstoneHistoryError::EmptyDepthFragmentRetryPlanBindingBatch);
         }
 
         let mut steps = steps.to_vec();
@@ -18016,8 +18218,7 @@ impl BranchMergeTombstoneHistory {
         recoveries: &[BranchMergeDepthFragmentRecovery],
         appends: &[SequencedBranchMergePlan],
     ) -> Result<Vec<BranchMergeTombstoneEvent>, BranchMergeTombstoneHistoryError> {
-        let transaction =
-            AppliedDepthFragmentRetryTransaction::new(bindings, recoveries, appends);
+        let transaction = AppliedDepthFragmentRetryTransaction::new(bindings, recoveries, appends);
         if self
             .applied_fragment_retry_transactions
             .contains(&transaction)
@@ -18100,9 +18301,11 @@ impl BranchMergeTombstoneHistory {
         restarts.sort_unstable_by_key(|(order, _)| *order);
         for pair in restarts.windows(2) {
             if pair[0].0 == pair[1].0 {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart {
-                    order: pair[0].0,
-                });
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthWaveRestart {
+                        order: pair[0].0,
+                    },
+                );
             }
         }
 
@@ -18215,10 +18418,12 @@ impl BranchMergeTombstoneHistory {
         recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
         for pair in recoveries.windows(2) {
             if pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment {
-                return Err(BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
-                    order: pair[0].order,
-                    fragment: pair[0].fragment,
-                });
+                return Err(
+                    BranchMergeTombstoneHistoryError::DuplicateDepthFragmentRecovery {
+                        order: pair[0].order,
+                        fragment: pair[0].fragment,
+                    },
+                );
             }
         }
         self.validate_depth_fragment_labels(&recoveries)?;
@@ -18227,7 +18432,9 @@ impl BranchMergeTombstoneHistory {
         let mut appends = appends.to_vec();
         appends.sort_unstable_by_key(|step| step.order);
         for step in &appends {
-            let replaces_same_order = recoveries.iter().any(|recovery| recovery.order == step.order);
+            let replaces_same_order = recoveries
+                .iter()
+                .any(|recovery| recovery.order == step.order);
             candidate.append_recovery_plan(step, replaces_same_order)?;
         }
 
@@ -18249,7 +18456,10 @@ impl BranchMergeTombstoneHistory {
             return Err(BranchMergeTombstoneHistoryError::OrderExhausted);
         }
 
-        let existing_mode = self.committed_modes.get(&step.order).copied()
+        let existing_mode = self
+            .committed_modes
+            .get(&step.order)
+            .copied()
             .or_else(|| {
                 self.pending_deltas
                     .get(&step.order)
@@ -18277,16 +18487,20 @@ impl BranchMergeTombstoneHistory {
                     Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
                         fragment_count,
                         fragments,
-                    }) if fragments.len() == *fragment_count => Some(
-                        fragments.values().flatten().cloned().collect::<Vec<_>>(),
-                    ),
+                    }) if fragments.len() == *fragment_count => {
+                        Some(fragments.values().flatten().cloned().collect::<Vec<_>>())
+                    }
                     _ if self.committed_modes.get(&step.order)
-                        == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) => Some(
-                            self.events.iter()
+                        == Some(&BranchMergeTombstoneSubmissionMode::DepthFragments) =>
+                    {
+                        Some(
+                            self.events
+                                .iter()
                                 .filter(|event| event.order == step.order)
                                 .map(|event| (event.table, event.key.clone()))
                                 .collect::<Vec<_>>(),
-                        ),
+                        )
+                    }
                     _ => None,
                 };
                 let tombstones_match = existing.as_ref().is_some_and(|existing| {
@@ -18297,9 +18511,8 @@ impl BranchMergeTombstoneHistory {
                     }
                 });
                 if tombstones_match
-                    && identity.is_none_or(|identity| {
-                        *identity == paired_plan_retry_identity(&step.plan)
-                    })
+                    && identity
+                        .is_none_or(|identity| *identity == paired_plan_retry_identity(&step.plan))
                 {
                     return Ok(());
                 }
@@ -18313,9 +18526,7 @@ impl BranchMergeTombstoneHistory {
             BranchMergeTombstoneSubmissionMode::WholePlan,
         )?;
         if has_duplicate_tombstones_in_wave(&step.ordered_row_tombstones) {
-            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone {
-                order: step.order,
-            });
+            return Err(BranchMergeTombstoneHistoryError::DuplicateTombstone { order: step.order });
         }
 
         if let Some(BufferedBranchMergeTombstoneDelta::WholePlan(existing)) =
@@ -18328,9 +18539,7 @@ impl BranchMergeTombstoneHistory {
             return if same_plan && same_tombstone_delta(existing, &step.ordered_row_tombstones) {
                 Ok(())
             } else {
-                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch {
-                    order: step.order,
-                })
+                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: step.order })
             };
         }
 
@@ -18341,16 +18550,16 @@ impl BranchMergeTombstoneHistory {
                 .committed_plan_identities
                 .get(&step.order)
                 .is_some_and(|identity| *identity == paired_plan_retry_identity(&step.plan));
-            let committed = self.events.iter()
+            let committed = self
+                .events
+                .iter()
                 .filter(|event| event.order == step.order)
                 .map(|event| (event.table, event.key.clone()))
                 .collect::<Vec<_>>();
             return if same_plan && same_tombstone_delta(&committed, &step.ordered_row_tombstones) {
                 Ok(())
             } else {
-                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch {
-                    order: step.order,
-                })
+                Err(BranchMergeTombstoneHistoryError::AppendRetryMismatch { order: step.order })
             };
         }
 
@@ -18392,15 +18601,15 @@ impl BranchMergeTombstoneHistory {
                 }
                 fragments
             }
-            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => unreachable!(
-                "whole-plan mode conflicts are classified before fragment recovery"
-            ),
-            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => unreachable!(
-                "tabular-wave mode conflicts are classified before fragment recovery"
-            ),
-            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => unreachable!(
-                "column-wave mode conflicts are classified before fragment recovery"
-            ),
+            Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => {
+                unreachable!("whole-plan mode conflicts are classified before fragment recovery")
+            }
+            Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => {
+                unreachable!("tabular-wave mode conflicts are classified before fragment recovery")
+            }
+            Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => {
+                unreachable!("column-wave mode conflicts are classified before fragment recovery")
+            }
             Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
                 unreachable!("multi-parent mode conflicts are classified before fragment recovery")
             }
@@ -18456,9 +18665,10 @@ impl BranchMergeTombstoneHistory {
     ) -> Result<(), BranchMergeTombstoneHistoryError> {
         let mut recoveries = recoveries.iter().collect::<Vec<_>>();
         recoveries.sort_unstable_by_key(|recovery| (recovery.order, recovery.fragment));
-        if recoveries.windows(2).any(|pair| {
-            pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment
-        }) {
+        if recoveries
+            .windows(2)
+            .any(|pair| pair[0].order == pair[1].order && pair[0].fragment == pair[1].fragment)
+        {
             // The public recovery API reports duplicate labels after paired
             // bindings. Leave that established structural-error precedence
             // intact instead of preflighting a partial label view.
@@ -18468,13 +18678,14 @@ impl BranchMergeTombstoneHistory {
         for recovery in recoveries {
             let expected_count = match self.pending_deltas.get(&recovery.order) {
                 Some(BufferedBranchMergeTombstoneDelta::DepthFragments {
-                    fragment_count,
-                    ..
+                    fragment_count, ..
                 }) => Some(*fragment_count),
                 Some(BufferedBranchMergeTombstoneDelta::WholePlan(_)) => None,
                 Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => None,
                 Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => None,
-                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => None,
+                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
+                    None
+                }
                 None => self.committed_fragment_counts.get(&recovery.order).copied(),
             };
             let Some(expected_count) = expected_count else {
@@ -18539,13 +18750,18 @@ impl BranchMergeTombstoneHistory {
                 }) => fragments.len() == *fragment_count,
                 Some(BufferedBranchMergeTombstoneDelta::TabularDepthWave(_)) => true,
                 Some(BufferedBranchMergeTombstoneDelta::TabularColumnDepthWave(_)) => true,
-                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => true,
+                Some(BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(_)) => {
+                    true
+                }
                 None => false,
             };
             if !ready {
                 break;
             }
-            let delta = self.pending_deltas.remove(&order).expect("ready delta is buffered");
+            let delta = self
+                .pending_deltas
+                .remove(&order)
+                .expect("ready delta is buffered");
             let mode = delta.submission_mode();
             if let BufferedBranchMergeTombstoneDelta::DepthFragments {
                 fragment_count,
@@ -18574,7 +18790,9 @@ impl BranchMergeTombstoneHistory {
                 self.committed_tabular_column_fragment_retry_identities
                     .insert(order, tabular_column_depth_wave_retry_identity(wave));
             }
-            if let BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) = &delta {
+            if let BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) =
+                &delta
+            {
                 self.committed_multi_parent_column_retry_identities
                     .insert(order, parent_column_depth_wave_retry_identity(wave));
             }
@@ -18609,8 +18827,7 @@ impl BranchMergeTombstoneHistory {
                 BufferedBranchMergeTombstoneDelta::MultiParentTabularColumnDepthWave(wave) => {
                     parent_column_events = parent_column_depth_wave_events(&wave)
                         .expect("buffered multi-parent waves were validated before insertion");
-                    parent_column_ladder_events =
-                        parent_column_depth_wave_ladder_events(&wave);
+                    parent_column_ladder_events = parent_column_depth_wave_ladder_events(&wave);
                     parent_column_ladder_waves.push(
                         BranchMergeMultiParentColumnDepthLadderWaveEvent {
                             order: wave.order,
@@ -18622,13 +18839,15 @@ impl BranchMergeTombstoneHistory {
             };
             self.committed_modes.insert(order, mode);
             tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
-                left_table.cmp(right_table).then_with(|| {
-                    compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
-                })
+                left_table
+                    .cmp(right_table)
+                    .then_with(|| compare_primary_keys_with_encoding_tiebreak(left_key, right_key))
             });
-            self.events.extend(tombstones.into_iter().map(|(table, key)| {
-                BranchMergeTombstoneEvent { order, table, key }
-            }));
+            self.events.extend(
+                tombstones
+                    .into_iter()
+                    .map(|(table, key)| BranchMergeTombstoneEvent { order, table, key }),
+            );
             self.table_ladder_events.extend(table_ladder_events);
             self.column_events.extend(column_events);
             self.column_ladder_events.extend(column_ladder_events);
@@ -18725,17 +18944,18 @@ impl BranchMergeTombstoneHistory {
         order: u64,
         tombstones: &[(ObjectId, CanonicalValue)],
     ) -> Option<u64> {
-        self.pending_deltas.iter().find_map(|(pending_order, delta)| {
-            if *pending_order == order {
-                return None;
-            }
-            let first_order = order.min(*pending_order);
-            let last_order = order.max(*pending_order);
-            tombstones
-                .iter()
-                .any(|(table, key)| {
-                    delta.contains_tombstone(*table, key)
-                        && {
+        self.pending_deltas
+            .iter()
+            .find_map(|(pending_order, delta)| {
+                if *pending_order == order {
+                    return None;
+                }
+                let first_order = order.min(*pending_order);
+                let last_order = order.max(*pending_order);
+                tombstones
+                    .iter()
+                    .any(|(table, key)| {
+                        delta.contains_tombstone(*table, key) && {
                             let between = self
                                 .pending_deltas
                                 .range((first_order + 1)..last_order)
@@ -18746,9 +18966,9 @@ impl BranchMergeTombstoneHistory {
                                     middle_delta.contains_tombstone(*table, key)
                                 })
                         }
-                })
-                .then_some(*pending_order)
-        })
+                    })
+                    .then_some(*pending_order)
+            })
     }
 
     /// Returns the next lineage position required by this history.
@@ -18782,11 +19002,9 @@ impl BufferedBranchMergeTombstoneDelta {
             *candidate_table == table && same_primary_key(candidate_key, key)
         };
         match self {
-            Self::WholePlan(tombstones) => {
-                tombstones.iter().any(|(candidate_table, candidate_key)| {
-                    contains(candidate_table, candidate_key)
-                })
-            }
+            Self::WholePlan(tombstones) => tombstones
+                .iter()
+                .any(|(candidate_table, candidate_key)| contains(candidate_table, candidate_key)),
             Self::DepthFragments { fragments, .. } => fragments
                 .values()
                 .flatten()
@@ -18804,10 +19022,7 @@ impl BufferedBranchMergeTombstoneDelta {
     }
 }
 
-fn concurrent_duplicate_error(
-    order: u64,
-    other_order: u64,
-) -> BranchMergeTombstoneHistoryError {
+fn concurrent_duplicate_error(order: u64, other_order: u64) -> BranchMergeTombstoneHistoryError {
     BranchMergeTombstoneHistoryError::ConcurrentDuplicateTombstone {
         first_order: order.min(other_order),
         second_order: order.max(other_order),
@@ -18866,9 +19081,9 @@ fn primary_key_tuple_arity(value: &CanonicalValue) -> Option<usize> {
 fn has_duplicate_tombstones_in_wave(tombstones: &[(ObjectId, CanonicalValue)]) -> bool {
     let mut ordered = tombstones.to_vec();
     ordered.sort_by(|(left_table, left_key), (right_table, right_key)| {
-        left_table.cmp(right_table).then_with(|| {
-            compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
-        })
+        left_table
+            .cmp(right_table)
+            .then_with(|| compare_primary_keys_with_encoding_tiebreak(left_key, right_key))
     });
     ordered
         .windows(2)
@@ -18912,7 +19127,8 @@ fn update_retry_identity_debug(hash: &mut Sha256, value: &impl fmt::Debug) {
     hash.update([0xf0]);
     {
         let mut formatter = RetryIdentityFormatter(hash);
-        write!(&mut formatter, "{value:?}").expect("writing to the retry identity hash cannot fail");
+        write!(&mut formatter, "{value:?}")
+            .expect("writing to the retry identity hash cannot fail");
     }
     hash.update([0]);
 }
@@ -18951,9 +19167,7 @@ fn tabular_depth_wave_tombstones(
     wave: &BranchMergeTabularDepthWave,
 ) -> Result<Vec<(ObjectId, CanonicalValue)>, BranchMergeTombstoneHistoryError> {
     if wave.tables.is_empty() {
-        return Err(BranchMergeTombstoneHistoryError::EmptyTabularDepthWave {
-            order: wave.order,
-        });
+        return Err(BranchMergeTombstoneHistoryError::EmptyTabularDepthWave { order: wave.order });
     }
 
     let mut tombstones = Vec::new();
@@ -19025,9 +19239,9 @@ fn tabular_column_depth_wave_events(
     wave: &BranchMergeTabularColumnDepthWave,
 ) -> Result<Vec<BranchMergeColumnDepthEvent>, BranchMergeTombstoneHistoryError> {
     if wave.columns.is_empty() {
-        return Err(BranchMergeTombstoneHistoryError::EmptyTabularColumnDepthWave {
-            order: wave.order,
-        });
+        return Err(
+            BranchMergeTombstoneHistoryError::EmptyTabularColumnDepthWave { order: wave.order },
+        );
     }
 
     let mut events = Vec::new();
@@ -19078,9 +19292,7 @@ fn tabular_column_depth_wave_events(
             .cmp(&right.table)
             .then_with(|| left.column.cmp(&right.column))
             .then_with(|| left.fragment.cmp(&right.fragment))
-            .then_with(|| {
-                compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key)
-            })
+            .then_with(|| compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key))
     });
     Ok(events)
 }
@@ -19106,18 +19318,18 @@ fn tabular_column_depth_ladder_events(
 ) -> Vec<BranchMergeColumnDepthLadderEvent> {
     wave.columns
         .iter()
-        .map(|((table, column), depth)| BranchMergeColumnDepthLadderEvent {
-            order: wave.order,
-            table: *table,
-            column: *column,
-            depth_labels: depth.fragments.keys().copied().collect(),
-        })
+        .map(
+            |((table, column), depth)| BranchMergeColumnDepthLadderEvent {
+                order: wave.order,
+                table: *table,
+                column: *column,
+                depth_labels: depth.fragments.keys().copied().collect(),
+            },
+        )
         .collect()
 }
 
-fn column_depth_fragment_retry_identity(
-    cells: &[(CanonicalValue, CanonicalValue)],
-) -> [u8; 32] {
+fn column_depth_fragment_retry_identity(cells: &[(CanonicalValue, CanonicalValue)]) -> [u8; 32] {
     let mut encoded = cells
         .iter()
         .map(|(key, value)| {
@@ -19159,10 +19371,12 @@ fn parent_column_depth_wave_events(
     let mut events = Vec::new();
     for (parent, columns) in &wave.parents {
         if columns.is_empty() {
-            return Err(BranchMergeTombstoneHistoryError::EmptyParentColumnDepthWave {
-                order: wave.order,
-                parent: *parent,
-            });
+            return Err(
+                BranchMergeTombstoneHistoryError::EmptyParentColumnDepthWave {
+                    order: wave.order,
+                    parent: *parent,
+                },
+            );
         }
         for ((table, column), depth) in columns {
             if depth.fragment_count == 0
@@ -19229,17 +19443,15 @@ fn parent_column_depth_wave_ladder_events(
     wave.parents
         .iter()
         .flat_map(|(parent, columns)| {
-            columns
-                .iter()
-                .map(move |((table, column), depth)| {
-                    BranchMergeParentColumnDepthLadderEvent {
-                        order: wave.order,
-                        parent: *parent,
-                        table: *table,
-                        column: *column,
-                        depth_labels: depth.fragments.keys().copied().collect(),
-                    }
-                })
+            columns.iter().map(move |((table, column), depth)| {
+                BranchMergeParentColumnDepthLadderEvent {
+                    order: wave.order,
+                    parent: *parent,
+                    table: *table,
+                    column: *column,
+                    depth_labels: depth.fragments.keys().copied().collect(),
+                }
+            })
         })
         .collect()
 }
@@ -19319,9 +19531,9 @@ fn paired_plan_retry_identity(plan: &BranchMergePlan) -> [u8; 32] {
             }
         }
         rows.sort_by(|left, right| {
-            left.table.cmp(&right.table).then_with(|| {
-                compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key)
-            })
+            left.table
+                .cmp(&right.table)
+                .then_with(|| compare_primary_keys_with_encoding_tiebreak(&left.key, &right.key))
         });
         update_retry_identity_count(&mut hash, rows.len());
         for row in rows {
@@ -19339,9 +19551,9 @@ fn paired_plan_retry_identity(plan: &BranchMergePlan) -> [u8; 32] {
         }
 
         tombstones.sort_by(|(left_table, left_key), (right_table, right_key)| {
-            left_table.cmp(right_table).then_with(|| {
-                compare_primary_keys_with_encoding_tiebreak(left_key, right_key)
-            })
+            left_table
+                .cmp(right_table)
+                .then_with(|| compare_primary_keys_with_encoding_tiebreak(left_key, right_key))
         });
         update_retry_identity_count(&mut hash, tombstones.len());
         for (table, key) in tombstones {
@@ -19385,7 +19597,10 @@ impl BranchMergePlanSequencer {
     /// Starts a sequence at the next commit position following the caller's
     /// already-persisted prefix.
     pub fn new(first_order: u64) -> Self {
-        Self { next_order: Some(first_order), pending: BTreeMap::new() }
+        Self {
+            next_order: Some(first_order),
+            pending: BTreeMap::new(),
+        }
     }
 
     /// Submits one selected successful plan. Returns the newly contiguous
@@ -19581,15 +19796,26 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
     // candidate schema. MERGE-1 requires an isolated complete result but
     // leaves diagnostic ordering open, so this order is the deterministic
     // policy used here.
-    let schema = match merge_schema_bounded(&base.schema, &left.schema, &right.schema, budget.max_conflicts) {
+    let schema = match merge_schema_bounded(
+        &base.schema,
+        &left.schema,
+        &right.schema,
+        budget.max_conflicts,
+    ) {
         Ok(schema) => schema,
         Err(schema_failure) => {
             for conflict in &schema_failure.conflicts {
                 let affected = conflict.affected_tables();
                 if affected.is_empty() {
-                    report.affected_tables.extend(base.schema.tables.iter().map(|table| table.id));
-                    report.affected_tables.extend(left.schema.tables.iter().map(|table| table.id));
-                    report.affected_tables.extend(right.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(base.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(left.schema.tables.iter().map(|table| table.id));
+                    report
+                        .affected_tables
+                        .extend(right.schema.tables.iter().map(|table| table.id));
                 } else {
                     report.affected_tables.extend(affected);
                 }
@@ -19600,48 +19826,68 @@ pub fn merge_three_way_snapshots<R: BranchRowSource>(
                 // that happens, report every candidate table conservatively;
                 // the reference requires affected-table evidence but does
                 // not define a summary shape for omitted schema details.
-                report.affected_tables.extend(base.schema.tables.iter().map(|table| table.id));
-                report.affected_tables.extend(left.schema.tables.iter().map(|table| table.id));
-                report.affected_tables.extend(right.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(base.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(left.schema.tables.iter().map(|table| table.id));
+                report
+                    .affected_tables
+                    .extend(right.schema.tables.iter().map(|table| table.id));
             }
             if schema_failure.conflicts_lower_bound > budget.max_conflicts {
                 report.conflicts_lower_bound = schema_failure.conflicts_lower_bound;
                 return Err(BranchMergeError::BudgetExceeded { report });
             }
             report.conflicts_lower_bound = schema_failure.conflicts_lower_bound;
-            conflicts.extend(schema_failure.conflicts.into_iter().map(BranchMergeConflict::Schema));
+            conflicts.extend(
+                schema_failure
+                    .conflicts
+                    .into_iter()
+                    .map(BranchMergeConflict::Schema),
+            );
             return Err(BranchMergeError::Conflicts { conflicts, report });
         }
     };
 
     // The ascending union is part of the recovery ordering policy: a paired
     // depth walk cannot reorder tombstones or conflicts by table visitation.
-    let table_ids: BTreeSet<_> = base.tables.keys().chain(left.tables.keys()).chain(right.tables.keys()).copied().collect();
+    let table_ids: BTreeSet<_> = base
+        .tables
+        .keys()
+        .chain(left.tables.keys())
+        .chain(right.tables.keys())
+        .copied()
+        .collect();
     let mut merged_tables = BTreeMap::new();
     for table in table_ids {
         let b = base.tables.get(&table);
         let l = left.tables.get(&table);
         let r = right.tables.get(&table);
-        if let Some(table_plan) = merge_table(table, b, l, r, rows, budget, &mut conflicts, &mut report)? { merged_tables.insert(table, table_plan); }
+        if let Some(table_plan) =
+            merge_table(table, b, l, r, rows, budget, &mut conflicts, &mut report)?
+        {
+            merged_tables.insert(table, table_plan);
+        }
     }
 
     // If the bounded row phase stops early, do not mix checkpoint impacts
     // into a report whose row materialization was cut short.
-    let checkpoints = merge_checkpoint_phase(
-        base,
-        left,
-        right,
-        budget,
-        &mut conflicts,
-        &mut report,
-    )?;
+    let checkpoints =
+        merge_checkpoint_phase(base, left, right, budget, &mut conflicts, &mut report)?;
 
     if !conflicts.is_empty() {
         // Intermediate table candidates are never observable when any later
         // row or checkpoint conflict remains unresolved.
         return Err(BranchMergeError::Conflicts { conflicts, report });
     }
-    Ok(BranchMergePlan { schema, tables: merged_tables, checkpoints, report })
+    Ok(BranchMergePlan {
+        schema,
+        tables: merged_tables,
+        checkpoints,
+        report,
+    })
 }
 
 /// Resolves storage checkpoint state after row ranges have been planned.
@@ -19658,7 +19904,13 @@ fn merge_checkpoint_phase(
     conflicts: &mut Vec<BranchMergeConflict>,
     report: &mut BranchMergeReport,
 ) -> Result<BTreeMap<CheckpointId, CheckpointGeneration>, BranchMergeError> {
-    let checkpoint_ids: BTreeSet<_> = base.checkpoints.keys().chain(left.checkpoints.keys()).chain(right.checkpoints.keys()).cloned().collect();
+    let checkpoint_ids: BTreeSet<_> = base
+        .checkpoints
+        .keys()
+        .chain(left.checkpoints.keys())
+        .chain(right.checkpoints.keys())
+        .cloned()
+        .collect();
     let mut checkpoints = BTreeMap::new();
     for id in checkpoint_ids {
         match merge_checkpoint_generation(
@@ -19666,7 +19918,9 @@ fn merge_checkpoint_phase(
             left.checkpoints.get(&id),
             right.checkpoints.get(&id),
         ) {
-            Ok(Some(checkpoint)) => { checkpoints.insert(id, checkpoint); }
+            Ok(Some(checkpoint)) => {
+                checkpoints.insert(id, checkpoint);
+            }
             Ok(None) => {}
             Err(conflict) => {
                 report.affected_checkpoints.insert(id.clone());
@@ -19678,7 +19932,9 @@ fn merge_checkpoint_phase(
                     report,
                     budget,
                 ) {
-                    return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+                    return Err(BranchMergeError::BudgetExceeded {
+                        report: report.clone(),
+                    });
                 }
             }
         }
@@ -19715,8 +19971,20 @@ fn merge_table<R: BranchRowSource>(
         (None, None, Some(r)) => Ok(Some(reuse(MergeSide::Right, r))),
         (None, Some(l), Some(r)) if l.digest == r.digest => Ok(Some(reuse(MergeSide::Left, l))),
         (None, Some(_), Some(_)) => {
-            if record_conflict(BranchMergeConflict::Table { table, reason: "same table identity added differently" }, Some(table), None, conflicts, report, budget) {
-                return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+            if record_conflict(
+                BranchMergeConflict::Table {
+                    table,
+                    reason: "same table identity added differently",
+                },
+                Some(table),
+                None,
+                conflicts,
+                report,
+                budget,
+            ) {
+                return Err(BranchMergeError::BudgetExceeded {
+                    report: report.clone(),
+                });
             }
             Ok(None)
         }
@@ -19724,8 +19992,20 @@ fn merge_table<R: BranchRowSource>(
         (Some(b), None, Some(r)) if b.digest == r.digest => Ok(None),
         (Some(b), Some(l), None) if b.digest == l.digest => Ok(None),
         (Some(_), None, Some(_)) | (Some(_), Some(_), None) => {
-            if record_conflict(BranchMergeConflict::Table { table, reason: "table deleted on one side and edited on the other" }, Some(table), None, conflicts, report, budget) {
-                return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+            if record_conflict(
+                BranchMergeConflict::Table {
+                    table,
+                    reason: "table deleted on one side and edited on the other",
+                },
+                Some(table),
+                None,
+                conflicts,
+                report,
+                budget,
+            ) {
+                return Err(BranchMergeError::BudgetExceeded {
+                    report: report.clone(),
+                });
             }
             Ok(None)
         }
@@ -19748,17 +20028,59 @@ fn merge_table<R: BranchRowSource>(
                 for index in 0..b.segments.len() {
                     let (bs, ls, rs) = (&b.segments[index], &l.segments[index], &r.segments[index]);
                     if ls.digest == rs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Left, manifest: ls.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Left,
+                            manifest: ls.clone(),
+                        });
                     } else if ls.digest == bs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Right, manifest: rs.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Right,
+                            manifest: rs.clone(),
+                        });
                     } else if rs.digest == bs.digest {
-                        segments.push(MergedSegment::Reuse { from: MergeSide::Left, manifest: ls.clone() });
+                        segments.push(MergedSegment::Reuse {
+                            from: MergeSide::Left,
+                            manifest: ls.clone(),
+                        });
                     } else {
                         let range = bs.range.clone();
-                        let base_rows = read_segment(rows, MergeSide::Base, table, Some(bs), &range, budget, report)?;
-                        let left_rows = read_segment(rows, MergeSide::Left, table, Some(ls), &range, budget, report)?;
-                        let right_rows = read_segment(rows, MergeSide::Right, table, Some(rs), &range, budget, report)?;
-                        let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
+                        let base_rows = read_segment(
+                            rows,
+                            MergeSide::Base,
+                            table,
+                            Some(bs),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let left_rows = read_segment(
+                            rows,
+                            MergeSide::Left,
+                            table,
+                            Some(ls),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let right_rows = read_segment(
+                            rows,
+                            MergeSide::Right,
+                            table,
+                            Some(rs),
+                            &range,
+                            budget,
+                            report,
+                        )?;
+                        let merged = merge_range_rows(
+                            table,
+                            range.clone(),
+                            base_rows,
+                            left_rows,
+                            right_rows,
+                            budget,
+                            conflicts,
+                            report,
+                        )?;
                         segments.push(MergedSegment::Rows {
                             range,
                             rows: merged.rows,
@@ -19774,17 +20096,33 @@ fn merge_table<R: BranchRowSource>(
                 // and conflict details independent of source visitation and
                 // of other concurrently planned merges.
                 let range = KeyRange::all();
-                let base_rows = read_segment(rows, MergeSide::Base, table, None, &range, budget, report)?;
-                let left_rows = read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
-                let right_rows = read_segment(rows, MergeSide::Right, table, None, &range, budget, report)?;
-                let merged = merge_range_rows(table, range.clone(), base_rows, left_rows, right_rows, budget, conflicts, report)?;
+                let base_rows =
+                    read_segment(rows, MergeSide::Base, table, None, &range, budget, report)?;
+                let left_rows =
+                    read_segment(rows, MergeSide::Left, table, None, &range, budget, report)?;
+                let right_rows =
+                    read_segment(rows, MergeSide::Right, table, None, &range, budget, report)?;
+                let merged = merge_range_rows(
+                    table,
+                    range.clone(),
+                    base_rows,
+                    left_rows,
+                    right_rows,
+                    budget,
+                    conflicts,
+                    report,
+                )?;
                 segments.push(MergedSegment::Rows {
                     range,
                     rows: merged.rows,
                     tombstones: merged.tombstones,
                 });
             }
-            Ok(Some(MergedTable { id: table, whole_table_reuse: None, segments }))
+            Ok(Some(MergedTable {
+                id: table,
+                whole_table_reuse: None,
+                segments,
+            }))
         }
     }
 }
@@ -19811,7 +20149,10 @@ fn valid_manifest(manifest: &TableManifest) -> bool {
 
 fn aligned_layouts(base: &TableManifest, left: &TableManifest, right: &TableManifest) -> bool {
     let same = |a: &TableManifest, b: &TableManifest| {
-        a.segments.iter().map(|s| &s.range).eq(b.segments.iter().map(|s| &s.range))
+        a.segments
+            .iter()
+            .map(|s| &s.range)
+            .eq(b.segments.iter().map(|s| &s.range))
     };
     same(base, left) && same(base, right)
 }
@@ -19830,29 +20171,33 @@ fn read_segment<R: BranchRowSource>(
     let mut decoded = BTreeMap::new();
     let mut budget_hit = false;
     let mut invalid = false;
-    source.visit_rows(side, table, segment, range, &mut |row| {
-        if report.rows_examined >= budget.max_rows_examined {
-            report.rows_examined = report.rows_examined.saturating_add(1);
-            budget_hit = true;
-            return false;
-        }
-        report.rows_examined += 1;
-        if row.table != table {
-            invalid = true;
-            return false;
-        }
-        let Ok(key) = row.key.encode() else {
-            invalid = true;
-            return false;
-        };
-        if !range.contains(&key) || decoded.insert(key, row).is_some() {
-            invalid = true;
-            return false;
-        }
-        true
-    }).map_err(|message| BranchMergeError::RowRead { message })?;
+    source
+        .visit_rows(side, table, segment, range, &mut |row| {
+            if report.rows_examined >= budget.max_rows_examined {
+                report.rows_examined = report.rows_examined.saturating_add(1);
+                budget_hit = true;
+                return false;
+            }
+            report.rows_examined += 1;
+            if row.table != table {
+                invalid = true;
+                return false;
+            }
+            let Ok(key) = row.key.encode() else {
+                invalid = true;
+                return false;
+            };
+            if !range.contains(&key) || decoded.insert(key, row).is_some() {
+                invalid = true;
+                return false;
+            }
+            true
+        })
+        .map_err(|message| BranchMergeError::RowRead { message })?;
     if budget_hit {
-        return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+        return Err(BranchMergeError::BudgetExceeded {
+            report: report.clone(),
+        });
     }
     if invalid {
         return Err(BranchMergeError::InvalidRow { table });
@@ -19886,8 +20231,8 @@ fn merge_range_rows(
         .collect();
     let mut keys = Vec::with_capacity(encoded_keys.len());
     for encoded in encoded_keys {
-        let key = CanonicalValue::decode(&encoded)
-            .map_err(|_| BranchMergeError::InvalidRow { table })?;
+        let key =
+            CanonicalValue::decode(&encoded).map_err(|_| BranchMergeError::InvalidRow { table })?;
         keys.push((encoded, key));
     }
     // Encoded byte order is not always the table's logical primary-key order:
@@ -19938,19 +20283,27 @@ fn merge_range_rows(
             }
             Err(RowSnapshotMergeError::Conflict(conflict)) => {
                 if record_conflict(
-                    BranchMergeConflict::Row { range: range.clone(), conflict },
+                    BranchMergeConflict::Row {
+                        range: range.clone(),
+                        conflict,
+                    },
                     Some(table),
                     Some((table, range.clone())),
                     conflicts,
                     report,
                     budget,
                 ) {
-                    return Err(BranchMergeError::BudgetExceeded { report: report.clone() });
+                    return Err(BranchMergeError::BudgetExceeded {
+                        report: report.clone(),
+                    });
                 }
             }
         }
     }
-    Ok(MergedRangeRows { rows: merged, tombstones })
+    Ok(MergedRangeRows {
+        rows: merged,
+        tombstones,
+    })
 }
 
 fn record_conflict(
@@ -19965,9 +20318,15 @@ fn record_conflict(
     // first conflict over it stops resolution and returns only its bounded
     // location summary, never an incomplete plan or an unbounded detail list.
     report.conflicts_lower_bound = report.conflicts_lower_bound.saturating_add(1);
-    if let Some(table) = table { report.affected_tables.insert(table); }
-    if let Some(range) = range { report.affected_ranges.insert(range); }
-    if conflicts.len() < budget.max_conflicts { conflicts.push(conflict); }
+    if let Some(table) = table {
+        report.affected_tables.insert(table);
+    }
+    if let Some(range) = range {
+        report.affected_ranges.insert(range);
+    }
+    if conflicts.len() < budget.max_conflicts {
+        conflicts.push(conflict);
+    }
     report.conflicts_lower_bound > budget.max_conflicts
 }
 
@@ -20027,7 +20386,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCh
 
 /// A malformed F177 fold tagged with its enclosing F178 paired handoff identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_handoff_identity: BranchMergePairedHandoffIdentity,
@@ -20042,7 +20402,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedChec
 /// malformed F177 folds preserve their original source alongside the outer handoff pair.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())
@@ -20115,7 +20475,6 @@ pub fn restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_neste
         .collect())
 }
 
-
 /// One F179 fold carrying an outer paired compaction identity around its F178 chain.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
@@ -20172,7 +20531,8 @@ pub struct BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNeste
 
 /// A malformed F178 fold tagged with its enclosing F179 compaction identity.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError {
+pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError
+{
     RestoreFold {
         restore_fold_ordinal: usize,
         nested_compaction_identity: BranchMergePairedCompactionIdentity,
@@ -20187,7 +20547,7 @@ pub enum BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedH
 /// their original error as the source.
 pub fn restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(
     restore_folds: &[BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot],
-) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError> {
+) -> Result<Vec<BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldStreamSnapshot>, BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedRewindIdentityNestedHandoffIdentityNestedRewindIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedCompactionIdentityNestedCheckpointIdentityNestedHandoffIdentityNestedRewindIdentityNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreError>{
     let inner_folds = restore_folds
         .iter()
         .map(|fold| fold.restore_fold.clone())

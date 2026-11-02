@@ -16,7 +16,7 @@ use format3::*;
 
 #[path = "support/media_commit.rs"]
 mod media_commit;
-use media_commit::{commit_source_captures, SourceCaptureRow};
+use media_commit::{SourceCaptureRow, commit_source_captures};
 
 const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
 
@@ -208,15 +208,17 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
         .with_repository_capture_capability(capability);
 
     let updated_commit = repository.head().unwrap().unwrap();
-    let updated_format_context =
-        format3_context_for_snapshot(&repository, updated_commit.as_str());
+    let updated_format_context = format3_context_for_snapshot(&repository, updated_commit.as_str());
     let updated_source = song_source.replace("    cover: null,\n", "");
     assert!(
         !updated_source.contains("cover"),
         "cover is omitted from the updated source row: {updated_source}"
     );
     let cover_capture = format!(r#"sys.blob.capture_file({root}, "pixel.png", 65536)"#);
-    let updated_fields = [("payload", capture.as_str()), ("cover", cover_capture.as_str())];
+    let updated_fields = [
+        ("payload", capture.as_str()),
+        ("cover", cover_capture.as_str()),
+    ];
     let updated_row = [SourceCaptureRow {
         key: "song",
         blob_fields: &updated_fields,
@@ -241,7 +243,10 @@ async fn req_evol_004_history_diff_compares_logical_blob_annotations_not_layout_
         &format_context,
         "song",
     );
-    assert_ne!(after, with_cover, "publishing the cover update advanced HEAD");
+    assert_ne!(
+        after, with_cover,
+        "publishing the cover update advanced HEAD"
+    );
     drop(bindings);
     drop(updated_state);
 

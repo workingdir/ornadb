@@ -234,7 +234,8 @@ fn automatic_ids_survive_reset(db: &mut Db) -> Check {
         db.git_text(&["cat-file", "-p", &allocator])?.trim() == "10",
         "the allocator did not reach 10"
     );
-    db.git(&["reset", "--quiet", "--hard", &rows_end_at_seven])?.ok()?;
+    db.git(&["reset", "--quiet", "--hard", &rows_end_at_seven])?
+        .ok()?;
     ensure!(
         db.query_json(&note, &[])?["rows"].as_u64() == Some(7),
         "the reset branch does not hold the rows that end at 7"
@@ -844,7 +845,7 @@ fn read_head(stream: &mut TcpStream) -> Result<String, Failure> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
-    harness_ensure!(
+        harness_ensure!(
             head.len() < 16 * 1024,
             "the websocket upgrade response has no end"
         );

@@ -713,10 +713,7 @@ mod tests {
     /// with the domain and headers, is over.
     #[test]
     fn an_entry_too_large_for_a_node_is_refused() {
-        let oversized = entry(
-            uint(1),
-            CborValue::Array(vec![text("x".repeat(65_500))]),
-        );
+        let oversized = entry(uint(1), CborValue::Array(vec![text("x".repeat(65_500))]));
         let mut writes = 0;
         let result = build_ordered_map(&rows_domain(), [oversized], &mut |_| {
             writes += 1;
