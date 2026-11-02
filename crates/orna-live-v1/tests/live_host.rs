@@ -912,7 +912,8 @@ impl LiveApplication for WatchEventApplication {
         _: &Message,
     ) -> Result<Envelope, Error> {
         self.subscriptions += 1;
-        Ok(Self::snapshot(request, [10 + self.subscriptions as u8; 16]))
+        let offset = u8::try_from(self.subscriptions % 200).expect("subscription count stays small");
+        Ok(Self::snapshot(request, [10 + offset; 16]))
     }
 
     fn resync(
