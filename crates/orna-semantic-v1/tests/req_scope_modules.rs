@@ -24,7 +24,10 @@ fn sys_is_protected_and_std_is_optional_replaceable_and_reserved() {
     assert!(std_shadow.diagnostics.iter().any(|diagnostic| diagnostic.code() == orna_semantic_v1::DIAG_RESERVED));
 
     let source = module("main.orna", "use std as s; fn run(): Int = s.answer();");
-    assert!(!analyze(&[source.clone()]).is_ok(), "std is absent from the default catalogue");
+    assert!(
+        !analyze(std::slice::from_ref(&source)).is_ok(),
+        "std is absent from the default catalogue"
+    );
 
     let standard_source = "pub fn answer(): Int = 42;";
     let profile = StandardDependencyProfile::from_sources("std/replacement-v1", [("std/main.orna".into(), standard_source.into())]).expect("profile");

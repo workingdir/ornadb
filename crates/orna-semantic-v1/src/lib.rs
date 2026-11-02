@@ -1788,11 +1788,10 @@ fn standard_callee_candidates(
     let Some(imports) = imports else {
         return candidates;
     };
-    if let Some((root, rest)) = callee.split_first() {
-        if let Some(target) = imports.aliases.get(root) {
+    if let Some((root, rest)) = callee.split_first()
+        && let Some(target) = imports.aliases.get(root) {
             push_import_candidates(&mut candidates, namespace, target, rest, declared);
         }
-    }
     for glob in &imports.globs {
         push_import_candidates(&mut candidates, namespace, glob, callee, declared);
     }
@@ -2588,10 +2587,7 @@ fn analyze_recording_origins(
             &mut result.diagnostics,
         );
         result.modules.insert(namespace.clone(), header);
-        source_unit_items.extend(parse.value.items.iter().filter_map(|item| {
-            matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })
-                .then(|| (namespace.clone(), input.logical_path.clone(), item.clone()))
-        }));
+        source_unit_items.extend(parse.value.items.iter().filter(|&item| matches!(&item.declaration, Declaration::Dimension { .. } | Declaration::Unit { .. })).map(|item| (namespace.clone(), input.logical_path.clone(), item.clone())));
         origins.bind_namespace(&namespace, &input.logical_path);
         parsed.push((namespace, parse.value));
     }
@@ -4316,6 +4312,10 @@ fn resolve_imports(
         diagnostics,
     )
 }
+/// The module graph, historical modules, attached symbols and dependency
+/// summaries are four views of one analysis input, and the two callers pass
+/// them straight from the scope they hold.
+#[allow(clippy::too_many_arguments)]
 fn resolve_imports_with_dependencies(
     namespace: &Namespace,
     tree: &SyntaxTree,
@@ -8015,11 +8015,10 @@ fn resolved_generic_parameters(
         if local.contains_key(text) {
             return None;
         }
-        if let Some(symbol) = scope.names.get(text) {
-            if !symbol.generic_parameters.is_empty() {
+        if let Some(symbol) = scope.names.get(text)
+            && !symbol.generic_parameters.is_empty() {
                 return Some(symbol.generic_parameters.clone());
             }
-        }
         return scope.generic_functions.get(text).map(|signature| {
             signature
                 .generics
@@ -8073,11 +8072,10 @@ fn qualified_export<'a>(scope: &'a Scope, name: &str) -> Option<&'a Symbol> {
             .map(|part| (*part).to_owned())
             .collect(),
     );
-    if let Some(module) = scope.available_modules.get(&direct_namespace) {
-        if let Some(symbol) = module.exports.get(parts[parts.len() - 1]) {
+    if let Some(module) = scope.available_modules.get(&direct_namespace)
+        && let Some(symbol) = module.exports.get(parts[parts.len() - 1]) {
             return Some(symbol);
         }
-    }
     let root = scope.modules.get(parts[0])?;
     let namespace = Namespace(
         root.0
@@ -8994,10 +8992,9 @@ fn infer_contextual_finite_list_aggregate(
             let operation = finite_list_collection_operation(callee, scope, local)?;
             if !matches!(operation, "sum" | "min" | "max")
                 || arguments.len() != 1
-                || !arguments[0]
+                || arguments[0]
                     .name
-                    .as_deref()
-                    .is_none_or(|name| name == "rows")
+                    .as_deref().is_some_and(|name| name != "rows")
                 || !is_empty_list_literal(&arguments[0].value)
             {
                 return None;
@@ -14921,9 +14918,7 @@ fn infer_relation_statistics_call(
     }
 
     if implicit == 0 {
-        let Some(index) = slots[0] else {
-            return None;
-        };
+        let index = slots[0]?;
         let mut probe_diagnostics = Vec::new();
         if !matches!(
             infer(
@@ -14979,15 +14974,14 @@ fn infer_relation_statistics_call(
     };
     let numeric = is_statistics_numeric_type(&element);
     match operation {
-        "mean" | "median" | "variance" | "standard_deviation" | "percentile" => {
-            if !numeric {
+        "mean" | "median" | "variance" | "standard_deviation" | "percentile"
+            if !numeric => {
                 diagnostics.push(diag(
                     DIAG_TYPE,
                     format!("std.stats.{operation} requires numeric relation rows"),
                 ));
                 valid = false;
             }
-        }
         "sum" if is_absolute_affine(&element) => {
             diagnostics.push(diag(
                 DIAG_ABSOLUTE_QUANTITY_SUM,
@@ -18912,8 +18906,8 @@ fn infer_descriptor_system_call(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<Inferred> {
     let functions = system_api::embedded_system_api().function(&path.join("."))?;
-    if path == ["sys", "explain"] {
-        if let Some(explained) = infer_query_explain_system_call(
+    if path == ["sys", "explain"]
+        && let Some(explained) = infer_query_explain_system_call(
             functions,
             arguments,
             type_arguments,
@@ -18924,7 +18918,6 @@ fn infer_descriptor_system_call(
         ) {
             return Some(explained);
         }
-    }
     if path == ["sys", "meta"] {
         return Some(infer_meta_system_call(
             functions,
@@ -19839,8 +19832,8 @@ fn infer_query_explain_system_call(
                 effects,
             });
         }
-    } else if type_arguments.is_none() {
-        if let Some(function) = functions
+    } else if type_arguments.is_none()
+        && let Some(function) = functions
             .iter()
             .filter(|function| {
                 function.name == "sys.explain"
@@ -19858,7 +19851,6 @@ fn infer_query_explain_system_call(
                 effects,
             });
         }
-    }
 
     diagnostics.push(diag(
         DIAG_TYPE,
@@ -20783,6 +20775,9 @@ fn snapshot_selector_context(
 /// same-named selectors from the caller throughout the returned signature;
 /// shadowing SnapshotRef lambda parameters also retain a binder identity so a
 /// captured alias is specialized at the depth where it was introduced.
+/// The seven inputs are one call site's formal parameters and its arguments,
+/// which the two callers read from the same inference frame.
+#[allow(clippy::too_many_arguments)]
 fn specialize_dynamic_parameter_snapshot_contexts(
     ty: &Type,
     formal_parameters: &[Type],
@@ -20899,6 +20894,10 @@ fn specialize_dynamic_parameter_snapshot_contexts(
     )
 }
 
+/// The scoped form adds the shadowed parameter names and binder contexts the
+/// caller already tracks, so the seven-parameter shape above is repeated here
+/// with the two scope inputs it threads through.
+#[allow(clippy::too_many_arguments)]
 fn specialize_dynamic_parameter_snapshot_contexts_scoped(
     ty: &Type,
     parameter_names: Option<&[String]>,
@@ -21493,7 +21492,7 @@ fn historical_callable_context(ty: &Type) -> Option<&Type> {
         return None;
     };
     (base == "sys.HistoricalCallable")
-        .then(|| match arguments.as_slice() {
+        .then_some(match arguments.as_slice() {
             [snapshot, Type::Function { .. }] => Some(snapshot),
             _ => None,
         })
@@ -21582,10 +21581,7 @@ fn snapshot_context_paired_tuple_identity_shapes_match(
     fn paired_shapes(
         pin_maps: &[SnapshotContextMapPair],
         use_expected: bool,
-    ) -> BTreeMap<
-        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
-        usize,
-    > {
+    ) -> PairedShapeCounts {
         let mut memberships = BTreeMap::<
             String,
             BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
@@ -22341,8 +22337,8 @@ fn function_snapshot_pin_identity_topology_matches(
         &mut path,
         SnapshotTopologyBoundary::FunctionResult,
     );
-    let topology_matches = boundaries_match && snapshot_context_topology_matches(&pin_maps);
-    topology_matches
+    
+    boundaries_match && snapshot_context_topology_matches(&pin_maps)
 }
 
 fn tuple_checkpoint_shape_matches(expected: &[Type], actual: &[Type]) -> bool {
@@ -22768,7 +22764,7 @@ fn type_sequence_has_omitted_pinned_checkpoint_tuple_at_path(
         .any(|ty| type_contains_pinned_checkpoint_tuple(ty));
     let contains_omission = types
         .iter()
-        .any(|ty| ty.is_none_or(|ty| checkpoint_value_is_omitted(ty)));
+        .any(|ty| ty.is_none_or(checkpoint_value_is_omitted));
     if contains_pinned_tuple && contains_omission {
         return true;
     }
@@ -22903,8 +22899,8 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                         let field = fields.get(&name)?;
                         type_contains_pinned_checkpoint_tuple(field).then(|| field.clone())
                     });
-                    if let Some(template) = template {
-                        if types.iter().any(|ty| match &**ty {
+                    if let Some(template) = template
+                        && types.iter().any(|ty| match &**ty {
                             Type::Record(fields) => fields
                                 .get(&name)
                                 .is_none_or(|field| matches!(field, Type::Bottom)),
@@ -22923,7 +22919,6 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                                 }
                             }
                         }
-                    }
 
                     let mut children = types
                         .iter_mut()
@@ -22953,8 +22948,8 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                         type_contains_pinned_checkpoint_tuple(element)
                             .then(|| element.clone())
                     });
-                    if let Some(template) = template {
-                        if types.iter().any(|ty| match &**ty {
+                    if let Some(template) = template
+                        && types.iter().any(|ty| match &**ty {
                             Type::Tuple(elements) => elements
                                 .get(index)
                                 .is_none_or(|element| matches!(element, Type::Bottom)),
@@ -22970,7 +22965,6 @@ fn seed_omitted_pinned_checkpoint_tuple_paths(types: &mut [Type]) {
                                 }
                             }
                         }
-                    }
 
                     let mut children = types
                         .iter_mut()
@@ -24215,14 +24209,17 @@ fn checkpoint_value_pin_identity_topology_matches(expected: &Type, actual: &Type
 /// sparse source supplied them. The enclosing compaction guard still rejects
 /// new cross-path identity. The reference does not specify these local sparse
 /// multi-parent folds.
+/// A paired snapshot shape: the expected and actual boundary sets, counted.
+type PairedShapeCounts = BTreeMap<
+    BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
+    usize,
+>;
+
 fn checkpoint_value_paired_pin_membership_matches(expected: &Type, actual: &Type) -> bool {
     fn paired_membership_patterns(
         pin_maps: &[SnapshotContextMapPair],
         expected: bool,
-    ) -> BTreeMap<
-        BTreeSet<(Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>)>,
-        usize,
-    > {
+    ) -> PairedShapeCounts {
         let mut memberships = BTreeMap::<
             String,
             BTreeMap<Vec<SnapshotTopologyBoundary>, BTreeSet<SnapshotTopologyBoundary>>,
@@ -25168,7 +25165,7 @@ fn historical_namespace_parts(ty: &Type) -> Option<(&Type, &str)> {
         return None;
     };
     (base == "sys.HistoricalNamespace")
-        .then(|| match arguments.as_slice() {
+        .then_some(match arguments.as_slice() {
             [snapshot, Type::Named(namespace)] => Some((snapshot, namespace.as_str())),
             _ => None,
         })
@@ -25211,9 +25208,7 @@ fn infer_historical_member(
             effects: EffectSummary::default(),
         });
     }
-    let Some((snapshot, namespace)) = historical_namespace_parts(base) else {
-        return None;
-    };
+    let (snapshot, namespace) = historical_namespace_parts(base)?;
     let module_namespace = Namespace(
         namespace
             .split('.')
@@ -25814,7 +25809,7 @@ fn contains_secret_value_type_in(
 }
 
 fn is_secret_sensitive_presentation_path(path: &[&str]) -> bool {
-    path.starts_with(&["std", "ui"]) || path == &["std", "terminal", "present_table"]
+    path.starts_with(&["std", "ui"]) || path == ["std", "terminal", "present_table"]
 }
 
 fn infer_ui_action_call(
@@ -25851,7 +25846,7 @@ fn infer_ui_action_call(
                     continue;
                 };
                 let name = path.join(".");
-                let ty = primitive(&name).unwrap_or_else(|| Type::Named(name));
+                let ty = primitive(&name).unwrap_or(Type::Named(name));
                 let ty = canonicalize_type(&ty, scope);
                 if !static_type_is_known(&ty, scope) {
                     valid = false;
@@ -27669,10 +27664,13 @@ fn row_key_matches_type(value: &str, ty: &Type, analysis: &Analysis) -> bool {
 
 fn canonical_integer(value: &str) -> bool {
     let digits = value.strip_prefix('-').unwrap_or(value);
-    !(value.starts_with('-') && digits == "0")
-        && !digits.is_empty()
-        && digits.bytes().all(|byte| byte.is_ascii_digit())
-        && (digits == "0" || !digits.starts_with('0'))
+    if value.starts_with('-') && digits == "0" {
+        return false;
+    }
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return false;
+    }
+    digits == "0" || !digits.starts_with('0')
 }
 
 fn canonical_date(value: &str) -> bool {
