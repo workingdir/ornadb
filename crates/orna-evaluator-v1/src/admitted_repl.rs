@@ -1196,7 +1196,7 @@ fn locate_identifier(source: &str, name: &str, qualified: bool) -> Option<std::o
     lex(source).ok()?.into_iter().find_map(|token| match &token.kind {
         TokenKind::Identifier { normalized } if normalized == name || token.text == name => {
             let start = token.span.start;
-            (!qualified || source[..start].trim_end().ends_with('.')).then(|| start..token.span.end)
+            (!qualified || source[..start].trim_end().ends_with('.')).then_some(start..token.span.end)
         }
         _ => None,
     })

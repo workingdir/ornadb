@@ -106,12 +106,15 @@ fn capture_format_db_pin(project_path: &Path, standard_pin: &str, message: &str)
     git_output_at(project_path, &["rev-parse", "HEAD"])
 }
 
-fn pinned_format_db_projects() -> (
+/// Three pinned-format databases with their sources.
+type PinnedFormatDbProjects = (
     TempDir,
     [LoadedProject; 3],
     [String; 3],
     [Vec<(String, String)>; 3],
-) {
+);
+
+fn pinned_format_db_projects() -> PinnedFormatDbProjects {
     let directory = tempfile::tempdir().unwrap();
     let project_path = directory.path().join("project");
     fs::create_dir_all(&project_path).unwrap();
