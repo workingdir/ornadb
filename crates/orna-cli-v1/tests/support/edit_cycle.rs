@@ -1,6 +1,7 @@
 //! Evaluates the committed `offline-edit-image.orna` capture into an offline
 //! row, so an import-edit cycle can start from the real `.orna` source.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -28,7 +29,7 @@ pub fn edit_capture_row(fixture: &Path, media: &Path) -> OfflineRow {
     let expression = source.trim_end().replace(MEDIA_ROOT_PLACEHOLDER, &root);
     let value = evaluate_expression_ovb2_with_effects(
         &expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )

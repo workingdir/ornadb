@@ -9,6 +9,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn execute(parsed: &Parsed) -> Result<(), Diagnostic> {
     match parsed.command.clone() {
         Command::Help => {
@@ -1054,6 +1055,7 @@ fn mv_partial_update_error() -> Diagnostic {
 /// Names why the migration source failed format admission. The title carries
 /// the `FormatContextError` message, so the cause is user-visible; the stable
 /// code is kept in the detail.
+#[allow(clippy::needless_pass_by_value)]
 fn migration_source_admission_diagnostic(
     error: orna_repository_v1::FormatContextError,
 ) -> Diagnostic {

@@ -351,9 +351,9 @@ fn render_table(rows: &[ReportRow<'_>], media_type: Option<&str>) -> String {
     // to an aligned table and turns the rendered report into a function of the
     // widest commitment rather than of the row values.
     for [key, kind, bytes, digest] in &lines {
-        out.push_str(&format!(
+        out.extend([format!(
             "{key:<key_width$}  {kind:<type_width$}  {bytes:>bytes_width$}  {digest}\n"
-        ));
+        )]);
     }
     out
 }
@@ -368,6 +368,7 @@ fn hex(bytes: &[u8]) -> String {
     output
 }
 
+#[allow(clippy::cast_precision_loss)]
 /// Renders a resident-set size in IEC units, for the one counter that is
 /// inherently approximate.
 fn render_rss(bytes: u64) -> String {
@@ -382,6 +383,7 @@ fn render_rss(bytes: u64) -> String {
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 /// Peak resident set size of this process so far, from Linux `/proc`. Other
 /// platforms report `None`, which the report renders as unavailable.
 fn peak_rss_bytes() -> Option<u64> {
@@ -581,10 +583,15 @@ mod tests {
         let bundle = directory.path().join("bundle");
         let rows = [row("image", b"pixels"), row("song", b"tone-bytes")];
         write_offline_copy(&bundle, &rows, &[]).unwrap();
-        let digest: String = Sha256::digest(b"pixels")
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let digest = {
+            use std::fmt::Write as _;
+            let digest = Sha256::digest(b"pixels");
+            let mut out = String::with_capacity(64);
+            for byte in &digest {
+                write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+            }
+            out
+        };
 
         // The writer pads every column to its widest cell, so compare the
         // fields rather than the incidental padding.

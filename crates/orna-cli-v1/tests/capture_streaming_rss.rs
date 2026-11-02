@@ -9,6 +9,7 @@
 #[path = "support/format3.rs"]
 mod format3;
 
+use std::collections::BTreeMap;
 use std::{fs::File, io::Write, path::Path};
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -59,7 +60,7 @@ fn product_capture_streams_a_source_larger_than_its_memory_budget() {
     );
     let value = evaluate_expression_ovb2_with_effects(
         &expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )
