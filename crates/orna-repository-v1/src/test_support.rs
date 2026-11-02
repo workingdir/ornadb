@@ -1,5 +1,9 @@
 //! Shared helpers for Git-backed repository fixtures.
 
+// Included by path from several test targets, each of which uses the part of
+// the support surface it needs.
+#![allow(dead_code)]
+
 use std::{
     io::Write as _,
     path::Path,

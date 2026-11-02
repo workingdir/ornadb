@@ -127,7 +127,7 @@ impl Column {
         match self {
             Self::Int(values) => values.iter().map(|value| Key::Int(*value)).collect(),
             Self::Date(values) => values.iter().map(|value| Key::Date(*value)).collect(),
-            Self::Str(values) => values.iter().map(|value| Key::Str(value.clone())).collect(),
+            Self::Str(values) => values.iter().map(|value| Key::Str(value)).collect(),
         }
     }
 
