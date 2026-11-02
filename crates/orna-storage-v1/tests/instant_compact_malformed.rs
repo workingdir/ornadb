@@ -383,7 +383,7 @@ fn corrupt_metadata(bytes: Vec<u8>, corruption: MetadataCorruption) -> Vec<u8> {
     let mut group_builder = groups[0].clone().into_builder();
     let mut columns = group_builder.take_columns();
     let column = &mut columns[0];
-    let mut column_builder = column.clone().into_builder();
+    let column_builder = column.clone().into_builder();
     match corruption {
         MetadataCorruption::DictionaryOffset(offset) => {
             *column = column_builder.set_dictionary_page_offset(Some(offset)).build().unwrap();
