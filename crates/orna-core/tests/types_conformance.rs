@@ -87,14 +87,11 @@ fn ordered_float_comparisons_with_nan_are_all_false() {
         .value();
     let number = RuntimeFloat::new(1.0).unwrap().value();
 
-    assert!(!(nan < number));
-    assert!(!(nan <= number));
-    assert!(!(nan > number));
-    assert!(!(nan >= number));
-    assert!(!(number < nan));
-    assert!(!(number <= nan));
-    assert!(!(number > nan));
-    assert!(!(number >= nan));
+    // A NaN operand makes the partial order undefined, which makes every
+    // comparison operator on the pair false. Asserting the undefined order
+    // states that once instead of negating eight operators.
+    assert_eq!(nan.partial_cmp(&number), None);
+    assert_eq!(number.partial_cmp(&nan), None);
 }
 
 #[test]
