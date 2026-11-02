@@ -150,6 +150,12 @@ pub enum VfsRepositoryCacheError {
     ImageAlreadyScoped,
 }
 
+impl Default for VfsRepositoryCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl VfsRepositoryCache {
     /// A view whose EDIT-1 spools live in the process temp directory.
     pub fn new() -> Self {
@@ -221,6 +227,11 @@ impl VfsRepositoryCache {
 
     /// Commits a temporary Blob replacement through the owner of this view's
     /// shared row transaction and projection epoch.
+    /// The ten parameters are one durable save: the target file, the staged
+    /// scratch, the runtime and capture it commits through, the canonical
+    /// identity and media values, the admission callback and the fault seam.
+    /// Each caller supplies all of them from a single request record.
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit_durable_blob_rename<S, A, AFut>(
         &self,
         target: &Arc<ManagedFile<S>>,
@@ -242,7 +253,7 @@ impl VfsRepositoryCache {
         if !Arc::ptr_eq(&target.cache_epoch.generation, &self.epoch.generation) {
             return Err(VfsSaveError::WrongRepositoryScope);
         }
-        let result = target
+        target
             .commit_durable_temporary_blob_rename(
                 scratch,
                 runtime,
@@ -254,8 +265,7 @@ impl VfsRepositoryCache {
                 admit,
                 faults,
             )
-            .await;
-        result
+            .await
     }
 
     async fn has_current_projection<S>(&self, image: &VfsFileSnapshot<S>) -> bool {
@@ -3712,6 +3722,9 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
     /// can bind its canonical Blob field and pin into one row mutation.
     /// `media_type` and `suffix` must already be canonical MIME-1 annotation
     /// values, as issued by the source schema.
+    /// Same durable save as `commit_durable_blob_rename`, addressed through the
+    /// managed file's owner rather than the managed file itself.
+    #[allow(clippy::too_many_arguments)]
     pub async fn commit_durable_temporary_blob_rename<A, AFut>(
         self: &Arc<Self>,
         scratch: &TemporarySave<S>,
@@ -3728,8 +3741,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
         A: FnOnce(VfsSaveCoordinates, CandidateSnapshot, OrpBlobBinding) -> AFut,
         AFut: Future<Output = Result<VfsSaveCandidate, TableActivationError>>,
     {
-        let result = self
-            .commit_durable_temporary_save(
+        self.commit_durable_temporary_save(
                 scratch,
                 runtime,
                 save,
@@ -3749,8 +3761,7 @@ impl<S: Send + Sync + 'static> ManagedFile<S> {
                 },
                 faults,
             )
-            .await;
-        result
+            .await
     }
 
     /// Adopts one complete VFS row-document save through the same durable
@@ -5004,7 +5015,7 @@ mod tests {
     #[tokio::test]
     async fn refused_candidate_is_charged_once_and_leaves_room_for_its_disk_record() {
         const HEADER: u64 = 64;
-        let len = fixture_image().bytes.len().max(32 << 10) as u64;
+        let len = fixture_image().bytes.len().max(32 << 10);
         let quota = Arc::new(DraftQuota::new(2 * len + HEADER));
         let storage = DraftStorage::new(&std::env::temp_dir(), Arc::clone(&quota));
         let draft = EditDraft::open(fixture_image(), 1 << 20, storage);
