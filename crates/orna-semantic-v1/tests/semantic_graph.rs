@@ -8589,33 +8589,94 @@ fn tuple_wrapped_paired_boundary_depths_stay_stable_through_selector_storms() {
         element.as_ref()
     };
 
-    let Type::Function { result, .. } = &module.symbols
-        ["rejects_tuple_wrapped_paired_depth_drift_after_selector_storm"]
-        .ty
-    else {
-        panic!("rejected storm must retain its computed result");
-    };
-    let Type::Record(rejected) = result.as_ref() else {
-        panic!("rejected storm must return its source rows: {result:?}");
-    };
-    let Type::Record(first) = rejected.get("first").expect("first source row") else {
-        panic!("first source row must be a record");
-    };
-    let Type::Tuple(first_groups) = first.get("group").expect("first group tuple") else {
-        panic!("first group must remain a tuple");
-    };
+    // ornadb-3iqo ruling: a conflicting later row folds each slot to the union of its stable
+    // labels through the shared engine path of
+    // multi_parent_checkpoint_folds_preserve_labels_across_paired_omissions, not a whole-record
+    // rollback to the first row (that came from the superseded #7161 generation).
+    // Observed at 5b73047d7: group[0] left [{1201,1202,1203},{1241}], right [{1211,1212,1213},{1241}];
+    // group[1] left [{1221,1222,1223},{1251,1252}], right [{1231,1232,1233},{1251,1252}].
     let Type::Record(folded) = folded_element(
         "rejects_tuple_wrapped_paired_depth_drift_after_selector_storm",
     ) else {
         panic!("rejected fold element must remain a record");
     };
-    let Type::Tuple(folded_groups) = folded.get("group").expect("folded group tuple") else {
+    let Type::Tuple(rejected_groups) = folded.get("group").expect("folded group tuple") else {
         panic!("folded group must remain a tuple");
     };
-    assert_eq!(
-        folded_groups, first_groups,
-        "a paired tuple-boundary fold must roll back atomically when its selector depth splits"
-    );
+    for (group_index, left_union, right_union) in [
+        (
+            0,
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1201".to_owned(),
+                    "selector:HEAD~1202".to_owned(),
+                    "selector:HEAD~1203".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1241".to_owned()]),
+            ],
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1211".to_owned(),
+                    "selector:HEAD~1212".to_owned(),
+                    "selector:HEAD~1213".to_owned(),
+                ]),
+                BTreeSet::from(["selector:HEAD~1241".to_owned()]),
+            ],
+        ),
+        (
+            1,
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1221".to_owned(),
+                    "selector:HEAD~1222".to_owned(),
+                    "selector:HEAD~1223".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~1251".to_owned(),
+                    "selector:HEAD~1252".to_owned(),
+                ]),
+            ],
+            [
+                BTreeSet::from([
+                    "selector:HEAD~1231".to_owned(),
+                    "selector:HEAD~1232".to_owned(),
+                    "selector:HEAD~1233".to_owned(),
+                ]),
+                BTreeSet::from([
+                    "selector:HEAD~1251".to_owned(),
+                    "selector:HEAD~1252".to_owned(),
+                ]),
+            ],
+        ),
+    ] {
+        let Type::Record(pair) = &rejected_groups[group_index] else {
+            panic!("rejected tuple boundary {group_index} must remain a record");
+        };
+        for (side_name, expected) in [("left", left_union), ("right", right_union)] {
+            let Type::Optional(side) = &pair[side_name] else {
+                panic!("rejected {side_name} boundary must remain optional");
+            };
+            let Type::Record(side_fields) = side.as_ref() else {
+                panic!("rejected {side_name} boundary must remain a record");
+            };
+            let Type::Tuple(slots) = &side_fields["pins"] else {
+                panic!("rejected {side_name} selector depths must retain the tuple");
+            };
+            let contexts = slots
+                .iter()
+                .map(|slot| {
+                    let mut contexts = BTreeSet::new();
+                    collect_snapshot_contexts(slot, &mut contexts);
+                    contexts
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                contexts,
+                expected,
+                "rejected tuple-wrapped group {group_index} {side_name} selectors must fold to the union of stable labels"
+            );
+        }
+    }
 
     let Type::Record(stable) =
         folded_element("accepts_tuple_wrapped_paired_depths_after_selector_storm")
