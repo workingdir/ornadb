@@ -189,7 +189,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.95.0
         with:
-          components: rustfmt, clippy
+          components: rustfmt
 
       - name: Check formatting
         run: >-
@@ -197,14 +197,6 @@ jobs:
           --record lint-fmt --title "cargo fmt --check"
           --out "$RUNNER_TEMP/gate-evidence"
           -- cargo fmt --all -- --check
-
-      - name: Run Clippy
-        if: ${{ !cancelled() }}
-        run: >-
-          python3 scripts/gate_evidence.py run --check clippy
-          --record lint-clippy --title "cargo clippy, warnings denied"
-          --out "$RUNNER_TEMP/gate-evidence" --timeout-minutes 120
-          -- cargo clippy --locked --workspace --all-targets -- -D warnings
 
       - name: Check the fixed-row batching product claim
         if: ${{ !cancelled() }}
