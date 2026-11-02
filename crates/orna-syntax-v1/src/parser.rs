@@ -995,7 +995,10 @@ pub fn parse_repl(source: &str) -> Parse<ReplInput> {
             Some(TokenKind::Keyword(Keyword::Table))
         );
     let value = if public_table {
-        p.error_here("ORNA-PARSE-001", "public table declarations are not valid REPL input");
+        p.error_here(
+            "ORNA-PARSE-001",
+            "public table declarations are not valid REPL input",
+        );
         None
     } else if matches!(
         p.keyword(),
@@ -5327,8 +5330,7 @@ impl Parser {
             TokenKind::Punct("(" | "{" | "[") => true,
             TokenKind::Identifier { .. } | TokenKind::Keyword(Keyword::SelfValue) => matches!(
                 next,
-                Some(TokenKind::Punct("." | "(" | "{"))
-                    | Some(TokenKind::Keyword(Keyword::If))
+                Some(TokenKind::Punct("." | "(" | "{")) | Some(TokenKind::Keyword(Keyword::If))
             ),
             TokenKind::Keyword(Keyword::True | Keyword::False | Keyword::Null)
             | TokenKind::Integer

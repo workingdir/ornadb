@@ -36,10 +36,10 @@ use orna_protocol_v1::{
     TargetKind, canonical_request_fingerprint,
 };
 use orna_runtime_v1::{
-    Component, ConsumerIdentity, FaultInjector, RecoveryDisposition, RequestIdentity, RequestOwner,
-    RequestState as DurableRequestState, RequestStatus as DurableRequestStatus,
-    RunObservationRegistration, RuntimeActivationContext, RuntimeError, RuntimeState,
-    ActivationEffectReport, StagedTableActivation, TableActivationCandidateValidator,
+    ActivationEffectReport, Component, ConsumerIdentity, FaultInjector, RecoveryDisposition,
+    RequestIdentity, RequestOwner, RequestState as DurableRequestState,
+    RequestStatus as DurableRequestStatus, RunObservationRegistration, RuntimeActivationContext,
+    RuntimeError, RuntimeState, StagedTableActivation, TableActivationCandidateValidator,
     TableActivationError, TableMutation, TerminalOutcome, ValidatedTableRequestActivationCommit,
     WriterLease, admin_invocation_id, with_terminal_admin_effect,
 };
@@ -1757,8 +1757,7 @@ impl<T: SessionDeletionAdapter> DeletionAdapter for T {}
 /// activation context that the staged mutations were admitted under. Commits
 /// use the validated runtime path only when a factory is installed.
 pub type TableCandidateValidatorFactory = Box<
-    dyn Fn(&RuntimeActivationContext) -> Result<Box<dyn TableActivationCandidateValidator>>
-        + Send,
+    dyn Fn(&RuntimeActivationContext) -> Result<Box<dyn TableActivationCandidateValidator>> + Send,
 >;
 
 /// Concrete async request/frame host adapter. Its async methods make it fit
@@ -4534,18 +4533,16 @@ impl LiveHost {
                         TableActivationError::ValidationFailed(_) => Error::RuntimeUnavailable,
                     })?
             }
-            None => {
-                runtime
-                    .commit_staged_table_request_activation(
-                        lease,
-                        identity,
-                        fingerprint,
-                        &staged,
-                        terminal,
-                    )
-                    .await
-                    .map_err(|error| map_runtime(&error))?
-            }
+            None => runtime
+                .commit_staged_table_request_activation(
+                    lease,
+                    identity,
+                    fingerprint,
+                    &staged,
+                    terminal,
+                )
+                .await
+                .map_err(|error| map_runtime(&error))?,
         };
         if let Some(after_commit) = after_commit {
             after_commit();
@@ -4566,9 +4563,7 @@ impl LiveHost {
         )?
         .response
         .ok_or(Error::ApplicationRejected)?;
-        if mutating
-            && let Some(watch) = watch
-        {
+        if mutating && let Some(watch) = watch {
             self.close_watch(identity.session_id, watch)?;
         }
         Ok(response)
@@ -6744,7 +6739,11 @@ impl LiveTransport {
         // ownership), so it is measured from this detachment.
         if let Some(session) = session
             && outcome.is_ok()
-            && !self.host.attachments.values().any(|owner| *owner == session)
+            && !self
+                .host
+                .attachments
+                .values()
+                .any(|owner| *owner == session)
             && let Some(record) = self.sessions.get_mut(&session)
         {
             record.metadata.expires_at = now.saturating_add(self.limits.lease_ms);
@@ -9813,7 +9812,10 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(replay, response);
-        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+        assert_eq!(
+            application.calls, 1,
+            "a retry must never rerun the application"
+        );
     }
 
     #[test]
@@ -9858,7 +9860,10 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(replay, response);
-        assert_eq!(application.calls, 1, "a retry must never rerun the application");
+        assert_eq!(
+            application.calls, 1,
+            "a retry must never rerun the application"
+        );
     }
 
     #[test]
@@ -11506,7 +11511,12 @@ mod tests {
         // starts the lease, which the test then pins to an expired deadline.
         futures::executor::block_on(transport.close_attachment([4; 16], 0))
             .expect("detaching the attachment starts the reconnection lease");
-        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
+        transport
+            .sessions
+            .get_mut(&[1; 16])
+            .unwrap()
+            .metadata
+            .expires_at = 10;
         let mut deletion = ExpiryDeletion::default();
         let mut children = ExpiryChildren {
             fail: true,
@@ -11658,7 +11668,12 @@ mod tests {
         // by its reconnection lease, which starts at WebSocket loss (30-protocol).
         futures::executor::block_on(transport.close_attachment([4; 16], 0))
             .expect("detaching the attachment starts the reconnection lease");
-        transport.sessions.get_mut(&[1; 16]).unwrap().metadata.expires_at = 10;
+        transport
+            .sessions
+            .get_mut(&[1; 16])
+            .unwrap()
+            .metadata
+            .expires_at = 10;
         let mut deletion = ExpiryDeletion {
             fail: true,
             ..ExpiryDeletion::default()
@@ -12036,7 +12051,10 @@ mod base64_accept_table {
     #[test]
     fn long_inputs_follow_the_same_rules() {
         let valid = "Zm9v".repeat(65_536);
-        assert_eq!(decode_base64(&valid).map(|bytes| bytes.len()), Some(196_608));
+        assert_eq!(
+            decode_base64(&valid).map(|bytes| bytes.len()),
+            Some(196_608)
+        );
         let invalid = format!("{}-_8=", "Zm9v".repeat(65_536));
         assert_eq!(decode_base64(&invalid), None);
     }

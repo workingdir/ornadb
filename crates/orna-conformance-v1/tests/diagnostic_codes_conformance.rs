@@ -1,6 +1,4 @@
-use orna_conformance_v1::{
-    ConformanceAdapter, SemanticAdapter, SourceUnit, StageOutcome,
-};
+use orna_conformance_v1::{ConformanceAdapter, SemanticAdapter, SourceUnit, StageOutcome};
 use orna_semantic_v1::{ModuleInput, analyze};
 
 const FIXTURE: &str = include_str!("fixtures/diagnostic-codes.orna");
@@ -106,10 +104,7 @@ fn assertion_execution_codes_are_separated_from_compile_time_diagnostics() {
     // assertion outcomes here; ORNA-A091-009 is stream-owned and ORNA-A091-008
     // has no producer in the compiler/evaluator path.
     for name in ["A091-008", "A091-009"] {
-        let analysis = analyze(&[ModuleInput::new(
-            format!("{name}.orna"),
-            case(name),
-        )]);
+        let analysis = analyze(&[ModuleInput::new(format!("{name}.orna"), case(name))]);
         assert!(analysis.is_ok(), "{name}: {:?}", analysis.diagnostics);
     }
     assert_eq!(

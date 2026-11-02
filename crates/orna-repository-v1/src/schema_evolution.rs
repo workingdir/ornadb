@@ -31,8 +31,7 @@ use std::collections::BTreeMap;
 use num_bigint::BigInt;
 
 use orna_value_v1::{
-    Decimal, Raw, SchemaDescriptor, decode_canonical_storage_value,
-    encode_canonical_storage_value,
+    Decimal, Raw, SchemaDescriptor, decode_canonical_storage_value, encode_canonical_storage_value,
 };
 
 const DECIMAL_TAG: u64 = 60_000;
@@ -195,11 +194,12 @@ impl EvolutionPlan {
         let mut changes = SchemaChanges::default();
         for field in &new_fields {
             if let Some(old_field) = old_fields.iter().find(|old| old.id == field.id)
-                && old_field.name != field.name {
-                    changes
-                        .renamed
-                        .push((old_field.name.to_owned(), field.name.to_owned()));
-                }
+                && old_field.name != field.name
+            {
+                changes
+                    .renamed
+                    .push((old_field.name.to_owned(), field.name.to_owned()));
+            }
         }
         let old_stored = old_fields
             .iter()
@@ -321,7 +321,9 @@ pub fn admit_row_under_descriptor(
 }
 
 /// The key field ObjectIds and every field of a closed descriptor.
-fn fields(descriptor: &SchemaDescriptor) -> Result<(Vec<[u8; 16]>, Vec<Field<'_>>), EvolutionRefusal> {
+fn fields(
+    descriptor: &SchemaDescriptor,
+) -> Result<(Vec<[u8; 16]>, Vec<Field<'_>>), EvolutionRefusal> {
     let Raw::Map(entries) = descriptor.raw() else {
         return Err(EvolutionRefusal::InvalidDescriptor);
     };
@@ -593,7 +595,10 @@ mod tests {
         let introductions = BTreeMap::from([([5; 16], Raw::Text("GB".into()))]);
         let plan = EvolutionPlan::new(TABLE, &committed(), &staged, 1, &introductions).unwrap();
         let changes = plan.changes();
-        assert_eq!(changes.renamed(), &[("title".to_owned(), "name".to_owned())]);
+        assert_eq!(
+            changes.renamed(),
+            &[("title".to_owned(), "name".to_owned())]
+        );
         assert_eq!(changes.converted(), &["plays".to_owned()]);
         assert_eq!(changes.added(), &["country".to_owned(), "note".to_owned()]);
         assert_eq!(changes.removed(), &["rating".to_owned()]);
@@ -635,7 +640,10 @@ mod tests {
                 field(4, "rating", primitive("Int"), 1),
             ],
         );
-        assert_eq!(plan(&retyped_key, 1).err(), Some(EvolutionRefusal::KeyChanged));
+        assert_eq!(
+            plan(&retyped_key, 1).err(),
+            Some(EvolutionRefusal::KeyChanged)
+        );
         let to_text = descriptor(
             primitive("Str"),
             vec![
@@ -692,7 +700,10 @@ mod tests {
         let present = plan
             .rewrite_row(
                 &key(),
-                &row(vec![option(Some(Raw::Text("kept".into()))), Raw::Int(3.into())]),
+                &row(vec![
+                    option(Some(Raw::Text("kept".into()))),
+                    Raw::Int(3.into()),
+                ]),
             )
             .unwrap();
         assert_eq!(

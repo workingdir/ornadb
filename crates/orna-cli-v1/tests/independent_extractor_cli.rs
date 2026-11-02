@@ -44,7 +44,10 @@ const EXTRACTOR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/orna
 fn run(directory: &Path, arguments: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     isolate_git(&mut command, directory);
-    command.args(arguments).output().expect("CLI process starts")
+    command
+        .args(arguments)
+        .output()
+        .expect("CLI process starts")
 }
 
 /// Runs the standard-library extractor over `repository` at HEAD, writing Blob
@@ -112,7 +115,11 @@ fn extracted_field(row: &Value, index: u64) -> &Value {
         .as_array()
         .unwrap()
         .iter()
-        .find(|field| field["index"].as_u64() == Some(index)).map_or_else(|| panic!("the extracted row holds field index {index}: {row}"), |field| &field["value"])
+        .find(|field| field["index"].as_u64() == Some(index))
+        .map_or_else(
+            || panic!("the extracted row holds field index {index}: {row}"),
+            |field| &field["value"],
+        )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -289,9 +296,15 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
         let row = extracted_row(rows, key);
         let field = listing["field"].as_u64().unwrap();
         let blob = &extracted_field(row, field)["blob"];
-        assert_eq!(blob["descriptor"], listing["descriptor"], "{key}: descriptor");
+        assert_eq!(
+            blob["descriptor"], listing["descriptor"],
+            "{key}: descriptor"
+        );
         assert_eq!(blob["length"], listing["length"], "{key}: length");
-        assert_eq!(blob["media_type"], listing["media_type"], "{key}: media type");
+        assert_eq!(
+            blob["media_type"], listing["media_type"],
+            "{key}: media type"
+        );
         assert_eq!(blob["suffix"], listing["suffix"], "{key}: suffix");
         assert_eq!(blob["sha256"], listing["sha256"], "{key}: SHA-256");
     }
@@ -316,7 +329,10 @@ async fn extractor_recovers_modules_schema_rows_and_blob_bytes_from_an_export() 
             blob["sha256"].as_str().unwrap(),
             "{key}: the recovered bytes hash to the recorded SHA-256"
         );
-        assert_eq!(&recovered, bytes, "{key}: the recovered payload equals the source");
+        assert_eq!(
+            &recovered, bytes,
+            "{key}: the recovered payload equals the source"
+        );
         assert!(
             blobs.iter().any(|record| record["path"] == path),
             "{key}: the Blob is listed in the report's blob table"

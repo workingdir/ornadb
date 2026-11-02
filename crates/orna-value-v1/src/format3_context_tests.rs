@@ -1,8 +1,8 @@
 use std::{
     io::Cursor,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     },
 };
 
@@ -152,7 +152,13 @@ fn published_blob_vectors_use_explicit_profiles() {
             .iter()
             .map(|case| case["id"].as_str().expect("a vector id"))
             .collect::<Vec<_>>(),
-        ["ovb2-empty", "ovb2-text", "sov3-text", "rov3-text", "ovb2-js-module"]
+        [
+            "ovb2-empty",
+            "ovb2-text",
+            "sov3-text",
+            "rov3-text",
+            "ovb2-js-module"
+        ]
     );
     let resolver = counting_resolver(&[]);
     let context = test_context(resolver.clone());
@@ -163,9 +169,12 @@ fn published_blob_vectors_use_explicit_profiles() {
         match case["value"]["tag"].as_u64().expect("a value tag") {
             60110 => {
                 let media_type = fields[1].as_str().expect("a media type");
-                let ovb2 =
-                    Blob::from_bytes_with_annotation(vector_bytes(&fields[0]), media_type, fields[2].as_str())
-                        .unwrap();
+                let ovb2 = Blob::from_bytes_with_annotation(
+                    vector_bytes(&fields[0]),
+                    media_type,
+                    fields[2].as_str(),
+                )
+                .unwrap();
                 assert_eq!(encode_ovb2(&ovb2).unwrap(), canonical, "{id}");
                 assert_eq!(decode_ovb2(&canonical).unwrap(), ovb2, "{id}");
             }
@@ -1076,54 +1085,65 @@ fn stored_table_reference_admission_binds_database_to_containing_snapshot_contex
             (Raw::Int(0.into()), Raw::Int(1.into())),
             (Raw::Int(1.into()), uuid_raw([9; 16])),
             (Raw::Int(2.into()), Raw::Array(vec![uuid_raw([1; 16])])),
-            (Raw::Int(3.into()), Raw::Array(vec![
+            (
+                Raw::Int(3.into()),
                 Raw::Array(vec![
-                    uuid_raw([1; 16]),
-                    Raw::Text("id".into()),
-                    int_type.clone(),
-                    Raw::Int(0.into()),
-                    Raw::Array(vec![Raw::Int(0.into())]),
+                    Raw::Array(vec![
+                        uuid_raw([1; 16]),
+                        Raw::Text("id".into()),
+                        int_type.clone(),
+                        Raw::Int(0.into()),
+                        Raw::Array(vec![Raw::Int(0.into())]),
+                    ]),
+                    Raw::Array(vec![
+                        uuid_raw([2; 16]),
+                        Raw::Text("owner".into()),
+                        reference_type,
+                        Raw::Int(1.into()),
+                        Raw::Array(vec![Raw::Int(0.into())]),
+                    ]),
                 ]),
-                Raw::Array(vec![
-                    uuid_raw([2; 16]),
-                    Raw::Text("owner".into()),
-                    reference_type,
-                    Raw::Int(1.into()),
-                    Raw::Array(vec![Raw::Int(0.into())]),
-                ]),
-            ])),
+            ),
             (Raw::Int(4.into()), Raw::Array(vec![])),
         ]))
         .unwrap()
     };
     let row_key = encode_canonical_storage_value(&Raw::Int(3.into())).unwrap();
-    let referenced_value = Raw::Tag(60021, Box::new(Raw::Array(vec![
-        uuid_raw([1; 16]),
-        uuid_raw([8; 16]),
-        Raw::Int(3.into()),
-    ])));
+    let referenced_value = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid_raw([1; 16]),
+            uuid_raw([8; 16]),
+            Raw::Int(3.into()),
+        ])),
+    );
     let row_fields = encode_canonical_storage_value(&Raw::Array(vec![referenced_value])).unwrap();
     let context = test_context(counting_resolver(b""));
 
     let local_schema = schema_for_database([1; 16]);
-    assert!(local_schema
-        .validate_stored_row_in_context(&context, [9; 16], &row_key, &row_fields)
-        .is_ok());
+    assert!(
+        local_schema
+            .validate_stored_row_in_context(&context, [9; 16], &row_key, &row_fields)
+            .is_ok()
+    );
 
     let foreign_schema = schema_for_database([7; 16]);
-    let foreign_value = Raw::Tag(60021, Box::new(Raw::Array(vec![
-        uuid_raw([7; 16]),
-        uuid_raw([8; 16]),
-        Raw::Int(3.into()),
-    ])));
-    let foreign_fields =
-        encode_canonical_storage_value(&Raw::Array(vec![foreign_value])).unwrap();
-    assert!(foreign_schema
-        .validate_stored_row([9; 16], &row_key, &foreign_fields)
-        .is_ok());
-    assert_eq!(
+    let foreign_value = Raw::Tag(
+        60021,
+        Box::new(Raw::Array(vec![
+            uuid_raw([7; 16]),
+            uuid_raw([8; 16]),
+            Raw::Int(3.into()),
+        ])),
+    );
+    let foreign_fields = encode_canonical_storage_value(&Raw::Array(vec![foreign_value])).unwrap();
+    assert!(
         foreign_schema
-            .validate_stored_row_in_context(&context, [9; 16], &row_key, &foreign_fields),
+            .validate_stored_row([9; 16], &row_key, &foreign_fields)
+            .is_ok()
+    );
+    assert_eq!(
+        foreign_schema.validate_stored_row_in_context(&context, [9; 16], &row_key, &foreign_fields),
         Err(Error::InvalidValue)
     );
 }
@@ -1136,7 +1156,11 @@ fn stored_table_reference_roundtrips_as_identity_without_snapshot() {
     };
     assert_eq!(
         payload.as_ref(),
-        &Raw::Array(vec![uuid_raw([1; 16]), uuid_raw([2; 16]), Raw::Int(7.into())])
+        &Raw::Array(vec![
+            uuid_raw([1; 16]),
+            uuid_raw([2; 16]),
+            Raw::Int(7.into())
+        ])
     );
     let bytes = reference.encode().unwrap();
     let decoded = Value::decode(&bytes).unwrap();
@@ -1180,8 +1204,7 @@ fn table_reference_keys_across_tables_are_not_ordered() {
     let int_key = Value::table_reference([1; 16], [2; 16], Raw::Int(5.into())).unwrap();
     let text_key_later_table =
         Value::table_reference([1; 16], [3; 16], Raw::Text("a".into())).unwrap();
-    let other_database =
-        Value::table_reference([9; 16], [2; 16], Raw::Int(5.into())).unwrap();
+    let other_database = Value::table_reference([9; 16], [2; 16], Raw::Int(5.into())).unwrap();
     assert!(compare_primary_keys(&int_key, &text_key_later_table).is_err());
     assert!(compare_primary_keys(&text_key_later_table, &int_key).is_err());
     assert!(compare_primary_keys(&int_key, &other_database).is_err());
@@ -1216,7 +1239,12 @@ fn table_reference_decode_rejects_non_permitted_key() {
             uuid(2),
             Raw::Tag(
                 60010,
-                Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
+                Box::new(Raw::Array(vec![
+                    uuid(1),
+                    uuid(2),
+                    Raw::Int(1.into()),
+                    snapshot,
+                ])),
             ),
         ])),
     );
@@ -1228,7 +1256,6 @@ fn table_reference_decode_rejects_non_permitted_key() {
     );
     assert!(Value::new(permitted).is_ok());
 }
-
 
 fn uuid(byte: u8) -> Raw {
     Raw::Tag(37, Box::new(Raw::Bytes(vec![byte; 16])))
@@ -1254,7 +1281,12 @@ fn table_reference_rejects_each_non_permitted_key_clause() {
     let snapshot = Snapshot::cwd([1; 16], [2; 16], 0.into()).unwrap().raw();
     let pinned = Raw::Tag(
         60010,
-        Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(1.into()), snapshot])),
+        Box::new(Raw::Array(vec![
+            uuid(1),
+            uuid(2),
+            Raw::Int(1.into()),
+            snapshot,
+        ])),
     );
     assert!(Value::table_reference([1; 16], [2; 16], pinned).is_err());
     // Enum-like (60008) payload must be exactly [type uuid, variant uuid, Null].
@@ -1292,7 +1324,10 @@ fn table_reference_accepts_each_permitted_key_shape() {
         ),
     ];
     for key in shapes {
-        assert!(Value::table_reference([1; 16], [2; 16], key.clone()).is_ok(), "{key:?}");
+        assert!(
+            Value::table_reference([1; 16], [2; 16], key.clone()).is_ok(),
+            "{key:?}"
+        );
     }
 }
 
@@ -1305,11 +1340,13 @@ fn table_reference_to_keyless_table_unit_key_decodes_and_round_trips() {
     let bytes = reference.encode().unwrap();
     let decoded = Value::decode(&bytes).unwrap();
     assert_eq!(decoded, reference);
-    assert!(Value::new(Raw::Tag(
-        60021,
-        Box::new(Raw::Array(vec![uuid(1), uuid(2), unit])),
-    ))
-    .is_ok());
+    assert!(
+        Value::new(Raw::Tag(
+            60021,
+            Box::new(Raw::Array(vec![uuid(1), uuid(2), unit])),
+        ))
+        .is_ok()
+    );
     assert_eq!(
         compare_primary_keys(&reference, &reference).unwrap(),
         std::cmp::Ordering::Equal
@@ -1328,7 +1365,12 @@ fn tuple_primary_key_with_pinned_reference_keeps_base_behaviour() {
     let pinned = |n: i32| {
         Raw::Tag(
             60010,
-            Box::new(Raw::Array(vec![uuid(1), uuid(2), Raw::Int(n.into()), snapshot.clone()])),
+            Box::new(Raw::Array(vec![
+                uuid(1),
+                uuid(2),
+                Raw::Int(n.into()),
+                snapshot.clone(),
+            ])),
         )
     };
     let one = Value::new(Raw::Array(vec![pinned(1)])).unwrap();

@@ -63,9 +63,8 @@ fn format3_context_for_database(commit: &GitCommitRef, database_id: [u8; 16]) ->
 
 #[test]
 fn same_commit_context_from_another_database_cannot_admit_source_row() {
-    let (_directory, repository, relation_id) = format3::format3_repository(
-        "pub table media(id: Str) { content: Str, }\n",
-    );
+    let (_directory, repository, relation_id) =
+        format3::format3_repository("pub table media(id: Str) { content: Str, }\n");
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
@@ -81,7 +80,10 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
     assert_eq!(schema.binding().module_name(), Some(""));
     assert_eq!(schema.binding().source_path(), Some("main.orna"));
     assert_eq!(schema.binding().declaration_name(), Some("media"));
-    assert_eq!(schema.binding().database_id().as_bytes(), schema.database_id());
+    assert_eq!(
+        schema.binding().database_id().as_bytes(),
+        schema.database_id()
+    );
 
     let row_source = "{ content: \"picture\", }\n";
     let matching_context = format3_context_for_database(&commit, *schema.database_id());
@@ -126,9 +128,8 @@ fn same_commit_context_from_another_database_cannot_admit_source_row() {
 
 #[test]
 fn legacy_key_path_spelling_is_refused_and_vfs_spelling_admits() {
-    let (_directory, repository, relation_id) = format3::format3_repository(
-        "pub table media(id: Str) { content: Str, }\n",
-    );
+    let (_directory, repository, relation_id) =
+        format3::format3_repository("pub table media(id: Str) { content: Str, }\n");
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
@@ -174,9 +175,8 @@ fn legacy_key_path_spelling_is_refused_and_vfs_spelling_admits() {
 /// (profiles/vfs-1.md:52-56). A digest-matching pair with other text is refused.
 #[test]
 fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
-    let (_directory, repository, relation_id) = format3::format3_repository(
-        "pub table media(id: Str) { content: Str, }\n",
-    );
+    let (_directory, repository, relation_id) =
+        format3::format3_repository("pub table media(id: Str) { content: Str, }\n");
     let commit = repository.head().unwrap().unwrap();
     let loader = ProjectLoader::default();
     let project = loader
@@ -225,7 +225,10 @@ fn long_key_alias_admits_only_a_pair_whose_text_is_its_encoding_text() {
         &[pair(key)],
         [0x7b; 16],
     );
-    assert!(admitted.is_ok(), "the pair whose text encodes to the alias admits");
+    assert!(
+        admitted.is_ok(),
+        "the pair whose text encodes to the alias admits"
+    );
 }
 
 #[test]

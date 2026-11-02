@@ -308,7 +308,9 @@ impl ObjectReader {
         }
         match self.info(&format!("{treeish}^{{tree}}:{path}"))? {
             Some(target) if target.kind == ObjectKind::Tree => {
-                let prefix = u64::try_from(path.len()).unwrap_or(u64::MAX).saturating_add(1);
+                let prefix = u64::try_from(path.len())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(1);
                 self.check_tree_budget(target.oid(), None, prefix)
             }
             _ => Ok(()),
@@ -935,9 +937,7 @@ mod tests {
                 .info(&tree)
                 .expect("read the tree")
                 .expect("the tree exists");
-            objects
-                .tree_entries(&tree)
-                .expect("list the tree");
+            objects.tree_entries(&tree).expect("list the tree");
         }
         assert_eq!(
             objects.process_starts(),

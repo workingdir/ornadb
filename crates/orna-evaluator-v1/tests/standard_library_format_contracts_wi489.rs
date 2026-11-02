@@ -64,11 +64,9 @@ fn pinned_format_sources() -> Vec<(String, String)> {
 
 fn pinned_format_session() -> AdmittedReplSession {
     let sources = pinned_format_sources();
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/format-contracts-wi489",
-        sources.clone(),
-    )
-    .expect("the pinned format and text module bytes form a dependency profile");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/format-contracts-wi489", sources.clone())
+            .expect("the pinned format and text module bytes form a dependency profile");
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("the pinned std.format and std.text modules resolve against core");
@@ -82,7 +80,10 @@ fn format_db_sources(marker_source: &str) -> Vec<(String, String)> {
         "std/main.orna".to_owned(),
         include_str!("fixtures/stdlib-format-db-main-wi489.orna").to_owned(),
     ));
-    sources.push(("std/format_marker.orna".to_owned(), marker_source.to_owned()));
+    sources.push((
+        "std/format_marker.orna".to_owned(),
+        marker_source.to_owned(),
+    ));
     sources
 }
 
@@ -135,15 +136,17 @@ fn pinned_format_db_projects() -> PinnedFormatDbProjects {
     fs::create_dir_all(&standard_path).unwrap();
     initialize_repository(&standard_path).unwrap();
     configure_git_repo(&standard_path);
-    let sources_v1 =
-        format_db_sources(include_str!("fixtures/stdlib-format-db-marker-v1-wi489.orna"));
+    let sources_v1 = format_db_sources(include_str!(
+        "fixtures/stdlib-format-db-marker-v1-wi489.orna"
+    ));
     write_format_db_sources(&standard_path, &sources_v1);
     commit_directory(&standard_path, "capture pinned format module v1");
     let pin_v1 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
     let parent_v1 = capture_format_db_pin(&project_path, &pin_v1, "capture format DB v1");
 
-    let sources_v2 =
-        format_db_sources(include_str!("fixtures/stdlib-format-db-marker-v2-wi489.orna"));
+    let sources_v2 = format_db_sources(include_str!(
+        "fixtures/stdlib-format-db-marker-v2-wi489.orna"
+    ));
     fs::write(
         standard_path.join("format_marker.orna"),
         sources_v2
@@ -157,11 +160,8 @@ fn pinned_format_db_projects() -> PinnedFormatDbProjects {
     commit_directory(&standard_path, "capture pinned format module v2");
     let pin_v2 = git_output_at(&standard_path, &["rev-parse", "HEAD"]);
     let parent_v2 = capture_format_db_pin(&project_path, &pin_v2, "capture format DB v2");
-    let parent_v1_restored = capture_format_db_pin(
-        &project_path,
-        &pin_v1,
-        "restore captured format DB v1",
-    );
+    let parent_v1_restored =
+        capture_format_db_pin(&project_path, &pin_v1, "restore captured format DB v1");
 
     let repository = Repository::discover(&project_path).unwrap();
     let loader = ProjectLoader::default();
@@ -177,11 +177,7 @@ fn pinned_format_db_projects() -> PinnedFormatDbProjects {
             let profile = StandardDependencyProfile::from_sources(pin.clone(), sources.clone())
                 .expect("the selected formatter source snapshot forms a profile");
             loader
-                .load_committed_snapshot_with_standard_profile(
-                    &repository,
-                    snapshot,
-                    Some(profile),
-                )
+                .load_committed_snapshot_with_standard_profile(&repository, snapshot, Some(profile))
                 .unwrap()
         })
         .collect::<Vec<_>>();
@@ -214,11 +210,15 @@ fn text_value(value: &str) -> CanonicalValue {
 fn pinned_format_module_emits_minimal_integer_and_boolean_spellings() {
     let mut session = pinned_format_session();
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-format-contract-use-wi489.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-format-contract-use-wi489.orna"
+        )),
         Ok(None)
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-format-contract-integers-wi489.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-format-contract-integers-wi489.orna"
+        )),
         Ok(Some(strings(&[
             "0",
             "1",
@@ -234,7 +234,9 @@ fn pinned_format_module_emits_minimal_integer_and_boolean_spellings() {
         ])))
     );
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-format-contract-booleans-wi489.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-format-contract-booleans-wi489.orna"
+        )),
         Ok(Some(strings(&["true", "false"])))
     );
 }
@@ -246,14 +248,10 @@ fn format_contract_outputs_follow_selected_and_restored_std_db_pins() {
         .iter()
         .zip(&sources)
         .map(|(project, sources)| {
-            AdmittedReplSession::from_loaded_project(
-                project,
-                sources.clone(),
-                Limits::default(),
-            )
-            .unwrap_or_else(|error| {
-                panic!("could not admit captured format DB: {}", error.code())
-            })
+            AdmittedReplSession::from_loaded_project(project, sources.clone(), Limits::default())
+                .unwrap_or_else(|error| {
+                    panic!("could not admit captured format DB: {}", error.code())
+                })
         })
         .collect::<Vec<_>>();
     let imports = [
@@ -271,13 +269,17 @@ fn format_contract_outputs_follow_selected_and_restored_std_db_pins() {
     let markers = ["format-db-v1", "format-db-v2", "format-db-v1"];
     for (index, session) in sessions.iter_mut().enumerate() {
         assert_eq!(
-            session.submit(include_str!("fixtures/stdlib-format-contract-marker-wi489.orna")),
+            session.submit(include_str!(
+                "fixtures/stdlib-format-contract-marker-wi489.orna"
+            )),
             Ok(Some(text_value(markers[index]))),
             "captured format DB marker at pin {}",
             pins[index]
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/stdlib-format-contract-integers-wi489.orna")),
+            session.submit(include_str!(
+                "fixtures/stdlib-format-contract-integers-wi489.orna"
+            )),
             Ok(Some(strings(&[
                 "0",
                 "1",
@@ -295,7 +297,9 @@ fn format_contract_outputs_follow_selected_and_restored_std_db_pins() {
             pins[index]
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/stdlib-format-contract-booleans-wi489.orna")),
+            session.submit(include_str!(
+                "fixtures/stdlib-format-contract-booleans-wi489.orna"
+            )),
             Ok(Some(strings(&["true", "false"]))),
             "Boolean display values at captured format DB pin {}",
             pins[index]
@@ -304,8 +308,9 @@ fn format_contract_outputs_follow_selected_and_restored_std_db_pins() {
 
     for index in [2, 0, 1, 2, 1] {
         assert_eq!(
-            sessions[index]
-                .submit(include_str!("fixtures/stdlib-format-contract-marker-wi489.orna")),
+            sessions[index].submit(include_str!(
+                "fixtures/stdlib-format-contract-marker-wi489.orna"
+            )),
             Ok(Some(text_value(markers[index]))),
             "replayed format DB marker at captured pin {}",
             pins[index]

@@ -78,19 +78,17 @@ pub fn host_effect(path: &[&str]) -> Option<EffectKind> {
         ["sys", "clock", ..] => Clock,
         ["sys", "random", ..] => Randomness,
         ["sys", "blob", "capture_file"] => Filesystem,
-        ["sys", "admin", "commit" | "commit_reviewed" | "checkout" | "create_branch"] => Git,
+        [
+            "sys",
+            "admin",
+            "commit" | "commit_reviewed" | "checkout" | "create_branch",
+        ] => Git,
         ["sys", "admin", "flush" | "compact" | "verify"] => StorageAdmin,
         [
             "sys",
             "admin",
-            "cancel_run"
-            | "pause_stream"
-            | "resume_stream"
-            | "reset_checkpoint"
-            | "retry_failure"
-            | "skip_failure"
-            | "replay_failure"
-            | "resolve_failure",
+            "cancel_run" | "pause_stream" | "resume_stream" | "reset_checkpoint" | "retry_failure"
+            | "skip_failure" | "replay_failure" | "resolve_failure",
         ] => RuntimeAdmin,
         _ => return None,
     })
@@ -152,8 +150,14 @@ mod tests {
             (&["sys", "admin", "verify"], EffectKind::StorageAdmin),
             (&["sys", "admin", "cancel_run"], EffectKind::RuntimeAdmin),
             (&["sys", "admin", "pause_stream"], EffectKind::RuntimeAdmin),
-            (&["sys", "admin", "reset_checkpoint"], EffectKind::RuntimeAdmin),
-            (&["sys", "admin", "resolve_failure"], EffectKind::RuntimeAdmin),
+            (
+                &["sys", "admin", "reset_checkpoint"],
+                EffectKind::RuntimeAdmin,
+            ),
+            (
+                &["sys", "admin", "resolve_failure"],
+                EffectKind::RuntimeAdmin,
+            ),
         ];
         let mut covered = BTreeSet::new();
         for (path, kind) in cases {

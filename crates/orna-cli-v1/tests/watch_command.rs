@@ -96,7 +96,8 @@ fn envelope_for(watch: [u8; 16], code: u8, body: Vec<u8>) -> Vec<u8> {
 
 fn text(value: &str) -> Vec<u8> {
     assert!(value.len() < 24);
-    let mut bytes = vec![0x60 + u8::try_from(value.len()).expect("fixture text stays under 24 bytes")];
+    let mut bytes =
+        vec![0x60 + u8::try_from(value.len()).expect("fixture text stays under 24 bytes")];
     bytes.extend(value.as_bytes());
     bytes
 }

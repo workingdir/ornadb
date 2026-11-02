@@ -17,7 +17,10 @@ fn repository() -> TempDir {
     let temp = tempfile::tempdir().expect("temporary Git repository");
     git(temp.path(), &["init", "--quiet"]);
     git(temp.path(), &["config", "user.name", "Traceability Test"]);
-    git(temp.path(), &["config", "user.email", "traceability@example.invalid"]);
+    git(
+        temp.path(),
+        &["config", "user.email", "traceability@example.invalid"],
+    );
     git(temp.path(), &["config", "commit.gpgsign", "false"]);
     temp
 }
@@ -143,6 +146,10 @@ fn git_conflicts_on_different_edits_to_one_editable_row_field() {
     let output = git(path, &["merge", "--no-edit", "theirs"]);
     assert!(!output.status.success());
     let status = succeed(path, &["status", "--porcelain"]);
-    assert!(String::from_utf8(status.stdout).unwrap().contains("UU crm/Contact/1.orna"));
+    assert!(
+        String::from_utf8(status.stdout)
+            .unwrap()
+            .contains("UU crm/Contact/1.orna")
+    );
     succeed(path, &["merge", "--abort"]);
 }

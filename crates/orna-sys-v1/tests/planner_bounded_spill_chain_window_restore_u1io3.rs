@@ -311,8 +311,13 @@ fn bounded_spill_chain_window_identity_binds_paired_restore_chains() {
     assert!(
         text(baseline, spill_key).starts_with("paired-bounded-window-spill-chain-window-fold:")
     );
-    assert!(text(baseline, restore_key).starts_with("paired-window-restore-chain-descriptor-fold:"));
-    assert!(text(baseline, window_restore_key).starts_with("paired-window-restore-chain-descriptor-window-fold:"));
+    assert!(
+        text(baseline, restore_key).starts_with("paired-window-restore-chain-descriptor-fold:")
+    );
+    assert!(
+        text(baseline, window_restore_key)
+            .starts_with("paired-window-restore-chain-descriptor-window-fold:")
+    );
     assert_eq!(
         integer(
             baseline,

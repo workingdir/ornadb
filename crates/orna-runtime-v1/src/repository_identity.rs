@@ -50,8 +50,8 @@ pub fn migration_copy_runtime_identity(
 fn migration_metadata_identity(
     repository: &Repository,
 ) -> Result<(RuntimeIdentity, [u8; 32]), RuntimeError> {
-    let metadata = inspect_metadata_for_runtime(repository)
-        .map_err(|_| RuntimeError::StorageUnavailable)?;
+    let metadata =
+        inspect_metadata_for_runtime(repository).map_err(|_| RuntimeError::StorageUnavailable)?;
     let Some(metadata) = metadata else {
         return Err(RuntimeError::InvalidIdentity);
     };

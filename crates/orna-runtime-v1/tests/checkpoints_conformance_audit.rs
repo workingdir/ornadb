@@ -2,7 +2,11 @@
 //! chapter audit. The source fixture is used as the retained delivery payload;
 //! this suite does not claim that RuntimeState evaluates Orna source.
 
-use std::{path::Path, process::Command, sync::atomic::{AtomicUsize, Ordering}};
+use std::{
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
@@ -11,9 +15,9 @@ use orna_runtime_v1::{
 };
 use orna_stream_v1::{
     AsyncCheckpointBackend, AsyncFailurePayloadBackend, CheckpointPrecondition, CommitIntent,
-    CommitResult, Component,
-    ConsumerIdentity, DeliveryIdentity, DiagnosticClass, DiagnosticCode, FailureRecord,
-    FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic, StreamFailurePayload,
+    CommitResult, Component, ConsumerIdentity, DeliveryIdentity, DiagnosticClass, DiagnosticCode,
+    FailureRecord, FailureStatus, LeasePurpose, Position, RejectReason, SafeDiagnostic,
+    StreamFailurePayload,
 };
 use orna_syntax_v1::parse_module;
 use sha2::{Digest, Sha256};
@@ -304,12 +308,7 @@ async fn cancelled_protected_replay_grant_is_rejected_before_refetch() {
     assert_eq!(
         fixture
             .state
-            .replay_stream_failure_with_provider(
-                fixture.writer,
-                grant,
-                &provider,
-                &mut handler,
-            )
+            .replay_stream_failure_with_provider(fixture.writer, grant, &provider, &mut handler,)
             .await
             .expect("stale replay grant is rejected before provider access"),
         CommitResult::Rejected(RejectReason::StaleFailure)
@@ -344,7 +343,11 @@ async fn successful_replay_counts_one_attempt_and_preserves_live_checkpoint() {
     ))
     .await;
     let grant = fixture.admit_replay().await;
-    let capture = fixture.state.capture().await.expect("capture before replay");
+    let capture = fixture
+        .state
+        .capture()
+        .await
+        .expect("capture before replay");
     let mut handler = FixtureHandler {
         calls: 0,
         generation_digest: capture.generation_digest(),
@@ -375,7 +378,11 @@ async fn interrupted_replay_recovery_keeps_the_admitted_attempt() {
     ))
     .await;
     let grant = fixture.admit_replay().await;
-    let capture = fixture.state.capture().await.expect("capture after admission");
+    let capture = fixture
+        .state
+        .capture()
+        .await
+        .expect("capture after admission");
     let replacement = fixture
         .state
         .takeover_lease(fixture.writer, [5; 16])

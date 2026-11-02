@@ -115,7 +115,13 @@ fn present_duplicate_key_is_rejected_at_first_duplicate() {
 #[test]
 fn schema_with_many_fields_and_definitions_validates_in_bounded_time() {
     let definitions: Vec<Raw> = (1..=LARGE_SCHEMA_COUNT)
-        .map(|index| Raw::Array(vec![uuid(index), Raw::Int(0.into()), Raw::Array(Vec::new())]))
+        .map(|index| {
+            Raw::Array(vec![
+                uuid(index),
+                Raw::Int(0.into()),
+                Raw::Array(Vec::new()),
+            ])
+        })
         .collect();
     let fields: Vec<Raw> = (1..=LARGE_SCHEMA_COUNT)
         .map(|index| {

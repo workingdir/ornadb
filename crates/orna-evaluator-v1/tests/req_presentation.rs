@@ -52,11 +52,12 @@ fn orna_codec_is_deterministic_unambiguous_and_preserves_large_integer_precision
     );
     assert_ne!(first_encoding, encoded_string);
 
-    let round_trip = format!(
-        "std.encoding.orna.decode(std.encoding.orna.encode({large_integer}), as: Int)"
-    );
+    let round_trip =
+        format!("std.encoding.orna.decode(std.encoding.orna.encode({large_integer}), as: Int)");
     assert_eq!(
         submit(&mut repl, &round_trip),
-        canonical(Raw::Int(large_integer.parse().expect("large integer parses"))),
+        canonical(Raw::Int(
+            large_integer.parse().expect("large integer parses")
+        )),
     );
 }

@@ -52,7 +52,9 @@ fn sops_reads_decrypt_in_memory_without_plaintext_temp_files_or_ciphertext_rewri
         .with_executable(executable)
         .with_temp_dir(plaintext_temps.clone());
     let reference = SecretRef::new("messages.inbox").unwrap();
-    provider.store_secret(&reference, b"in-memory-only").unwrap();
+    provider
+        .store_secret(&reference, b"in-memory-only")
+        .unwrap();
     let ciphertext_before = directory_contents(&secrets);
     assert_eq!(ciphertext_before.len(), 1);
 

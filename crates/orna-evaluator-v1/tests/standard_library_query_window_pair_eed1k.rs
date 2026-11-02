@@ -16,7 +16,12 @@ fn sparse_rate_and_integral_pairs_follow_their_shared_window_order() {
         .submit(include_str!(
             "fixtures/stdlib-query-sparse-window-rate-integral-pairs-eed1k.orna"
         ))
-        .unwrap_or_else(|error| panic!("paired sparse window statistics failed with {}", error.code()));
+        .unwrap_or_else(|error| {
+            panic!(
+                "paired sparse window statistics failed with {}",
+                error.code()
+            )
+        });
     assert_eq!(
         actual,
         Some(CanonicalValue::new(Raw::Bool(true)).expect("expected exact paired values"))

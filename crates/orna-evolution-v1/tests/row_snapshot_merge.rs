@@ -25,11 +25,15 @@ fn id(value: u8) -> ObjectId {
 fn parse_fixture(source: &str) -> KeyedRow {
     let parsed = parse_row(source);
     assert!(parsed.diagnostics.is_empty(), "{:#?}", parsed.diagnostics);
-    let Expr::Record { fields, .. } = parsed.value else { panic!("row fixture must be a record") };
+    let Expr::Record { fields, .. } = parsed.value else {
+        panic!("row fixture must be a record")
+    };
     let mut key = None;
     let mut values = BTreeMap::new();
     for field in fields {
-        let Expr::Literal { text, kind, .. } = field.value else { panic!("row fields must be literals") };
+        let Expr::Literal { text, kind, .. } = field.value else {
+            panic!("row fields must be literals")
+        };
         match field.name.as_str() {
             "id" => {
                 assert_eq!(kind, LiteralKind::Integer);
@@ -40,7 +44,10 @@ fn parse_fixture(source: &str) -> KeyedRow {
                 assert_eq!(kind, LiteralKind::String);
                 let value = text.strip_prefix('"').unwrap().strip_suffix('"').unwrap();
                 let field_id = if field.name == "name" { id(2) } else { id(3) };
-                values.insert(field_id, CanonicalValue::new(OvbRaw::Text(value.into())).unwrap());
+                values.insert(
+                    field_id,
+                    CanonicalValue::new(OvbRaw::Text(value.into())).unwrap(),
+                );
             }
             other => panic!("unexpected fixture field {other}"),
         }
@@ -54,7 +61,10 @@ fn parse_fixture(source: &str) -> KeyedRow {
 }
 
 fn tombstone(row: &KeyedRow) -> RowSnapshotState<'_> {
-    RowSnapshotState::Tombstone { table: row.table, key: &row.key }
+    RowSnapshotState::Tombstone {
+        table: row.table,
+        key: &row.key,
+    }
 }
 
 #[test]
@@ -130,7 +140,10 @@ fn disjoint_edits_convergent_edits_and_unchanged_sides_reconcile() {
 #[test]
 fn known_deletions_emit_tombstones_but_never_created_rows_remain_absent() {
     let base = parse_fixture(BASE);
-    let tombstone = RowMergeOperation::Tombstone { table: base.table, key: base.key.clone() };
+    let tombstone = RowMergeOperation::Tombstone {
+        table: base.table,
+        key: base.key.clone(),
+    };
     assert_eq!(
         merge_keyed_row_states(
             RowSnapshotState::Present(&base),
@@ -200,17 +213,15 @@ fn retained_tombstones_are_logical_absence_and_can_be_folded_from_complete_snaps
             tombstone(&live),
             RowSnapshotState::Present(&edited),
         ),
-        Err(RowSnapshotMergeError::Conflict(RowMergeConflict::DeleteAndEdit { .. }))
+        Err(RowSnapshotMergeError::Conflict(
+            RowMergeConflict::DeleteAndEdit { .. }
+        ))
     ));
 
     // A complete base already records absence. Once its tombstone effect is
     // folded into a replacement snapshot, the marker can be omitted there.
     assert_eq!(
-        merge_keyed_row_states(
-            tombstone(&live),
-            tombstone(&live),
-            RowSnapshotState::Absent,
-        ),
+        merge_keyed_row_states(tombstone(&live), tombstone(&live), RowSnapshotState::Absent,),
         Ok(RowMergeOperation::Absent),
     );
 
@@ -268,7 +279,9 @@ fn pruned_history_is_unavailable_and_delete_update_stays_a_conflict() {
             RowSnapshotState::Absent,
             RowSnapshotState::Present(&edited),
         ),
-        Err(RowSnapshotMergeError::Conflict(RowMergeConflict::DeleteAndEdit { .. }))
+        Err(RowSnapshotMergeError::Conflict(
+            RowMergeConflict::DeleteAndEdit { .. }
+        ))
     ));
 }
 
@@ -295,7 +308,11 @@ fn pruned_sides_are_reported_deterministically_in_merge_argument_order() {
             RowSnapshotState::Pruned,
         ),
         Err(RowSnapshotMergeError::PrunedInput {
-            sides: vec![RowSnapshotSide::Base, RowSnapshotSide::Left, RowSnapshotSide::Right],
+            sides: vec![
+                RowSnapshotSide::Base,
+                RowSnapshotSide::Left,
+                RowSnapshotSide::Right
+            ],
         }),
     );
 }
@@ -339,8 +356,14 @@ fn identity_conflicts_have_a_stable_anchor_and_tombstones_cannot_change_keys() {
 
     // With no common base, the encoded canonical key order is the diagnostic
     // tie-breaker. Integer key 1 precedes key 2 in OVB, independent of sides.
-    assert_eq!(merge_keyed_row(None, Some(&base), Some(&other)), Err(expected.clone()));
-    assert_eq!(merge_keyed_row(None, Some(&other), Some(&base)), Err(expected.clone()));
+    assert_eq!(
+        merge_keyed_row(None, Some(&base), Some(&other)),
+        Err(expected.clone())
+    );
+    assert_eq!(
+        merge_keyed_row(None, Some(&other), Some(&base)),
+        Err(expected.clone())
+    );
     assert_eq!(
         merge_keyed_row_states(
             RowSnapshotState::Absent,
@@ -391,10 +414,12 @@ fn identity_conflicts_precede_field_and_delete_edit_conflicts() {
     let base = parse_fixture(BASE);
     let left = parse_fixture(MULTI_CONFLICT_LEFT);
     let wrong_identity = parse_fixture(OTHER_KEY_CONFLICT);
-    let identity_conflict = Err(RowSnapshotMergeError::Conflict(RowMergeConflict::Identity {
-        table: base.table,
-        key: base.key.clone(),
-    }));
+    let identity_conflict = Err(RowSnapshotMergeError::Conflict(
+        RowMergeConflict::Identity {
+            table: base.table,
+            key: base.key.clone(),
+        },
+    ));
 
     // These branch payloads also diverge on both fields. Identity is the
     // higher-priority diagnosis, with the common base anchoring either order.

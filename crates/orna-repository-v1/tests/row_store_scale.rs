@@ -418,12 +418,13 @@ fn encode_leaf(domain: &[u8], rows: &[(u64, u64)], media_annotation: Option<&[u8
         cbor_array(&mut data, 2);
         data.extend_from_slice(&encode_uint(*key));
         if *key == 0
-            && let Some(annotation) = media_annotation {
-                cbor_array(&mut data, 2);
-                cbor_uint(&mut data, *value);
-                data.extend_from_slice(annotation);
-                continue;
-            }
+            && let Some(annotation) = media_annotation
+        {
+            cbor_array(&mut data, 2);
+            cbor_uint(&mut data, *value);
+            data.extend_from_slice(annotation);
+            continue;
+        }
         data.extend_from_slice(&encode_bucket(*value));
     }
     data
@@ -2110,8 +2111,13 @@ fn orp1_index_churn_multi_page() {
         "ORP-1 index_churn_fixture rows={} leaf_pages={} branch_pages={}",
         MULTI_PAGE_ROWS, multi.leaf_pages, multi.branch_pages
     );
-    assert!(multi.leaf_pages > 1, "multi-page churn needs more than one leaf page");
-    timed("index_churn", MULTI_PAGE_ROWS, || exercise_index_churn(&multi));
+    assert!(
+        multi.leaf_pages > 1,
+        "multi-page churn needs more than one leaf page"
+    );
+    timed("index_churn", MULTI_PAGE_ROWS, || {
+        exercise_index_churn(&multi)
+    });
 }
 
 #[path = "../../orna-cli-v1/tests/support/format3.rs"]

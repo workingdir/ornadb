@@ -82,14 +82,8 @@ where
         Err(crate::native_graph::ProtectedBlobRowPreparationError::Graph(graph)) => {
             return Err(PublicationTransactionError::Graph(graph));
         }
-        Err(crate::native_graph::ProtectedBlobRowPreparationError::Cleanup {
-            graph,
-            cleanup,
-        }) => {
-            return Err(PublicationTransactionError::GraphCleanup {
-                graph,
-                cleanup,
-            });
+        Err(crate::native_graph::ProtectedBlobRowPreparationError::Cleanup { graph, cleanup }) => {
+            return Err(PublicationTransactionError::GraphCleanup { graph, cleanup });
         }
     };
     let receipt = match commit(prepared.candidate().clone()).await {

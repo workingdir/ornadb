@@ -20,11 +20,11 @@ use orna_foundation_v1::{
     CanonicalSnapshot, CanonicalValue, FunctionRef, GitHash, OvbRaw, RowRef, Snapshot,
     function_reference, object_reference, snapshot_reference,
 };
+use orna_syntax_v1::{Expr, parse_expression};
 use orna_sys_v1::{
     DependencyConfidence, DependencyInput, DependencyKind, FunctionPlanDescription, ObjectRef,
     QueryPlanDescription, SnapshotRef, explain_function, explain_query,
 };
-use orna_syntax_v1::{Expr, parse_expression};
 use orna_value_v1::{ContextValue, Raw, Value};
 
 #[derive(Debug)]
@@ -257,7 +257,10 @@ fn explain_record_carries_all_seven_plan_fields() {
         &Raw::Bool(plan.actual_available()),
         "actual_available"
     );
-    assert!(plan.warnings().is_empty(), "explain_query emits no warnings");
+    assert!(
+        plan.warnings().is_empty(),
+        "explain_query emits no warnings"
+    );
     assert_eq!(field(raw, "warnings"), &Raw::Array(Vec::new()), "warnings");
 }
 
@@ -269,7 +272,10 @@ fn explain_does_not_scan_or_invoke_effects() {
     explain_outcome("sys.Storage | distinct() | take(2)", &mut effects)
         .expect("distinct then take should explain");
     assert_eq!(effects.scans, 0, "explain must not scan relation rows");
-    assert_eq!(effects.effect_calls, 0, "explain must not invoke effect handlers");
+    assert_eq!(
+        effects.effect_calls, 0,
+        "explain must not invoke effect handlers"
+    );
 }
 
 /// ORNA-PLAN-002: the piped form `rel | sys.explain()` explains the piped
@@ -277,8 +283,11 @@ fn explain_does_not_scan_or_invoke_effects() {
 #[test]
 fn piped_explain_matches_explicit_argument() {
     let mut piped = storage_effects();
-    let piped_value = invoke_expression("sys.Storage | distinct() | take(2) | sys.explain()", &mut piped)
-        .expect("piped explain should explain");
+    let piped_value = invoke_expression(
+        "sys.Storage | distinct() | take(2) | sys.explain()",
+        &mut piped,
+    )
+    .expect("piped explain should explain");
     let mut explicit = storage_effects();
     let explicit_value = explain_outcome("sys.Storage | distinct() | take(2)", &mut explicit)
         .expect("explicit explain should explain");
@@ -329,12 +338,18 @@ fn explain_leaves_same_query_rows_scans_and_cursors_unchanged() {
         explain_outcome("sys.Storage | distinct() | take(2)", &mut with)
             .expect("preceding explain");
         assert_eq!(with.scans, 0, "preceding explain must not scan");
-        assert!(with.requests.is_empty(), "preceding explain must not read cursors");
+        assert!(
+            with.requests.is_empty(),
+            "preceding explain must not read cursors"
+        );
         with.scans = 0;
         with.requests.clear();
         let result_with = invoke_expression(&query, &mut with).expect("query after explain");
 
-        assert!(without.scans > 0, "fixture must exercise relation scans: {terminal}");
+        assert!(
+            without.scans > 0,
+            "fixture must exercise relation scans: {terminal}"
+        );
         assert_eq!(result_with, result_without, "rows: {terminal}");
         assert_eq!(with.scans, without.scans, "scan count: {terminal}");
         assert_eq!(with.requests, without.requests, "cursors: {terminal}");
@@ -415,11 +430,11 @@ fn ovb2_entry_point_forwards_explain_catalogue() {
         &mut handler,
     )
     .expect("OVB-2 entry should explain through the forwarded catalogue");
+    assert_eq!(text(field(value.raw(), "snapshot")), "snapshot-explain");
     assert_eq!(
-        text(field(value.raw(), "snapshot")),
-        "snapshot-explain"
+        handler.effect_calls, 0,
+        "explain must not invoke effect handlers"
     );
-    assert_eq!(handler.effect_calls, 0, "explain must not invoke effect handlers");
 }
 
 #[test]
@@ -473,7 +488,11 @@ impl ContextValueEffectHandler for ContextExplainHandler {
 #[test]
 fn context_entry_point_forwards_explain_catalogue() {
     let parsed = parse_expression("sys.explain(sys.Storage | distinct() | take(2))");
-    assert!(parsed.is_ok(), "fixture should parse: {:?}", parsed.diagnostics);
+    assert!(
+        parsed.is_ok(),
+        "fixture should parse: {:?}",
+        parsed.diagnostics
+    );
     let functions = Functions::from([(
         "explain_fixture".to_owned(),
         PureFunction {
@@ -495,10 +514,7 @@ fn context_entry_point_forwards_explain_catalogue() {
         &mut budget,
     )
     .expect("context entry should explain through the forwarded catalogue");
-    assert_eq!(
-        text(field(value.raw(), "snapshot")),
-        "snapshot-explain"
-    );
+    assert_eq!(text(field(value.raw(), "snapshot")), "snapshot-explain");
 }
 
 const DATABASE: [u8; 16] = [0x42; 16];

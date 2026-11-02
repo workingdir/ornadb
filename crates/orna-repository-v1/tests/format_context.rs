@@ -476,10 +476,7 @@ fn rejects_bare_format_marker_no_writer_produced() {
 /// remedy. A format-3 or unborn `HEAD` is not refused here.
 #[test]
 fn refuses_runtime_writes_on_a_legacy_head_whatever_the_worktree_holds() {
-    for (record, format) in [
-        (ORNADB_1_0_FORMAT_ONE, 1),
-        (DRAFT_FORMAT_TWO, 2),
-    ] {
+    for (record, format) in [(ORNADB_1_0_FORMAT_ONE, 1), (DRAFT_FORMAT_TWO, 2)] {
         let directory = repository(Some(SIDECAR_DATABASE), Some(record), false);
         fs::remove_file(directory.path().join(".orna/format.orna")).unwrap();
         fs::write(
@@ -647,10 +644,7 @@ fn head_gate_admits_known_unborn_and_recordless_heads() {
 
 #[test]
 fn migration_carry_gate_refuses_a_legacy_head_without_a_prepared_copy() {
-    for (record, format) in [
-        (ORNADB_1_0_FORMAT_ONE, 1),
-        (DRAFT_FORMAT_TWO, 2),
-    ] {
+    for (record, format) in [(ORNADB_1_0_FORMAT_ONE, 1), (DRAFT_FORMAT_TWO, 2)] {
         let directory = repository(Some(SIDECAR_DATABASE), Some(record), false);
         let repository = Repository::discover(directory.path()).unwrap();
         assert!(!repository.holds_prepared_migration());

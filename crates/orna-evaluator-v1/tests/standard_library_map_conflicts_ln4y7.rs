@@ -15,11 +15,9 @@ fn pinned_session() -> AdmittedReplSession {
         .filter(|(path, _)| MODULES.contains(&path.as_str()))
         .collect::<Vec<_>>();
     assert_eq!(sources.len(), MODULES.len());
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/ln4y7-map-conflicts",
-        sources.clone(),
-    )
-    .expect("captured collection and map sources form a profile");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/ln4y7-map-conflicts", sources.clone())
+            .expect("captured collection and map sources form a profile");
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("map imports resolve against pinned collection modules");
@@ -32,8 +30,14 @@ fn pinned_session() -> AdmittedReplSession {
             .expect("executed source matches its pinned profile");
     }
     assert_eq!(session.submit("use std.map as map;"), Ok(None));
-    assert_eq!(session.submit("use std.collection as collection;"), Ok(None));
-    assert_eq!(session.submit("let empty_pairs: [(Str, Int)] = [];"), Ok(None));
+    assert_eq!(
+        session.submit("use std.collection as collection;"),
+        Ok(None)
+    );
+    assert_eq!(
+        session.submit("let empty_pairs: [(Str, Int)] = [];"),
+        Ok(None)
+    );
     session
 }
 

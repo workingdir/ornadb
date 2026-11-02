@@ -105,7 +105,11 @@ pub struct MediaResponsePlan {
 /// Plans the response for `method` and an optional `Range` header against a
 /// representation of `length` bytes.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn plan_media_response(method: MediaMethod, range: Option<&str>, length: u64) -> MediaResponsePlan {
+pub fn plan_media_response(
+    method: MediaMethod,
+    range: Option<&str>,
+    length: u64,
+) -> MediaResponsePlan {
     let send_body = method == MediaMethod::Get;
     match resolve_range(range, length) {
         RangeOutcome::Full => MediaResponsePlan {
@@ -228,15 +232,30 @@ mod tests {
 
     #[test]
     fn start_beyond_end_is_unsatisfiable() {
-        assert_eq!(resolve_range(Some("bytes=10-"), 10), RangeOutcome::Unsatisfiable);
-        assert_eq!(resolve_range(Some("bytes=10-12"), 10), RangeOutcome::Unsatisfiable);
-        assert_eq!(resolve_range(Some("bytes=-0"), 10), RangeOutcome::Unsatisfiable);
+        assert_eq!(
+            resolve_range(Some("bytes=10-"), 10),
+            RangeOutcome::Unsatisfiable
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=10-12"), 10),
+            RangeOutcome::Unsatisfiable
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=-0"), 10),
+            RangeOutcome::Unsatisfiable
+        );
     }
 
     #[test]
     fn empty_representation_has_no_satisfiable_suffix() {
-        assert_eq!(resolve_range(Some("bytes=-5"), 0), RangeOutcome::Unsatisfiable);
-        assert_eq!(resolve_range(Some("bytes=0-"), 0), RangeOutcome::Unsatisfiable);
+        assert_eq!(
+            resolve_range(Some("bytes=-5"), 0),
+            RangeOutcome::Unsatisfiable
+        );
+        assert_eq!(
+            resolve_range(Some("bytes=0-"), 0),
+            RangeOutcome::Unsatisfiable
+        );
     }
 
     #[test]
@@ -312,11 +331,10 @@ mod tests {
 
     #[test]
     fn empty_representation_reads_nothing() {
-        let reply =
-            media_reply(MediaMethod::Get, None, 0, |_, _| -> Result<Vec<u8>, ()> {
-                unreachable!("empty representation must not read")
-            })
-            .expect("empty plan");
+        let reply = media_reply(MediaMethod::Get, None, 0, |_, _| -> Result<Vec<u8>, ()> {
+            unreachable!("empty representation must not read")
+        })
+        .expect("empty plan");
         assert_eq!(reply.plan.status, 200);
         assert!(reply.body.is_empty());
     }

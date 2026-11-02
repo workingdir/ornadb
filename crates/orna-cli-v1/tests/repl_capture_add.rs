@@ -91,7 +91,11 @@ fn protected_ref_owner_id(directory: &std::path::Path) -> [u8; 16] {
         .strip_prefix("refs/orna/pins/")
         .and_then(|reference| reference.split('/').next())
         .expect("captured row retains an owner-scoped protected-content ref");
-    assert_eq!(owner_hex.len(), 32, "owner ID is a 16-byte hexadecimal value");
+    assert_eq!(
+        owner_hex.len(),
+        32,
+        "owner ID is a 16-byte hexadecimal value"
+    );
     let mut owner_id = [0; 16];
     for (index, pair) in owner_hex.as_bytes().chunks_exact(2).enumerate() {
         owner_id[index] = u8::from_str_radix(
@@ -164,7 +168,12 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     );
     let output = run_repl(root, &input);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{:?}",
+        output.stderr
+    );
     assert!(
         !stdout.contains("ORNA-REPL-EFFECT"),
         "trusted REPL rejected the captured insert: {stdout}"
@@ -174,7 +183,11 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
         "trusted REPL could not evaluate the captured insert: {stdout}"
     );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
-    assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
+    assert_eq!(
+        git_head(root),
+        head_before,
+        "REPL must not publish a Git commit"
+    );
     let key_json = "\"london\"";
     let typed_key = stdout.find(key_json).and_then(|start| {
         let end = start + key_json.len();
@@ -206,7 +219,11 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let Raw::Array(fields) = row.raw() else {
         panic!("stored Music row is not an array");
     };
-    assert_eq!(fields.len(), 2, "the primary key is stored in the index, not the row array");
+    assert_eq!(
+        fields.len(),
+        2,
+        "the primary key is stored in the index, not the row array"
+    );
     let mut title_field_count = 0;
     let mut blob_field_count = 0;
     let mut blob_field = None;
@@ -219,21 +236,20 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
                 "stored Music title matches the inserted row"
             );
         } else {
-            let value = ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
-                .expect("construct stored Music row content field");
+            let value =
+                ContextValue::new_in_context(&value_context, ValueFormat::Rov3, field.clone())
+                    .expect("construct stored Music row content field");
             value.blob().expect("stored Music content field is a Blob");
             blob_field_count += 1;
             blob_field = Some(field.clone());
         }
     }
     assert_eq!(
-        title_field_count,
-        1,
+        title_field_count, 1,
         "stored Music row has exactly one Text title field"
     );
     assert_eq!(
-        blob_field_count,
-        1,
+        blob_field_count, 1,
         "stored Music row has exactly one Blob content field"
     );
     let encoded_blob = ContextValue::new_in_context(
@@ -244,12 +260,9 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     .expect("construct content field value")
     .encode()
     .expect("encode content field value");
-    let blob_value = ContextValue::decode_in_context(
-        &encoded_blob,
-        ValueFormat::Rov3,
-        &value_context,
-    )
-    .expect("decode the stored Blob reference");
+    let blob_value =
+        ContextValue::decode_in_context(&encoded_blob, ValueFormat::Rov3, &value_context)
+            .expect("decode the stored Blob reference");
     let blob = blob_value.blob().expect("content field is a Blob");
     let descriptor_oid = blob
         .descriptor_oid()
@@ -258,14 +271,13 @@ async fn repl_capture_annotate_and_add_commit_one_durable_blob_row_without_git_c
     let reference = value_context
         .reference(blob.content_identity(), descriptor_oid)
         .expect("bind the descriptor to the owner-scoped repository resolver");
-    let blob = Blob::from_reference_with_annotation(
-        reference,
-        blob.media_type(),
-        blob.suffix(),
-    )
-    .expect("bind stored Blob metadata to the repository resolver");
+    let blob = Blob::from_reference_with_annotation(reference, blob.media_type(), blob.suffix())
+        .expect("bind stored Blob metadata to the repository resolver");
     assert_eq!(blob.media_type(), "audio/mpeg");
-    assert_eq!(blob.read_to_end().expect("read protected captured bytes"), payload);
+    assert_eq!(
+        blob.read_to_end().expect("read protected captured bytes"),
+        payload
+    );
 }
 
 #[tokio::test]
@@ -273,8 +285,7 @@ async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit()
     let (directory, repository, relation_id) = format3_repository(MUSIC_SOURCE);
     let root = directory.path();
     let key = "x".repeat(201);
-    std::fs::write(root.join("recording.mp3"), b"long key capture")
-        .expect("write synthetic media");
+    std::fs::write(root.join("recording.mp3"), b"long key capture").expect("write synthetic media");
     let head_before = git_head(root);
     let input = format!(
         "let raw = sys.blob.capture_file({root:?}, \"recording.mp3\", 64);\nlet audio = sys.blob.annotate(raw, \"audio/mpeg\");\nmain.add({key:?}, \"Long-key recording\", audio);",
@@ -283,7 +294,12 @@ async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit()
 
     let output = run_repl(root, &input);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{:?}",
+        output.stderr
+    );
     assert!(
         !stdout.contains("ORNA-REPL-EFFECT"),
         "trusted REPL rejected long key: {stdout}"
@@ -293,7 +309,11 @@ async fn repl_capture_add_accepts_a_key_beyond_the_legacy_path_component_limit()
         "trusted REPL could not evaluate the captured long-key row: {stdout}"
     );
     assert!(output.stderr.is_empty(), "{:?}", output.stderr);
-    assert_eq!(git_head(root), head_before, "REPL must not publish a Git commit");
+    assert_eq!(
+        git_head(root),
+        head_before,
+        "REPL must not publish a Git commit"
+    );
 
     let (identity, initial_digest) = cli_runtime_identity(&repository);
     let state = RuntimeState::open(&repository, identity, initial_digest)
@@ -333,7 +353,10 @@ fn repl_capture_candidate_is_released_when_the_session_exits() {
     assert_eq!(child.wait().expect("wait for REPL exit").code(), Some(0));
     let mut trailing = Vec::new();
     stdout.read_to_end(&mut trailing).expect("read REPL output");
-    assert!(scratch_refs(root).is_empty(), "session drop releases unconsumed capture");
+    assert!(
+        scratch_refs(root).is_empty(),
+        "session drop releases unconsumed capture"
+    );
 }
 
 #[test]
@@ -353,7 +376,9 @@ fn repl_snapshot_replacement_releases_unconsumed_capture() {
     assert!(!String::from_utf8_lossy(&captured).contains("ORNA-"));
     assert_eq!(scratch_refs(root).len(), 1, "capture holds one scratch ref");
 
-    stdin.write_all(b":at HEAD\n").expect("select committed snapshot");
+    stdin
+        .write_all(b":at HEAD\n")
+        .expect("select committed snapshot");
     stdin.flush().expect("flush snapshot command");
     let replaced = read_prompt(&mut stdout);
     assert!(
@@ -389,7 +414,9 @@ async fn repl_capture_candidate_is_reclaimed_after_crash_and_runtime_reopen() {
     assert!(!String::from_utf8_lossy(&captured).contains("ORNA-"));
     assert_eq!(scratch_refs(root).len(), 1, "capture holds one scratch ref");
 
-    child.kill().expect("terminate the live REPL as a crashed owner");
+    child
+        .kill()
+        .expect("terminate the live REPL as a crashed owner");
     assert!(!child.wait().expect("reap crashed REPL").success());
     drop(stdin);
     drop(stdout);
@@ -420,7 +447,9 @@ fn repl_user_main_module_wins_over_the_root_main_alias() {
     .expect("root and user main modules are admitted");
 
     assert!(session.submit("main.add(1)").is_err());
-    session.submit("use main;").expect("user main module is importable");
+    session
+        .submit("use main;")
+        .expect("user main module is importable");
     let value = session
         .submit("main.add(1)")
         .expect("user main function is callable")
@@ -463,8 +492,16 @@ fn repl_counts_an_uncommitted_insert_in_the_cwd() {
     let input = "main.Contact.insert({ id: \"alice\", name: \"Alice\" })\nmain.Contact | count()";
     let output = run_repl(root, input);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
-    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "insert rejected: {stdout}");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{:?}",
+        output.stderr
+    );
+    assert!(
+        !stdout.contains("ORNA-REPL-EFFECT"),
+        "insert rejected: {stdout}"
+    );
     assert!(
         stdout.contains("> 1 : Int"),
         "CWD must count the uncommitted row (1): {stdout}"
@@ -487,8 +524,16 @@ fn repl_counts_uncommitted_blob_bearing_inserts_in_the_cwd() {
     );
     let output = run_repl(root, &input);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(output.status.code(), Some(0), "{stdout}\n{:?}", output.stderr);
-    assert!(!stdout.contains("ORNA-REPL-EFFECT"), "insert rejected: {stdout}");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{stdout}\n{:?}",
+        output.stderr
+    );
+    assert!(
+        !stdout.contains("ORNA-REPL-EFFECT"),
+        "insert rejected: {stdout}"
+    );
     assert!(
         stdout.contains("> 2 : Int"),
         "CWD must count both uncommitted Blob rows (2): {stdout}"

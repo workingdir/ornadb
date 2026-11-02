@@ -16,7 +16,6 @@ const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expres
 type ReplSubmissionHandler<'a> =
     dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure> + 'a;
 
-
 #[derive(Clone, Copy)]
 pub(super) enum AnsiColor {
     Green,
@@ -319,7 +318,11 @@ fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
     let pad = " ".repeat(gutter.len());
     let withheld = match string_literal_ranges(source) {
         None => Some("<source withheld: submission does not tokenize>"),
-        Some(ranges) if ranges.iter().any(|range| range.start < line_end && range.end > line_start) => {
+        Some(ranges)
+            if ranges
+                .iter()
+                .any(|range| range.start < line_end && range.end > line_start) =>
+        {
             Some("<source withheld: line contains a string literal>")
         }
         Some(_) => None,
@@ -397,20 +400,10 @@ fn write_repl_value<W: Write>(
     let (result, ty) = rendered
         .rsplit_once(" : ")
         .unwrap_or((rendered.as_str(), ""));
-    write_styled(
-        writer,
-        AnsiColor::Green,
-        result.as_bytes(),
-        color_enabled,
-    )?;
+    write_styled(writer, AnsiColor::Green, result.as_bytes(), color_enabled)?;
     if !ty.is_empty() {
         writer.write_all(b" : ")?;
-        write_styled(
-            writer,
-            AnsiColor::Dim,
-            ty.as_bytes(),
-            color_enabled,
-        )?;
+        write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)?;
     }
     writer.write_all(b"\n")
 }
@@ -568,12 +561,7 @@ fn run_loop<
 ) -> io::Result<()> {
     loop {
         pump_watch_frames(&mut watch, writer, color_enabled)?;
-        write_styled(
-            writer,
-            AnsiColor::Dim,
-            b"> ",
-            color_enabled,
-        )?;
+        write_styled(writer, AnsiColor::Dim, b"> ", color_enabled)?;
         writer.flush()?;
         match read_submission(reader)? {
             ReadSubmission::Eof => {
@@ -594,12 +582,9 @@ fn run_loop<
                 }
                 if let Some(help) = parse_help_command(command) {
                     match help {
-                        Ok(text) => write_styled(
-                            writer,
-                            AnsiColor::Cyan,
-                            text.as_bytes(),
-                            color_enabled,
-                        )?,
+                        Ok(text) => {
+                            write_styled(writer, AnsiColor::Cyan, text.as_bytes(), color_enabled)?;
+                        }
                         Err(()) => {
                             write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
                         }
@@ -631,7 +616,9 @@ fn run_loop<
                     match result {
                         Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
                         Ok(None) => {}
-                        Err(failure) => write_repl_failure(writer, &failure, &source, color_enabled)?,
+                        Err(failure) => {
+                            write_repl_failure(writer, &failure, &source, color_enabled)?;
+                        }
                     }
                 }
             }
@@ -701,12 +688,7 @@ fn accept_frame<W: Write>(
                     color_enabled,
                 )?;
                 writer.write_all(b" (rev ")?;
-                write_styled_display(
-                    writer,
-                    AnsiColor::Dim,
-                    published.revision(),
-                    color_enabled,
-                )?;
+                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
                 writer.write_all(b")\n")?;
             }
         }
@@ -719,12 +701,7 @@ fn accept_frame<W: Write>(
                     color_enabled,
                 )?;
                 writer.write_all(b" (rev ")?;
-                write_styled_display(
-                    writer,
-                    AnsiColor::Dim,
-                    published.revision(),
-                    color_enabled,
-                )?;
+                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
                 writer.write_all(b")\n")?;
             }
         }
@@ -740,7 +717,6 @@ fn accept_frame<W: Write>(
     }
     Ok(())
 }
-
 
 #[allow(clippy::needless_pass_by_value)]
 /// Drains every immediately available frame; `Ok(None)` keeps the REPL
@@ -801,7 +777,6 @@ fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
     }
     Ok(())
 }
-
 
 fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
     let mut words = command.split_ascii_whitespace();
@@ -1055,10 +1030,7 @@ mod tests {
         let raw = Raw::Map(vec![
             (
                 Raw::Text("credential".into()),
-                Raw::Array(vec![Raw::Tag(
-                    0,
-                    Box::new(Raw::Text(fixture.to_owned())),
-                )]),
+                Raw::Array(vec![Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned())))]),
             ),
             (
                 Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned()))),
@@ -1144,7 +1116,10 @@ mod tests {
                 (Raw::Int(1.into()), Raw::Int(3.into())),
                 (Raw::Int(2.into()), Raw::Text(fixture.into())),
                 (Raw::Int(3.into()), Raw::Array(vec![])),
-                (Raw::Int(4.into()), Raw::Array(vec![Raw::Text(fixture.into())])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
                 (Raw::Int(5.into()), Raw::Array(vec![])),
                 (Raw::Int(6.into()), Raw::Bool(false)),
             ]),
@@ -1191,9 +1166,11 @@ mod tests {
         let trace = value.redacted_for_trace().unwrap().encode().unwrap();
         assert!(!debug.contains(fixture), "{debug}");
         assert!(!display.contains(fixture), "{display}");
-        assert!(!trace
-            .windows(fixture.len())
-            .any(|part| part == fixture.as_bytes()));
+        assert!(
+            !trace
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
     }
 
     #[test]
@@ -1235,7 +1212,9 @@ mod tests {
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         assert_eq!(
             String::from_utf8(output).expect("UTF-8"),
-            format!("> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> ")
+            format!(
+                "> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> "
+            )
         );
     }
 
@@ -1369,7 +1348,10 @@ mod tests {
         let mut session = AdmittedReplSession::new(Limits::default());
         run(&mut input, &mut output, &mut session).expect("REPL runs");
         let output = String::from_utf8(output).expect("UTF-8");
-        assert!(output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: "), "{output}");
+        assert!(
+            output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: "),
+            "{output}"
+        );
         assert!(output.contains("\nhelp: "), "{output}");
         assert!(output.ends_with("> 2 : Int\n> "), "{output}");
     }
@@ -1388,7 +1370,10 @@ mod tests {
             .expect("status binding prints its redacted payload");
         assert!(!status_payload.contains("private"), "{output}");
         assert!(status_payload.contains("\"redacted\": true"), "{output}");
-        assert!(output.ends_with("> 42 : Int\n> null : Null\n> "), "{output}");
+        assert!(
+            output.ends_with("> 42 : Int\n> null : Null\n> "),
+            "{output}"
+        );
     }
 
     #[test]
@@ -1466,12 +1451,17 @@ mod tests {
         let text = render_repl_failure(&failure, "he\n");
         let lines: Vec<&str> = text.lines().collect();
 
-        assert_eq!(lines[0], "error[ORNA-S012-UNRESOLVED]: name `he` cannot be resolved");
+        assert_eq!(
+            lines[0],
+            "error[ORNA-S012-UNRESOLVED]: name `he` cannot be resolved"
+        );
         assert!(lines.contains(&"  --> line 1, column 1"), "{text}");
         assert!(lines.contains(&"1 | he"), "{text}");
         assert!(lines.contains(&"  | ^^"), "{text}");
         assert!(
-            lines.iter().any(|line| line.starts_with("help: declare `he` before using it")),
+            lines
+                .iter()
+                .any(|line| line.starts_with("help: declare `he` before using it")),
             "{text}"
         );
     }
@@ -1488,7 +1478,10 @@ mod tests {
         let text = render_repl_failure(&failure, source);
 
         assert!(text.contains("  --> line 1, column 1"), "{text}");
-        assert!(text.contains("<source withheld: line contains a string literal>"), "{text}");
+        assert!(
+            text.contains("<source withheld: line contains a string literal>"),
+            "{text}"
+        );
         assert!(!text.contains("private"), "{text}");
     }
 
@@ -1505,7 +1498,10 @@ mod tests {
         let text = render_repl_failure(&failure, source);
 
         assert!(text.contains("  --> line 2, column 1"), "{text}");
-        assert!(text.contains("<source withheld: line contains a string literal>"), "{text}");
+        assert!(
+            text.contains("<source withheld: line contains a string literal>"),
+            "{text}"
+        );
         assert!(!text.contains("secret"), "{text}");
         assert!(!text.contains("middle"), "{text}");
     }

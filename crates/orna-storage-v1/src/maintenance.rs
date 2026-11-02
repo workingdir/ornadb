@@ -123,7 +123,10 @@ impl CompactConsolidationPlan {
                 .map_err(|_| CompactConsolidationError::InvalidOutputRow)?;
             let value = CanonicalValue::decode(&value_bytes)
                 .map_err(|_| CompactConsolidationError::InvalidOutputRow)?;
-            if key.encode().map_err(|_| CompactConsolidationError::InvalidOutputRow)? != key_bytes
+            if key
+                .encode()
+                .map_err(|_| CompactConsolidationError::InvalidOutputRow)?
+                != key_bytes
                 || value
                     .encode()
                     .map_err(|_| CompactConsolidationError::InvalidOutputRow)?
@@ -194,9 +197,7 @@ pub fn plan_compact_consolidation(
     base: &CompactBaseState,
     estimated_output_bytes: u64,
 ) -> Result<CompactConsolidationPlan, CompactConsolidationError> {
-    if manifest.table().as_bytes() != &profile.table_id()
-        || base.table_id() != profile.table_id()
-    {
+    if manifest.table().as_bytes() != &profile.table_id() || base.table_id() != profile.table_id() {
         return Err(CompactConsolidationError::WrongTable);
     }
     if manifest.schema() != profile.schema_fingerprint()
@@ -219,7 +220,10 @@ pub fn plan_compact_consolidation(
         input_compressed_bytes = input_compressed_bytes
             .checked_add(entry.compressed_bytes())
             .ok_or(CompactConsolidationError::SizeOverflow)?;
-        if matches!(entry.role(), CompactSegmentRole::Replacement | CompactSegmentRole::Deletion) {
+        if matches!(
+            entry.role(),
+            CompactSegmentRole::Replacement | CompactSegmentRole::Deletion
+        ) {
             overlay_segments = overlay_segments
                 .checked_add(1)
                 .ok_or(CompactConsolidationError::SizeOverflow)?;
@@ -342,8 +346,7 @@ mod tests {
     use orna_foundation_v1::OvbRaw;
 
     const TABLE: Uuid = Uuid::from_u128(1);
-    const KEY_FIELD: Uuid =
-        Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
+    const KEY_FIELD: Uuid = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0001);
 
     fn profile() -> CompactOvbProfile {
         CompactOvbProfile::new(

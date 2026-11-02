@@ -89,8 +89,9 @@ pub fn build_format3_store_relations(
                     error,
                 })?;
             table_names.insert(*table.table_object_id(), name.clone());
-            let relation = StagedRelation::new(*table.table_object_id(), table.descriptor().clone())
-                .with_introductions(project.constant_default_stored_values(&table));
+            let relation =
+                StagedRelation::new(*table.table_object_id(), table.descriptor().clone())
+                    .with_introductions(project.constant_default_stored_values(&table));
             relations.push(if admission.automatic_key {
                 relation.with_automatic_key()
             } else {

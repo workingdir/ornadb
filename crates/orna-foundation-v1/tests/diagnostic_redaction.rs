@@ -52,7 +52,10 @@ fn admitted_root_message_does_not_disclose_notes_or_nested_causes() {
             .windows(message.len())
             .any(|window| window == message.as_bytes())
     );
-    assert_eq!(Diagnostic::decode_ovb(&encoded).unwrap().message(), "<redacted>");
+    assert_eq!(
+        Diagnostic::decode_ovb(&encoded).unwrap().message(),
+        "<redacted>"
+    );
     assert_redacted_boundaries(redacted, &message);
 }
 
@@ -143,10 +146,7 @@ fn composed_json_and_codec_projections_redact_fixture_tails() {
         composed_json["outer"]["admitted"]["message"],
         "operation denied"
     );
-    assert_eq!(
-        composed_json["outer"]["admitted"]["notes"][0],
-        "<redacted>"
-    );
+    assert_eq!(composed_json["outer"]["admitted"]["notes"][0], "<redacted>");
 
     let codec_diagnostic = Diagnostic::new(
         SafeText::new("ORNA-E-CODEC").unwrap(),
@@ -397,14 +397,8 @@ fn clone_from_replaces_diagnostic_trust_with_source_state() {
         "diagnostics": [admitted_destination.clone(), revoked_destination.clone()]
     });
     let json = serde_json::to_vec(&envelope).unwrap();
-    assert_eq!(
-        envelope["diagnostics"][0]["message"],
-        "<redacted>"
-    );
-    assert_eq!(
-        envelope["diagnostics"][1]["message"],
-        fixture
-    );
+    assert_eq!(envelope["diagnostics"][0]["message"], "<redacted>");
+    assert_eq!(envelope["diagnostics"][1]["message"], fixture);
     assert_eq!(
         json.windows(fixture_credential.len())
             .filter(|window| *window == fixture_credential.as_bytes())
@@ -685,10 +679,16 @@ fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
     assert_eq!(growing_projection["causes"][0]["message"], "<redacted>");
     assert_eq!(growing_projection["causes"][0]["notes"][0], "<redacted>");
     assert_eq!(
-        growing_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        growing_projection["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         2
     );
-    for leaf in growing_projection["causes"][0]["causes"].as_array().unwrap() {
+    for leaf in growing_projection["causes"][0]["causes"]
+        .as_array()
+        .unwrap()
+    {
         assert_eq!(leaf["message"], "<redacted>");
         assert_eq!(leaf["notes"][0], "<redacted>");
     }
@@ -742,11 +742,17 @@ fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
     shrinking_destination.clone_from(&shrinking_source);
     let shrinking_json = serde_json::to_vec(&shrinking_destination).unwrap();
     let shrinking_projection = serde_json::to_value(&shrinking_destination).unwrap();
-    assert_eq!(shrinking_projection["message"], "admitted nested shrink root");
+    assert_eq!(
+        shrinking_projection["message"],
+        "admitted nested shrink root"
+    );
     assert_eq!(shrinking_projection["causes"].as_array().unwrap().len(), 1);
     assert_eq!(shrinking_projection["causes"][0]["message"], "<redacted>");
     assert_eq!(
-        shrinking_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        shrinking_projection["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         0
     );
     assert!(
@@ -765,7 +771,10 @@ fn clone_from_nested_cause_vectors_resize_without_secret_tails() {
     assert_eq!(shrinking_decoded["message"], "<redacted>");
     assert_eq!(shrinking_decoded["causes"][0]["message"], "<redacted>");
     assert_eq!(
-        shrinking_decoded["causes"][0]["causes"].as_array().unwrap().len(),
+        shrinking_decoded["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         0
     );
 }
@@ -893,8 +902,8 @@ fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
 
     destination.clone_from(&source);
     assert_eq!(destination, source);
-    let readmitted = destination
-        .redacted_with_message(SafeText::new("new root admission").unwrap());
+    let readmitted =
+        destination.redacted_with_message(SafeText::new("new root admission").unwrap());
 
     let json = serde_json::to_vec(&readmitted).unwrap();
     let projection = serde_json::to_value(&readmitted).unwrap();
@@ -902,7 +911,10 @@ fn root_readmission_after_clone_from_does_not_regrant_nested_slots() {
     assert_eq!(projection["notes"][0], "<redacted>");
     assert_eq!(projection["causes"][0]["message"], "<redacted>");
     assert_eq!(projection["causes"][0]["notes"][0], "<redacted>");
-    assert_eq!(projection["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        projection["causes"][0]["causes"].as_array().unwrap().len(),
+        2
+    );
     for cause in projection["causes"][0]["causes"].as_array().unwrap() {
         assert_eq!(cause["message"], "<redacted>");
         assert_eq!(cause["notes"][0], "<redacted>");
@@ -1018,7 +1030,10 @@ fn post_clone_admission_stays_local_through_nested_cause_composition() {
     let projection = serde_json::to_value(&composed).unwrap();
     assert_eq!(projection["message"], "outer local admission");
     assert_eq!(projection["causes"][0]["message"], "<redacted>");
-    assert_eq!(projection["causes"][0]["causes"][0]["message"], "<redacted>");
+    assert_eq!(
+        projection["causes"][0]["causes"][0]["message"],
+        "<redacted>"
+    );
     assert_eq!(
         projection["causes"][0]["causes"][0]["causes"][0]["message"],
         "<redacted>"
@@ -1085,8 +1100,8 @@ fn clone_from_readmission_keeps_root_sibling_when_clone_is_a_cause() {
     destination.clone_from(&source);
     assert_eq!(destination, source);
 
-    let post_clone = destination
-        .redacted_with_message(SafeText::new("post-clone sibling disclosure").unwrap());
+    let post_clone =
+        destination.redacted_with_message(SafeText::new("post-clone sibling disclosure").unwrap());
     let standalone_sibling = post_clone.clone();
     let cause_sibling = post_clone;
     let composed = Diagnostic::new(
@@ -1109,14 +1124,8 @@ fn clone_from_readmission_keeps_root_sibling_when_clone_is_a_cause() {
         envelope["standalone"]["message"],
         "post-clone sibling disclosure"
     );
-    assert_eq!(
-        envelope["composed"]["message"],
-        "outer local disclosure"
-    );
-    assert_eq!(
-        envelope["composed"]["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(envelope["composed"]["message"], "outer local disclosure");
+    assert_eq!(envelope["composed"]["causes"][0]["message"], "<redacted>");
     assert_eq!(
         json.windows(b"post-clone sibling disclosure".len())
             .filter(|window| *window == b"post-clone sibling disclosure")
@@ -1183,8 +1192,8 @@ fn clone_from_replacement_revokes_only_that_post_clone_sibling() {
     destination.clone_from(&source);
     assert_eq!(destination, source);
 
-    let survivor = destination
-        .redacted_with_message(SafeText::new("post-clone sibling admission").unwrap());
+    let survivor =
+        destination.redacted_with_message(SafeText::new("post-clone sibling admission").unwrap());
     let mut replaced = survivor.clone();
     let untrusted_replacement = Diagnostic::new(
         SafeText::new("ORNA-E-REPLACEMENT-UNTRUSTED").unwrap(),
@@ -1330,10 +1339,7 @@ fn clone_from_grant_and_revoke_stay_local_at_cause_boundaries() {
     );
     let granted_projection = serde_json::to_value(&granted_destination).unwrap();
     assert_eq!(granted_projection["message"], "source local admission");
-    assert_eq!(
-        granted_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(granted_projection["causes"][0]["message"], "<redacted>");
     let revoked_projection = serde_json::to_value(&revoked_destination).unwrap();
     assert_eq!(revoked_projection["message"], "<redacted>");
 
@@ -1419,9 +1425,8 @@ fn sequential_clone_from_replacements_keep_admission_snapshots_local() {
             diagnostic("ORNA-E-REPLACEMENT-SECOND-CAUSE")
                 .redacted_with_message(SafeText::new("second nested admission").unwrap()),
         );
-    let untrusted_source = diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED").with_cause(
-        diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED-CAUSE"),
-    );
+    let untrusted_source = diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED")
+        .with_cause(diagnostic("ORNA-E-REPLACEMENT-UNTRUSTED-CAUSE"));
 
     let mut receiver = untrusted_source.clone();
     receiver.clone_from(&first_source);
@@ -1452,23 +1457,17 @@ fn sequential_clone_from_replacements_keep_admission_snapshots_local() {
         assert_eq!(cause["message"], "<redacted>");
         assert_eq!(cause["notes"][0], "<redacted>");
     }
-    assert_eq!(
-        outer_causes[0]["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(outer_causes[0]["causes"][0]["message"], "<redacted>");
     let first_projection = serde_json::to_value(&first_snapshot).unwrap();
     assert_eq!(first_projection["message"], "first replacement admission");
-    assert_eq!(
-        first_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(first_projection["causes"][0]["message"], "<redacted>");
     let second_projection = serde_json::to_value(&second_snapshot).unwrap();
     assert_eq!(second_projection["message"], "second replacement admission");
+    assert_eq!(second_projection["causes"][0]["message"], "<redacted>");
     assert_eq!(
-        second_projection["causes"][0]["message"],
+        serde_json::to_value(&receiver).unwrap()["message"],
         "<redacted>"
     );
-    assert_eq!(serde_json::to_value(&receiver).unwrap()["message"], "<redacted>");
 
     let envelope = serde_json::json!({
         "outer": outer,
@@ -1617,19 +1616,13 @@ fn forked_clone_from_replacements_do_not_mutate_snapshot_siblings() {
         ancestor_projection["message"],
         "ancestor snapshot admission"
     );
-    assert_eq!(
-        ancestor_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(ancestor_projection["causes"][0]["message"], "<redacted>");
     let granted_projection = serde_json::to_value(&granted_branch).unwrap();
     assert_eq!(
         granted_projection["message"],
         "branch replacement admission"
     );
-    assert_eq!(
-        granted_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(granted_projection["causes"][0]["message"], "<redacted>");
     assert_eq!(
         serde_json::to_value(&revoked_branch).unwrap()["message"],
         "<redacted>"
@@ -1784,19 +1777,13 @@ fn parent_replacement_preserves_forked_nested_cause_snapshots() {
         old_child_projection["message"],
         "old child snapshot admission"
     );
-    assert_eq!(
-        old_child_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(old_child_projection["causes"][0]["message"], "<redacted>");
     let new_child_projection = serde_json::to_value(&new_child_snapshot).unwrap();
     assert_eq!(
         new_child_projection["message"],
         "new child snapshot admission"
     );
-    assert_eq!(
-        new_child_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(new_child_projection["causes"][0]["message"], "<redacted>");
 
     let envelope = serde_json::json!({
         "outer": outer,
@@ -1897,10 +1884,8 @@ fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
         .unwrap()
         .with_note(SafeText::new(fixture).unwrap())
     };
-    let old_leaf =
-        diagnostic("ORNA-E-NESTED-REPLACE-OLD-LEAF").redacted_with_message(
-            SafeText::new("old leaf snapshot admission").unwrap(),
-        );
+    let old_leaf = diagnostic("ORNA-E-NESTED-REPLACE-OLD-LEAF")
+        .redacted_with_message(SafeText::new("old leaf snapshot admission").unwrap());
     let old_leaf_snapshot = old_leaf.clone();
     let old_child = diagnostic("ORNA-E-NESTED-REPLACE-OLD-CHILD")
         .redacted_with_message(SafeText::new("old child snapshot admission").unwrap())
@@ -1912,10 +1897,8 @@ fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
     let mut parent_destination = old_parent.clone();
     let old_parent_snapshot = parent_destination.clone();
 
-    let new_leaf =
-        diagnostic("ORNA-E-NESTED-REPLACE-NEW-LEAF").redacted_with_message(
-            SafeText::new("new leaf snapshot admission").unwrap(),
-        );
+    let new_leaf = diagnostic("ORNA-E-NESTED-REPLACE-NEW-LEAF")
+        .redacted_with_message(SafeText::new("new leaf snapshot admission").unwrap());
     let new_leaf_snapshot = new_leaf.clone();
     let new_child = diagnostic("ORNA-E-NESTED-REPLACE-NEW-CHILD")
         .redacted_with_message(SafeText::new("new child snapshot admission").unwrap())
@@ -1955,10 +1938,7 @@ fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
     }
     for parent in &causes[..2] {
         assert_eq!(parent["causes"][0]["message"], "<redacted>");
-        assert_eq!(
-            parent["causes"][0]["causes"][0]["message"],
-            "<redacted>"
-        );
+        assert_eq!(parent["causes"][0]["causes"][0]["message"], "<redacted>");
     }
     for child in &causes[2..4] {
         assert_eq!(child["causes"][0]["message"], "<redacted>");
@@ -1969,19 +1949,13 @@ fn nested_replacement_preserves_parent_child_and_leaf_snapshots() {
         old_parent_projection["message"],
         "old parent snapshot admission"
     );
-    assert_eq!(
-        old_parent_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(old_parent_projection["causes"][0]["message"], "<redacted>");
     let new_parent_projection = serde_json::to_value(&parent_destination).unwrap();
     assert_eq!(
         new_parent_projection["message"],
         "new parent snapshot admission"
     );
-    assert_eq!(
-        new_parent_projection["causes"][0]["message"],
-        "<redacted>"
-    );
+    assert_eq!(new_parent_projection["causes"][0]["message"], "<redacted>");
     let old_child_projection = serde_json::to_value(&old_child_snapshot).unwrap();
     assert_eq!(
         old_child_projection["message"],
@@ -2142,11 +2116,8 @@ fn nested_vector_shrink_and_growth_preserve_held_tail_snapshots() {
         "ORNA-E-TAIL-SHRINK-KEEP-LEAF",
         "shrink kept leaf admission",
     );
-    let shrink_parent = admitted(
-        "ORNA-E-TAIL-SHRINK-PARENT",
-        "shrink parent admission",
-    )
-    .with_cause(shrink_keep);
+    let shrink_parent =
+        admitted("ORNA-E-TAIL-SHRINK-PARENT", "shrink parent admission").with_cause(shrink_keep);
     let shrink_parent_snapshot = shrink_parent.clone();
     let mut destination = old_parent;
     destination.clone_from(&shrink_parent);
@@ -2226,7 +2197,10 @@ fn nested_vector_shrink_and_growth_preserve_held_tail_snapshots() {
             assert_eq!(branch["message"], "<redacted>");
         }
         let wire = root.encode_ovb().unwrap();
-        assert!(wire.windows(message.len()).any(|window| window == message.as_bytes()));
+        assert!(
+            wire.windows(message.len())
+                .any(|window| window == message.as_bytes())
+        );
         assert!(
             !wire
                 .windows(fixture.len())
@@ -2328,11 +2302,8 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
 
     // Composition captures an owned cause tree. Later resizing the source
     // destination must not reshape or revoke the cause already attached here.
-    let outer = admitted(
-        "ORNA-E-COMPOSED-SNAPSHOT-OUTER",
-        "outer snapshot admission",
-    )
-    .with_cause(destination.clone());
+    let outer = admitted("ORNA-E-COMPOSED-SNAPSHOT-OUTER", "outer snapshot admission")
+        .with_cause(destination.clone());
 
     let shrink_branch = branch(
         "ORNA-E-COMPOSED-SNAPSHOT-SHRINK",
@@ -2383,7 +2354,10 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
     }
     let destination_projection = serde_json::to_value(&destination).unwrap();
     assert_eq!(destination_projection["message"], "grown parent admission");
-    assert_eq!(destination_projection["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        destination_projection["causes"].as_array().unwrap().len(),
+        2
+    );
     for cause in destination_projection["causes"].as_array().unwrap() {
         assert_eq!(cause["message"], "<redacted>");
     }
@@ -2403,7 +2377,10 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
         let projection = serde_json::to_value(root).unwrap();
         assert_eq!(projection["message"], message);
         let wire = root.encode_ovb().unwrap();
-        assert!(wire.windows(message.len()).any(|window| window == message.as_bytes()));
+        assert!(
+            wire.windows(message.len())
+                .any(|window| window == message.as_bytes())
+        );
         assert!(
             !wire
                 .windows(fixture.len())
@@ -2468,7 +2445,10 @@ fn composed_cause_snapshot_keeps_original_tree_after_source_resizes() {
     assert_eq!(decoded_outer["message"], "<redacted>");
     assert_eq!(decoded_outer["causes"][0]["message"], "<redacted>");
     assert_eq!(
-        decoded_outer["causes"][0]["causes"].as_array().unwrap().len(),
+        decoded_outer["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         3
     );
     assert_eq!(
@@ -2499,13 +2479,16 @@ fn pre_resize_composed_projection_is_stable_after_source_mutation() {
 
     // Capture both public projections before mutating their source. The cause
     // edge owns a snapshot and boundary serialization must remain non-mutating.
-    let outer = admitted("ORNA-E-PRESIZE-OUTER", "outer root admission")
-        .with_cause(destination.clone());
+    let outer =
+        admitted("ORNA-E-PRESIZE-OUTER", "outer root admission").with_cause(destination.clone());
     let before_projection = serde_json::to_value(&outer).unwrap();
     assert_eq!(before_projection["message"], "outer root admission");
     assert_eq!(before_projection["causes"][0]["message"], "<redacted>");
     assert_eq!(
-        before_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        before_projection["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         3
     );
     let before_json = serde_json::to_vec(&outer).unwrap();
@@ -2540,7 +2523,10 @@ fn pre_resize_composed_projection_is_stable_after_source_mutation() {
 
     let destination_projection = serde_json::to_value(&destination).unwrap();
     assert_eq!(destination_projection["message"], "grown root admission");
-    assert_eq!(destination_projection["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        destination_projection["causes"].as_array().unwrap().len(),
+        2
+    );
     for cause in destination_projection["causes"].as_array().unwrap() {
         assert_eq!(cause["message"], "<redacted>");
     }
@@ -2609,9 +2595,15 @@ fn pre_resize_snapshot_keeps_its_slot_when_later_sizes_are_composed() {
         .with_cause(branch("ORNA-E-COVER-GROWN-B", "grown branch b admission"));
     destination.clone_from(&grown);
     assert_eq!(destination, grown);
-    assert_eq!(serde_json::to_value(&before_resize).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_resize).unwrap(),
+        before_projection
+    );
     assert_eq!(before_resize.encode_ovb().unwrap(), before_wire);
-    assert_eq!(serde_json::to_value(&after_shrink).unwrap(), shrink_projection);
+    assert_eq!(
+        serde_json::to_value(&after_shrink).unwrap(),
+        shrink_projection
+    );
     assert_eq!(after_shrink.encode_ovb().unwrap(), shrink_wire);
 
     let outer = admitted("ORNA-E-COVER-OUTER", "cover outer admission")
@@ -2662,7 +2654,11 @@ fn pre_resize_snapshot_keeps_its_slot_when_later_sizes_are_composed() {
         b"grown branch b admission".as_slice(),
         b"covered leaf admission".as_slice(),
     ] {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -2676,7 +2672,11 @@ fn pre_resize_snapshot_keeps_its_slot_when_later_sizes_are_composed() {
         b"grown branch b admission".as_slice(),
         b"covered leaf admission".as_slice(),
     ] {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -2713,15 +2713,15 @@ fn nested_pre_resize_composition_survives_late_recomposition() {
 
     // Capture one composed tree before replacement, then compose that held
     // tree again later. Trust is local to each root; nesting redacts it.
-    let before_resize = admitted(
-        "ORNA-E-NESTED-COVER-EARLY",
-        "early composition admission",
-    )
-    .with_cause(source.clone());
+    let before_resize = admitted("ORNA-E-NESTED-COVER-EARLY", "early composition admission")
+        .with_cause(source.clone());
     let before_projection = serde_json::to_value(&before_resize).unwrap();
     let before_wire = before_resize.encode_ovb().unwrap();
     assert_eq!(
-        before_projection["causes"][0]["causes"].as_array().unwrap().len(),
+        before_projection["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
         3
     );
 
@@ -2729,11 +2729,20 @@ fn nested_pre_resize_composition_survives_late_recomposition() {
         .with_cause(admitted("ORNA-E-NESTED-COVER-S", "shrink cause admission"));
     source.clone_from(&shrink);
     let grown = admitted("ORNA-E-NESTED-COVER-GROWN", "grown source admission")
-        .with_cause(admitted("ORNA-E-NESTED-COVER-GA", "grown cause a admission"))
-        .with_cause(admitted("ORNA-E-NESTED-COVER-GB", "grown cause b admission"));
+        .with_cause(admitted(
+            "ORNA-E-NESTED-COVER-GA",
+            "grown cause a admission",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-NESTED-COVER-GB",
+            "grown cause b admission",
+        ));
     source.clone_from(&grown);
     assert_eq!(source, grown);
-    assert_eq!(serde_json::to_value(&before_resize).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_resize).unwrap(),
+        before_projection
+    );
     assert_eq!(before_resize.encode_ovb().unwrap(), before_wire);
 
     let later = admitted("ORNA-E-NESTED-COVER-LATE", "late composition admission")
@@ -2784,7 +2793,11 @@ fn nested_pre_resize_composition_survives_late_recomposition() {
         b"grown cause a admission".as_slice(),
         b"grown cause b admission".as_slice(),
     ] {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = later.encode_ovb().unwrap();
@@ -2796,7 +2809,11 @@ fn nested_pre_resize_composition_survives_late_recomposition() {
         b"grown source admission".as_slice(),
         b"grown cause b admission".as_slice(),
     ] {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -2828,8 +2845,8 @@ fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
         .with_cause(admitted("ORNA-E-PARENT-COVER-A", "old child a admission"))
         .with_cause(admitted("ORNA-E-PARENT-COVER-B", "old child b admission"))
         .with_cause(admitted("ORNA-E-PARENT-COVER-C", "old child c admission"));
-    let before_resize = admitted("ORNA-E-PARENT-COVER-EARLY", "early parent admission")
-        .with_cause(original);
+    let before_resize =
+        admitted("ORNA-E-PARENT-COVER-EARLY", "early parent admission").with_cause(original);
     let before_projection = serde_json::to_value(&before_resize).unwrap();
     let before_wire = before_resize.encode_ovb().unwrap();
     let mut destination = before_resize.clone();
@@ -2838,11 +2855,20 @@ fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
         .with_cause(admitted("ORNA-E-PARENT-COVER-S", "shrink child admission"));
     destination.clone_from(&shrink);
     let grown = admitted("ORNA-E-PARENT-COVER-GROWN", "grown parent admission")
-        .with_cause(admitted("ORNA-E-PARENT-COVER-GA", "grown child a admission"))
-        .with_cause(admitted("ORNA-E-PARENT-COVER-GB", "grown child b admission"));
+        .with_cause(admitted(
+            "ORNA-E-PARENT-COVER-GA",
+            "grown child a admission",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-PARENT-COVER-GB",
+            "grown child b admission",
+        ));
     destination.clone_from(&grown);
     assert_eq!(destination, grown);
-    assert_eq!(serde_json::to_value(&before_resize).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_resize).unwrap(),
+        before_projection
+    );
     assert_eq!(before_resize.encode_ovb().unwrap(), before_wire);
 
     // Replacing the composed parent must not rebind an earlier snapshot of
@@ -2895,7 +2921,11 @@ fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
         b"grown child a admission".as_slice(),
         b"grown child b admission".as_slice(),
     ] {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -2911,7 +2941,11 @@ fn pre_resize_composition_snapshot_survives_parent_vector_replacement() {
         b"grown parent admission".as_slice(),
         b"grown child b admission".as_slice(),
     ] {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -2954,8 +2988,9 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
     let before_projection = serde_json::to_value(&before_replacement).unwrap();
     let before_wire = before_replacement.encode_ovb().unwrap();
 
-    let shrink = admitted("ORNA-E-VEC-PARENT-SHRINK", "shrink parent admission")
-        .with_cause(admitted("ORNA-E-VEC-SHRINK-CHILD", "shrink child admission"));
+    let shrink = admitted("ORNA-E-VEC-PARENT-SHRINK", "shrink parent admission").with_cause(
+        admitted("ORNA-E-VEC-SHRINK-CHILD", "shrink child admission"),
+    );
     parent.clone_from(&vec![shrink]);
     let grown = admitted("ORNA-E-VEC-PARENT-GROWN", "grown parent admission")
         .with_cause(admitted("ORNA-E-VEC-GROWN-A", "grown child a admission"))
@@ -2963,7 +2998,10 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
     parent.clone_from(&vec![grown.clone()]);
 
     assert_eq!(parent[0], grown);
-    assert_eq!(serde_json::to_value(&before_replacement).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_replacement).unwrap(),
+        before_projection
+    );
     assert_eq!(before_replacement.encode_ovb().unwrap(), before_wire);
     let current_projection = serde_json::to_value(&parent[0]).unwrap();
     assert_eq!(current_projection["message"], "grown parent admission");
@@ -3013,7 +3051,11 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
             b"grown child b admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -3031,7 +3073,11 @@ fn pre_resize_parent_vector_clone_from_keeps_secret_admission_local() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -3060,11 +3106,19 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
         .redacted_with_message(SafeText::new(message).unwrap())
     };
     let original = vec![
-        admitted("ORNA-E-EMPTY-PARENT-OLD-A", "old parent a admission")
-            .with_cause(admitted("ORNA-E-EMPTY-OLD-A-CHILD", "old child a admission")),
+        admitted("ORNA-E-EMPTY-PARENT-OLD-A", "old parent a admission").with_cause(admitted(
+            "ORNA-E-EMPTY-OLD-A-CHILD",
+            "old child a admission",
+        )),
         admitted("ORNA-E-EMPTY-PARENT-OLD-B", "old parent b admission")
-            .with_cause(admitted("ORNA-E-EMPTY-OLD-B-CHILD-A", "old child b a admission"))
-            .with_cause(admitted("ORNA-E-EMPTY-OLD-B-CHILD-B", "old child b b admission")),
+            .with_cause(admitted(
+                "ORNA-E-EMPTY-OLD-B-CHILD-A",
+                "old child b a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-EMPTY-OLD-B-CHILD-B",
+                "old child b b admission",
+            )),
     ];
     let mut destination = original.clone();
     let before_empty = destination.clone();
@@ -3082,15 +3136,26 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
     assert!(destination.is_empty());
     let replacement = vec![
         admitted("ORNA-E-EMPTY-PARENT-NEW-A", "new parent a admission")
-            .with_cause(admitted("ORNA-E-EMPTY-NEW-A-CHILD-A", "new child a a admission"))
-            .with_cause(admitted("ORNA-E-EMPTY-NEW-A-CHILD-B", "new child a b admission")),
-        admitted("ORNA-E-EMPTY-PARENT-NEW-B", "new parent b admission")
-            .with_cause(admitted("ORNA-E-EMPTY-NEW-B-CHILD", "new child b admission")),
+            .with_cause(admitted(
+                "ORNA-E-EMPTY-NEW-A-CHILD-A",
+                "new child a a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-EMPTY-NEW-A-CHILD-B",
+                "new child a b admission",
+            )),
+        admitted("ORNA-E-EMPTY-PARENT-NEW-B", "new parent b admission").with_cause(admitted(
+            "ORNA-E-EMPTY-NEW-B-CHILD",
+            "new child b admission",
+        )),
     ];
     destination.clone_from(&replacement);
 
     assert_eq!(destination, replacement);
-    assert_eq!(serde_json::to_value(&before_empty).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_empty).unwrap(),
+        before_projection
+    );
     assert_eq!(
         before_empty
             .iter()
@@ -3102,7 +3167,10 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
     assert_eq!(retained_projection[0]["message"], "old parent a admission");
     assert_eq!(retained_projection[0]["causes"][0]["message"], "<redacted>");
     assert_eq!(retained_projection[1]["message"], "old parent b admission");
-    assert_eq!(retained_projection[1]["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        retained_projection[1]["causes"].as_array().unwrap().len(),
+        2
+    );
 
     let outer = admitted("ORNA-E-EMPTY-PARENT-OUTER", "outer parent admission")
         .with_cause(before_empty[0].clone())
@@ -3153,7 +3221,11 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
             b"new child b admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -3171,7 +3243,11 @@ fn pre_resize_parent_vector_empty_round_trip_keeps_snapshots_isolated() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -3207,13 +3283,23 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
         .redacted_with_message(SafeText::new(message).unwrap())
     };
     let original = vec![
-        admitted("ORNA-E-CLOSURE-OLD-A", "old parent a admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-OLD-A-CHILD", "old child a admission")),
+        admitted("ORNA-E-CLOSURE-OLD-A", "old parent a admission").with_cause(admitted(
+            "ORNA-E-CLOSURE-OLD-A-CHILD",
+            "old child a admission",
+        )),
         admitted("ORNA-E-CLOSURE-OLD-B", "old parent b admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-OLD-B-CHILD-A", "old child b a admission"))
-            .with_cause(admitted("ORNA-E-CLOSURE-OLD-B-CHILD-B", "old child b b admission")),
-        admitted("ORNA-E-CLOSURE-OLD-TAIL", "old parent tail admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-OLD-TAIL-CHILD", "old tail child admission")),
+            .with_cause(admitted(
+                "ORNA-E-CLOSURE-OLD-B-CHILD-A",
+                "old child b a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-CLOSURE-OLD-B-CHILD-B",
+                "old child b b admission",
+            )),
+        admitted("ORNA-E-CLOSURE-OLD-TAIL", "old parent tail admission").with_cause(admitted(
+            "ORNA-E-CLOSURE-OLD-TAIL-CHILD",
+            "old tail child admission",
+        )),
     ];
     let mut destination = original.clone();
     let before_resize = destination.clone();
@@ -3227,8 +3313,10 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
     // reuses the surviving root slot and appends new roots; the held snapshots
     // keep their original disclosure boundary across both transitions.
     let shrink = vec![
-        admitted("ORNA-E-CLOSURE-SHRINK", "shrink parent admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-SHRINK-CHILD", "shrink child admission")),
+        admitted("ORNA-E-CLOSURE-SHRINK", "shrink parent admission").with_cause(admitted(
+            "ORNA-E-CLOSURE-SHRINK-CHILD",
+            "shrink child admission",
+        )),
     ];
     destination.clone_from(&shrink);
     let after_shrink = destination.clone();
@@ -3240,16 +3328,27 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
 
     let grown = vec![
         admitted("ORNA-E-CLOSURE-GROWN-A", "grown parent a admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-GROWN-A-CHILD-A", "grown child a a admission"))
-            .with_cause(admitted("ORNA-E-CLOSURE-GROWN-A-CHILD-B", "grown child a b admission")),
-        admitted("ORNA-E-CLOSURE-GROWN-B", "grown parent b admission")
-            .with_cause(admitted("ORNA-E-CLOSURE-GROWN-B-CHILD", "grown child b admission")),
+            .with_cause(admitted(
+                "ORNA-E-CLOSURE-GROWN-A-CHILD-A",
+                "grown child a a admission",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-CLOSURE-GROWN-A-CHILD-B",
+                "grown child a b admission",
+            )),
+        admitted("ORNA-E-CLOSURE-GROWN-B", "grown parent b admission").with_cause(admitted(
+            "ORNA-E-CLOSURE-GROWN-B-CHILD",
+            "grown child b admission",
+        )),
         admitted("ORNA-E-CLOSURE-GROWN-TAIL", "grown parent tail admission"),
     ];
     destination.clone_from(&grown);
 
     assert_eq!(destination, grown);
-    assert_eq!(serde_json::to_value(&before_resize).unwrap(), before_projection);
+    assert_eq!(
+        serde_json::to_value(&before_resize).unwrap(),
+        before_projection
+    );
     assert_eq!(
         before_resize
             .iter()
@@ -3257,7 +3356,10 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
             .collect::<Vec<_>>(),
         before_wires
     );
-    assert_eq!(serde_json::to_value(&after_shrink).unwrap(), shrink_projection);
+    assert_eq!(
+        serde_json::to_value(&after_shrink).unwrap(),
+        shrink_projection
+    );
     assert_eq!(
         after_shrink
             .iter()
@@ -3325,7 +3427,11 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
             b"grown child b admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -3344,7 +3450,11 @@ fn pre_resize_parent_vector_nonempty_resize_keeps_closure_snapshots() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -3578,11 +3688,12 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
         .redacted_with_message(SafeText::new(message).unwrap())
     };
     let original = vec![
-        admitted("ORNA-E-REMAINDER-OLD-A", "remainder old parent a admission")
-            .with_cause(admitted(
+        admitted("ORNA-E-REMAINDER-OLD-A", "remainder old parent a admission").with_cause(
+            admitted(
                 "ORNA-E-REMAINDER-OLD-A-CHILD",
                 "remainder old child a admission",
-            )),
+            ),
+        ),
         admitted("ORNA-E-REMAINDER-OLD-B", "remainder old parent b admission")
             .with_cause(admitted(
                 "ORNA-E-REMAINDER-OLD-B-CHILD-A",
@@ -3607,11 +3718,14 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
     let captured_original = before_replacement.clone();
     let restore_original = move || captured_original.clone();
     let shrink = vec![
-        admitted("ORNA-E-REMAINDER-SHRINK", "remainder shrink parent admission")
-            .with_cause(admitted(
-                "ORNA-E-REMAINDER-SHRINK-CHILD",
-                "remainder shrink child admission",
-            )),
+        admitted(
+            "ORNA-E-REMAINDER-SHRINK",
+            "remainder shrink parent admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-SHRINK-CHILD",
+            "remainder shrink child admission",
+        )),
     ];
     destination.clone_from(&shrink);
     let after_shrink = destination.clone();
@@ -3622,21 +3736,30 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
         .collect::<Vec<_>>();
 
     let grown = vec![
-        admitted("ORNA-E-REMAINDER-GROWN-A", "remainder grown parent a admission")
-            .with_cause(admitted(
-                "ORNA-E-REMAINDER-GROWN-A-CHILD-A",
-                "remainder grown child a a admission",
-            ))
-            .with_cause(admitted(
-                "ORNA-E-REMAINDER-GROWN-A-CHILD-B",
-                "remainder grown child a b admission",
-            )),
-        admitted("ORNA-E-REMAINDER-GROWN-B", "remainder grown parent b admission")
-            .with_cause(admitted(
-                "ORNA-E-REMAINDER-GROWN-B-CHILD",
-                "remainder grown child b admission",
-            )),
-        admitted("ORNA-E-REMAINDER-GROWN-TAIL", "remainder grown tail admission"),
+        admitted(
+            "ORNA-E-REMAINDER-GROWN-A",
+            "remainder grown parent a admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-GROWN-A-CHILD-A",
+            "remainder grown child a a admission",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-GROWN-A-CHILD-B",
+            "remainder grown child a b admission",
+        )),
+        admitted(
+            "ORNA-E-REMAINDER-GROWN-B",
+            "remainder grown parent b admission",
+        )
+        .with_cause(admitted(
+            "ORNA-E-REMAINDER-GROWN-B-CHILD",
+            "remainder grown child b admission",
+        )),
+        admitted(
+            "ORNA-E-REMAINDER-GROWN-TAIL",
+            "remainder grown tail admission",
+        ),
     ];
     let captured_growth = grown.clone();
     let grow_from_closure = move || captured_growth.clone();
@@ -3664,7 +3787,10 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
             .collect::<Vec<_>>(),
         before_wires
     );
-    assert_eq!(serde_json::to_value(&after_shrink).unwrap(), shrink_projection);
+    assert_eq!(
+        serde_json::to_value(&after_shrink).unwrap(),
+        shrink_projection
+    );
     assert_eq!(
         after_shrink
             .iter()
@@ -3672,7 +3798,10 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
             .collect::<Vec<_>>(),
         shrink_wires
     );
-    assert_eq!(serde_json::to_value(&after_growth).unwrap(), growth_projection);
+    assert_eq!(
+        serde_json::to_value(&after_growth).unwrap(),
+        growth_projection
+    );
     assert_eq!(
         after_growth
             .iter()
@@ -3713,8 +3842,14 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
     let outer = compose_captured_replacements();
     let outer_projection = serde_json::to_value(&outer).unwrap();
     let outer_again = compose_captured_replacements();
-    assert_eq!(serde_json::to_value(&outer_again).unwrap(), outer_projection);
-    assert_eq!(outer_projection["message"], "remainder outer closure admission");
+    assert_eq!(
+        serde_json::to_value(&outer_again).unwrap(),
+        outer_projection
+    );
+    assert_eq!(
+        outer_projection["message"],
+        "remainder outer closure admission"
+    );
     let causes = outer_projection["causes"].as_array().unwrap();
     assert_eq!(causes.len(), 5);
     for (cause, expected_children) in causes.iter().zip([1, 2, 1, 2, 1]) {
@@ -3762,7 +3897,11 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
             b"remainder grown child b admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -3779,7 +3918,11 @@ fn closure_replacement_sources_restore_parent_snapshots_after_resize() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -3982,7 +4125,11 @@ fn same_length_closure_sources_keep_replaced_parent_snapshots_local() {
             b"same length replacement b child admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -4001,7 +4148,11 @@ fn same_length_closure_sources_keep_replaced_parent_snapshots_local() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -4149,10 +4300,7 @@ fn same_length_closure_replacement_keeps_mixed_slot_admission_local() {
         let restored = after_restore.clone();
         let replaced_again = after_second_replacement.clone();
         move || {
-            let mut outer = admitted(
-                "ORNA-E-MIXED-OUTER",
-                "mixed slot outer closure admission",
-            );
+            let mut outer = admitted("ORNA-E-MIXED-OUTER", "mixed slot outer closure admission");
             for cause in [
                 old[0].clone(),
                 old[1].clone(),
@@ -4211,7 +4359,11 @@ fn same_length_closure_replacement_keeps_mixed_slot_admission_local() {
             b"mixed new child admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -4230,7 +4382,11 @@ fn same_length_closure_replacement_keeps_mixed_slot_admission_local() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -4277,12 +4433,16 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
     let original = vec![
         admitted("ORNA-E-FORK-OLD-ADMITTED", "fork old admitted parent")
             .with_cause(untrusted("ORNA-E-FORK-OLD-CHILD", "fork old child secret")),
-        untrusted("ORNA-E-FORK-OLD-RAW", "fork old raw parent secret")
-            .with_cause(admitted("ORNA-E-FORK-OLD-RAW-CHILD", "fork old raw child secret")),
+        untrusted("ORNA-E-FORK-OLD-RAW", "fork old raw parent secret").with_cause(admitted(
+            "ORNA-E-FORK-OLD-RAW-CHILD",
+            "fork old raw child secret",
+        )),
     ];
     let replacement = vec![
-        untrusted("ORNA-E-FORK-NEW-RAW", "fork new raw parent secret")
-            .with_cause(admitted("ORNA-E-FORK-NEW-RAW-CHILD", "fork new raw child secret")),
+        untrusted("ORNA-E-FORK-NEW-RAW", "fork new raw parent secret").with_cause(admitted(
+            "ORNA-E-FORK-NEW-RAW-CHILD",
+            "fork new raw child secret",
+        )),
         admitted("ORNA-E-FORK-NEW-ADMITTED", "fork new admitted parent")
             .with_cause(untrusted("ORNA-E-FORK-NEW-CHILD", "fork new child secret")),
     ];
@@ -4329,7 +4489,10 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
             .collect::<Vec<_>>(),
         before_wires
     );
-    assert_eq!(serde_json::to_value(&replacement).unwrap(), replacement_projection);
+    assert_eq!(
+        serde_json::to_value(&replacement).unwrap(),
+        replacement_projection
+    );
     assert_eq!(
         replacement
             .iter()
@@ -4402,7 +4565,11 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
             b"fork new child secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -4421,7 +4588,11 @@ fn mixed_trust_closure_sources_keep_sibling_replacements_independent() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -4466,16 +4637,24 @@ fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
         .with_note(SafeText::new(fixture).unwrap())
     };
     let original = vec![
-        admitted("ORNA-E-CROSS-OLD-ADMITTED", "cross old admitted parent")
-            .with_cause(untrusted("ORNA-E-CROSS-OLD-CHILD", "cross old child secret")),
-        untrusted("ORNA-E-CROSS-OLD-RAW", "cross old raw parent secret")
-            .with_cause(admitted("ORNA-E-CROSS-OLD-RAW-CHILD", "cross old raw child secret")),
+        admitted("ORNA-E-CROSS-OLD-ADMITTED", "cross old admitted parent").with_cause(untrusted(
+            "ORNA-E-CROSS-OLD-CHILD",
+            "cross old child secret",
+        )),
+        untrusted("ORNA-E-CROSS-OLD-RAW", "cross old raw parent secret").with_cause(admitted(
+            "ORNA-E-CROSS-OLD-RAW-CHILD",
+            "cross old raw child secret",
+        )),
     ];
     let replacement = vec![
-        untrusted("ORNA-E-CROSS-NEW-RAW", "cross new raw parent secret")
-            .with_cause(admitted("ORNA-E-CROSS-NEW-RAW-CHILD", "cross new raw child secret")),
-        admitted("ORNA-E-CROSS-NEW-ADMITTED", "cross new admitted parent")
-            .with_cause(untrusted("ORNA-E-CROSS-NEW-CHILD", "cross new child secret")),
+        untrusted("ORNA-E-CROSS-NEW-RAW", "cross new raw parent secret").with_cause(admitted(
+            "ORNA-E-CROSS-NEW-RAW-CHILD",
+            "cross new raw child secret",
+        )),
+        admitted("ORNA-E-CROSS-NEW-ADMITTED", "cross new admitted parent").with_cause(untrusted(
+            "ORNA-E-CROSS-NEW-CHILD",
+            "cross new child secret",
+        )),
     ];
     let old_projection = serde_json::to_value(&original).unwrap();
     let old_wires = original
@@ -4597,7 +4776,11 @@ fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
             b"cross new child secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -4616,7 +4799,11 @@ fn mixed_trust_sibling_closures_cross_restore_captured_generations() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -4661,22 +4848,33 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
         .with_note(SafeText::new(fixture).unwrap())
     };
     let original = vec![
-        admitted("ORNA-E-GEN-BASE-ADMITTED", "generation base admission")
-            .with_cause(untrusted("ORNA-E-GEN-BASE-CHILD", "generation base child secret")),
-        untrusted("ORNA-E-GEN-BASE-RAW", "generation base parent secret")
-            .with_cause(admitted("ORNA-E-GEN-BASE-RAW-CHILD", "generation base raw child")),
+        admitted("ORNA-E-GEN-BASE-ADMITTED", "generation base admission").with_cause(untrusted(
+            "ORNA-E-GEN-BASE-CHILD",
+            "generation base child secret",
+        )),
+        untrusted("ORNA-E-GEN-BASE-RAW", "generation base parent secret").with_cause(admitted(
+            "ORNA-E-GEN-BASE-RAW-CHILD",
+            "generation base raw child",
+        )),
     ];
     let mut contracted = vec![
-        admitted("ORNA-E-GEN-SMALL-ADMITTED", "generation small admission")
-            .with_cause(untrusted("ORNA-E-GEN-SMALL-CHILD", "generation small child secret")),
+        admitted("ORNA-E-GEN-SMALL-ADMITTED", "generation small admission").with_cause(untrusted(
+            "ORNA-E-GEN-SMALL-CHILD",
+            "generation small child secret",
+        )),
     ];
     let mut expanded = vec![
-        untrusted("ORNA-E-GEN-WIDE-RAW-0", "generation wide raw parent secret")
-            .with_cause(admitted("ORNA-E-GEN-WIDE-RAW-CHILD-0", "generation wide raw child")),
-        admitted("ORNA-E-GEN-WIDE-ADMITTED", "generation wide admission")
-            .with_cause(untrusted("ORNA-E-GEN-WIDE-CHILD", "generation wide child secret")),
-        untrusted("ORNA-E-GEN-WIDE-RAW-2", "generation wide tail secret")
-            .with_cause(admitted("ORNA-E-GEN-WIDE-RAW-CHILD-2", "generation wide tail child")),
+        untrusted("ORNA-E-GEN-WIDE-RAW-0", "generation wide raw parent secret").with_cause(
+            admitted("ORNA-E-GEN-WIDE-RAW-CHILD-0", "generation wide raw child"),
+        ),
+        admitted("ORNA-E-GEN-WIDE-ADMITTED", "generation wide admission").with_cause(untrusted(
+            "ORNA-E-GEN-WIDE-CHILD",
+            "generation wide child secret",
+        )),
+        untrusted("ORNA-E-GEN-WIDE-RAW-2", "generation wide tail secret").with_cause(admitted(
+            "ORNA-E-GEN-WIDE-RAW-CHILD-2",
+            "generation wide tail child",
+        )),
     ];
     let original_snapshot = original.clone();
     let contracted_snapshot = contracted.clone();
@@ -4742,7 +4940,10 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
     right.clone_from(&restore_right_expanded());
     assert_eq!(left, contracted_snapshot);
     assert_eq!(right, expanded_snapshot);
-    assert_eq!(serde_json::to_value(&original_snapshot).unwrap(), original_projection);
+    assert_eq!(
+        serde_json::to_value(&original_snapshot).unwrap(),
+        original_projection
+    );
     assert_eq!(
         original_snapshot
             .iter()
@@ -4761,7 +4962,10 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
             .collect::<Vec<_>>(),
         contracted_wires
     );
-    assert_eq!(serde_json::to_value(&expanded_snapshot).unwrap(), expanded_projection);
+    assert_eq!(
+        serde_json::to_value(&expanded_snapshot).unwrap(),
+        expanded_projection
+    );
     assert_eq!(
         expanded_snapshot
             .iter()
@@ -4837,7 +5041,11 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
             b"generation wide tail child".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -4856,7 +5064,11 @@ fn mixed_trust_sibling_closures_restore_resized_generations() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -4901,21 +5113,45 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
         .with_note(SafeText::new(fixture).unwrap())
     };
     let old_left = admitted("ORNA-E-PARENT-OLD-LEFT", "parent old left admission")
-        .with_cause(untrusted("ORNA-E-PARENT-OLD-L0", "parent old left raw child"))
-        .with_cause(admitted("ORNA-E-PARENT-OLD-L1", "parent old left nested admission"))
-        .with_cause(untrusted("ORNA-E-PARENT-OLD-L2", "parent old left tail secret"));
+        .with_cause(untrusted(
+            "ORNA-E-PARENT-OLD-L0",
+            "parent old left raw child",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-PARENT-OLD-L1",
+            "parent old left nested admission",
+        ))
+        .with_cause(untrusted(
+            "ORNA-E-PARENT-OLD-L2",
+            "parent old left tail secret",
+        ));
     let old_right = untrusted("ORNA-E-PARENT-OLD-RIGHT", "parent old right root secret")
-        .with_cause(admitted("ORNA-E-PARENT-OLD-R0", "parent old right child admission"));
-    let new_left = untrusted("ORNA-E-PARENT-NEW-LEFT", "parent new left root secret")
-        .with_cause(admitted("ORNA-E-PARENT-NEW-L0", "parent new left child admission"));
+        .with_cause(admitted(
+            "ORNA-E-PARENT-OLD-R0",
+            "parent old right child admission",
+        ));
+    let new_left = untrusted("ORNA-E-PARENT-NEW-LEFT", "parent new left root secret").with_cause(
+        admitted("ORNA-E-PARENT-NEW-L0", "parent new left child admission"),
+    );
     let new_right = admitted("ORNA-E-PARENT-NEW-RIGHT", "parent new right admission")
-        .with_cause(untrusted("ORNA-E-PARENT-NEW-R0", "parent new right raw child"))
-        .with_cause(admitted("ORNA-E-PARENT-NEW-R1", "parent new right nested admission"))
-        .with_cause(untrusted("ORNA-E-PARENT-NEW-R2", "parent new right tail secret"));
-    let source_snapshots = [old_left.clone(),
+        .with_cause(untrusted(
+            "ORNA-E-PARENT-NEW-R0",
+            "parent new right raw child",
+        ))
+        .with_cause(admitted(
+            "ORNA-E-PARENT-NEW-R1",
+            "parent new right nested admission",
+        ))
+        .with_cause(untrusted(
+            "ORNA-E-PARENT-NEW-R2",
+            "parent new right tail secret",
+        ));
+    let source_snapshots = [
+        old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone()];
+        new_right.clone(),
+    ];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -4968,7 +5204,10 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
     assert_eq!(left, new_left);
     assert_eq!(right, new_right);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -5041,7 +5280,11 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
             b"empty replacement parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -5060,7 +5303,11 @@ fn mixed_trust_sibling_parent_closures_restore_resized_cause_generations() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -5105,29 +5352,56 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
         .with_note(SafeText::new(fixture).unwrap())
     };
     let old_left = admitted("ORNA-E-NEST-OLD-LEFT", "nested old left admission").with_cause(
-        untrusted("ORNA-E-NEST-OLD-LEFT-CAUSE", "nested old left cause secret")
-            .with_cause(admitted("ORNA-E-NEST-OLD-LEFT-LEAF", "nested old left leaf")),
+        untrusted("ORNA-E-NEST-OLD-LEFT-CAUSE", "nested old left cause secret").with_cause(
+            admitted("ORNA-E-NEST-OLD-LEFT-LEAF", "nested old left leaf"),
+        ),
     );
     let old_right = untrusted("ORNA-E-NEST-OLD-RIGHT", "nested old right root secret").with_cause(
-        admitted("ORNA-E-NEST-OLD-RIGHT-CAUSE", "nested old right cause admission")
-            .with_cause(untrusted("ORNA-E-NEST-OLD-R0", "nested old right leaf zero"))
-            .with_cause(admitted("ORNA-E-NEST-OLD-R1", "nested old right leaf one"))
-            .with_cause(untrusted("ORNA-E-NEST-OLD-R2", "nested old right leaf two secret")),
+        admitted(
+            "ORNA-E-NEST-OLD-RIGHT-CAUSE",
+            "nested old right cause admission",
+        )
+        .with_cause(untrusted(
+            "ORNA-E-NEST-OLD-R0",
+            "nested old right leaf zero",
+        ))
+        .with_cause(admitted("ORNA-E-NEST-OLD-R1", "nested old right leaf one"))
+        .with_cause(untrusted(
+            "ORNA-E-NEST-OLD-R2",
+            "nested old right leaf two secret",
+        )),
     );
     let new_left = untrusted("ORNA-E-NEST-NEW-LEFT", "nested new left root secret").with_cause(
-        admitted("ORNA-E-NEST-NEW-LEFT-CAUSE", "nested new left cause admission")
-            .with_cause(untrusted("ORNA-E-NEST-NEW-L0", "nested new left leaf zero secret"))
-            .with_cause(admitted("ORNA-E-NEST-NEW-L1", "nested new left leaf one"))
-            .with_cause(untrusted("ORNA-E-NEST-NEW-L2", "nested new left leaf two secret")),
+        admitted(
+            "ORNA-E-NEST-NEW-LEFT-CAUSE",
+            "nested new left cause admission",
+        )
+        .with_cause(untrusted(
+            "ORNA-E-NEST-NEW-L0",
+            "nested new left leaf zero secret",
+        ))
+        .with_cause(admitted("ORNA-E-NEST-NEW-L1", "nested new left leaf one"))
+        .with_cause(untrusted(
+            "ORNA-E-NEST-NEW-L2",
+            "nested new left leaf two secret",
+        )),
     );
     let new_right = admitted("ORNA-E-NEST-NEW-RIGHT", "nested new right admission").with_cause(
-        untrusted("ORNA-E-NEST-NEW-RIGHT-CAUSE", "nested new right cause secret")
-            .with_cause(admitted("ORNA-E-NEST-NEW-RIGHT-LEAF", "nested new right leaf")),
+        untrusted(
+            "ORNA-E-NEST-NEW-RIGHT-CAUSE",
+            "nested new right cause secret",
+        )
+        .with_cause(admitted(
+            "ORNA-E-NEST-NEW-RIGHT-LEAF",
+            "nested new right leaf",
+        )),
     );
-    let source_snapshots = [old_left.clone(),
+    let source_snapshots = [
+        old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone()];
+        new_right.clone(),
+    ];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -5179,7 +5453,10 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
     assert_eq!(left, new_left);
     assert_eq!(right, new_right);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -5260,7 +5537,11 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
             b"nested empty parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -5280,7 +5561,11 @@ fn mixed_trust_sibling_closures_restore_nested_cause_generations() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -5331,20 +5616,36 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
         )
         .with_cause(
             admitted("ORNA-E-CAUSE-OLD-RIGHT", "old sibling right admission")
-                .with_cause(untrusted("ORNA-E-CAUSE-OLD-R0", "old sibling right leaf zero secret"))
-                .with_cause(admitted("ORNA-E-CAUSE-OLD-R1", "old sibling right leaf one"))
-                .with_cause(untrusted("ORNA-E-CAUSE-OLD-R2", "old sibling right leaf two secret")),
+                .with_cause(untrusted(
+                    "ORNA-E-CAUSE-OLD-R0",
+                    "old sibling right leaf zero secret",
+                ))
+                .with_cause(admitted(
+                    "ORNA-E-CAUSE-OLD-R1",
+                    "old sibling right leaf one",
+                ))
+                .with_cause(untrusted(
+                    "ORNA-E-CAUSE-OLD-R2",
+                    "old sibling right leaf two secret",
+                )),
         );
     let new_parent = untrusted("ORNA-E-CAUSE-NEW-PARENT", "new sibling parent root secret")
         .with_cause(
             admitted("ORNA-E-CAUSE-NEW-LEFT", "new sibling left admission")
-                .with_cause(untrusted("ORNA-E-CAUSE-NEW-L0", "new sibling left leaf zero secret"))
+                .with_cause(untrusted(
+                    "ORNA-E-CAUSE-NEW-L0",
+                    "new sibling left leaf zero secret",
+                ))
                 .with_cause(admitted("ORNA-E-CAUSE-NEW-L1", "new sibling left leaf one"))
-                .with_cause(untrusted("ORNA-E-CAUSE-NEW-L2", "new sibling left leaf two secret")),
+                .with_cause(untrusted(
+                    "ORNA-E-CAUSE-NEW-L2",
+                    "new sibling left leaf two secret",
+                )),
         )
         .with_cause(
-            untrusted("ORNA-E-CAUSE-NEW-RIGHT", "new sibling right cause secret")
-                .with_cause(admitted("ORNA-E-CAUSE-NEW-R0", "new sibling right leaf admission")),
+            untrusted("ORNA-E-CAUSE-NEW-RIGHT", "new sibling right cause secret").with_cause(
+                admitted("ORNA-E-CAUSE-NEW-R0", "new sibling right leaf admission"),
+            ),
         );
     let source_snapshots = [old_parent.clone(), new_parent.clone()];
     let source_projections = source_snapshots
@@ -5398,7 +5699,10 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
     assert_eq!(left, new_parent);
     assert_eq!(right, old_parent);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -5479,7 +5783,11 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
             b"sibling empty parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -5499,7 +5807,11 @@ fn mixed_trust_parent_closures_restore_resized_sibling_causes() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -5551,18 +5863,39 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
         .with_note(SafeText::new(fixture).unwrap())
     };
     let old_parent = admitted("ORNA-E-EMPTY-OLD-PARENT", "empty edge old parent admission")
-        .with_cause(untrusted("ORNA-E-EMPTY-OLD-A", "empty edge old empty sibling secret"))
+        .with_cause(untrusted(
+            "ORNA-E-EMPTY-OLD-A",
+            "empty edge old empty sibling secret",
+        ))
         .with_cause(
-            admitted("ORNA-E-EMPTY-OLD-B", "empty edge old populated sibling admission")
-                .with_cause(untrusted("ORNA-E-EMPTY-OLD-B0", "empty edge old leaf secret")),
+            admitted(
+                "ORNA-E-EMPTY-OLD-B",
+                "empty edge old populated sibling admission",
+            )
+            .with_cause(untrusted(
+                "ORNA-E-EMPTY-OLD-B0",
+                "empty edge old leaf secret",
+            )),
         );
     let new_parent = untrusted("ORNA-E-EMPTY-NEW-PARENT", "empty edge new parent secret")
         .with_cause(
-            admitted("ORNA-E-EMPTY-NEW-A", "empty edge new expanded sibling admission")
-                .with_cause(untrusted("ORNA-E-EMPTY-NEW-A0", "empty edge new leaf zero secret"))
-                .with_cause(admitted("ORNA-E-EMPTY-NEW-A1", "empty edge new leaf one admission")),
+            admitted(
+                "ORNA-E-EMPTY-NEW-A",
+                "empty edge new expanded sibling admission",
+            )
+            .with_cause(untrusted(
+                "ORNA-E-EMPTY-NEW-A0",
+                "empty edge new leaf zero secret",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-EMPTY-NEW-A1",
+                "empty edge new leaf one admission",
+            )),
         )
-        .with_cause(untrusted("ORNA-E-EMPTY-NEW-B", "empty edge new empty sibling secret"));
+        .with_cause(untrusted(
+            "ORNA-E-EMPTY-NEW-B",
+            "empty edge new empty sibling secret",
+        ));
     let source_snapshots = [old_parent.clone(), new_parent.clone()];
     let source_projections = source_snapshots
         .iter()
@@ -5615,7 +5948,10 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
     assert_eq!(left, new_parent);
     assert_eq!(right, old_parent);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -5691,7 +6027,11 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
             b"empty edge live parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -5710,7 +6050,11 @@ fn mixed_trust_parent_closures_restore_empty_sibling_cause_edges() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -5765,10 +6109,16 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
     let populated_generation =
         untrusted("ORNA-E-ZERO-POPULATED", "zero cause populated root secret")
             .with_cause(
-                admitted("ORNA-E-ZERO-CHILD-0", "zero cause populated child admission")
-                    .with_cause(untrusted("ORNA-E-ZERO-LEAF-0", "zero cause leaf secret")),
+                admitted(
+                    "ORNA-E-ZERO-CHILD-0",
+                    "zero cause populated child admission",
+                )
+                .with_cause(untrusted("ORNA-E-ZERO-LEAF-0", "zero cause leaf secret")),
             )
-            .with_cause(untrusted("ORNA-E-ZERO-CHILD-1", "zero cause sibling secret"));
+            .with_cause(untrusted(
+                "ORNA-E-ZERO-CHILD-1",
+                "zero cause sibling secret",
+            ));
     let source_snapshots = [empty_generation.clone(), populated_generation.clone()];
     let source_projections = source_snapshots
         .iter()
@@ -5821,7 +6171,10 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
     assert_eq!(left, populated_generation);
     assert_eq!(right, empty_generation);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -5893,7 +6246,11 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
             b"zero cause live parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -5912,7 +6269,11 @@ fn mixed_trust_parent_closures_restore_zero_cause_generations() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -5966,11 +6327,16 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
     let old_left = admitted("ORNA-E-EMPTY-OLD-LEFT", "empty sibling old left admission");
     let old_right = untrusted("ORNA-E-EMPTY-OLD-RIGHT", "empty sibling old right secret");
     let new_left = untrusted("ORNA-E-EMPTY-NEW-LEFT", "empty sibling new left secret");
-    let new_right = admitted("ORNA-E-EMPTY-NEW-RIGHT", "empty sibling new right admission");
-    let source_snapshots = [old_left.clone(),
+    let new_right = admitted(
+        "ORNA-E-EMPTY-NEW-RIGHT",
+        "empty sibling new right admission",
+    );
+    let source_snapshots = [
+        old_left.clone(),
         old_right.clone(),
         new_left.clone(),
-        new_right.clone()];
+        new_right.clone(),
+    ];
     let source_projections = source_snapshots
         .iter()
         .map(serde_json::to_value)
@@ -6031,7 +6397,10 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
     assert_eq!(left, new_left);
     assert_eq!(right, new_right);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -6093,7 +6462,11 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
             b"empty sibling live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -6111,7 +6484,11 @@ fn mixed_trust_empty_cause_closures_preserve_sibling_generation_admission() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -6218,7 +6595,10 @@ fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
     assert_eq!(left, new_parent);
     assert_eq!(right, old_parent);
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -6288,7 +6668,11 @@ fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
             b"empty sibling live parent secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -6307,7 +6691,11 @@ fn mixed_trust_parent_closures_preserve_empty_sibling_admission() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -6358,10 +6746,16 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
         .unwrap()
         .with_note(SafeText::new(fixture).unwrap())
     };
-    let old_admitted_sibling = admitted("ORNA-E-ACLOSE-OLD-ADMITTED", "closure old sibling admission");
+    let old_admitted_sibling = admitted(
+        "ORNA-E-ACLOSE-OLD-ADMITTED",
+        "closure old sibling admission",
+    );
     let old_untrusted_sibling = untrusted("ORNA-E-ACLOSE-OLD-RAW", "closure old sibling secret");
     let new_untrusted_sibling = untrusted("ORNA-E-ACLOSE-NEW-RAW", "closure new sibling secret");
-    let new_admitted_sibling = admitted("ORNA-E-ACLOSE-NEW-ADMITTED", "closure new sibling admission");
+    let new_admitted_sibling = admitted(
+        "ORNA-E-ACLOSE-NEW-ADMITTED",
+        "closure new sibling admission",
+    );
     let old_parent_factory = {
         let root = admitted("ORNA-E-ACLOSE-OLD-PARENT", "closure old parent admission");
         let old_admitted = {
@@ -6372,7 +6766,11 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
             let snapshot = old_untrusted_sibling.clone();
             move || snapshot.clone()
         };
-        move || root.clone().with_cause(old_admitted()).with_cause(old_untrusted())
+        move || {
+            root.clone()
+                .with_cause(old_admitted())
+                .with_cause(old_untrusted())
+        }
     };
     let new_parent_factory = {
         let root = untrusted("ORNA-E-ACLOSE-NEW-PARENT", "closure new parent secret");
@@ -6384,7 +6782,11 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
             let snapshot = new_admitted_sibling.clone();
             move || snapshot.clone()
         };
-        move || root.clone().with_cause(new_untrusted()).with_cause(new_admitted())
+        move || {
+            root.clone()
+                .with_cause(new_untrusted())
+                .with_cause(new_admitted())
+        }
     };
     let source_snapshots = [old_parent_factory(), new_parent_factory()];
     let source_projections = source_snapshots
@@ -6430,10 +6832,19 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
     right.clone_from(&restore_right_old());
     assert_eq!(left, source_snapshots[1]);
     assert_eq!(right, source_snapshots[0]);
-    assert_eq!(serde_json::to_value(old_parent_factory()).unwrap(), source_projections[0]);
-    assert_eq!(serde_json::to_value(new_parent_factory()).unwrap(), source_projections[1]);
+    assert_eq!(
+        serde_json::to_value(old_parent_factory()).unwrap(),
+        source_projections[0]
+    );
+    assert_eq!(
+        serde_json::to_value(new_parent_factory()).unwrap(),
+        source_projections[1]
+    );
     for (index, snapshot) in source_snapshots.iter().enumerate() {
-        assert_eq!(serde_json::to_value(snapshot).unwrap(), source_projections[index]);
+        assert_eq!(
+            serde_json::to_value(snapshot).unwrap(),
+            source_projections[index]
+        );
         assert_eq!(snapshot.encode_ovb().unwrap(), source_wires[index]);
     }
 
@@ -6505,7 +6916,11 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
             b"closure admission live secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -6524,7 +6939,11 @@ fn mixed_trust_empty_sibling_cause_closures_preserve_admission() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -6688,7 +7107,11 @@ fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
             b"revocation live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -6704,7 +7127,11 @@ fn mixed_trust_empty_cause_closures_preserve_pre_revocation_admission() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -6853,7 +7280,11 @@ fn mixed_trust_empty_cause_closures_keep_pre_revocation_admission_after_readmiss
             b"replaced live sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -6869,7 +7300,11 @@ fn mixed_trust_empty_cause_closures_keep_pre_revocation_admission_after_readmiss
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -6976,13 +7411,16 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
         let left = left.clone();
         let right = right.clone();
         move || {
-            admitted("ORNA-E-READMIT-OUTER", "readmission closure outer admission")
-                .with_cause(left.clone())
-                .with_cause(right.clone())
-                .with_cause(capture_initial())
-                .with_cause(capture_first_revoked())
-                .with_cause(capture_readmitted())
-                .with_cause(capture_second_revoked())
+            admitted(
+                "ORNA-E-READMIT-OUTER",
+                "readmission closure outer admission",
+            )
+            .with_cause(left.clone())
+            .with_cause(right.clone())
+            .with_cause(capture_initial())
+            .with_cause(capture_first_revoked())
+            .with_cause(capture_readmitted())
+            .with_cause(capture_second_revoked())
         }
     };
 
@@ -7031,7 +7469,11 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
             b"readmission replaced sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -7047,7 +7489,11 @@ fn mixed_trust_empty_cause_closures_preserve_readmission_before_second_revocatio
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -7112,11 +7558,9 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
     // ORNA-SECRET-002 requires secret values redacted from diagnostics, but
     // leaves closure snapshots through recursive parent revocation unspecified.
     // Revoke the parent as a new generation and retain the child snapshot.
-    let parent_with_readmitted_cause = admitted(
-        "ORNA-E-EDGE-PARENT",
-        "edge parent before second revocation",
-    )
-    .with_cause(capture_readmitted());
+    let parent_with_readmitted_cause =
+        admitted("ORNA-E-EDGE-PARENT", "edge parent before second revocation")
+            .with_cause(capture_readmitted());
     let capture_parent = {
         let snapshot = parent_with_readmitted_cause.clone();
         move || snapshot.clone()
@@ -7217,7 +7661,11 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
             b"edge replaced sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -7234,7 +7682,11 @@ fn readmitted_cause_closure_survives_second_revocation_of_its_parent() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -7385,9 +7837,15 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
         assert_redacted_tree(cause);
     }
     assert_eq!(causes[0]["causes"].as_array().unwrap().len(), 1);
-    assert_eq!(causes[0]["causes"][0]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        causes[0]["causes"][0]["causes"].as_array().unwrap().len(),
+        1
+    );
     assert_eq!(causes[1]["causes"].as_array().unwrap().len(), 1);
-    assert_eq!(causes[1]["causes"][0]["causes"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        causes[1]["causes"][0]["causes"].as_array().unwrap().len(),
+        1
+    );
 
     let json = serde_json::to_vec(&outer).unwrap();
     assert_eq!(
@@ -7408,7 +7866,11 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
             b"nested replaced sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -7426,7 +7888,11 @@ fn recursive_revocation_closure_preserves_nested_parent_snapshots() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -7484,8 +7950,8 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
     let old_branch = admitted("ORNA-E-SNAPSHOT-BRANCH", "old nested branch admission")
         .with_cause(admitted("ORNA-E-SNAPSHOT-TAIL-A", "old nested tail A"))
         .with_cause(admitted("ORNA-E-SNAPSHOT-TAIL-B", "old nested tail B"));
-    let old_generation = admitted("ORNA-E-SNAPSHOT-PARENT", "old snapshot parent admission")
-        .with_cause(old_branch);
+    let old_generation =
+        admitted("ORNA-E-SNAPSHOT-PARENT", "old snapshot parent admission").with_cause(old_branch);
     let capture_old = {
         let snapshot = old_generation.clone();
         move || snapshot.clone()
@@ -7495,14 +7961,11 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
         let snapshot = revoked_generation.clone();
         move || snapshot.clone()
     };
-    let short_replacement = untrusted(
-        "ORNA-E-SNAPSHOT-SHORT",
-        "short replacement parent secret",
-    )
-    .with_cause(untrusted(
-        "ORNA-E-SNAPSHOT-SHORT-BRANCH",
-        "short replacement branch secret",
-    ));
+    let short_replacement = untrusted("ORNA-E-SNAPSHOT-SHORT", "short replacement parent secret")
+        .with_cause(untrusted(
+            "ORNA-E-SNAPSHOT-SHORT-BRANCH",
+            "short replacement branch secret",
+        ));
 
     // ORNA-SECRET-002 requires diagnostic secret redaction but leaves host
     // Clone::clone_from behavior for nested vector shrink/regrowth unspecified.
@@ -7524,7 +7987,13 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
     );
     let revoked_projection = serde_json::to_value(capture_revoked()).unwrap();
     assert_eq!(revoked_projection["message"], "<redacted>");
-    assert_eq!(revoked_projection["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        revoked_projection["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
 
     let compose_captured_snapshots = {
         let left = left.clone();
@@ -7537,10 +8006,7 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
                 .with_cause(capture_revoked())
         }
     };
-    let live_replacement = untrusted(
-        "ORNA-E-SNAPSHOT-LIVE",
-        "live replacement snapshot secret",
-    );
+    let live_replacement = untrusted("ORNA-E-SNAPSHOT-LIVE", "live replacement snapshot secret");
     left.clone_from(&live_replacement);
     right.clone_from(&live_replacement);
     assert_eq!(left, live_replacement);
@@ -7555,10 +8021,24 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
     for cause in causes {
         assert_redacted_tree(cause);
     }
-    assert_eq!(causes[0]["causes"][0]["causes"].as_array().unwrap().len(), 2);
-    assert!(causes[1]["causes"][0]["causes"].as_array().unwrap().is_empty());
-    assert_eq!(causes[2]["causes"][0]["causes"].as_array().unwrap().len(), 2);
-    assert_eq!(causes[3]["causes"][0]["causes"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        causes[0]["causes"][0]["causes"].as_array().unwrap().len(),
+        2
+    );
+    assert!(
+        causes[1]["causes"][0]["causes"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        causes[2]["causes"][0]["causes"].as_array().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        causes[3]["causes"][0]["causes"].as_array().unwrap().len(),
+        2
+    );
 
     let json = serde_json::to_vec(&outer).unwrap();
     assert!(
@@ -7579,7 +8059,11 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
             b"live replacement snapshot secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -7597,7 +8081,11 @@ fn revoked_nested_snapshots_survive_cause_vector_shrink_and_regrowth() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -7778,7 +8266,11 @@ fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
             b"resized live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -7796,7 +8288,11 @@ fn closure_snapshots_survive_nested_parent_and_cause_vector_resize() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -7869,11 +8365,14 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
         .with_note(SafeText::new(fixture).unwrap())
     };
 
-    let empty_generation = admitted("ORNA-E-EMPTY-GROWTH-PARENT", "empty snapshot parent admission")
-        .with_cause(admitted(
-            "ORNA-E-EMPTY-GROWTH-BRANCH",
-            "empty snapshot branch admission",
-        ));
+    let empty_generation = admitted(
+        "ORNA-E-EMPTY-GROWTH-PARENT",
+        "empty snapshot parent admission",
+    )
+    .with_cause(admitted(
+        "ORNA-E-EMPTY-GROWTH-BRANCH",
+        "empty snapshot branch admission",
+    ));
     let capture_empty = {
         let snapshot = empty_generation.clone();
         move || snapshot.clone()
@@ -7914,7 +8413,10 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
     };
 
     let empty_projection = serde_json::to_value(capture_empty()).unwrap();
-    assert_eq!(empty_projection["message"], "empty snapshot parent admission");
+    assert_eq!(
+        empty_projection["message"],
+        "empty snapshot parent admission"
+    );
     assert_eq!(empty_projection["causes"].as_array().unwrap().len(), 1);
     assert_eq!(nested_cause_lengths(&empty_projection), [0]);
     let grown_projection = serde_json::to_value(capture_grown()).unwrap();
@@ -7971,10 +8473,7 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
         assert_redacted_tree(cause);
     }
     assert_eq!(
-        causes
-            .iter()
-            .map(nested_cause_lengths)
-            .collect::<Vec<_>>(),
+        causes.iter().map(nested_cause_lengths).collect::<Vec<_>>(),
         vec![vec![2], vec![2], vec![0]]
     );
 
@@ -7998,7 +8497,11 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
             b"empty growth live nested secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -8016,7 +8519,11 @@ fn closure_snapshots_survive_empty_nested_vector_growth_and_revocation() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -8088,23 +8595,14 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
         let snapshot = empty_generation.clone();
         move || snapshot.clone()
     };
-    let partial_source = admitted("ORNA-E-GROWTH-STAGED-PARENT", "stage one admission")
-        .with_cause(
-            admitted(
-                "ORNA-E-GROWTH-STAGED-BRANCH",
-                "stage one branch admission",
-            )
-            .with_cause(admitted(
-                "ORNA-E-GROWTH-STAGED-CHILD-A",
-                "stage one nested child",
-            )),
-        );
-    let full_source = admitted("ORNA-E-GROWTH-STAGED-PARENT", "stage two admission")
-        .with_cause(
-            admitted(
-                "ORNA-E-GROWTH-STAGED-BRANCH",
-                "stage two branch admission",
-            )
+    let partial_source = admitted("ORNA-E-GROWTH-STAGED-PARENT", "stage one admission").with_cause(
+        admitted("ORNA-E-GROWTH-STAGED-BRANCH", "stage one branch admission").with_cause(admitted(
+            "ORNA-E-GROWTH-STAGED-CHILD-A",
+            "stage one nested child",
+        )),
+    );
+    let full_source = admitted("ORNA-E-GROWTH-STAGED-PARENT", "stage two admission").with_cause(
+        admitted("ORNA-E-GROWTH-STAGED-BRANCH", "stage two branch admission")
             .with_cause(admitted(
                 "ORNA-E-GROWTH-STAGED-CHILD-A",
                 "stage two nested child A",
@@ -8113,7 +8611,7 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
                 "ORNA-E-GROWTH-STAGED-CHILD-B",
                 "stage two nested child B",
             )),
-        );
+    );
 
     // ORNA-SECRET-002 requires diagnostic secret redaction, but leaves host
     // Clone::clone_from growth across retained closures unspecified. Capture
@@ -8165,13 +8663,16 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
         let left = left.clone();
         let right = right.clone();
         move || {
-            admitted("ORNA-E-GROWTH-STAGED-OUTER", "staged growth outer admission")
-                .with_cause(left.clone())
-                .with_cause(right.clone())
-                .with_cause(capture_empty())
-                .with_cause(capture_partial())
-                .with_cause(capture_full())
-                .with_cause(capture_revoked())
+            admitted(
+                "ORNA-E-GROWTH-STAGED-OUTER",
+                "staged growth outer admission",
+            )
+            .with_cause(left.clone())
+            .with_cause(right.clone())
+            .with_cause(capture_empty())
+            .with_cause(capture_partial())
+            .with_cause(capture_full())
+            .with_cause(capture_revoked())
         }
     };
     let live_replacement = untrusted(
@@ -8195,10 +8696,7 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
         assert_redacted_tree(cause);
     }
     assert_eq!(
-        causes
-            .iter()
-            .map(nested_cause_lengths)
-            .collect::<Vec<_>>(),
+        causes.iter().map(nested_cause_lengths).collect::<Vec<_>>(),
         vec![vec![2], vec![0], vec![0], vec![1], vec![2], vec![2]]
     );
 
@@ -8221,7 +8719,11 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
             b"staged growth live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -8241,7 +8743,11 @@ fn successive_nested_growth_closures_preserve_each_snapshot_after_revocation() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -8313,7 +8819,10 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
 
     let old_tail_a = admitted("ORNA-E-GROWTH-EDGE-TAIL-A", "stable first nested tail");
     let old_tail_b = admitted("ORNA-E-GROWTH-EDGE-TAIL-B", "captured old final tail");
-    let new_tail_b = admitted("ORNA-E-GROWTH-EDGE-TAIL-B", "appended replacement final tail");
+    let new_tail_b = admitted(
+        "ORNA-E-GROWTH-EDGE-TAIL-B",
+        "appended replacement final tail",
+    );
     let capture_old_tail = {
         let snapshot = old_tail_b.clone();
         move || snapshot.clone()
@@ -8435,10 +8944,7 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
         assert_redacted_tree(cause);
     }
     assert_eq!(
-        causes
-            .iter()
-            .map(nested_cause_lengths)
-            .collect::<Vec<_>>(),
+        causes.iter().map(nested_cause_lengths).collect::<Vec<_>>(),
         vec![
             vec![2],
             vec![0],
@@ -8472,7 +8978,11 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
             b"growth edge live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -8492,7 +9002,11 @@ fn staged_growth_closures_keep_replaced_nested_tail_snapshots() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -8697,10 +9211,7 @@ fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
         assert_redacted_tree(cause);
     }
     assert_eq!(
-        causes
-            .iter()
-            .map(nested_cause_lengths)
-            .collect::<Vec<_>>(),
+        causes.iter().map(nested_cause_lengths).collect::<Vec<_>>(),
         vec![
             vec![2],
             vec![2],
@@ -8733,7 +9244,11 @@ fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
             b"tail live replacement secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let wire = outer.encode_ovb().unwrap();
@@ -8752,7 +9267,11 @@ fn untrusted_nested_tail_replacement_keeps_admitted_closure_snapshot() {
     .into_iter()
     .chain(fixture_credentials.iter().map(|value| value.as_bytes()))
     {
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_eq!(decoded["message"], "<redacted>");
@@ -8912,8 +9431,16 @@ fn decoded_chain_tail_recovers_after_resize_without_inheriting_admission() {
             b"replacement branch secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
 
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
@@ -8974,9 +9501,7 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
     let make_parent = |message: &str, tail_codes: &[(&str, &str)]| {
         let branch = tail_codes.iter().fold(
             admitted("ORNA-E-ROUNDTRIP-BRANCH", "branch generation"),
-            |branch, (code, message)| {
-                branch.with_cause(admitted(code, message))
-            },
+            |branch, (code, message)| branch.with_cause(admitted(code, message)),
         );
         admitted("ORNA-E-ROUNDTRIP-PARENT", message).with_cause(branch)
     };
@@ -8998,7 +9523,11 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
         .map(|value| value.as_bytes())
         .chain([fixture.as_bytes()])
     {
-        assert!(!original_wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !original_wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let original_recovery = recover(&original_source);
     let replacement_source = make_parent(
@@ -9056,15 +9585,18 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
 
     let compose_generations = {
         move || {
-            admitted("ORNA-E-ROUNDTRIP-OUTER", "roundtrip closure outer admission")
-                .with_cause(capture_initial())
-                .with_cause(capture_original())
-                .with_cause(capture_shrunk())
-                .with_cause(capture_replacement())
-                .with_cause(capture_regrown())
-                .with_cause(capture_admitted())
-                .with_cause(capture_revoked())
-                .with_cause(capture_short())
+            admitted(
+                "ORNA-E-ROUNDTRIP-OUTER",
+                "roundtrip closure outer admission",
+            )
+            .with_cause(capture_initial())
+            .with_cause(capture_original())
+            .with_cause(capture_shrunk())
+            .with_cause(capture_replacement())
+            .with_cause(capture_regrown())
+            .with_cause(capture_admitted())
+            .with_cause(capture_revoked())
+            .with_cause(capture_short())
         }
     };
     receiver.clone_from(&make_parent("empty replacement generation", &[]));
@@ -9124,15 +9656,20 @@ fn decoded_chain_roundtrip_keeps_replaced_tail_closure_generations() {
             b"empty replacement generation".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
-    assert_eq!(
-        decoded["causes"].as_array().unwrap().len(),
-        8,
-    );
+    assert_eq!(decoded["causes"].as_array().unwrap().len(), 8,);
     assert_eq!(
         decoded["causes"]
             .as_array()
@@ -9234,7 +9771,10 @@ fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
     assert_eq!(capture_admitted_empty(), empty_readmission);
     assert_eq!(capture_final_full(), full_recovery);
     let empty_projection = serde_json::to_value(capture_admitted_empty()).unwrap();
-    assert_eq!(empty_projection["message"], "empty recovered root admission");
+    assert_eq!(
+        empty_projection["message"],
+        "empty recovered root admission"
+    );
     assert_eq!(
         branch_tail_codes(&empty_projection),
         vec![Vec::<String>::new()],
@@ -9245,12 +9785,15 @@ fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
 
     let compose_generations = {
         move || {
-            admitted("ORNA-E-EMPTY-RECOVERY-OUTER", "empty recovery outer admission")
-                .with_cause(capture_initial())
-                .with_cause(capture_shrunk())
-                .with_cause(capture_restored())
-                .with_cause(capture_admitted_empty())
-                .with_cause(capture_final_full())
+            admitted(
+                "ORNA-E-EMPTY-RECOVERY-OUTER",
+                "empty recovery outer admission",
+            )
+            .with_cause(capture_initial())
+            .with_cause(capture_shrunk())
+            .with_cause(capture_restored())
+            .with_cause(capture_admitted_empty())
+            .with_cause(capture_final_full())
         }
     };
     receiver.clone_from(&capture_empty());
@@ -9296,8 +9839,16 @@ fn decoded_empty_chain_tail_can_be_recovered_without_phantom_causes() {
             b"empty recovered root admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -9678,8 +10229,16 @@ fn decoded_empty_parent_replacement_restores_chain_closure_snapshots() {
             b"empty root readmission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -9751,8 +10310,7 @@ fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
             admitted("ORNA-E-DEEPER-TERMINAL", terminal_message),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-DEEPER-NESTED", "nested parent payload")
-            .with_cause(terminal);
+        let nested = admitted("ORNA-E-DEEPER-NESTED", "nested parent payload").with_cause(terminal);
         let parent = admitted(generation_code, generation_message).with_cause(nested);
         let branch = admitted("ORNA-E-DEEPER-BRANCH", "outer branch payload").with_cause(parent);
         admitted("ORNA-E-DEEPER-ROOT", root_message).with_cause(branch)
@@ -9819,7 +10377,10 @@ fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
     assert_eq!(capture_readmitted_empty(), empty_readmission);
     assert_eq!(capture_final_new(), new_recovery);
     let readmitted_projection = serde_json::to_value(capture_readmitted_empty()).unwrap();
-    assert_eq!(readmitted_projection["message"], "empty deep root readmission");
+    assert_eq!(
+        readmitted_projection["message"],
+        "empty deep root readmission"
+    );
     assert_eq!(cause_shape(&readmitted_projection), [1, 1, 1, 1, 0]);
     for cause in readmitted_projection["causes"].as_array().unwrap() {
         assert_redacted_tree(cause);
@@ -9904,8 +10465,16 @@ fn decoded_deeper_parent_chain_recovery_keeps_parent_and_tail_identity() {
             b"empty deep root readmission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -10002,10 +10571,7 @@ fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
         "deep replacement branch payload",
         "deep replacement nested payload",
         "deep replacement terminal payload",
-        vec![admitted(
-            "ORNA-E-DEEP-NEW",
-            "deep replacement tail payload",
-        )],
+        vec![admitted("ORNA-E-DEEP-NEW", "deep replacement tail payload")],
     ));
 
     // ORNA-SECRET-002 requires recursive redaction, but is silent on closure
@@ -10040,7 +10606,10 @@ fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
     assert_eq!(capture_readmitted_empty(), empty_readmission);
     assert_eq!(capture_final_new(), replacement_recovery);
     let readmitted_projection = serde_json::to_value(capture_readmitted_empty()).unwrap();
-    assert_eq!(readmitted_projection["message"], "deep empty root readmission");
+    assert_eq!(
+        readmitted_projection["message"],
+        "deep empty root readmission"
+    );
     assert_eq!(cause_shape(&readmitted_projection), [1, 1, 1, 0]);
     for cause in readmitted_projection["causes"].as_array().unwrap() {
         assert_redacted_tree(cause);
@@ -10115,8 +10684,16 @@ fn decoded_deep_nested_parent_tail_recovery_keeps_closure_generations() {
             b"deep empty root readmission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -10315,8 +10892,16 @@ fn decoded_parent_chains_cross_empty_sibling_replacements_without_tail_leaks() {
             b"empty parent payload".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -10373,17 +10958,16 @@ fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
         .with_note(SafeText::new(fixture).unwrap())
         .redacted_with_message(SafeText::new(message).unwrap())
     };
-    let make_parent = |root_message: &str,
-                       branch_message: &str,
-                       inner_message: &str,
-                       tails: Vec<Diagnostic>| {
-        let inner = tails.into_iter().fold(
-            admitted("ORNA-E-NESTED-RECOVERY-PARENT", inner_message),
-            |inner, tail| inner.with_cause(tail),
-        );
-        let branch = admitted("ORNA-E-NESTED-RECOVERY-BRANCH", branch_message).with_cause(inner);
-        admitted("ORNA-E-NESTED-RECOVERY-ROOT", root_message).with_cause(branch)
-    };
+    let make_parent =
+        |root_message: &str, branch_message: &str, inner_message: &str, tails: Vec<Diagnostic>| {
+            let inner = tails.into_iter().fold(
+                admitted("ORNA-E-NESTED-RECOVERY-PARENT", inner_message),
+                |inner, tail| inner.with_cause(tail),
+            );
+            let branch =
+                admitted("ORNA-E-NESTED-RECOVERY-BRANCH", branch_message).with_cause(inner);
+            admitted("ORNA-E-NESTED-RECOVERY-ROOT", root_message).with_cause(branch)
+        };
     let recover = |diagnostic: &Diagnostic| {
         Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
     };
@@ -10446,19 +11030,25 @@ fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
     assert_eq!(capture_admitted_empty(), empty_readmission);
     assert_eq!(capture_final_replacement(), replacement_recovery);
     let readmitted_projection = serde_json::to_value(capture_admitted_empty()).unwrap();
-    assert_eq!(readmitted_projection["message"], "empty nested root admission");
+    assert_eq!(
+        readmitted_projection["message"],
+        "empty nested root admission"
+    );
     assert_eq!(cause_shape(&readmitted_projection), [1, 1, 0]);
     assert_redacted_tree(&readmitted_projection["causes"][0]);
 
     let compose_generations = {
         move || {
-            admitted("ORNA-E-NESTED-RECOVERY-OUTER", "nested recovery outer admission")
-                .with_cause(capture_initial_full())
-                .with_cause(capture_empty_nested())
-                .with_cause(capture_replaced_tail())
-                .with_cause(capture_restored_full())
-                .with_cause(capture_admitted_empty())
-                .with_cause(capture_final_replacement())
+            admitted(
+                "ORNA-E-NESTED-RECOVERY-OUTER",
+                "nested recovery outer admission",
+            )
+            .with_cause(capture_initial_full())
+            .with_cause(capture_empty_nested())
+            .with_cause(capture_replaced_tail())
+            .with_cause(capture_restored_full())
+            .with_cause(capture_admitted_empty())
+            .with_cause(capture_final_replacement())
         }
     };
     receiver.clone_from(&capture_empty());
@@ -10518,8 +11108,16 @@ fn decoded_nested_parent_tail_recovery_keeps_empty_and_replaced_generations() {
             b"empty nested root admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -10793,8 +11391,16 @@ fn deep_parent_sibling_recovery_preserves_crossed_closure_edges() {
             b"deep empty terminal payload".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -11055,8 +11661,16 @@ fn shared_deep_parent_codes_preserve_unequal_tail_recovery_generations() {
             b"empty generation deep parent payload".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -11104,7 +11718,10 @@ fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
             .collect()
     }
     fn reused_recovery(diagnostic: &serde_json::Value) -> Option<&serde_json::Value> {
-        terminal_parent(diagnostic)["causes"].as_array().unwrap().first()
+        terminal_parent(diagnostic)["causes"]
+            .as_array()
+            .unwrap()
+            .first()
     }
     let admitted = |code: &str, message: &str| {
         Diagnostic::new(
@@ -11121,15 +11738,18 @@ fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
     };
     let shared_source = admitted("ORNA-E-SHARED-RECOVERY", "shared recovery root payload")
         .with_cause(
-            admitted("ORNA-E-SHARED-RECOVERY-BRANCH", "shared recovery branch payload")
-                .with_cause(admitted(
-                    "ORNA-E-SHARED-RECOVERY-A",
-                    "shared recovery first tail payload",
-                ))
-                .with_cause(admitted(
-                    "ORNA-E-SHARED-RECOVERY-B",
-                    "shared recovery final tail payload",
-                )),
+            admitted(
+                "ORNA-E-SHARED-RECOVERY-BRANCH",
+                "shared recovery branch payload",
+            )
+            .with_cause(admitted(
+                "ORNA-E-SHARED-RECOVERY-A",
+                "shared recovery first tail payload",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-SHARED-RECOVERY-B",
+                "shared recovery final tail payload",
+            )),
         );
     let shared_recovery = recover(&shared_source);
     let shared_projection = serde_json::to_value(&shared_recovery).unwrap();
@@ -11314,8 +11934,16 @@ fn reused_decoded_deep_recovery_tail_survives_parent_replacements() {
             b"empty shared deep parent payload".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -11382,24 +12010,21 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
     let recover = |diagnostic: &Diagnostic| {
         Diagnostic::decode_ovb(&diagnostic.encode_ovb().unwrap()).unwrap()
     };
-    let shared_source = admitted(
-        "ORNA-E-DUPLICATE-SHARED",
-        "duplicate shared root payload",
-    )
-    .with_cause(
-        admitted(
-            "ORNA-E-DUPLICATE-SHARED-BRANCH",
-            "duplicate shared branch payload",
-        )
-        .with_cause(admitted(
-            "ORNA-E-DUPLICATE-SHARED-A",
-            "duplicate shared first tail payload",
-        ))
-        .with_cause(admitted(
-            "ORNA-E-DUPLICATE-SHARED-B",
-            "duplicate shared final tail payload",
-        )),
-    );
+    let shared_source = admitted("ORNA-E-DUPLICATE-SHARED", "duplicate shared root payload")
+        .with_cause(
+            admitted(
+                "ORNA-E-DUPLICATE-SHARED-BRANCH",
+                "duplicate shared branch payload",
+            )
+            .with_cause(admitted(
+                "ORNA-E-DUPLICATE-SHARED-A",
+                "duplicate shared first tail payload",
+            ))
+            .with_cause(admitted(
+                "ORNA-E-DUPLICATE-SHARED-B",
+                "duplicate shared final tail payload",
+            )),
+        );
     let shared_recovery = recover(&shared_source);
     let shared_projection = serde_json::to_value(&shared_recovery).unwrap();
     let make_parent = |generation: &str, middle_code: &str, middle_message: &str| {
@@ -11425,14 +12050,14 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
     ));
     let empty_message = "empty generation repeated parent payload";
     let empty_terminal = admitted("ORNA-E-DUPLICATE-DEEP-TERMINAL", empty_message);
-    let empty_nested = admitted("ORNA-E-DUPLICATE-DEEP-NESTED", empty_message)
-        .with_cause(empty_terminal);
-    let empty_parent = admitted("ORNA-E-DUPLICATE-DEEP-PARENT", empty_message)
-        .with_cause(empty_nested);
-    let empty_branch = admitted("ORNA-E-DUPLICATE-DEEP-BRANCH", empty_message)
-        .with_cause(empty_parent);
-    let empty_source = admitted("ORNA-E-DUPLICATE-DEEP-ROOT", empty_message)
-        .with_cause(empty_branch);
+    let empty_nested =
+        admitted("ORNA-E-DUPLICATE-DEEP-NESTED", empty_message).with_cause(empty_terminal);
+    let empty_parent =
+        admitted("ORNA-E-DUPLICATE-DEEP-PARENT", empty_message).with_cause(empty_nested);
+    let empty_branch =
+        admitted("ORNA-E-DUPLICATE-DEEP-BRANCH", empty_message).with_cause(empty_parent);
+    let empty_source =
+        admitted("ORNA-E-DUPLICATE-DEEP-ROOT", empty_message).with_cause(empty_branch);
     let empty_recovery = recover(&empty_source);
     let capture = |snapshot: Diagnostic| move || snapshot.clone();
 
@@ -11476,17 +12101,20 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
 
     let compose_generations = {
         move || {
-            admitted("ORNA-E-DUPLICATE-OUTER", "duplicate recovery outer admission")
-                .with_cause(capture_left_old())
-                .with_cause(capture_right_new())
-                .with_cause(capture_left_empty())
-                .with_cause(capture_right_empty())
-                .with_cause(capture_left_crossed())
-                .with_cause(capture_right_crossed())
-                .with_cause(capture_left_restored())
-                .with_cause(capture_right_restored())
-                .with_cause(capture_left_empty_again())
-                .with_cause(capture_right_new_again())
+            admitted(
+                "ORNA-E-DUPLICATE-OUTER",
+                "duplicate recovery outer admission",
+            )
+            .with_cause(capture_left_old())
+            .with_cause(capture_right_new())
+            .with_cause(capture_left_empty())
+            .with_cause(capture_right_empty())
+            .with_cause(capture_left_crossed())
+            .with_cause(capture_right_crossed())
+            .with_cause(capture_left_restored())
+            .with_cause(capture_right_restored())
+            .with_cause(capture_left_empty_again())
+            .with_cause(capture_right_new_again())
         }
     };
     left.clone_from(&capture_empty());
@@ -11599,8 +12227,16 @@ fn duplicate_reused_deep_tail_edges_survive_sibling_recovery() {
             empty_message.as_bytes(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -11740,15 +12376,18 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
 
     let compose_generations = {
         move || {
-            admitted("ORNA-E-DUPLICATE-DEEP-OUTER", "duplicate closure outer admission")
-                .with_cause(capture_left_initial())
-                .with_cause(capture_right_initial())
-                .with_cause(capture_left_empty())
-                .with_cause(capture_right_replacement())
-                .with_cause(capture_left_replacement())
-                .with_cause(capture_right_restored())
-                .with_cause(capture_left_restored())
-                .with_cause(capture_right_empty())
+            admitted(
+                "ORNA-E-DUPLICATE-DEEP-OUTER",
+                "duplicate closure outer admission",
+            )
+            .with_cause(capture_left_initial())
+            .with_cause(capture_right_initial())
+            .with_cause(capture_left_empty())
+            .with_cause(capture_right_replacement())
+            .with_cause(capture_left_replacement())
+            .with_cause(capture_right_restored())
+            .with_cause(capture_left_restored())
+            .with_cause(capture_right_empty())
         }
     };
     left.clone_from(&capture_empty());
@@ -11844,15 +12483,22 @@ fn duplicate_closures_keep_same_deep_recovery_across_parent_replacements() {
             b"empty generation deep recovery payload".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!wire.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !wire
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&wire).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
     let decoded_causes = decoded["causes"].as_array().unwrap();
     assert_eq!(decoded_causes, causes);
 }
-
 
 #[test]
 fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
@@ -11904,9 +12550,12 @@ fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
 
     // ORNA-SECRET-002 requires recursive cause redaction but does not specify
     // how a locally re-admitted recovered snapshot behaves beside its duplicate.
-    let local_snapshot = first_recovery
-        .redacted_with_message(SafeText::new("local snapshot admission").unwrap());
-    assert_eq!(serde_json::to_value(&local_snapshot).unwrap()["message"], "local snapshot admission");
+    let local_snapshot =
+        first_recovery.redacted_with_message(SafeText::new("local snapshot admission").unwrap());
+    assert_eq!(
+        serde_json::to_value(&local_snapshot).unwrap()["message"],
+        "local snapshot admission"
+    );
     let outer = admitted("ORNA-E-TAKE3-OUTER", "outer snapshot admission")
         .with_cause(local_snapshot)
         .with_cause(duplicate_recovery);
@@ -11936,8 +12585,16 @@ fn duplicate_deep_recoveries_redact_local_snapshot_admission() {
             b"local snapshot admission".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12079,8 +12736,16 @@ fn empty_duplicate_sibling_counts_follow_order_with_duplicate_terminals() {
             b"RIGHT sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12123,14 +12788,10 @@ fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
             "ORNA-E-TAKE4-REPEATED-TAIL",
             "second repeated tail secret",
         ));
-    let nested = admitted("ORNA-E-TAKE4-NESTED", "deep snapshot payload")
-        .with_cause(terminal);
-    let parent = admitted("ORNA-E-TAKE4-PARENT", "deep snapshot payload")
-        .with_cause(nested);
-    let branch = admitted("ORNA-E-TAKE4-BRANCH", "deep snapshot payload")
-        .with_cause(parent);
-    let root = admitted("ORNA-E-TAKE4-ROOT", "deep snapshot payload")
-        .with_cause(branch);
+    let nested = admitted("ORNA-E-TAKE4-NESTED", "deep snapshot payload").with_cause(terminal);
+    let parent = admitted("ORNA-E-TAKE4-PARENT", "deep snapshot payload").with_cause(nested);
+    let branch = admitted("ORNA-E-TAKE4-BRANCH", "deep snapshot payload").with_cause(parent);
+    let root = admitted("ORNA-E-TAKE4-ROOT", "deep snapshot payload").with_cause(branch);
     let wire = root.encode_ovb().unwrap();
     let first = Diagnostic::decode_ovb(&wire).unwrap();
     let duplicate = Diagnostic::decode_ovb(&wire).unwrap();
@@ -12169,8 +12830,16 @@ fn duplicate_deep_snapshots_preserve_repeated_tail_order() {
             b"second repeated tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12213,14 +12882,11 @@ fn repeated_deep_recovery_cycles_keep_tail_multiplicity() {
             "ORNA-E-CYCLE-TAIL",
             "second repeated cycle tail secret",
         ));
-    let nested = admitted("ORNA-E-CYCLE-NESTED", "deep recovery cycle payload")
-        .with_cause(terminal);
-    let parent = admitted("ORNA-E-CYCLE-PARENT", "deep recovery cycle payload")
-        .with_cause(nested);
-    let branch = admitted("ORNA-E-CYCLE-BRANCH", "deep recovery cycle payload")
-        .with_cause(parent);
-    let root = admitted("ORNA-E-CYCLE-ROOT", "deep recovery cycle payload")
-        .with_cause(branch);
+    let nested =
+        admitted("ORNA-E-CYCLE-NESTED", "deep recovery cycle payload").with_cause(terminal);
+    let parent = admitted("ORNA-E-CYCLE-PARENT", "deep recovery cycle payload").with_cause(nested);
+    let branch = admitted("ORNA-E-CYCLE-BRANCH", "deep recovery cycle payload").with_cause(parent);
+    let root = admitted("ORNA-E-CYCLE-ROOT", "deep recovery cycle payload").with_cause(branch);
 
     let mut current = Diagnostic::decode_ovb(&root.encode_ovb().unwrap()).unwrap();
     let mut generations = vec![current.clone()];
@@ -12265,14 +12931,21 @@ fn repeated_deep_recovery_cycles_keep_tail_multiplicity() {
             b"second repeated cycle tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
     assert_eq!(decoded["causes"], projection["causes"]);
 }
-
 
 #[test]
 fn repeated_recovery_tails_survive_empty_replacements() {
@@ -12299,12 +12972,12 @@ fn repeated_recovery_tails_survive_empty_replacements() {
             admitted("ORNA-E-REPEAT-TERMINAL", "repeated recovery payload"),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-REPEAT-NESTED", "repeated recovery payload")
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-REPEAT-PARENT", "repeated recovery payload")
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-REPEAT-BRANCH", "repeated recovery payload")
-            .with_cause(parent);
+        let nested =
+            admitted("ORNA-E-REPEAT-NESTED", "repeated recovery payload").with_cause(terminal);
+        let parent =
+            admitted("ORNA-E-REPEAT-PARENT", "repeated recovery payload").with_cause(nested);
+        let branch =
+            admitted("ORNA-E-REPEAT-BRANCH", "repeated recovery payload").with_cause(parent);
         admitted("ORNA-E-REPEAT-ROOT", "repeated recovery payload").with_cause(branch)
     };
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
@@ -12397,11 +13070,20 @@ fn repeated_recovery_tails_survive_empty_replacements() {
     assert_eq!(
         causes.iter().map(tail_codes).collect::<Vec<_>>(),
         vec![
-            vec!["ORNA-E-REPEAT-TAIL".to_owned(), "ORNA-E-REPEAT-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPEAT-TAIL".to_owned(),
+                "ORNA-E-REPEAT-TAIL".to_owned()
+            ],
             vec![],
-            vec!["ORNA-E-REPEAT-TAIL".to_owned(), "ORNA-E-REPEAT-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPEAT-TAIL".to_owned(),
+                "ORNA-E-REPEAT-TAIL".to_owned()
+            ],
             vec![],
-            vec!["ORNA-E-REPEAT-TAIL".to_owned(), "ORNA-E-REPEAT-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPEAT-TAIL".to_owned(),
+                "ORNA-E-REPEAT-TAIL".to_owned()
+            ],
         ],
     );
 
@@ -12417,8 +13099,16 @@ fn repeated_recovery_tails_survive_empty_replacements() {
             b"second repeated tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12538,8 +13228,16 @@ fn repeated_error_tails_keep_order_and_severity_after_recovery() {
             b"second repeated fatal secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12730,8 +13428,16 @@ fn repeated_error_tails_survive_empty_snapshot_replacements() {
             b"second restore fatal secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12760,17 +13466,37 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
     };
     let make_chain = |tails: Vec<Diagnostic>| {
         let terminal = tails.into_iter().fold(
-            admitted("ORNA-E-REPLAY-TERMINAL", DiagnosticSeverity::Error, "replay payload"),
+            admitted(
+                "ORNA-E-REPLAY-TERMINAL",
+                DiagnosticSeverity::Error,
+                "replay payload",
+            ),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-REPLAY-NESTED", DiagnosticSeverity::Help, "replay payload")
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-REPLAY-PARENT", DiagnosticSeverity::Error, "replay payload")
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-REPLAY-BRANCH", DiagnosticSeverity::Warning, "replay payload")
-            .with_cause(parent);
-        admitted("ORNA-E-REPLAY-ROOT", DiagnosticSeverity::Error, "replay payload")
-            .with_cause(branch)
+        let nested = admitted(
+            "ORNA-E-REPLAY-NESTED",
+            DiagnosticSeverity::Help,
+            "replay payload",
+        )
+        .with_cause(terminal);
+        let parent = admitted(
+            "ORNA-E-REPLAY-PARENT",
+            DiagnosticSeverity::Error,
+            "replay payload",
+        )
+        .with_cause(nested);
+        let branch = admitted(
+            "ORNA-E-REPLAY-BRANCH",
+            DiagnosticSeverity::Warning,
+            "replay payload",
+        )
+        .with_cause(parent);
+        admitted(
+            "ORNA-E-REPLAY-ROOT",
+            DiagnosticSeverity::Error,
+            "replay payload",
+        )
+        .with_cause(branch)
     };
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
@@ -12811,8 +13537,16 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
     }
 
     let repeated_wire = make_chain(vec![
-        admitted("ORNA-E-REPLAY-TAIL", DiagnosticSeverity::Error, "first replay error secret"),
-        admitted("ORNA-E-REPLAY-TAIL", DiagnosticSeverity::Fatal, "second replay fatal secret"),
+        admitted(
+            "ORNA-E-REPLAY-TAIL",
+            DiagnosticSeverity::Error,
+            "first replay error secret",
+        ),
+        admitted(
+            "ORNA-E-REPLAY-TAIL",
+            DiagnosticSeverity::Fatal,
+            "second replay fatal secret",
+        ),
     ])
     .encode_ovb()
     .unwrap();
@@ -12850,7 +13584,11 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
         restored_second_replay(),
     ];
     let outer = snapshots.into_iter().fold(
-        admitted("ORNA-E-REPLAY-OUTER", DiagnosticSeverity::Error, "outer replay admission"),
+        admitted(
+            "ORNA-E-REPLAY-OUTER",
+            DiagnosticSeverity::Error,
+            "outer replay admission",
+        ),
         |outer, snapshot| outer.with_cause(snapshot),
     );
     let projection = serde_json::to_value(&outer).unwrap();
@@ -12872,16 +13610,31 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
             vec![1, 1, 1, 1, 2, 0, 0],
         ],
     );
-    assert_eq!(severity_path(&causes[0]), ["error", "warning", "error", "help", "error"]);
-    assert_eq!(severity_path(&causes[1]), ["error", "warning", "error", "help", "error"]);
+    assert_eq!(
+        severity_path(&causes[0]),
+        ["error", "warning", "error", "help", "error"]
+    );
+    assert_eq!(
+        severity_path(&causes[1]),
+        ["error", "warning", "error", "help", "error"]
+    );
     assert_eq!(
         causes.iter().map(tail_codes).collect::<Vec<_>>(),
         vec![
-            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPLAY-TAIL".to_owned(),
+                "ORNA-E-REPLAY-TAIL".to_owned()
+            ],
             vec![],
-            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPLAY-TAIL".to_owned(),
+                "ORNA-E-REPLAY-TAIL".to_owned()
+            ],
             vec![],
-            vec!["ORNA-E-REPLAY-TAIL".to_owned(), "ORNA-E-REPLAY-TAIL".to_owned()],
+            vec![
+                "ORNA-E-REPLAY-TAIL".to_owned(),
+                "ORNA-E-REPLAY-TAIL".to_owned()
+            ],
         ],
     );
     let mut terminal = &causes[0];
@@ -12904,8 +13657,16 @@ fn error_tail_replay_preserves_repeated_entries_after_empty_recovery() {
             b"second replay fatal secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -12933,23 +13694,31 @@ fn replayed_error_snapshots_keep_repeated_tail_order() {
         .redacted_with_message(SafeText::new(message).unwrap())
     };
     let make_wire = |payload: &str, tail_severities: [DiagnosticSeverity; 2]| {
-        let terminal = admitted("ORNA-E-REPLAY2-TERMINAL", DiagnosticSeverity::Error, payload)
-            .with_cause(admitted(
-                "ORNA-E-REPLAY2-TAIL",
-                tail_severities[0],
-                &format!("{payload} first tail secret"),
-            ))
-            .with_cause(admitted(
-                "ORNA-E-REPLAY2-TAIL",
-                tail_severities[1],
-                &format!("{payload} second tail secret"),
-            ));
+        let terminal = admitted(
+            "ORNA-E-REPLAY2-TERMINAL",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(admitted(
+            "ORNA-E-REPLAY2-TAIL",
+            tail_severities[0],
+            &format!("{payload} first tail secret"),
+        ))
+        .with_cause(admitted(
+            "ORNA-E-REPLAY2-TAIL",
+            tail_severities[1],
+            &format!("{payload} second tail secret"),
+        ));
         let nested = admitted("ORNA-E-REPLAY2-NESTED", DiagnosticSeverity::Help, payload)
             .with_cause(terminal);
         let parent = admitted("ORNA-E-REPLAY2-PARENT", DiagnosticSeverity::Error, payload)
             .with_cause(nested);
-        let branch = admitted("ORNA-E-REPLAY2-BRANCH", DiagnosticSeverity::Warning, payload)
-            .with_cause(parent);
+        let branch = admitted(
+            "ORNA-E-REPLAY2-BRANCH",
+            DiagnosticSeverity::Warning,
+            payload,
+        )
+        .with_cause(parent);
         admitted("ORNA-E-REPLAY2-ROOT", DiagnosticSeverity::Error, payload)
             .with_cause(branch)
             .encode_ovb()
@@ -13022,7 +13791,11 @@ fn replayed_error_snapshots_keep_repeated_tail_order() {
         capture_replayed_b(),
     ];
     let outer = snapshots.into_iter().fold(
-        admitted("ORNA-E-REPLAY2-OUTER", DiagnosticSeverity::Error, "outer replay admission"),
+        admitted(
+            "ORNA-E-REPLAY2-OUTER",
+            DiagnosticSeverity::Error,
+            "outer replay admission",
+        ),
         |outer, snapshot| outer.with_cause(snapshot),
     );
     let projection = serde_json::to_value(&outer).unwrap();
@@ -13062,8 +13835,16 @@ fn replayed_error_snapshots_keep_repeated_tail_order() {
             b"replay generation B payload second tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -13092,8 +13873,14 @@ fn error_tail_order_survives_crossed_snapshot_replay() {
     };
     let make_wire = |payload: &str, tail_codes: [&str; 2]| {
         let terminal = admitted("ORNA-E-ORDER-TERMINAL", payload)
-            .with_cause(admitted(tail_codes[0], &format!("{payload} first tail secret")))
-            .with_cause(admitted(tail_codes[1], &format!("{payload} second tail secret")));
+            .with_cause(admitted(
+                tail_codes[0],
+                &format!("{payload} first tail secret"),
+            ))
+            .with_cause(admitted(
+                tail_codes[1],
+                &format!("{payload} second tail secret"),
+            ));
         let nested = admitted("ORNA-E-ORDER-NESTED", payload).with_cause(terminal);
         let parent = admitted("ORNA-E-ORDER-PARENT", payload).with_cause(nested);
         let branch = admitted("ORNA-E-ORDER-BRANCH", payload).with_cause(parent);
@@ -13162,9 +13949,18 @@ fn error_tail_order_survives_crossed_snapshot_replay() {
     assert_eq!(
         causes.iter().map(tail_codes).collect::<Vec<_>>(),
         vec![
-            vec!["ORNA-E-ORDER-TAIL-A".to_owned(), "ORNA-E-ORDER-TAIL-B".to_owned()],
-            vec!["ORNA-E-ORDER-TAIL-B".to_owned(), "ORNA-E-ORDER-TAIL-A".to_owned()],
-            vec!["ORNA-E-ORDER-TAIL-A".to_owned(), "ORNA-E-ORDER-TAIL-B".to_owned()],
+            vec![
+                "ORNA-E-ORDER-TAIL-A".to_owned(),
+                "ORNA-E-ORDER-TAIL-B".to_owned()
+            ],
+            vec![
+                "ORNA-E-ORDER-TAIL-B".to_owned(),
+                "ORNA-E-ORDER-TAIL-A".to_owned()
+            ],
+            vec![
+                "ORNA-E-ORDER-TAIL-A".to_owned(),
+                "ORNA-E-ORDER-TAIL-B".to_owned()
+            ],
         ],
     );
     let mut terminal = &causes[0];
@@ -13190,8 +13986,16 @@ fn error_tail_order_survives_crossed_snapshot_replay() {
             b"reverse order recovery payload second tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -13219,23 +14023,35 @@ fn replayed_error_tail_order_is_stable_between_siblings() {
         .redacted_with_message(SafeText::new(message).unwrap())
     };
     let make_wire = |payload: &str, tail_codes: [&str; 2]| {
-        let terminal = admitted("ORNA-E-ORDER-REPLAY-TERMINAL", DiagnosticSeverity::Error, payload)
-            .with_cause(admitted(
-                tail_codes[0],
-                DiagnosticSeverity::Error,
-                &format!("{payload} first tail secret"),
-            ))
-            .with_cause(admitted(
-                tail_codes[1],
-                DiagnosticSeverity::Error,
-                &format!("{payload} second tail secret"),
-            ));
-        let parent = admitted("ORNA-E-ORDER-REPLAY-PARENT", DiagnosticSeverity::Error, payload)
-            .with_cause(terminal);
-        admitted("ORNA-E-ORDER-REPLAY-ROOT", DiagnosticSeverity::Error, payload)
-            .with_cause(parent)
-            .encode_ovb()
-            .unwrap()
+        let terminal = admitted(
+            "ORNA-E-ORDER-REPLAY-TERMINAL",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(admitted(
+            tail_codes[0],
+            DiagnosticSeverity::Error,
+            &format!("{payload} first tail secret"),
+        ))
+        .with_cause(admitted(
+            tail_codes[1],
+            DiagnosticSeverity::Error,
+            &format!("{payload} second tail secret"),
+        ));
+        let parent = admitted(
+            "ORNA-E-ORDER-REPLAY-PARENT",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(terminal);
+        admitted(
+            "ORNA-E-ORDER-REPLAY-ROOT",
+            DiagnosticSeverity::Error,
+            payload,
+        )
+        .with_cause(parent)
+        .encode_ovb()
+        .unwrap()
     };
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
@@ -13346,12 +14162,16 @@ fn replayed_error_tail_order_is_stable_between_siblings() {
         ])
     {
         assert!(
-            !json.windows(disclosure.len()).any(|window| window == disclosure),
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure),
             "JSON retained test secret {:?}",
             String::from_utf8_lossy(disclosure),
         );
         assert!(
-            !encoded.windows(disclosure.len()).any(|window| window == disclosure),
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure),
             "OVB retained test secret {:?}",
             String::from_utf8_lossy(disclosure),
         );
@@ -13506,12 +14326,24 @@ fn replayed_error_tail_order_survives_an_interposed_error_sibling() {
         tails,
         [
             vec![
-                ("ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(), "error".to_owned()),
-                ("ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(), "error".to_owned()),
+                (
+                    "ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(),
+                    "error".to_owned()
+                ),
+                (
+                    "ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(),
+                    "error".to_owned()
+                ),
             ],
             vec![
-                ("ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(), "error".to_owned()),
-                ("ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(), "error".to_owned()),
+                (
+                    "ORNA-E-REPLAY-INTERPOSED-TAIL-B".to_owned(),
+                    "error".to_owned()
+                ),
+                (
+                    "ORNA-E-REPLAY-INTERPOSED-TAIL-A".to_owned(),
+                    "error".to_owned()
+                ),
             ],
         ],
     );
@@ -13533,8 +14365,16 @@ fn replayed_error_tail_order_survives_an_interposed_error_sibling() {
             b"reverse interposed replay payload second tail secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -13642,10 +14482,13 @@ fn replayed_duplicate_error_tail_order_keeps_nested_shapes() {
 
     // ORNA-SECRET-002 requires redaction but is silent on order for duplicate
     // same-code Error tails; preserve their insertion order across replay.
-    let outer = admitted("ORNA-E-REPLAY-DUPLICATE-OUTER", "public duplicate replay admission")
-        .with_cause(forward)
-        .with_cause(reverse)
-        .with_cause(restored_forward);
+    let outer = admitted(
+        "ORNA-E-REPLAY-DUPLICATE-OUTER",
+        "public duplicate replay admission",
+    )
+    .with_cause(forward)
+    .with_cause(reverse)
+    .with_cause(restored_forward);
     let projection = serde_json::to_value(&outer).unwrap();
     assert_eq!(projection["severity"], "error");
     assert_eq!(projection["message"], "public duplicate replay admission");
@@ -13689,8 +14532,16 @@ fn replayed_duplicate_error_tail_order_keeps_nested_shapes() {
             b"child B2 secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -13747,12 +14598,10 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
             admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-TERMINAL", payload),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-NESTED", payload)
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-PARENT", payload)
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-BRANCH", payload)
-            .with_cause(parent);
+        let nested =
+            admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-NESTED", payload).with_cause(terminal);
+        let parent = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-PARENT", payload).with_cause(nested);
+        let branch = admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-BRANCH", payload).with_cause(parent);
         admitted("ORNA-E-REPLAY-NESTED-DUPLICATE-ROOT", payload)
             .with_cause(branch)
             .encode_ovb()
@@ -13811,7 +14660,10 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
     .with_cause(restored_forward);
     let projection = serde_json::to_value(&outer).unwrap();
     assert_eq!(projection["severity"], "error");
-    assert_eq!(projection["message"], "public duplicate replay order admission");
+    assert_eq!(
+        projection["message"],
+        "public duplicate replay order admission"
+    );
     let causes = projection["causes"].as_array().unwrap();
     assert_eq!(causes.len(), 3);
     for cause in causes {
@@ -13856,11 +14708,7 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
     ];
     assert_eq!(
         causes.iter().map(tail_contents).collect::<Vec<_>>(),
-        vec![
-            forward_contents.clone(),
-            reverse_contents,
-            forward_contents,
-        ],
+        vec![forward_contents.clone(), reverse_contents, forward_contents,],
     );
 
     let json = serde_json::to_vec(&outer).unwrap();
@@ -13880,8 +14728,16 @@ fn replayed_duplicate_error_tails_keep_nested_child_order() {
             b"ORNA-E-REPLAY-CHILD-B2 secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14003,13 +14859,16 @@ fn nested_duplicate_error_tail_cardinality_edges_survive_replay() {
 
     // ORNA-SECRET-002 requires redaction but leaves ordering open; retain the
     // nested insertion order across two, one, and zero-tail replay generations.
-    let outer = admitted("ORNA-E-NESTED-DUPLICATE-OUTER", "public nested replay admission")
-        .with_cause(forward)
-        .with_cause(single_after_forward)
-        .with_cause(empty_between)
-        .with_cause(reverse)
-        .with_cause(single_after_reverse)
-        .with_cause(restored_forward);
+    let outer = admitted(
+        "ORNA-E-NESTED-DUPLICATE-OUTER",
+        "public nested replay admission",
+    )
+    .with_cause(forward)
+    .with_cause(single_after_forward)
+    .with_cause(empty_between)
+    .with_cause(reverse)
+    .with_cause(single_after_reverse)
+    .with_cause(restored_forward);
     let projection = serde_json::to_value(&outer).unwrap();
     assert_eq!(projection["severity"], "error");
     assert_eq!(projection["message"], "public nested replay admission");
@@ -14079,8 +14938,16 @@ fn nested_duplicate_error_tail_cardinality_edges_survive_replay() {
             b"leaf B2 secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14131,12 +14998,9 @@ fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
             admitted("ORNA-E-NESTED-DUPLICATE-EDGE-TERMINAL", payload),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-NESTED", payload)
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-PARENT", payload)
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-BRANCH", payload)
-            .with_cause(parent);
+        let nested = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-NESTED", payload).with_cause(terminal);
+        let parent = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-PARENT", payload).with_cause(nested);
+        let branch = admitted("ORNA-E-NESTED-DUPLICATE-EDGE-BRANCH", payload).with_cause(parent);
         admitted("ORNA-E-NESTED-DUPLICATE-EDGE-ROOT", payload)
             .with_cause(branch)
             .encode_ovb()
@@ -14209,9 +15073,21 @@ fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
     assert_eq!(
         causes.iter().map(tail_codes).collect::<Vec<_>>(),
         vec![
-            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
-            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
-            vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()],
+            vec![
+                duplicate.to_owned(),
+                interposed.to_owned(),
+                duplicate.to_owned()
+            ],
+            vec![
+                duplicate.to_owned(),
+                interposed.to_owned(),
+                duplicate.to_owned()
+            ],
+            vec![
+                duplicate.to_owned(),
+                interposed.to_owned(),
+                duplicate.to_owned()
+            ],
         ],
     );
     assert_eq!(
@@ -14251,8 +15127,16 @@ fn nested_duplicate_tails_keep_interposed_sibling_order_on_replay() {
             b"interposed sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14307,12 +15191,9 @@ fn nested_duplicate_tail_empty_child_shape_survives_replay() {
             admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-TERMINAL", payload),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-NESTED", payload)
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-PARENT", payload)
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-BRANCH", payload)
-            .with_cause(parent);
+        let nested = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-NESTED", payload).with_cause(terminal);
+        let parent = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-PARENT", payload).with_cause(nested);
+        let branch = admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-BRANCH", payload).with_cause(parent);
         admitted("ORNA-E-NESTED-DUPLICATE-EMPTY-ROOT", payload)
             .with_cause(branch)
             .encode_ovb()
@@ -14421,8 +15302,16 @@ fn nested_duplicate_tail_empty_child_shape_survives_replay() {
             b"interposed sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14471,12 +15360,9 @@ fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
             admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-TERMINAL", payload),
             |terminal, tail| terminal.with_cause(tail),
         );
-        let nested = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-NESTED", payload)
-            .with_cause(terminal);
-        let parent = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-PARENT", payload)
-            .with_cause(nested);
-        let branch = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-BRANCH", payload)
-            .with_cause(parent);
+        let nested = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-NESTED", payload).with_cause(terminal);
+        let parent = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-PARENT", payload).with_cause(nested);
+        let branch = admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-BRANCH", payload).with_cause(parent);
         admitted("ORNA-E-EMPTY-NESTED-DUPLICATE-ROOT", payload)
             .with_cause(branch)
             .encode_ovb()
@@ -14559,7 +15445,11 @@ fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
     }
     let duplicate = "ORNA-E-EMPTY-NESTED-DUPLICATE-TAIL";
     let interposed = "ORNA-E-EMPTY-NESTED-DUPLICATE-INTERPOSED";
-    let pair_codes = vec![duplicate.to_owned(), interposed.to_owned(), duplicate.to_owned()];
+    let pair_codes = vec![
+        duplicate.to_owned(),
+        interposed.to_owned(),
+        duplicate.to_owned(),
+    ];
     let single_codes = vec![duplicate.to_owned(), interposed.to_owned()];
     assert_eq!(
         causes.iter().map(tail_codes).collect::<Vec<_>>(),
@@ -14574,7 +15464,14 @@ fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
     );
     assert_eq!(
         causes.iter().map(tail_child_counts).collect::<Vec<_>>(),
-        vec![vec![0, 0, 0], vec![0, 0], vec![], vec![0, 0, 0], vec![0, 0], vec![0, 0, 0]],
+        vec![
+            vec![0, 0, 0],
+            vec![0, 0],
+            vec![],
+            vec![0, 0, 0],
+            vec![0, 0],
+            vec![0, 0, 0]
+        ],
     );
 
     let json = serde_json::to_vec(&outer).unwrap();
@@ -14593,8 +15490,16 @@ fn empty_nested_duplicate_tails_keep_multiplicity_across_replay() {
             b"interposed secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14726,7 +15631,14 @@ fn empty_nested_duplicate_tails_stay_local_to_sibling_on_replay() {
     }
     assert_eq!(
         causes.iter().map(branch_tail_counts).collect::<Vec<_>>(),
-        vec![vec![2, 2], vec![0, 2], vec![2, 0], vec![1, 1], vec![0, 0], vec![2, 2]],
+        vec![
+            vec![2, 2],
+            vec![0, 2],
+            vec![2, 0],
+            vec![1, 1],
+            vec![0, 0],
+            vec![2, 2]
+        ],
     );
 
     let json = serde_json::to_vec(&outer).unwrap();
@@ -14749,8 +15661,16 @@ fn empty_nested_duplicate_tails_stay_local_to_sibling_on_replay() {
             b"RIGHT branch secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -14903,8 +15823,16 @@ fn empty_duplicate_sibling_tails_keep_owner_across_replay() {
             b"RIGHT sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -15027,7 +15955,10 @@ fn empty_duplicate_sibling_order_keeps_nested_tail_owners_on_replay() {
         assert_empty_tail_shapes(cause);
     }
     assert_eq!(
-        causes.iter().map(sibling_terminal_codes).collect::<Vec<_>>(),
+        causes
+            .iter()
+            .map(sibling_terminal_codes)
+            .collect::<Vec<_>>(),
         vec![
             vec![
                 "ORNA-E-EMPTY-DUP-ORDER-LEFT-TERMINAL".to_owned(),
@@ -15064,8 +15995,16 @@ fn empty_duplicate_sibling_order_keeps_nested_tail_owners_on_replay() {
             b"RIGHT sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -15140,12 +16079,14 @@ fn duplicate_sibling_tail_groups_survive_reversed_nested_replay() {
         } else {
             vec![left, right]
         };
-        siblings.into_iter().fold(
-            admitted("ORNA-E-DUP-SIBLING-ROOT", payload),
-            |root, sibling| root.with_cause(sibling),
-        )
-        .encode_ovb()
-        .unwrap()
+        siblings
+            .into_iter()
+            .fold(
+                admitted("ORNA-E-DUP-SIBLING-ROOT", payload),
+                |root, sibling| root.with_cause(sibling),
+            )
+            .encode_ovb()
+            .unwrap()
     };
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
@@ -15233,11 +16174,17 @@ fn duplicate_sibling_tail_groups_survive_reversed_nested_replay() {
             ],
             vec![
                 vec![
-                    vec!["ORNA-E-DUP-SIBLING-RIGHT-B1-CHILD".to_owned(), "ORNA-E-DUP-SIBLING-RIGHT-B2-CHILD".to_owned()],
+                    vec![
+                        "ORNA-E-DUP-SIBLING-RIGHT-B1-CHILD".to_owned(),
+                        "ORNA-E-DUP-SIBLING-RIGHT-B2-CHILD".to_owned()
+                    ],
                     vec!["ORNA-E-DUP-SIBLING-RIGHT-A-CHILD".to_owned()],
                 ],
                 vec![
-                    vec!["ORNA-E-DUP-SIBLING-LEFT-B1-CHILD".to_owned(), "ORNA-E-DUP-SIBLING-LEFT-B2-CHILD".to_owned()],
+                    vec![
+                        "ORNA-E-DUP-SIBLING-LEFT-B1-CHILD".to_owned(),
+                        "ORNA-E-DUP-SIBLING-LEFT-B2-CHILD".to_owned()
+                    ],
                     vec!["ORNA-E-DUP-SIBLING-LEFT-A-CHILD".to_owned()],
                 ],
             ],
@@ -15281,8 +16228,16 @@ fn duplicate_sibling_tail_groups_survive_reversed_nested_replay() {
             b"RIGHT B2 child secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -15357,12 +16312,14 @@ fn duplicate_sibling_tail_child_shapes_follow_order_on_replay() {
         } else {
             vec![left, right]
         };
-        siblings.into_iter().fold(
-            admitted("ORNA-E-DUP-SIBLING-SHAPE-ROOT", payload),
-            |root, sibling| root.with_cause(sibling),
-        )
-        .encode_ovb()
-        .unwrap()
+        siblings
+            .into_iter()
+            .fold(
+                admitted("ORNA-E-DUP-SIBLING-SHAPE-ROOT", payload),
+                |root, sibling| root.with_cause(sibling),
+            )
+            .encode_ovb()
+            .unwrap()
     };
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
@@ -15434,7 +16391,11 @@ fn duplicate_sibling_tail_child_shapes_follow_order_on_replay() {
             .iter()
             .map(sibling_tail_child_counts)
             .collect::<Vec<_>>(),
-        vec![vec![vec![1, 2], vec![2, 1]], vec![vec![2, 1], vec![1, 2]], vec![vec![1, 2], vec![2, 1]]],
+        vec![
+            vec![vec![1, 2], vec![2, 1]],
+            vec![vec![2, 1], vec![1, 2]],
+            vec![vec![1, 2], vec![2, 1]]
+        ],
     );
 
     let json = serde_json::to_vec(&outer).unwrap();
@@ -15460,8 +16421,16 @@ fn duplicate_sibling_tail_child_shapes_follow_order_on_replay() {
             b"RIGHT sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!encoded.windows(disclosure.len()).any(|window| window == disclosure));
+        assert!(
+            !json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !encoded
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&encoded).unwrap()).unwrap();
     assert_redacted_tree(&decoded);
@@ -15658,14 +16627,22 @@ fn shorthand_redaction_preserves_duplicate_sibling_tail_shapes_on_replay() {
             b"RIGHT sibling secret".as_slice(),
         ])
     {
-        assert!(!json.windows(disclosure.len()).any(|window| window == disclosure));
-        assert!(!reverse_json
-            .windows(disclosure.len())
-            .any(|window| window == disclosure));
-        for wire in [&forward_wire, &reverse_wire] {
-            assert!(!wire
+        assert!(
+            !json
                 .windows(disclosure.len())
-                .any(|window| window == disclosure));
+                .any(|window| window == disclosure)
+        );
+        assert!(
+            !reverse_json
+                .windows(disclosure.len())
+                .any(|window| window == disclosure)
+        );
+        for wire in [&forward_wire, &reverse_wire] {
+            assert!(
+                !wire
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     let decoded = serde_json::to_value(Diagnostic::decode_ovb(&forward_wire).unwrap()).unwrap();
@@ -15852,9 +16829,11 @@ fn pre_redacted_duplicate_tails_keep_sibling_order_on_replay() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -16047,9 +17026,11 @@ fn shorthand_redacted_siblings_keep_duplicate_tail_shapes_when_composed() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -16158,10 +17139,7 @@ fn shorthand_redacted_terminals_keep_duplicate_sibling_tail_shapes() {
             .map(|sibling| {
                 assert_eq!(sibling["code"], "ORNA-E-SHORTHAND-TERMINAL-DUP-BRANCH");
                 let terminal = &sibling["causes"][0];
-                assert_eq!(
-                    terminal["code"],
-                    "ORNA-E-SHORTHAND-TERMINAL-DUP-TERMINAL"
-                );
+                assert_eq!(terminal["code"], "ORNA-E-SHORTHAND-TERMINAL-DUP-TERMINAL");
                 let tails = terminal["causes"].as_array().unwrap();
                 assert_eq!(tails.len(), 2);
                 tails
@@ -16247,9 +17225,11 @@ fn shorthand_redacted_terminals_keep_duplicate_sibling_tail_shapes() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -16288,7 +17268,10 @@ fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
                 ("LEFT", vec![("D", 1)]),
             ]
         } else {
-            vec![("LEFT", vec![("A", 0), ("B", 2)]), ("RIGHT", vec![("C", 1)])]
+            vec![
+                ("LEFT", vec![("A", 0), ("B", 2)]),
+                ("RIGHT", vec![("C", 1)]),
+            ]
         };
         layout
             .into_iter()
@@ -16303,9 +17286,7 @@ fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
                             ),
                             |tail, child| {
                                 tail.with_cause(diagnostic(
-                                    &format!(
-                                        "ORNA-E-SHORTHAND-CLONE-{side}-{slot}-CHILD-{child}"
-                                    ),
+                                    &format!("ORNA-E-SHORTHAND-CLONE-{side}-{slot}-CHILD-{child}"),
                                     &format!("{payload} {side} {slot} child {child} secret"),
                                 ))
                             },
@@ -16341,10 +17322,7 @@ fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
             .map(|sibling| {
                 assert_eq!(sibling["code"], "ORNA-E-SHORTHAND-CLONE-DUP-BRANCH");
                 let terminal = &sibling["causes"][0];
-                assert_eq!(
-                    terminal["code"],
-                    "ORNA-E-SHORTHAND-CLONE-DUP-TERMINAL"
-                );
+                assert_eq!(terminal["code"], "ORNA-E-SHORTHAND-CLONE-DUP-TERMINAL");
                 terminal["causes"]
                     .as_array()
                     .unwrap()
@@ -16454,9 +17432,11 @@ fn shorthand_after_clone_replacement_keeps_duplicate_sibling_tails() {
         restored_wire,
     ] {
         for disclosure in disclosures.clone() {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -16506,9 +17486,7 @@ fn cloned_alias_siblings_retain_their_duplicate_tail_additions() {
         // These independent clones model two aliased uses of one diagnostic
         // value; each sibling appends a distinct same-code tail afterward.
         let left_terminal = shared_terminal.clone().with_cause(tail("LEFT-ALIAS", 1));
-        let right_terminal = shared_terminal
-            .clone()
-            .with_cause(tail("RIGHT-ALIAS", 2));
+        let right_terminal = shared_terminal.clone().with_cause(tail("RIGHT-ALIAS", 2));
         let left = diagnostic(
             "ORNA-E-ALIAS-DUP-SIBLING-BRANCH",
             &format!("{payload} left sibling secret"),
@@ -16650,9 +17628,11 @@ fn cloned_alias_siblings_retain_their_duplicate_tail_additions() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -16757,10 +17737,7 @@ fn cloned_alias_tails_keep_distinct_appends_across_siblings() {
                         assert_eq!(tail["code"], "ORNA-E-ALIAS-SIBLING-DUP-TAIL");
                         let children = tail["causes"].as_array().unwrap();
                         assert_eq!(children.len(), 2);
-                        assert_eq!(
-                            children[0]["code"],
-                            "ORNA-E-ALIAS-SIBLING-SHARED-CHILD"
-                        );
+                        assert_eq!(children[0]["code"], "ORNA-E-ALIAS-SIBLING-SHARED-CHILD");
                         children
                             .iter()
                             .map(|child| {
@@ -16843,9 +17820,11 @@ fn cloned_alias_tails_keep_distinct_appends_across_siblings() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -16974,14 +17953,8 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
                         assert_eq!(tail["code"], "ORNA-E-NESTED-ALIAS-DUP-TAIL");
                         let children = tail["causes"].as_array().unwrap();
                         assert_eq!(children.len(), 3);
-                        assert_eq!(
-                            children[0]["code"],
-                            "ORNA-E-NESTED-ALIAS-DUP-CHILD"
-                        );
-                        assert_eq!(
-                            children[1]["code"],
-                            "ORNA-E-NESTED-ALIAS-DUP-CHILD"
-                        );
+                        assert_eq!(children[0]["code"], "ORNA-E-NESTED-ALIAS-DUP-CHILD");
+                        assert_eq!(children[1]["code"], "ORNA-E-NESTED-ALIAS-DUP-CHILD");
                         children
                             .iter()
                             .map(|child| {
@@ -16992,10 +17965,9 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
                                         .unwrap()
                                         .iter()
                                         .map(|grandchild| {
-                                            assert!(grandchild["causes"]
-                                                .as_array()
-                                                .unwrap()
-                                                .is_empty());
+                                            assert!(
+                                                grandchild["causes"].as_array().unwrap().is_empty()
+                                            );
                                             grandchild["code"].as_str().unwrap().to_owned()
                                         })
                                         .collect(),
@@ -17035,24 +18007,36 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
             vec![
                 shared_a.clone(),
                 shared_b.clone(),
-                ("ORNA-E-NESTED-ALIAS-LEFT-A-APPENDED-CHILD".to_owned(), vec![]),
+                (
+                    "ORNA-E-NESTED-ALIAS-LEFT-A-APPENDED-CHILD".to_owned(),
+                    vec![],
+                ),
             ],
             vec![
                 shared_a.clone(),
                 shared_b.clone(),
-                ("ORNA-E-NESTED-ALIAS-LEFT-B-APPENDED-CHILD".to_owned(), vec![]),
+                (
+                    "ORNA-E-NESTED-ALIAS-LEFT-B-APPENDED-CHILD".to_owned(),
+                    vec![],
+                ),
             ],
         ],
         vec![
             vec![
                 shared_a.clone(),
                 shared_b.clone(),
-                ("ORNA-E-NESTED-ALIAS-RIGHT-A-APPENDED-CHILD".to_owned(), vec![]),
+                (
+                    "ORNA-E-NESTED-ALIAS-RIGHT-A-APPENDED-CHILD".to_owned(),
+                    vec![],
+                ),
             ],
             vec![
                 shared_a.clone(),
                 shared_b.clone(),
-                ("ORNA-E-NESTED-ALIAS-RIGHT-B-APPENDED-CHILD".to_owned(), vec![]),
+                (
+                    "ORNA-E-NESTED-ALIAS-RIGHT-B-APPENDED-CHILD".to_owned(),
+                    vec![],
+                ),
             ],
         ],
     ];
@@ -17096,9 +18080,11 @@ fn nested_duplicate_children_stay_with_cloned_alias_tails() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -17147,20 +18133,16 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
         .with_cause(shared_inner_tail.clone());
         let sibling = |side: &str| {
             let alias_tail = |slot: &str| {
-                shared_outer_tail
-                    .clone()
-                    .with_cause(
-                        diagnostic(
-                            "ORNA-E-NESTED-CLONED-ALIAS-TAIL",
-                            &format!("{payload} {side} {slot} appended inner tail secret"),
-                        )
-                        .with_cause(diagnostic(
-                            &format!(
-                                "ORNA-E-NESTED-CLONED-ALIAS-{side}-{slot}-APPENDED-LEAF"
-                            ),
-                            &format!("{payload} {side} {slot} appended leaf secret"),
-                        )),
+                shared_outer_tail.clone().with_cause(
+                    diagnostic(
+                        "ORNA-E-NESTED-CLONED-ALIAS-TAIL",
+                        &format!("{payload} {side} {slot} appended inner tail secret"),
                     )
+                    .with_cause(diagnostic(
+                        &format!("ORNA-E-NESTED-CLONED-ALIAS-{side}-{slot}-APPENDED-LEAF"),
+                        &format!("{payload} {side} {slot} appended leaf secret"),
+                    )),
+                )
             };
             let mut tails = vec![alias_tail("A"), alias_tail("B")];
             if reverse {
@@ -17202,9 +18184,7 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
             assert_redacted_tree(cause);
         }
     }
-    fn nested_tail_leaf_codes(
-        diagnostic: &serde_json::Value,
-    ) -> Vec<Vec<Vec<Vec<String>>>> {
+    fn nested_tail_leaf_codes(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<Vec<String>>>> {
         let siblings = diagnostic["causes"].as_array().unwrap();
         assert_eq!(siblings.len(), 2);
         siblings
@@ -17253,7 +18233,9 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
         vec![
             shared_inner[0].clone(),
             shared_inner[0].clone(),
-            vec![format!("ORNA-E-NESTED-CLONED-ALIAS-{side}-{slot}-APPENDED-LEAF")],
+            vec![format!(
+                "ORNA-E-NESTED-CLONED-ALIAS-{side}-{slot}-APPENDED-LEAF"
+            )],
         ]
     };
     let forward_shapes = vec![
@@ -17301,9 +18283,11 @@ fn nested_cloned_alias_tails_keep_duplicate_inner_tail_ownership() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -17424,9 +18408,7 @@ fn empty_nested_tails_remain_with_cloned_alias_groups() {
             assert_redacted_tree(cause);
         }
     }
-    fn nested_tail_leaf_codes(
-        diagnostic: &serde_json::Value,
-    ) -> Vec<Vec<Vec<Vec<String>>>> {
+    fn nested_tail_leaf_codes(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<Vec<String>>>> {
         let siblings = diagnostic["causes"].as_array().unwrap();
         assert_eq!(siblings.len(), 2);
         siblings
@@ -17482,9 +18464,7 @@ fn empty_nested_tails_remain_with_cloned_alias_groups() {
     ];
     let appended = |side: &str, slot: &str, count: usize| {
         (0..count)
-            .map(|child| {
-                format!("ORNA-E-EMPTY-NESTED-ALIAS-{side}-{slot}-APPENDED-CHILD-{child}")
-            })
+            .map(|child| format!("ORNA-E-EMPTY-NESTED-ALIAS-{side}-{slot}-APPENDED-CHILD-{child}"))
             .collect::<Vec<_>>()
     };
     let outer_shape = |side: &str, slot: &str, count: usize| {
@@ -17541,9 +18521,11 @@ fn empty_nested_tails_remain_with_cloned_alias_groups() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -17665,9 +18647,11 @@ fn empty_nested_clones_keep_duplicate_tail_counts_on_replay() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -17706,20 +18690,13 @@ fn nested_empty_alias_tails_survive_deep_clone_growth_replay() {
         )
     };
     let nested_alias = || {
-        diagnostic(
-            "ORNA-E-DEEP-EMPTY-CLONE-ALIAS",
-            "nested alias secret",
-        )
-        .with_cause(empty_tail())
+        diagnostic("ORNA-E-DEEP-EMPTY-CLONE-ALIAS", "nested alias secret").with_cause(empty_tail())
     };
     let make_wire = |reverse: bool| {
         let shared_nested = nested_alias();
-        let shared_outer = diagnostic(
-            "ORNA-E-DEEP-EMPTY-CLONE-ALIAS",
-            "outer alias secret",
-        )
-        .with_cause(shared_nested.clone())
-        .with_cause(shared_nested.clone());
+        let shared_outer = diagnostic("ORNA-E-DEEP-EMPTY-CLONE-ALIAS", "outer alias secret")
+            .with_cause(shared_nested.clone())
+            .with_cause(shared_nested.clone());
         let extended_nested = shared_nested.clone().with_cause(empty_tail());
         let extended_outer = shared_outer.clone().with_cause(extended_nested);
         let aliases = if reverse {
@@ -17809,9 +18786,11 @@ fn nested_empty_alias_tails_survive_deep_clone_growth_replay() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -17850,23 +18829,14 @@ fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
         )
     };
     let make_wire = |reverse: bool| {
-        let shared_leaf = diagnostic(
-            "ORNA-E-DEEPEST-EMPTY-ALIAS",
-            "leaf alias secret",
-        )
-        .with_cause(empty_tail());
-        let shared_middle = diagnostic(
-            "ORNA-E-DEEPEST-EMPTY-ALIAS",
-            "middle alias secret",
-        )
-        .with_cause(shared_leaf.clone())
-        .with_cause(shared_leaf.clone());
-        let shared_outer = diagnostic(
-            "ORNA-E-DEEPEST-EMPTY-ALIAS",
-            "outer alias secret",
-        )
-        .with_cause(shared_middle.clone())
-        .with_cause(shared_middle.clone());
+        let shared_leaf =
+            diagnostic("ORNA-E-DEEPEST-EMPTY-ALIAS", "leaf alias secret").with_cause(empty_tail());
+        let shared_middle = diagnostic("ORNA-E-DEEPEST-EMPTY-ALIAS", "middle alias secret")
+            .with_cause(shared_leaf.clone())
+            .with_cause(shared_leaf.clone());
+        let shared_outer = diagnostic("ORNA-E-DEEPEST-EMPTY-ALIAS", "outer alias secret")
+            .with_cause(shared_middle.clone())
+            .with_cause(shared_middle.clone());
 
         let grown_leaf = shared_leaf.clone().with_cause(empty_tail());
         let grown_middle = shared_middle.clone().with_cause(grown_leaf);
@@ -17942,8 +18912,14 @@ fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
     let shared_shape = vec![vec![1, 1], vec![1, 1]];
     let forward_shape = vec![grown_shape.clone(), shared_shape.clone()];
     let reverse_shape = vec![shared_shape, grown_shape];
-    assert_eq!(deepest_empty_alias_shape(&forward_projection), forward_shape);
-    assert_eq!(deepest_empty_alias_shape(&reverse_projection), reverse_shape);
+    assert_eq!(
+        deepest_empty_alias_shape(&forward_projection),
+        forward_shape
+    );
+    assert_eq!(
+        deepest_empty_alias_shape(&reverse_projection),
+        reverse_shape
+    );
 
     let mut replacement = forward.clone();
     replacement.clone_from(&reverse);
@@ -17969,9 +18945,11 @@ fn deepest_empty_alias_tail_growth_stays_with_its_cloned_chain() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -18043,9 +19021,7 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
             .encode_ovb()
             .unwrap()
     };
-    fn four_level_empty_alias_shape(
-        diagnostic: &serde_json::Value,
-    ) -> Vec<Vec<Vec<Vec<usize>>>> {
+    fn four_level_empty_alias_shape(diagnostic: &serde_json::Value) -> Vec<Vec<Vec<Vec<usize>>>> {
         let aliases = diagnostic["causes"].as_array().unwrap();
         assert_eq!(aliases.len(), 2);
         aliases
@@ -18106,14 +19082,8 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
 
     // ORNA-SECRET-002 leaves equal-code order unspecified; these shapes follow insertion order.
     let shared_inner_shape = vec![2, 2];
-    let shared_middle_shape = vec![
-        shared_inner_shape.clone(),
-        shared_inner_shape.clone(),
-    ];
-    let shared_outer_shape = vec![
-        shared_middle_shape.clone(),
-        shared_middle_shape.clone(),
-    ];
+    let shared_middle_shape = vec![shared_inner_shape.clone(), shared_inner_shape.clone()];
+    let shared_outer_shape = vec![shared_middle_shape.clone(), shared_middle_shape.clone()];
     let grown_inner_shape = vec![2, 2, 3];
     let grown_middle_shape = vec![
         shared_inner_shape.clone(),
@@ -18127,8 +19097,14 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
     ];
     let forward_shape = vec![grown_outer_shape.clone(), shared_outer_shape.clone()];
     let reverse_shape = vec![shared_outer_shape, grown_outer_shape];
-    assert_eq!(four_level_empty_alias_shape(&forward_projection), forward_shape);
-    assert_eq!(four_level_empty_alias_shape(&reverse_projection), reverse_shape);
+    assert_eq!(
+        four_level_empty_alias_shape(&forward_projection),
+        forward_shape
+    );
+    assert_eq!(
+        four_level_empty_alias_shape(&reverse_projection),
+        reverse_shape
+    );
 
     let mut replacement = forward.clone();
     replacement.clone_from(&reverse);
@@ -18155,9 +19131,11 @@ fn deepest_empty_alias_tail_duplicates_survive_four_clone_levels() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -18259,7 +19237,10 @@ fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
                                     .unwrap()
                                     .iter()
                                     .map(|level_two| {
-                                        assert_eq!(level_two["code"], "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS");
+                                        assert_eq!(
+                                            level_two["code"],
+                                            "ORNA-E-FIVE-LEVEL-EMPTY-ALIAS"
+                                        );
                                         level_two["causes"]
                                             .as_array()
                                             .unwrap()
@@ -18339,8 +19320,14 @@ fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
     let shared_shape = shared_level_four_shape;
     let forward_shape = vec![grown_shape.clone(), shared_shape.clone()];
     let reverse_shape = vec![shared_shape, grown_shape];
-    assert_eq!(five_level_empty_alias_shape(&forward_projection), forward_shape);
-    assert_eq!(five_level_empty_alias_shape(&reverse_projection), reverse_shape);
+    assert_eq!(
+        five_level_empty_alias_shape(&forward_projection),
+        forward_shape
+    );
+    assert_eq!(
+        five_level_empty_alias_shape(&reverse_projection),
+        reverse_shape
+    );
 
     let mut replacement = forward.clone();
     replacement.clone_from(&reverse);
@@ -18368,9 +19355,11 @@ fn deepest_empty_alias_tail_duplicates_survive_five_clone_levels() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -18497,8 +19486,14 @@ fn zero_cause_leaf_aliases_stay_empty_across_five_clone_levels() {
     let shared_counts = vec![0; 16];
     let forward_shape = vec![grown_counts.clone(), shared_counts.clone()];
     let reverse_shape = vec![shared_counts, grown_counts];
-    assert_eq!(five_level_leaf_tail_counts(&forward_projection), forward_shape);
-    assert_eq!(five_level_leaf_tail_counts(&reverse_projection), reverse_shape);
+    assert_eq!(
+        five_level_leaf_tail_counts(&forward_projection),
+        forward_shape
+    );
+    assert_eq!(
+        five_level_leaf_tail_counts(&reverse_projection),
+        reverse_shape
+    );
 
     let mut replacement = forward.clone();
     replacement.clone_from(&reverse);
@@ -18526,9 +19521,11 @@ fn zero_cause_leaf_aliases_stay_empty_across_five_clone_levels() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -18577,12 +19574,11 @@ fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
             .with_cause(shared_level_four.clone());
 
         let grow_chain = |tail_messages: &[&str]| {
-            let grown_leaf = tail_messages.iter().fold(shared_leaf.clone(), |leaf, message| {
-                leaf.with_cause(diagnostic(
-                    "ORNA-E-ZERO-ALIAS-GROWTH-TAIL",
-                    message,
-                ))
-            });
+            let grown_leaf = tail_messages
+                .iter()
+                .fold(shared_leaf.clone(), |leaf, message| {
+                    leaf.with_cause(diagnostic("ORNA-E-ZERO-ALIAS-GROWTH-TAIL", message))
+                });
             let grown_level_two = shared_level_two.clone().with_cause(grown_leaf);
             let grown_level_three = shared_level_three.clone().with_cause(grown_level_two);
             let grown_level_four = shared_level_four.clone().with_cause(grown_level_three);
@@ -18670,8 +19666,14 @@ fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
         shared_tail_counts.clone(),
     ];
     let reverse_shape = vec![shared_tail_counts, double_tail_counts, single_tail_counts];
-    assert_eq!(five_level_leaf_tail_counts(&forward_projection), forward_shape);
-    assert_eq!(five_level_leaf_tail_counts(&reverse_projection), reverse_shape);
+    assert_eq!(
+        five_level_leaf_tail_counts(&forward_projection),
+        forward_shape
+    );
+    assert_eq!(
+        five_level_leaf_tail_counts(&reverse_projection),
+        reverse_shape
+    );
 
     let mut replacement = forward.clone();
     replacement.clone_from(&reverse);
@@ -18701,9 +19703,11 @@ fn zero_cause_five_level_aliases_isolate_two_independent_growth_tails() {
         ])
     {
         for bytes in [&forward_json, &reverse_json, &forward_wire, &reverse_wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
     assert_eq!(
@@ -18793,11 +19797,13 @@ fn zero_cause_five_level_alias_growth_isolated_to_one_leaf_path() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -18840,9 +19846,11 @@ fn zero_cause_five_level_alias_growth_isolated_to_one_leaf_path() {
         ])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -18931,11 +19939,13 @@ fn zero_cause_five_level_aliases_isolate_different_leaf_tail_counts() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -18973,9 +19983,11 @@ fn zero_cause_five_level_aliases_isolate_different_leaf_tail_counts() {
         ])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19063,11 +20075,13 @@ fn zero_cause_five_level_aliases_keep_distinct_leaf_tail_identity() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -19102,9 +20116,11 @@ fn zero_cause_five_level_aliases_keep_distinct_leaf_tail_identity() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19136,10 +20152,7 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
         .clone()
         .with_cause(tail_a.clone())
         .with_cause(tail_b.clone());
-    let leaf_ba = empty_leaf
-        .clone()
-        .with_cause(tail_b)
-        .with_cause(tail_a);
+    let leaf_ba = empty_leaf.clone().with_cause(tail_b).with_cause(tail_a);
 
     let shared_level_two = alias()
         .with_cause(empty_leaf.clone())
@@ -19196,11 +20209,13 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -19239,9 +20254,11 @@ fn zero_cause_five_level_aliases_preserve_distinct_leaf_tail_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19273,10 +20290,7 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
         .clone()
         .with_cause(tail_a.clone())
         .with_cause(tail_b.clone());
-    let leaf_ba = empty_leaf
-        .clone()
-        .with_cause(tail_b)
-        .with_cause(tail_a);
+    let leaf_ba = empty_leaf.clone().with_cause(tail_b).with_cause(tail_a);
 
     let shared_level_two = alias()
         .with_cause(empty_leaf.clone())
@@ -19291,9 +20305,7 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
         .with_cause(shared_level_four.clone())
         .with_cause(shared_level_four.clone());
     let make_variant = |first_leaf: Diagnostic, second_leaf: Diagnostic| {
-        let distinct_level_two = alias()
-            .with_cause(first_leaf)
-            .with_cause(second_leaf);
+        let distinct_level_two = alias().with_cause(first_leaf).with_cause(second_leaf);
         let distinct_level_three = alias()
             .with_cause(shared_level_two.clone())
             .with_cause(distinct_level_two);
@@ -19351,11 +20363,13 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -19389,14 +20403,14 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
         shared_level_five.clone(),
         ba_ab_variant.clone(),
     ]);
-    let mut receiver = make_root(vec![
-        ba_ab_variant,
-        ab_ba_variant,
-        shared_level_five,
-    ]);
+    let mut receiver = make_root(vec![ba_ab_variant, ab_ba_variant, shared_level_five]);
     assert_eq!(
         root_tail_shapes(&serde_json::to_value(&receiver).unwrap()),
-        vec![ba_ab_shape.clone(), ab_ba_shape.clone(), empty_shape.clone()]
+        vec![
+            ba_ab_shape.clone(),
+            ab_ba_shape.clone(),
+            empty_shape.clone()
+        ]
     );
 
     // Error causes are ordered values; same-length replacement must retain the source sequence.
@@ -19422,9 +20436,11 @@ fn clone_from_preserves_ordered_distinct_zero_cause_five_level_aliases() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19456,10 +20472,7 @@ fn shrinking_clone_from_keeps_ordered_zero_cause_five_level_tails() {
         .clone()
         .with_cause(tail_a.clone())
         .with_cause(tail_b.clone());
-    let leaf_ba = empty_leaf
-        .clone()
-        .with_cause(tail_b)
-        .with_cause(tail_a);
+    let leaf_ba = empty_leaf.clone().with_cause(tail_b).with_cause(tail_a);
 
     let shared_level_two = || {
         alias()
@@ -19570,9 +20583,11 @@ fn shrinking_clone_from_keeps_ordered_zero_cause_five_level_tails() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19662,13 +20677,19 @@ fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
 
     let mut first_tail = Vec::new();
     collect_leaf_tail_codes(&causes[0], 4, &mut first_tail);
-    assert_eq!(first_tail, ["ORNA-E-ZERO-ALIAS-GROW-B", "ORNA-E-ZERO-ALIAS-GROW-A"]);
+    assert_eq!(
+        first_tail,
+        ["ORNA-E-ZERO-ALIAS-GROW-B", "ORNA-E-ZERO-ALIAS-GROW-A"]
+    );
     let mut empty_tail = Vec::new();
     collect_leaf_tail_codes(&causes[1], 4, &mut empty_tail);
     assert!(empty_tail.is_empty());
     let mut last_tail = Vec::new();
     collect_leaf_tail_codes(&causes[2], 4, &mut last_tail);
-    assert_eq!(last_tail, ["ORNA-E-ZERO-ALIAS-GROW-A", "ORNA-E-ZERO-ALIAS-GROW-B"]);
+    assert_eq!(
+        last_tail,
+        ["ORNA-E-ZERO-ALIAS-GROW-A", "ORNA-E-ZERO-ALIAS-GROW-B"]
+    );
 
     let wire = receiver.encode_ovb().unwrap();
     let decoded = Diagnostic::decode_ovb(&wire).unwrap();
@@ -19680,9 +20701,11 @@ fn growing_clone_from_keeps_ordered_zero_cause_five_level_tails() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19768,9 +20791,11 @@ fn decoded_clone_from_keeps_ordered_zero_cause_tail_siblings() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&replayed_json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19816,11 +20841,13 @@ fn composed_decoded_aliases_keep_ordered_zero_cause_siblings() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -19848,7 +20875,11 @@ fn composed_decoded_aliases_keep_ordered_zero_cause_siblings() {
             .iter()
             .map(|cause| cause["code"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        ["ORNA-E-DECODED-EMPTY", "ORNA-E-DECODED-AB", "ORNA-E-DECODED-BA"]
+        [
+            "ORNA-E-DECODED-EMPTY",
+            "ORNA-E-DECODED-AB",
+            "ORNA-E-DECODED-BA"
+        ]
     );
     assert!(nested_causes[0]["causes"].as_array().unwrap().is_empty());
     assert_eq!(
@@ -19882,9 +20913,11 @@ fn composed_decoded_aliases_keep_ordered_zero_cause_siblings() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -19932,11 +20965,13 @@ fn composed_decoded_empty_roots_keep_ordered_tail_sibling() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -19980,9 +21015,11 @@ fn composed_decoded_empty_roots_keep_ordered_tail_sibling() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20028,11 +21065,13 @@ fn composed_decoded_clone_keeps_appended_zero_cause_tail_local() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20074,9 +21113,11 @@ fn composed_decoded_clone_keeps_appended_zero_cause_tail_local() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20120,11 +21161,13 @@ fn composed_decoded_clone_tails_remain_isolated_between_siblings() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20144,15 +21187,12 @@ fn composed_decoded_clone_tails_remain_isolated_between_siblings() {
             .iter()
             .map(|cause| cause["code"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        [
-            "ORNA-E-DECODED-CLONE-BASE",
-            "ORNA-E-DECODED-CLONE-BASE",
-        ]
+        ["ORNA-E-DECODED-CLONE-BASE", "ORNA-E-DECODED-CLONE-BASE",]
     );
-    for (sibling, tail_code) in siblings.iter().zip([
-        "ORNA-E-DECODED-CLONE-TAIL-B",
-        "ORNA-E-DECODED-CLONE-TAIL-A",
-    ]) {
+    for (sibling, tail_code) in siblings
+        .iter()
+        .zip(["ORNA-E-DECODED-CLONE-TAIL-B", "ORNA-E-DECODED-CLONE-TAIL-A"])
+    {
         let causes = sibling["causes"].as_array().unwrap();
         assert_eq!(causes.len(), 2);
         assert_eq!(causes[0]["code"], "ORNA-E-DECODED-CLONE-EMPTY");
@@ -20173,9 +21213,11 @@ fn composed_decoded_clone_tails_remain_isolated_between_siblings() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20221,11 +21263,13 @@ fn composed_decoded_duplicate_tail_counts_stay_local() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20265,9 +21309,11 @@ fn composed_decoded_duplicate_tail_counts_stay_local() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20319,11 +21365,13 @@ fn composed_decoded_ordered_tail_stays_contained_in_its_branch() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20364,9 +21412,11 @@ fn composed_decoded_ordered_tail_stays_contained_in_its_branch() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20427,11 +21477,13 @@ fn composed_decoded_deep_empty_tails_stay_contained() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20476,9 +21528,11 @@ fn composed_decoded_deep_empty_tails_stay_contained() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20530,11 +21584,13 @@ fn deep_decoded_tail_containment_keeps_the_middle_empty() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20549,10 +21605,7 @@ fn deep_decoded_tail_containment_keeps_the_middle_empty() {
 
     let mut terminal = &outer_causes[0];
     for level in (0..5).rev() {
-        assert_eq!(
-            terminal["code"],
-            format!("ORNA-E-DEEP-EDGE-LEVEL-{level}")
-        );
+        assert_eq!(terminal["code"], format!("ORNA-E-DEEP-EDGE-LEVEL-{level}"));
         let causes = terminal["causes"].as_array().unwrap();
         assert_eq!(causes.len(), 2);
         assert_eq!(causes[0]["code"], "ORNA-E-DEEP-EDGE-EMPTY");
@@ -20586,9 +21639,11 @@ fn deep_decoded_tail_containment_keeps_the_middle_empty() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20633,16 +21688,8 @@ fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
         }
         branch
     };
-    let branch_ba = make_deep_branch(
-        "BA",
-        "ORNA-E-DEEP-PAIR-B",
-        "ORNA-E-DEEP-PAIR-A",
-    );
-    let branch_ab = make_deep_branch(
-        "AB",
-        "ORNA-E-DEEP-PAIR-A",
-        "ORNA-E-DEEP-PAIR-B",
-    );
+    let branch_ba = make_deep_branch("BA", "ORNA-E-DEEP-PAIR-B", "ORNA-E-DEEP-PAIR-A");
+    let branch_ab = make_deep_branch("AB", "ORNA-E-DEEP-PAIR-A", "ORNA-E-DEEP-PAIR-B");
     let composed = diagnostic("ORNA-E-DEEP-PAIR-OUTER")
         .with_cause(branch_ba)
         .with_cause(decoded_empty)
@@ -20651,11 +21698,13 @@ fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20720,9 +21769,11 @@ fn composed_deep_decoded_branches_keep_opposite_tails_contained() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20772,11 +21823,13 @@ fn clone_from_decoded_opposite_tails_keeps_source_branch_order() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20819,9 +21872,11 @@ fn clone_from_decoded_opposite_tails_keeps_source_branch_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -20870,9 +21925,11 @@ fn repeated_decoded_opposite_tail_replacements_follow_each_source() {
 
     fn assert_branch_tails(branch: &serde_json::Value, expected: [&str; 2]) {
         let tails = branch["causes"].as_array().unwrap();
-        assert!(tails
-            .iter()
-            .all(|tail| tail["causes"].as_array().unwrap().is_empty()));
+        assert!(
+            tails
+                .iter()
+                .all(|tail| tail["causes"].as_array().unwrap().is_empty())
+        );
         assert_eq!(
             tails
                 .iter()
@@ -20897,11 +21954,13 @@ fn repeated_decoded_opposite_tail_replacements_follow_each_source() {
     }
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -20950,9 +22009,11 @@ fn repeated_decoded_opposite_tail_replacements_follow_each_source() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21018,11 +22079,13 @@ fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -21034,23 +22097,14 @@ fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
         last: [&str; 2],
     ) {
         let root_code = format!("ORNA-E-OPPOSITE-THIRD-{generation}-ROOT");
-        assert_eq!(
-            projection["code"].as_str(),
-            Some(root_code.as_str())
-        );
+        assert_eq!(projection["code"].as_str(), Some(root_code.as_str()));
         let branches = projection["causes"].as_array().unwrap();
         assert_eq!(branches.len(), 3);
         let branch_code = format!("ORNA-E-OPPOSITE-THIRD-{generation}-BRANCH");
-        assert_eq!(
-            branches[0]["code"].as_str(),
-            Some(branch_code.as_str())
-        );
+        assert_eq!(branches[0]["code"].as_str(), Some(branch_code.as_str()));
         assert_eq!(branches[1]["code"], "ORNA-E-OPPOSITE-THIRD-EMPTY");
         assert!(branches[1]["causes"].as_array().unwrap().is_empty());
-        assert_eq!(
-            branches[2]["code"].as_str(),
-            Some(branch_code.as_str())
-        );
+        assert_eq!(branches[2]["code"].as_str(), Some(branch_code.as_str()));
         for (branch, expected) in [(&branches[0], first), (&branches[2], last)] {
             assert_eq!(
                 branch["causes"]
@@ -21087,9 +22141,11 @@ fn third_decoded_opposite_tail_replacement_keeps_its_generation_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21117,9 +22173,7 @@ fn decoded_three_cause_opposite_tails_keep_their_order() {
         let branch_code = format!("ORNA-E-OPPOSITE-THREE-{side}-BRANCH");
         let mut branch = diagnostic(&branch_code);
         for tail in order {
-            branch = branch.with_cause(diagnostic(&format!(
-                "ORNA-E-OPPOSITE-THREE-{side}-{tail}"
-            )));
+            branch = branch.with_cause(diagnostic(&format!("ORNA-E-OPPOSITE-THREE-{side}-{tail}")));
         }
         branch
     };
@@ -21137,11 +22191,13 @@ fn decoded_three_cause_opposite_tails_keep_their_order() {
     let projection = serde_json::to_value(&receiver).unwrap();
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -21183,9 +22239,11 @@ fn decoded_three_cause_opposite_tails_keep_their_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21247,11 +22305,13 @@ fn decoded_three_tail_replacements_preserve_each_opposite_order() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
@@ -21312,9 +22372,11 @@ fn decoded_three_tail_replacements_preserve_each_opposite_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21362,20 +22424,18 @@ fn decoded_repeated_diagnostic_references_keep_alias_slot_order() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
     }
-    fn assert_alias(
-        alias: &serde_json::Value,
-        reference: &str,
-        order: [&str; 2],
-    ) {
+    fn assert_alias(alias: &serde_json::Value, reference: &str, order: [&str; 2]) {
         assert_eq!(alias["code"], "ORNA-E-ALIAS-IDENTITY");
         assert_eq!(alias["reference"].as_str(), Some(reference));
         assert_eq!(
@@ -21424,9 +22484,11 @@ fn decoded_repeated_diagnostic_references_keep_alias_slot_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21480,21 +22542,18 @@ fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
     }
-    fn assert_alias(
-        alias: &serde_json::Value,
-        code: &str,
-        reference: &str,
-        order: [&str; 2],
-    ) {
+    fn assert_alias(alias: &serde_json::Value, code: &str, reference: &str, order: [&str; 2]) {
         assert_eq!(alias["code"].as_str(), Some(code));
         assert_eq!(alias["reference"].as_str(), Some(reference));
         assert_eq!(
@@ -21544,9 +22603,11 @@ fn decoded_alias_replacement_keeps_sibling_snapshot_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21602,21 +22663,18 @@ fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
 
     fn assert_redacted_tree(diagnostic: &serde_json::Value) {
         assert_eq!(diagnostic["message"], "<redacted>");
-        assert!(diagnostic["notes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|note| note == "<redacted>"));
+        assert!(
+            diagnostic["notes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|note| note == "<redacted>")
+        );
         for cause in diagnostic["causes"].as_array().unwrap() {
             assert_redacted_tree(cause);
         }
     }
-    fn assert_alias(
-        alias: &serde_json::Value,
-        code: &str,
-        reference: &str,
-        order: [&str; 2],
-    ) {
+    fn assert_alias(alias: &serde_json::Value, code: &str, reference: &str, order: [&str; 2]) {
         assert_eq!(alias["code"].as_str(), Some(code));
         assert_eq!(alias["reference"].as_str(), Some(reference));
         assert_eq!(
@@ -21670,9 +22728,11 @@ fn decoded_diagnostic_reload_preserves_alias_order_and_is_atomic() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -21810,9 +22870,11 @@ fn diagnostic_reload_rebinds_reused_alias_slots_in_wire_order() {
         .chain([fixture.as_bytes()])
     {
         for bytes in [&json, &wire] {
-            assert!(!bytes
-                .windows(disclosure.len())
-                .any(|window| window == disclosure));
+            assert!(
+                !bytes
+                    .windows(disclosure.len())
+                    .any(|window| window == disclosure)
+            );
         }
     }
 }
@@ -22016,7 +23078,10 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
         generation: usize,
         references: &[Option<u8>],
     ) {
-        assert_eq!(projection["code"], format!("ORNA-E-CONCURRENT-ROOT-{generation}"));
+        assert_eq!(
+            projection["code"],
+            format!("ORNA-E-CONCURRENT-ROOT-{generation}")
+        );
         assert_eq!(projection["message"], "<redacted>");
         let causes = projection["causes"].as_array().unwrap();
         assert_eq!(causes.len(), references.len());
@@ -22064,14 +23129,16 @@ fn diagnostic_concurrent_reloads_follow_serialized_alias_rebind_order() {
     }
 
     let fixture = include_str!("fixtures/diagnostic-parent-replacement.orna").trim();
-    let rounds = [vec![Some(0x11), Some(0x22), Some(0x11)],
+    let rounds = [
+        vec![Some(0x11), Some(0x22), Some(0x11)],
         vec![Some(0x22), Some(0x11), Some(0x22)],
         vec![None, Some(0x11), Some(0x22), Some(0x11)],
         vec![Some(0x22), None, Some(0x22)],
         vec![Some(0x11), Some(0x11), None, Some(0x22)],
         vec![Some(0x22), Some(0x11), Some(0x22), None],
         vec![Some(0x11), None, Some(0x22), Some(0x11)],
-        vec![Some(0x22), Some(0x22), Some(0x11)]];
+        vec![Some(0x22), Some(0x22), Some(0x11)],
+    ];
     let mut wires = Vec::with_capacity(rounds.len());
     for (generation, references) in rounds.iter().enumerate() {
         let mut root = diagnostic(&format!("ORNA-E-CONCURRENT-ROOT-{generation}"), fixture);
@@ -22169,7 +23236,10 @@ fn diagnostic_alias_storms_keep_each_synchronized_reload_snapshot_ordered() {
         generation: usize,
         aliases: &[Option<u8>],
     ) {
-        assert_eq!(projection["code"], format!("ORNA-E-ALIAS-STORM-ROOT-{generation}"));
+        assert_eq!(
+            projection["code"],
+            format!("ORNA-E-ALIAS-STORM-ROOT-{generation}")
+        );
         assert_eq!(projection["message"], "<redacted>");
         let causes = projection["causes"].as_array().unwrap();
         assert_eq!(causes.len(), aliases.len());
@@ -22255,11 +23325,17 @@ fn diagnostic_alias_storms_keep_each_synchronized_reload_snapshot_ordered() {
     }
 
     for wire in &wires {
-        assert!(!wire.windows(fixture.len()).any(|window| window == fixture.as_bytes()));
+        assert!(
+            !wire
+                .windows(fixture.len())
+                .any(|window| window == fixture.as_bytes())
+        );
         for marker in &fixture_markers {
-            assert!(!wire
-                .windows(marker.len())
-                .any(|window| window == marker.as_bytes()));
+            assert!(
+                !wire
+                    .windows(marker.len())
+                    .any(|window| window == marker.as_bytes())
+            );
         }
     }
 

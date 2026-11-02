@@ -114,7 +114,10 @@ fn deepest_nested_predicate_uses_the_current_family_continuation() {
 fn named_predicate_continuations_keep_their_captured_fold_identity() {
     let source = include_str!("fixtures/txn-relation-predicate-fold-values-m7ffi.orna");
     let analysis = analyze_with_catalogue(
-        &[ModuleInput::new("relation-predicate-fold-values.orna", source)],
+        &[ModuleInput::new(
+            "relation-predicate-fold-values.orna",
+            source,
+        )],
         &Catalogue::authoritative_fixture(),
     );
     assert!(

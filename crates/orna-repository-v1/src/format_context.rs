@@ -818,9 +818,7 @@ impl RepositoryFormatContext {
             return Err(FormatContextError::TableBindingMismatch);
         }
         let graph = self.open_native_graph(&rows)?;
-        let scope = graph
-            .open_read_scope()
-            .map_err(graph_context_error)?;
+        let scope = graph.open_read_scope().map_err(graph_context_error)?;
         let descriptor = graph
             .read_schema_descriptor(&scope)
             .map_err(graph_context_error)?;
@@ -1352,8 +1350,8 @@ impl Repository {
                 RepositoryError::GitUnavailable => FormatContextError::SchemaRootUnavailable,
                 _ => FormatContextError::SchemaRootInvalid,
             })?;
-        let store =
-            crate::ManagedPath::new(STORE_PATH).map_err(|_| FormatContextError::StoreRootInvalid)?;
+        let store = crate::ManagedPath::new(STORE_PATH)
+            .map_err(|_| FormatContextError::StoreRootInvalid)?;
         match self.tree_entry(tree.as_str(), &store) {
             Ok(Some((mode, _))) if mode == "040000" => Ok(()),
             Err(RepositoryError::GitUnavailable) => Err(FormatContextError::StoreRootUnavailable),
@@ -2627,7 +2625,8 @@ mod graph_bridge_tests {
         }
 
         let writing = context(directory);
-        let (schema_oid, schema_digest) = schema_node_for_relation(directory, &writing, relation_id);
+        let (schema_oid, schema_digest) =
+            schema_node_for_relation(directory, &writing, relation_id);
         let snapshot = writing
             .load_row_map(relation_id)
             .expect("load the seeded row-map identity");
@@ -3511,7 +3510,7 @@ mod graph_bridge_tests {
                 }],
             },
         );
-        
+
         write_native_node(
             directory,
             algorithm,
@@ -3533,10 +3532,7 @@ mod graph_bridge_tests {
         relation_id.copy_from_slice(&relation_digest[..16]);
         relation_id
     }
-    fn schema_node(
-        directory: &Path,
-        context: &RepositoryFormatContext,
-    ) -> (NativeOid, [u8; 32]) {
+    fn schema_node(directory: &Path, context: &RepositoryFormatContext) -> (NativeOid, [u8; 32]) {
         schema_node_for_relation(directory, context, graph_bridge_test_relation_id(context))
     }
 
@@ -5402,9 +5398,15 @@ mod graph_bridge_tests {
         root: &Path,
         relation_id: [u8; 16],
         payload: &[u8],
-    ) -> (crate::blob_store::ContentIdentity, NativeOid, NativeOid, u64) {
+    ) -> (
+        crate::blob_store::ContentIdentity,
+        NativeOid,
+        NativeOid,
+        u64,
+    ) {
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
+        let (schema_oid, schema_digest) =
+            schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");
@@ -5873,7 +5875,8 @@ mod graph_bridge_tests {
         install_overflow_row_store(root, &initial, relation_id, None);
 
         let writing_context = context(root);
-        let (schema_oid, schema_digest) = schema_node_for_relation(root, &writing_context, relation_id);
+        let (schema_oid, schema_digest) =
+            schema_node_for_relation(root, &writing_context, relation_id);
         let snapshot = writing_context
             .load_row_map(relation_id)
             .expect("load the committed row-map identity");

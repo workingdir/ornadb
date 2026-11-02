@@ -73,7 +73,11 @@ fn with_worktree_row<T>(
             format!("more than one worktree row matches table {table:?} and key path {key:?}"),
         ));
     }
-    action(&repository, candidate.logical_path(), candidate.source_bytes())
+    action(
+        &repository,
+        candidate.logical_path(),
+        candidate.source_bytes(),
+    )
 }
 
 /// Refuses to stage a row file into a repository whose rows are not files.
@@ -135,8 +139,8 @@ pub(super) fn add_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(),
     let key = key_text(key);
     with_worktree_row(endpoint, table, &key, |repository, logical, source| {
         require_row_file_layout(repository, logical)?;
-        let path = ManagedPath::new(logical)
-            .map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
+        let path =
+            ManagedPath::new(logical).map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
         let index = repository
             .index_generation()
             .map_err(|e| error("Git index could not be inspected", format!("{e:?}")))?;
@@ -153,8 +157,8 @@ pub(super) fn add_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(),
 pub(super) fn unstage_row(endpoint: &Endpoint, table: &str, key: &str) -> Result<(), Diagnostic> {
     let key = key_text(key);
     with_worktree_row(endpoint, table, &key, |repository, logical, _source| {
-        let path = ManagedPath::new(logical)
-            .map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
+        let path =
+            ManagedPath::new(logical).map_err(|e| error("row path is unsafe", format!("{e:?}")))?;
         let index = repository
             .index_generation()
             .map_err(|e| error("Git index could not be inspected", format!("{e:?}")))?;
@@ -165,4 +169,3 @@ pub(super) fn unstage_row(endpoint: &Endpoint, table: &str, key: &str) -> Result
         Ok(())
     })
 }
-

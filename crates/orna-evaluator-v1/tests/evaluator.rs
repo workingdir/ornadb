@@ -4,16 +4,17 @@ use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
     NominalDefinition, NominalDefinitions, NominalField, NominalVariant, PureFunction,
-    RelationPage, RelationReadScope, StepBudget, evaluate_expression, evaluate_expression_with_functions,
-    evaluate_function, evaluate_parsed, evaluate_parsed_with_nominals, evaluate_repl,
-    SysHostBindingRegistry, evaluate_with_functions_and_nominals, invoke_named,
-    invoke_named_with_effects, invoke_named_with_effects_and_budget, invoke_named_with_nominals,
+    RelationPage, RelationReadScope, StepBudget, SysHostBindingRegistry, evaluate_expression,
+    evaluate_expression_with_functions, evaluate_function, evaluate_parsed,
+    evaluate_parsed_with_nominals, evaluate_repl, evaluate_with_functions_and_nominals,
+    invoke_named, invoke_named_with_effects, invoke_named_with_effects_and_budget,
+    invoke_named_with_nominals,
 };
 use orna_syntax_v1::{
-    lex, AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern,
-    RecordField, Statement, SyntaxSpan, TokenKind,
+    AssignmentOperator, AssignmentTarget, Expr, LambdaParameter, NameSegment, Pattern, RecordField,
+    Statement, SyntaxSpan, TokenKind, lex,
 };
-use orna_value_v1::{Raw, Value, CANONICAL_NAN_BITS};
+use orna_value_v1::{CANONICAL_NAN_BITS, Raw, Value};
 
 fn evaluate(source: &str) -> Value {
     evaluate_expression(source, &Environment::new(), Limits::default())
@@ -32,11 +33,9 @@ fn std_environment_get_reads_current_and_absent_process_values() {
     let expected = std::env::var("PATH").expect("test process exposes PATH");
     let absent = "ORNA_TEST_MISSING_6TG7L_20261002";
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default()).unwrap();
-    let mut bindings = SysHostBindingRegistry::capture_environment([
-        String::from("PATH"),
-        absent.to_owned(),
-    ])
-    .expect("explicit process environment allowlist is valid");
+    let mut bindings =
+        SysHostBindingRegistry::capture_environment([String::from("PATH"), absent.to_owned()])
+            .expect("explicit process environment allowlist is valid");
     assert_eq!(
         session.submit(include_str!(
             "fixtures/repl-inline-use-std-io-environment-6tg7l.orna"
@@ -2594,7 +2593,9 @@ fn math_pipelines_and_mixed_named_calls_share_argument_positions() {
 #[test]
 fn std_bits_preserves_unbounded_signed_twos_complement_semantics() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_46ee2ded56c3f4e7.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_46ee2ded56c3f4e7.orna"
+        )),
         Value::int(3.into())
     );
     for (expression, expected) in [
@@ -3034,26 +3035,35 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
         ),
         (
             include_str!("fixtures/evaluator_source_e952ff55c7ba1f89.orna"),
-            Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
-                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
-            ]))))
+            Value::new(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                    Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
+                ])),
+            ))
             .unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_548331ad6b1db9ee.orna"),
-            Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
-                Raw::Array(vec![Raw::Int(1.into())]),
-            ]))))
+            Value::new(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                    Raw::Array(vec![Raw::Int(1.into())]),
+                ])),
+            ))
             .unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_8f029c7e1408a962.orna"),
-            Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
-                Raw::Array(vec![Raw::Int(1.into())]),
-            ]))))
+            Value::new(Raw::Tag(
+                60015,
+                Box::new(Raw::Array(vec![
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Int(3.into())]),
+                    Raw::Array(vec![Raw::Int(1.into())]),
+                ])),
+            ))
             .unwrap(),
         ),
         (
@@ -3086,16 +3096,28 @@ fn std_collection_fallback_preserves_finite_list_ordering() {
             include_str!("fixtures/evaluator_source_e6dbd68a5c438388.orna"),
             Value::new(Raw::Array(vec![
                 tag_tuple(Raw::Int(1.into()), Raw::Array(vec![Raw::Int(31.into())])),
-                tag_tuple(Raw::Int(2.into()), Raw::Array(vec![Raw::Int(12.into()), Raw::Int(22.into())])),
-                tag_tuple(Raw::Int(3.into()), Raw::Array(vec![Raw::Int(13.into()), Raw::Int(33.into())])),
+                tag_tuple(
+                    Raw::Int(2.into()),
+                    Raw::Array(vec![Raw::Int(12.into()), Raw::Int(22.into())]),
+                ),
+                tag_tuple(
+                    Raw::Int(3.into()),
+                    Raw::Array(vec![Raw::Int(13.into()), Raw::Int(33.into())]),
+                ),
             ]))
             .unwrap(),
         ),
         (
             include_str!("fixtures/evaluator_source_3b27fcd5cbfa74f8.orna"),
             Value::new(Raw::Array(vec![
-                tag_tuple(Raw::Int(0.into()), Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])),
-                tag_tuple(Raw::Int(1.into()), Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])),
+                tag_tuple(
+                    Raw::Int(0.into()),
+                    Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                ),
+                tag_tuple(
+                    Raw::Int(1.into()),
+                    Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+                ),
             ]))
             .unwrap(),
         ),
@@ -3400,9 +3422,18 @@ fn std_collection_take_drop_and_zip_charge_steps_for_copied_results() {
     );
 
     let exact_zip = Value::new(Raw::Array(vec![
-        Raw::Tag(60015, Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())]))),
-        Raw::Tag(60015, Box::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())]))),
-        Raw::Tag(60015, Box::new(Raw::Array(vec![Raw::Int(3.into()), Raw::Text("c".into())]))),
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(1.into()), Raw::Text("a".into())])),
+        ),
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(2.into()), Raw::Text("b".into())])),
+        ),
+        Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Int(3.into()), Raw::Text("c".into())])),
+        ),
     ]))
     .unwrap();
     assert_eq!(
@@ -3490,7 +3521,9 @@ fn std_collection_first_returns_only_the_head_of_a_finite_list() {
 #[test]
 fn std_collection_first_is_callback_free_and_bounded() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_8149266b97333702.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_8149266b97333702.orna"
+        )),
         Value::option(Some(Value::int(1.into()))).unwrap()
     );
     for (expression, expected) in [
@@ -3595,7 +3628,9 @@ fn std_collection_last_returns_option_none_for_empty_finite_inputs() {
 #[test]
 fn std_collection_last_is_callback_free_and_respects_collection_bounds() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_895445bd33a0cfd0.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_895445bd33a0cfd0.orna"
+        )),
         Value::option(Some(Value::int(1.into()))).unwrap()
     );
     for (expression, expected) in [
@@ -4105,7 +4140,9 @@ fn std_collection_decimal_sum_rejects_mixed_numeric_kinds() {
 #[test]
 fn std_collection_sum_rejects_unsupported_numeric_kinds_and_shapes() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_a92c58c6d0b15cfc.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_a92c58c6d0b15cfc.orna"
+        )),
         Value::int(1.into())
     );
     {
@@ -4373,7 +4410,9 @@ fn std_collection_float_aggregates_fail_on_bad_inputs_and_yield_ieee_infinity() 
         );
     }
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_4513747d05260e45.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_4513747d05260e45.orna"
+        )),
         Value::new(Raw::Float(f64::INFINITY.to_bits())).unwrap()
     );
 
@@ -4646,7 +4685,9 @@ fn std_collection_min_and_max_optional_results_match_some_null_and_coalesce() {
 #[test]
 fn std_collection_min_and_max_fail_closed_for_unsupported_kinds_shapes_and_limits() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_78bff71074810743.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_78bff71074810743.orna"
+        )),
         Value::option(Some(Value::int(1.into()))).unwrap()
     );
     assert_eq!(
@@ -4988,7 +5029,9 @@ fn std_collection_one_evaluates_predicates_in_order_and_propagates_late_failures
 #[test]
 fn std_collection_one_rejects_invalid_inputs_propagates_callback_failures_and_keeps_limits() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_4c6049668a352465.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_4c6049668a352465.orna"
+        )),
         Value::int(1.into())
     );
     for (expression, expected) in [
@@ -5750,10 +5793,13 @@ fn std_collection_partition_accepts_lawful_predicates_and_enforces_limits() {
             Limits::default()
         )
         .unwrap(),
-        Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
-        ]))))
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(3.into())]),
+            ]))
+        ))
         .unwrap()
     );
     assert_eq!(
@@ -5782,17 +5828,24 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
         evaluate(include_str!(
             "fixtures/evaluator_source_038bd297fe41baa8.orna"
         )),
-        Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
-            Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
-        ]))))
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+            ]))
+        ))
         .unwrap()
     );
     assert_eq!(
         evaluate(include_str!(
             "fixtures/evaluator_source_e84c7e377e3a0b41.orna"
         )),
-        Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])])))).unwrap()
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![Raw::Array(vec![]), Raw::Array(vec![])]))
+        ))
+        .unwrap()
     );
 
     let functions = functions_from_source(include_str!("fixtures/partition_effect_callback.orna"));
@@ -5816,10 +5869,13 @@ fn std_collection_partition_preserves_order_empty_and_invokes_predicate_once_per
             &mut effects,
         )
         .unwrap(),
-        Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
-            Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
-        ]))))
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())]),
+            ]))
+        ))
         .unwrap()
     );
     assert_eq!(
@@ -5883,10 +5939,13 @@ fn std_collection_partition_debits_one_step_per_scanned_value_without_duplicate_
             },
         )
         .unwrap(),
-        Value::new(Raw::Tag(60015, Box::new(Raw::Array(vec![
-            Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
-            Raw::Array(vec![]),
-        ]))))
+        Value::new(Raw::Tag(
+            60015,
+            Box::new(Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(2.into())]),
+                Raw::Array(vec![]),
+            ]))
+        ))
         .unwrap(),
         "partition should succeed when one debit is charged per input value",
     );
@@ -6779,8 +6838,8 @@ fn std_collection_split_when_requires_bool_and_propagates_callback_failures() {
 }
 
 #[test]
-fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging(
-) {
+fn std_collection_split_when_debits_one_step_per_scanned_value_without_duplicate_traversal_charging()
+ {
     let expression = include_str!("fixtures/split_when_step_budget.orna").trim();
     assert_eq!(
         code(evaluate_expression(
@@ -6828,8 +6887,14 @@ fn std_collection_group_by_accepts_functions_and_enforces_limits() {
         )
         .unwrap(),
         Value::new(Raw::Array(vec![
-            tag_tuple(Raw::Int(0.into()), Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])),
-            tag_tuple(Raw::Int(1.into()), Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])),
+            tag_tuple(
+                Raw::Int(0.into()),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(4.into())])
+            ),
+            tag_tuple(
+                Raw::Int(1.into()),
+                Raw::Array(vec![Raw::Int(3.into()), Raw::Int(1.into())])
+            ),
         ]))
         .unwrap()
     );
@@ -6887,9 +6952,16 @@ fn std_collection_group_by_sorts_keys_and_preserves_input_row_order() {
             tag_tuple(Raw::Int(0.into()), Raw::Array(vec![Raw::Int(12.into())])),
             tag_tuple(
                 Raw::Int(1.into()),
-                Raw::Array(vec![Raw::Int(1.into()), Raw::Int(7.into()), Raw::Int(4.into())]),
+                Raw::Array(vec![
+                    Raw::Int(1.into()),
+                    Raw::Int(7.into()),
+                    Raw::Int(4.into())
+                ]),
             ),
-            tag_tuple(Raw::Int(2.into()), Raw::Array(vec![Raw::Int(2.into()), Raw::Int(5.into())])),
+            tag_tuple(
+                Raw::Int(2.into()),
+                Raw::Array(vec![Raw::Int(2.into()), Raw::Int(5.into())])
+            ),
         ]))
         .unwrap()
     );
@@ -7106,14 +7178,20 @@ fn evaluates_literals_collections_bindings_and_math() {
             (
                 Raw::Text("values".into()),
                 Raw::Array(vec![
-                    Raw::Tag(60015, Box::new(Raw::Array(vec![
-                        Raw::Int(2.into()),
-                        Raw::Tag(
-                            60000,
-                            Box::new(Raw::Array(vec![Raw::Int(25.into()), Raw::Int((-1).into())]))
-                        ),
-                        Raw::Float(3.0f64.to_bits())
-                    ]))),
+                    Raw::Tag(
+                        60015,
+                        Box::new(Raw::Array(vec![
+                            Raw::Int(2.into()),
+                            Raw::Tag(
+                                60000,
+                                Box::new(Raw::Array(vec![
+                                    Raw::Int(25.into()),
+                                    Raw::Int((-1).into())
+                                ]))
+                            ),
+                            Raw::Float(3.0f64.to_bits())
+                        ]))
+                    ),
                     Raw::Null,
                     Raw::Bool(true),
                 ])
@@ -7602,13 +7680,23 @@ fn pinned_standard_math_source_executes_every_public_function() {
         )))
         .expect("the consumer fixture binds no second standard layer");
     assert_eq!(
-        invoke_named("incremented", &functions, &Environment::new(), Limits::default())
-            .unwrap(),
+        invoke_named(
+            "incremented",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(42.into())
     );
     assert_eq!(
-        invoke_named("decremented", &functions, &Environment::new(), Limits::default())
-            .unwrap(),
+        invoke_named(
+            "decremented",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int((-1).into())
     );
     assert_eq!(
@@ -7616,15 +7704,33 @@ fn pinned_standard_math_source_executes_every_public_function() {
         Value::new(Raw::Bool(true)).unwrap()
     );
     assert_eq!(
-        invoke_named("minimum", &functions, &Environment::new(), Limits::default()).unwrap(),
+        invoke_named(
+            "minimum",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(3.into())
     );
     assert_eq!(
-        invoke_named("maximum", &functions, &Environment::new(), Limits::default()).unwrap(),
+        invoke_named(
+            "maximum",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(5.into())
     );
     assert_eq!(
-        invoke_named("clamped", &functions, &Environment::new(), Limits::default()).unwrap(),
+        invoke_named(
+            "clamped",
+            &functions,
+            &Environment::new(),
+            Limits::default()
+        )
+        .unwrap(),
         Value::int(5.into())
     );
 }
@@ -9416,12 +9522,20 @@ fn cloned_filter_continuations_do_not_promote_between_equal_named_unknowns() {
         "fixtures/query-cloned-continuation-unknowns-9322q.orna"
     ));
     let mut effects = RepeatedUnknownRelationEffects {
-        rows: vec![Value::int(1.into()), Value::int(2.into()), Value::int(3.into())],
+        rows: vec![
+            Value::int(1.into()),
+            Value::int(2.into()),
+            Value::int(3.into()),
+        ],
         starts: 0,
     };
 
-    let result = invoke_relation(body, &mut effects, Limits::default())
-        .unwrap_or_else(|error| panic!("the chained filter query computes its count: {}", error.code()));
+    let result = invoke_relation(body, &mut effects, Limits::default()).unwrap_or_else(|error| {
+        panic!(
+            "the chained filter query computes its count: {}",
+            error.code()
+        )
+    });
 
     assert_eq!(result, Value::int(2.into()));
     assert_eq!(effects.starts, 3, "all three unknown operands contribute");
@@ -9446,7 +9560,9 @@ fn materialized_list_union_remains_left_to_right_with_duplicates() {
 #[test]
 fn std_stats_reject_mixed_or_unsupported_inputs_and_resource_overflow() {
     assert_eq!(
-        evaluate(include_str!("fixtures/evaluator_source_0b99861bb1316192.orna")),
+        evaluate(include_str!(
+            "fixtures/evaluator_source_0b99861bb1316192.orna"
+        )),
         Value::decimal(15.into(), (-1).into()).unwrap()
     );
     for (expression, expected) in [
@@ -9752,8 +9868,7 @@ fn distinct_relation_preserves_first_identity_across_sparse_filter_cascade_union
     ]))
     .expect("proof result is canonical");
     assert_eq!(
-        result,
-        expected,
+        result, expected,
         "the fold keeps the first surviving value for each identity across both union branches"
     );
 }
@@ -9792,8 +9907,7 @@ fn paired_distinct_cascades_preserve_first_values_and_stop_at_sparse_take_bounds
     ]))
     .expect("paired fold result is canonical");
     assert_eq!(
-        result,
-        expected,
+        result, expected,
         "branch-local distinct folds keep their first values, then the sparse shared cascade folds the union in order"
     );
 
@@ -10190,18 +10304,29 @@ fn lateral_flat_map_keeps_outer_identity_across_sparse_relation_cascades() {
         ),
         (
             "ChildLeft".into(),
-            vec![Value::int(1.into()), Value::int(0.into()), Value::int(3.into())],
+            vec![
+                Value::int(1.into()),
+                Value::int(0.into()),
+                Value::int(3.into()),
+            ],
         ),
         (
             "ChildRight".into(),
-            vec![Value::int(2.into()), Value::int(0.into()), Value::int(1.into())],
+            vec![
+                Value::int(2.into()),
+                Value::int(0.into()),
+                Value::int(1.into()),
+            ],
         ),
     ]));
 
     let pair = |outer: i64, inner: i64| {
         Raw::Tag(
             60015,
-            Box::new(Raw::Array(vec![Raw::Int(outer.into()), Raw::Int(inner.into())])),
+            Box::new(Raw::Array(vec![
+                Raw::Int(outer.into()),
+                Raw::Int(inner.into()),
+            ])),
         )
     };
     let expected_rows = Value::new(Raw::Array(vec![
@@ -10293,10 +10418,7 @@ fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
     let frame_pairs = relation_stage(unique_frames, "pairs", Vec::new());
     let body = relation_terminal(frame_pairs, "first");
     let mut effects = LateralRelationEffects::new(BTreeMap::from([
-        (
-            "ParentLeft".into(),
-            vec![Value::int(10.into())],
-        ),
+        ("ParentLeft".into(), vec![Value::int(10.into())]),
         ("ParentRight".into(), vec![Value::int(20.into())]),
         (
             "ChildLeft".into(),
@@ -10318,7 +10440,10 @@ fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
     let expected = Value::option(Some(
         Value::new(Raw::Tag(
             60015,
-            Box::new(Raw::Array(vec![frame(10).raw().clone(), frame(20).raw().clone()])),
+            Box::new(Raw::Array(vec![
+                frame(10).raw().clone(),
+                frame(20).raw().clone(),
+            ])),
         ))
         .expect("paired lateral frames are canonical"),
     ))
@@ -10342,7 +10467,11 @@ fn paired_windows_preserve_lateral_tuple_identity_across_sparse_scopes() {
                 scopes.push(*scope);
             }
         }
-        assert_eq!(scopes.len(), 2, "accepted parents open separate {source} scopes");
+        assert_eq!(
+            scopes.len(),
+            2,
+            "accepted parents open separate {source} scopes"
+        );
         for scope in scopes {
             let cursors = reads
                 .iter()
@@ -10644,8 +10773,7 @@ fn windowed_distinct_preserves_frame_identities_across_sparse_union_cascade() {
     ]))
     .expect("proof result is canonical");
     assert_eq!(
-        result,
-        expected,
+        result, expected,
         "sparse filters retain all frame positions across the union boundary, then distinct keeps the first original frames"
     );
 }
@@ -12051,7 +12179,12 @@ fn admitted_eval_producer_stages_effectful_source_without_publishing() {
         orna_syntax_v1::ReplInput::Expression(_)
     ));
     assert!(staged.result_type().is_some());
-    assert!(staged.effects().effects.contains(&orna_semantic_v1::EffectKind::Network));
+    assert!(
+        staged
+            .effects()
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::Network)
+    );
     assert!(staged.effects().may_fail);
     assert_eq!(
         session.preview(include_str!("fixtures/admitted_repl_last_result.orna").trim()),
@@ -12072,13 +12205,13 @@ fn default_limits_pass_full_collection_list_through_std_collection_operations() 
     ))
     .unwrap();
     let descending = Value::new(Raw::Array(
-        (0..2_048).rev().map(|value| Raw::Int(value.into())).collect(),
+        (0..2_048)
+            .rev()
+            .map(|value| Raw::Int(value.into()))
+            .collect(),
     ))
     .unwrap();
-    let environment = Environment::from([
-        ("rows".into(), rows),
-        ("descending".into(), descending),
-    ]);
+    let environment = Environment::from([("rows".into(), rows), ("descending".into(), descending)]);
     for source in [
         "std.collection.map(rows, value => value * 10)",
         "std.collection.filter(rows, value => value % 2 == 0)",

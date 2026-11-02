@@ -1,4 +1,4 @@
-use orna_value_v1::{base64_decode, base64_encode, Error};
+use orna_value_v1::{Error, base64_decode, base64_encode};
 
 #[test]
 fn encodes_and_decodes_rfc4648_boundary_vectors() {
@@ -22,21 +22,8 @@ fn encodes_and_decodes_rfc4648_boundary_vectors() {
 #[test]
 fn rejects_malformed_lengths_and_padding() {
     for input in [
-        "A",
-        "AAA",
-        "AAAAA",
-        "=",
-        "===",
-        "====",
-        "A===",
-        "Z===",
-        "Zg=",
-        "Zg===",
-        "Zg====",
-        "=Zg=",
-        "Z=g=",
-        "Zm=8",
-        "AAAA====",
+        "A", "AAA", "AAAAA", "=", "===", "====", "A===", "Z===", "Zg=", "Zg===", "Zg====", "=Zg=",
+        "Z=g=", "Zm=8", "AAAA====",
     ] {
         assert!(matches!(base64_decode(input), Err(Error::InvalidValue)));
     }
@@ -45,16 +32,7 @@ fn rejects_malformed_lengths_and_padding() {
 #[test]
 fn rejects_invalid_characters_whitespace_and_url_safe_alphabet() {
     for input in [
-        "Zg$=",
-        "Zg.=",
-        "Zg\0=",
-        "éA==",
-        " Zg==",
-        "Zg== ",
-        "Zg\n==",
-        "Zg\t==",
-        "_w==",
-        "-w==",
+        "Zg$=", "Zg.=", "Zg\0=", "éA==", " Zg==", "Zg== ", "Zg\n==", "Zg\t==", "_w==", "-w==",
     ] {
         assert!(matches!(base64_decode(input), Err(Error::InvalidValue)));
     }

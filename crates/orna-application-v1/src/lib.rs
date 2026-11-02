@@ -9,10 +9,10 @@
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, StagedReplActivation,
-    StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry, SysHostContext, invoke_named,
-    invoke_named_with_effects, invoke_named_with_sys_host_context, module_function_alias_key,
-    reference_standard_profile, reference_standard_sources,
+    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError,
+    StagedReplActivation, StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry,
+    SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
+    module_function_alias_key, reference_standard_profile, reference_standard_sources,
 };
 use orna_foundation_v1::{
     CanonicalSnapshot, CanonicalValue, OvbRaw, SafeText, compare_primary_keys,
@@ -30,11 +30,11 @@ use orna_protocol_v1::{
 };
 use orna_repository_v1::{GitCommitRef, ProtectedContentPin, RepositoryCaptureCapability};
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RuntimeActivationContext, RuntimeError,
-    RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot, RuntimeTableIdentity,
-    ActivationEffectReport, DeclaredEffectSet, RuntimeTableRows,
-    StagedTableActivation, TableMutation, TableObjectId,
+    ActivationEffectReport, DeclaredEffectSet, NoFault, RequestIdentity, RuntimeActivationContext,
+    RuntimeError, RuntimePublicationMetadataRows, RuntimeTableActivationSnapshot,
+    RuntimeTableIdentity, RuntimeTableRows, StagedTableActivation, TableMutation, TableObjectId,
 };
+pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use orna_semantic_v1::{
     Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace, StandardCatalogueError,
     StandardDependencyProfile, SystemProviders, TableSchema, analyze_with_providers,
@@ -45,7 +45,6 @@ use orna_syntax_v1::{
 };
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
-pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
@@ -67,8 +66,8 @@ pub fn remote_analysis_request(
     RemoteAnalysisRequest::new(policy, admitted_snapshot_identity, disclosed_data)
 }
 
-mod repl_transaction;
 mod browser_profile;
+mod repl_transaction;
 mod table_reference;
 pub use browser_profile::execute_browser_profile;
 pub use repl_transaction::{ReplEvaluationFailure, ReplTransactionScope};
@@ -419,11 +418,9 @@ impl ApplicationAuthority {
             public: &self.standard_public,
             non_function: &self.standard_non_function,
         };
-        for (alias, target) in standard_import_bindings(
-            &exports,
-            &self.standard_preludes,
-            &parsed.value.items,
-        )? {
+        for (alias, target) in
+            standard_import_bindings(&exports, &self.standard_preludes, &parsed.value.items)?
+        {
             // A user function keeps its own name; the import alias is bound only where it is free.
             if functions.contains_key(&alias) || !functions.contains_key(&target) {
                 continue;
@@ -515,9 +512,15 @@ impl ApplicationAuthority {
                 application.limits,
                 sys_host,
             ),
-            None => invoke_named(&application.entry, &application.functions, arguments, application.limits),
+            None => invoke_named(
+                &application.entry,
+                &application.functions,
+                arguments,
+                application.limits,
+            ),
         };
-        result.map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
+        result
+            .map_err(|error: EvaluationError| ApplicationError::Evaluation(error.code().to_owned()))
     }
 
     /// Executes the admitted entry while staging every admitted table effect
@@ -545,7 +548,12 @@ impl ApplicationAuthority {
         source_rows: Vec<AdmittedSourceRow>,
         value_context: &Format3Context,
     ) -> Result<StagedActivation, ApplicationError> {
-        self.evaluate_staged_with_source_rows_inner(application, arguments, source_rows, Some(value_context))
+        self.evaluate_staged_with_source_rows_inner(
+            application,
+            arguments,
+            source_rows,
+            Some(value_context),
+        )
     }
 
     fn evaluate_staged_with_source_rows_inner(
@@ -868,9 +876,7 @@ impl ApplicationAuthority {
         request: Option<RequestIdentity>,
         effects: ActivationEffectReport,
     ) -> Result<StagedTableActivation, ApplicationError> {
-        self.stage_source_mutations_with_provenance(
-            context, mutations, request, &[], &[], effects,
-        )
+        self.stage_source_mutations_with_provenance(context, mutations, request, &[], &[], effects)
     }
 
     fn stage_source_mutations_with_provenance(
@@ -1547,8 +1553,9 @@ impl SourceMutationEffectHandler {
         if transfers.len() != bindings.len() {
             return Err(ApplicationError::InvalidTableMetadata);
         }
-        let fields = ContextValue::decode_in_context(canonical_fields, ValueFormat::Rov3, value_context)
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+        let fields =
+            ContextValue::decode_in_context(canonical_fields, ValueFormat::Rov3, value_context)
+                .map_err(|_| ApplicationError::InvalidTableMetadata)?;
         let OvbRaw::Array(fields) = fields.raw() else {
             return Err(ApplicationError::InvalidTableMetadata);
         };
@@ -1564,12 +1571,9 @@ impl SourceMutationEffectHandler {
                 .iter()
                 .position(|expected| *expected == field_object_id)
                 .ok_or(ApplicationError::InvalidTableMetadata)?;
-            let encoded_blob = ContextValue::decode_in_context(
-                &encoded_value,
-                ValueFormat::Rov3,
-                value_context,
-            )
-            .map_err(|_| ApplicationError::InvalidTableMetadata)?;
+            let encoded_blob =
+                ContextValue::decode_in_context(&encoded_value, ValueFormat::Rov3, value_context)
+                    .map_err(|_| ApplicationError::InvalidTableMetadata)?;
             let transfer = pin.transfer_record();
             let transfer_evidence = transfers
                 .iter()
@@ -2686,7 +2690,9 @@ impl EffectHandler for SourceMutationEffectHandler {
             }));
         }
         if self.tables.contains_key(source) {
-            return self.table_relation_page(source, after, limit, budget).map(Some);
+            return self
+                .table_relation_page(source, after, limit, budget)
+                .map(Some);
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
@@ -2892,10 +2898,7 @@ fn standard_import_bindings(
                 for prelude in preludes.get(&namespace).into_iter().flatten() {
                     let target = format!("{namespace}.{prelude}");
                     if exports.public.contains(&target) {
-                        wildcard
-                            .entry(prelude.clone())
-                            .or_default()
-                            .insert(target);
+                        wildcard.entry(prelude.clone()).or_default().insert(target);
                     }
                 }
             }
@@ -4001,11 +4004,18 @@ mod tests {
 
     #[test]
     fn remote_analysis_is_denied_by_default_without_disclosure() {
-        let denied = remote_analysis_request(RemoteAnalysisPolicy::default(), "snapshot:sha256:source-deps-resources-toolchain-abi", Vec::new());
+        let denied = remote_analysis_request(
+            RemoteAnalysisPolicy::default(),
+            "snapshot:sha256:source-deps-resources-toolchain-abi",
+            Vec::new(),
+        );
         assert_eq!(denied.decision(), RemoteAnalysisDecision::DeniedLocalOnly);
         assert!(!denied.is_allowed());
         assert!(denied.disclosed_data().is_empty());
-        assert_eq!(denied.source_snapshot(), "snapshot:sha256:source-deps-resources-toolchain-abi");
+        assert_eq!(
+            denied.source_snapshot(),
+            "snapshot:sha256:source-deps-resources-toolchain-abi"
+        );
     }
 
     #[test]
@@ -4015,9 +4025,15 @@ mod tests {
             "snapshot:sha256:source-deps-resources-toolchain-abi",
             ["source", "dependency snapshot", "query"].map(str::to_owned),
         );
-        assert_eq!(allowed.decision(), RemoteAnalysisDecision::AllowedByUserPolicy);
+        assert_eq!(
+            allowed.decision(),
+            RemoteAnalysisDecision::AllowedByUserPolicy
+        );
         assert!(allowed.is_allowed());
-        assert_eq!(allowed.disclosed_data(), &["source", "dependency snapshot", "query"]);
+        assert_eq!(
+            allowed.disclosed_data(),
+            &["source", "dependency snapshot", "query"]
+        );
     }
     #[test]
     fn remote_analysis_explicit_deny_has_no_disclosure() {
@@ -4089,9 +4105,9 @@ mod tests {
     }
 
     fn int_value(value: i64) -> orna_foundation_v1::Value {
-        orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(
-            num_bigint::BigInt::from(value),
-        ))
+        orna_foundation_v1::Value::new(orna_foundation_v1::OvbRaw::Int(num_bigint::BigInt::from(
+            value,
+        )))
         .expect("canonical integer")
     }
 
@@ -4191,7 +4207,10 @@ mod tests {
         non_function: &[&str],
         source: &str,
     ) -> Result<BTreeMap<String, String>, ApplicationError> {
-        let public = public.iter().map(|name| (*name).to_owned()).collect::<BTreeSet<_>>();
+        let public = public
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect::<BTreeSet<_>>();
         let non_function = non_function
             .iter()
             .map(|name| (*name).to_owned())
@@ -4224,7 +4243,10 @@ mod tests {
             "use std.math.*;\npub fn answer(): Int = 1;\n",
         )
         .expect("glob binds public functions");
-        assert_eq!(bindings.keys().map(String::as_str).collect::<Vec<_>>(), vec!["increment"]);
+        assert_eq!(
+            bindings.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["increment"]
+        );
     }
 
     #[test]
@@ -4978,11 +5000,9 @@ mod tests {
                 [("std/store.orna".into(), catalogue_source.into())],
             )
             .expect("standard catalogue");
-        let adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
-            catalogue,
-            Limits::default(),
-        ))
-        .with_loaded_project(project);
+        let adapter =
+            ApplicationLiveAdapter::new(ApplicationAuthority::new(catalogue, Limits::default()))
+                .with_loaded_project(project);
         let result = adapter.repl_table_schemas();
         drop(repository);
         fs::remove_dir_all(root).expect("test project is removed");

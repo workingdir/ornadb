@@ -29,7 +29,10 @@ pub(crate) enum Hint {
     Unknown,
     /// The value of the name at this occurrence: a local, a declaration or a
     /// module alias.
-    Name { key: Key, span: SyntaxSpan },
+    Name {
+        key: Key,
+        span: SyntaxSpan,
+    },
     /// A value of the type written at this path.
     Type(TypePath),
     /// The result of calling the callee described by the inner hint.
@@ -390,7 +393,9 @@ struct Walker<'a> {
 impl Walker<'_> {
     /// Identifier tokens (including `self`) inside `span`, in order.
     fn identifiers(&self, span: &SyntaxSpan) -> impl Iterator<Item = &Token> {
-        let start = self.tokens.partition_point(|token| token.span.start < span.start);
+        let start = self
+            .tokens
+            .partition_point(|token| token.span.start < span.start);
         self.tokens[start..]
             .iter()
             .take_while(move |token| token.span.end <= span.end)
@@ -398,11 +403,15 @@ impl Walker<'_> {
     }
 
     fn first_identifier(&self, span: &SyntaxSpan) -> Option<SyntaxSpan> {
-        self.identifiers(span).next().map(|token| token.span.clone())
+        self.identifiers(span)
+            .next()
+            .map(|token| token.span.clone())
     }
 
     fn last_identifier(&self, span: &SyntaxSpan) -> Option<SyntaxSpan> {
-        self.identifiers(span).last().map(|token| token.span.clone())
+        self.identifiers(span)
+            .last()
+            .map(|token| token.span.clone())
     }
 
     fn occur(&mut self, span: SyntaxSpan, name: &str, role: Role) {
@@ -487,7 +496,10 @@ impl Walker<'_> {
     fn item(&mut self, item: &Item) {
         match &item.declaration {
             Declaration::Use { path, tail } => {
-                let keys = path.iter().map(|segment| key_of(&segment.name)).collect::<Vec<_>>();
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(&segment.name))
+                    .collect::<Vec<_>>();
                 for (index, segment) in path.iter().enumerate() {
                     self.occur(
                         segment.span.clone(),
@@ -524,7 +536,11 @@ impl Walker<'_> {
                 self.parameters(&signature.parameters, &body.span(), None);
                 self.expr(body);
             }
-            Declaration::Table { name, keys, members } => {
+            Declaration::Table {
+                name,
+                keys,
+                members,
+            } => {
                 let table = self.declare(name, &item.span, &item.span, DeclaredKind::Table);
                 let row = Hint::Owner(item.span.clone());
                 self.with_owner(table, |walker| {
@@ -854,7 +870,10 @@ impl Walker<'_> {
                 fields,
                 ..
             } => {
-                let keys = path.iter().map(|segment| key_of(&segment.text)).collect::<Vec<_>>();
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(&segment.text))
+                    .collect::<Vec<_>>();
                 for (index, segment) in path.iter().enumerate() {
                     self.occur(
                         segment.span.clone(),
@@ -872,7 +891,14 @@ impl Walker<'_> {
                         .collect(),
                 });
                 for argument in arguments {
-                    self.bind_pattern(argument, scope, visible_after, context, kind, &Hint::Unknown);
+                    self.bind_pattern(
+                        argument,
+                        scope,
+                        visible_after,
+                        context,
+                        kind,
+                        &Hint::Unknown,
+                    );
                 }
                 for field in fields {
                     let member = Hint::Member(Box::new(owner.clone()), key_of(&field.name));
@@ -887,7 +913,14 @@ impl Walker<'_> {
                                     },
                                 );
                             }
-                            self.bind_pattern(pattern, scope, visible_after, context, kind, &member);
+                            self.bind_pattern(
+                                pattern,
+                                scope,
+                                visible_after,
+                                context,
+                                kind,
+                                &member,
+                            );
                         }
                         None => {
                             self.occur(
@@ -965,7 +998,10 @@ impl Walker<'_> {
                 arguments,
                 span,
             } => {
-                let keys = path.iter().map(|segment| key_of(segment)).collect::<Vec<_>>();
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(segment))
+                    .collect::<Vec<_>>();
                 let segments = self
                     .identifiers(span)
                     .take(path.len())
@@ -987,7 +1023,9 @@ impl Walker<'_> {
                     self.type_expr(argument);
                 }
             }
-            TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => self.type_expr(inner),
+            TypeExpr::Optional { inner, .. } | TypeExpr::List { inner, .. } => {
+                self.type_expr(inner)
+            }
             TypeExpr::Product { lhs, rhs, .. } => {
                 self.type_expr(lhs);
                 self.type_expr(rhs);
@@ -1092,7 +1130,10 @@ impl Walker<'_> {
             }
             Expr::Record { fields, .. } => self.record_fields(fields, &Hint::Unknown),
             Expr::Nominal { path, fields, .. } => {
-                let keys = path.iter().map(|segment| key_of(&segment.text)).collect::<Vec<_>>();
+                let keys = path
+                    .iter()
+                    .map(|segment| key_of(&segment.text))
+                    .collect::<Vec<_>>();
                 for (index, segment) in path.iter().enumerate() {
                     self.occur(
                         segment.span.clone(),
@@ -1320,7 +1361,14 @@ impl Walker<'_> {
                     Some(annotation) => annotation_hint(self, annotation),
                     None => self.hint(value),
                 };
-                self.bind_pattern(pattern, block, span.end, span, LocalBindingKind::Local, &hint);
+                self.bind_pattern(
+                    pattern,
+                    block,
+                    span.end,
+                    span,
+                    LocalBindingKind::Local,
+                    &hint,
+                );
             }
             Statement::Assert { value, .. }
             | Statement::Expression { value, .. }
@@ -1406,7 +1454,9 @@ impl Walker<'_> {
                     .map(|segment| (key_of(&segment.text), segment.span.clone()))
                     .collect(),
             }),
-            Expr::Block { tail: Some(tail), .. } => self.hint(tail),
+            Expr::Block {
+                tail: Some(tail), ..
+            } => self.hint(tail),
             _ => Hint::Unknown,
         }
     }
