@@ -5,6 +5,11 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The workspace is now formatted with default `cargo fmt` (ornadb-5il1.224; no product behaviour change). `cargo fmt --all -- --check`
+  was red in at least 253 files on `d35b7c0c3`; it now passes for every crate. The reformat is layout only, apart from
+  two kinds of adjustment the new layout forces on the clippy gate: five expression statements
+  gained their trailing `;`, and nine functions that default rustfmt grew past its 100-line threshold carry
+  `#[allow(clippy::too_many_lines)]`, which is the convention 120 other functions already use.
 - Known limits for row maps and Git maintenance (no product behaviour change). Fixed-row batching is not content-stable: ORP row pages close at content-defined boundary anchors, with a maximum entry count as a backstop (`boundary_anchor` in `crates/orna-repository-v1/src/orp.rs`). Concurrent uncoordinated `git prune --expire now` is unsupported and is not advertised as safe (ORNA-CAP-006); this build exposes no `prune` command.
 - CWD observation reads each dirty or untracked file once per settled stamp (ornadb-5il1.156; product change). Commit,
   verify and publish observations reuse a regular file's digest section while its stamp is unchanged and its mtime and
