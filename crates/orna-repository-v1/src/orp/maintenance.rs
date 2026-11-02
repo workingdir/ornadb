@@ -1090,11 +1090,10 @@ mod tests {
         let mut pending = vec![root.clone()];
         while let Some(oid) = pending.pop() {
             match store.nodes.get(&oid) {
-                Some(NodeData::OrderedLeaf { entries, .. }) => {
-                    if entries.iter().any(|entry| entry.key == wanted) {
+                Some(NodeData::OrderedLeaf { entries, .. })
+                    if entries.iter().any(|entry| entry.key == wanted) => {
                         return true;
                     }
-                }
                 Some(NodeData::OrderedBranch { entries, .. }) => {
                     pending.extend(entries.iter().map(|entry| entry.child.clone()));
                 }

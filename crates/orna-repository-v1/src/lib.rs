@@ -638,6 +638,10 @@ pub struct MigrationContinuityRecord {
     predecessors: Vec<StreamCheckpointIdentityPredecessor>,
 }
 
+/// A legacy checkpoint key's format-3 successor: consumer identity, canonical
+/// source bytes and optional canonical partition bytes.
+type LegacySuccessor<'a> = ([u8; 32], &'a [u8], Option<&'a [u8]>);
+
 impl MigrationContinuityRecord {
     pub fn new(
         mut predecessors: Vec<StreamCheckpointIdentityPredecessor>,
@@ -729,7 +733,10 @@ impl MigrationContinuityRecord {
         &self.predecessors
     }
 
-    /// The format-3 successor identity of one legacy checkpoint key.
+
+    /// The format-3 successor identity of one legacy checkpoint key: the
+    /// consumer identity, the canonical source bytes and the optional
+    /// canonical partition bytes.
     ///
     /// A resumed publisher looks up the identity the migration recorded
     /// instead of re-deriving it: re-deriving is exactly the reset this
@@ -743,7 +750,7 @@ impl MigrationContinuityRecord {
         legacy_consumer_identity: [u8; 32],
         legacy_source_identity: &[u8],
         legacy_partition_identity: Option<&[u8]>,
-    ) -> Option<([u8; 32], &[u8], Option<&[u8]>)> {
+    ) -> Option<LegacySuccessor<'_>> {
         self.predecessors
             .iter()
             .find(|predecessor| {
@@ -2761,10 +2768,7 @@ impl Repository {
         let object_id_length = self.native_object_id_length()?;
         let mut fields = output.split(|byte| *byte == 0);
         let mut entries = Vec::new();
-        loop {
-            let Some(object_id) = fields.next() else {
-                break;
-            };
+        while let Some(object_id) = fields.next() {
             let committed_at = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
             let author = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
             let subject = fields.next().ok_or(RepositoryError::GitOperationFailed)?;
@@ -3025,7 +3029,6 @@ impl Repository {
     /// it, and the commit is a direct child of the captured `HEAD`. The
     /// symbolic branch and ordinary index are untouched; publication advances
     /// them later under its own lock and compare-and-set.
-
     pub fn build_frozen_publication_candidate(
         &self,
         expected_head: &GitCommitRef,
@@ -3744,8 +3747,8 @@ impl Repository {
 
             let path = ManagedPath::new(relative)?;
             let (target, quarantine) = self.store_reconciliation_paths(&path, candidate)?;
-            if is_payload {
-                if let Some(object) = new_object {
+            if is_payload
+                && let Some(object) = new_object {
                     self.reconcile_store_payload_worktree_file(
                         &path,
                         object,
@@ -3755,7 +3758,6 @@ impl Repository {
                     )?;
                     continue;
                 }
-            }
             let current = self.read_managed_file(&target)?;
             // Older publications could leave skipped leaves absent; restore them before
             // clearing those bits so reconciliation does not invent deletions.
@@ -6044,7 +6046,7 @@ impl Repository {
                             let read_started = std::time::SystemTime::now();
                             let section = Self::file_section_digest(&target)?;
                             let settled = Self::stamp_settled_before(&file_stamp, read_started);
-                            let entry = settled.then(|| CachedFileDigest {
+                            let entry = settled.then_some(CachedFileDigest {
                                 stamp: file_stamp,
                                 digest: section,
                             });
@@ -8324,7 +8326,7 @@ impl Repository {
         if journal
             .entries()
             .iter()
-            .any(|entry| &entry.path == &store_path)
+            .any(|entry| entry.path == store_path)
         {
             return Err(RepositoryError::InvalidPublicationJournal);
         }
@@ -8912,12 +8914,11 @@ impl Repository {
             let _ = fs::remove_file(&candidate);
             return Err(error);
         }
-        if let ManagedIndexOperation::AddContents(contents) = operation {
-            if let Err(error) = self.prepare_index_contents(&candidate, &paths[0], contents) {
+        if let ManagedIndexOperation::AddContents(contents) = operation
+            && let Err(error) = self.prepare_index_contents(&candidate, &paths[0], contents) {
                 let _ = fs::remove_file(&candidate);
                 return Err(error);
             }
-        }
         if let Some(hook) = before_install.as_mut() {
             hook();
         }

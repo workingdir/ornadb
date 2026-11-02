@@ -1977,7 +1977,7 @@ mod tests {
     /// supervisor kills it.
     fn crashed_fetch_child_body(root: &Path) {
         let repository =
-            Repository::discover(&root.join("local")).expect("discover crash repository");
+            Repository::discover(root.join("local")).expect("discover crash repository");
         let request =
             FetchRequest::new("origin", [RequestedRef::branch("main").unwrap()], []).unwrap();
         let _ = repository.fetch(&request);
