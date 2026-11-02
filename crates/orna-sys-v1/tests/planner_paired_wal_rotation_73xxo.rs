@@ -145,6 +145,8 @@ fn stream_rotation_chains() -> Vec<QueryPairedStreamRotationChainDescription> {
     }]
 }
 
+/// Each planner fixture helper assembles one plan shape from its parts.
+#[allow(clippy::too_many_arguments)]
 fn wal_rotation(
     checkpoint: &str,
     restore: u64,

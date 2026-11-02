@@ -220,7 +220,7 @@ fn access_by_object<'a>(plan: &'a orna_sys_v1::ExplainedPlan, object: &str) -> &
         .expect("planned access preserves its selected object")
 }
 
-fn joins_by_pair<'a>(plan: &'a orna_sys_v1::ExplainedPlan) -> BTreeMap<&'a str, &'a PlanNode> {
+fn joins_by_pair(plan: &orna_sys_v1::ExplainedPlan) -> BTreeMap<&str, &PlanNode> {
     plan.nodes()
         .iter()
         .filter(|node| node.kind() == PlanNodeKind::Join)
