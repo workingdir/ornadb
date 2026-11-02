@@ -1,4 +1,4 @@
-name: Clippy
+name: Lint
 
 on:
   push:
@@ -18,10 +18,29 @@ env:
 # same pull request cancels that pull request's older run, because each push
 # would otherwise queue behind the previous one.
 concurrency:
-  group: lint-clippy-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
+  group: lint-${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+        with:
+          components: rustfmt
+
+      # Formatting needs no build, so it reports in a couple of minutes instead
+      # of waiting behind the clippy compile.
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -55,9 +74,9 @@ jobs:
           sudo apt-get -y clean
           df -h /
 
-      # Warnings are denied for the whole workspace, test targets included. This
-      # moved here from the nightly gates workflow when the workspace reached
-      # zero diagnostics: a lint that only runs nightly is a lint that lands
-      # broken and stays broken until the next night.
+      # Warnings are denied for the whole workspace, test targets included. Both
+      # jobs moved here from the nightly gates workflow when the workspace
+      # reached zero diagnostics: a lint that only runs nightly is a lint that
+      # lands broken and stays broken until the next night.
       - name: Run Clippy
         run: cargo clippy --locked --workspace --all-targets --keep-going -- -D warnings
