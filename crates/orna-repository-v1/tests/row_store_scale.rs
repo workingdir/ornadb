@@ -1328,6 +1328,12 @@ fn measure_index_churn(
             !maintenance.index_objects_reused().is_empty(),
             "{operation} keeps the untouched pages by object ID"
         );
+        // A single-key change rewrites its own path, not the whole index.
+        let index_pages = fixture.leaf_pages + fixture.branch_pages;
+        assert!(
+            maintenance.index_objects_created().len() * 2 <= index_pages,
+            "{operation} rewrites at most half of the {index_pages} index pages"
+        );
     }
     let after_objects = object_inventory(repository_path);
     let source_page_transfer =
@@ -2091,6 +2097,23 @@ fn orp1_row_store_ten_rows() {
     let small = timed("build_fixture", 10, || build_fixture(10, Fault::None));
     timed("run_case", 10, || run_case(&small));
     timed("index_churn", 10, || exercise_index_churn(&small));
+}
+
+/// Rows for the multi-page churn case. At this size the boundary rule yields
+/// several leaf pages, so a one-key change has untouched pages to keep.
+const MULTI_PAGE_ROWS: u64 = 2_000;
+
+#[test]
+fn orp1_index_churn_multi_page() {
+    let multi = timed("build_fixture", MULTI_PAGE_ROWS, || {
+        build_fixture(MULTI_PAGE_ROWS, Fault::None)
+    });
+    eprintln!(
+        "ORP-1 index_churn_fixture rows={} leaf_pages={} branch_pages={}",
+        MULTI_PAGE_ROWS, multi.leaf_pages, multi.branch_pages
+    );
+    assert!(multi.leaf_pages > 1, "multi-page churn needs more than one leaf page");
+    timed("index_churn", MULTI_PAGE_ROWS, || exercise_index_churn(&multi));
 }
 
 #[path = "../../orna-cli-v1/tests/support/format3.rs"]
