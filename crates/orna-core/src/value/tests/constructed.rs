@@ -1968,7 +1968,9 @@ fn named_float_map_keys_fail_at_descriptor_preflight_for_all_attempted_values() 
         RuntimeValue::Float(RuntimeFloat::new(-0.0).unwrap()),
         // Deliberately bypass the finite-only constructor: descriptor preflight
         // must reject the named Float key before inspecting this attempted key.
-        RuntimeValue::Float(unsafe { std::mem::transmute(f64::NAN) }),
+        // SAFETY: the source and destination types are both 64-bit and bit
+        // patterns are preserved for every f64, including NaN.
+        RuntimeValue::Float(unsafe { std::mem::transmute::<f64, RuntimeFloat>(f64::NAN) }),
     ];
 
     for attempted_key in attempted_keys {
