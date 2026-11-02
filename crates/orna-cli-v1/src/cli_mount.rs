@@ -7,7 +7,10 @@
 
 use std::path::Path;
 #[cfg(target_os = "linux")]
-use std::{fs, os::unix::ffi::{OsStrExt, OsStringExt}};
+use std::{
+    fs,
+    os::unix::ffi::{OsStrExt, OsStringExt},
+};
 
 use super::*;
 use orna_repository_v1::{MountStatus, MountView, Repository};
@@ -44,19 +47,29 @@ pub(super) fn run_mount(
         Ok(status) => status,
         Err(error) => {
             let _ = view.detach();
-            return Err(mount_error("Mount record could not be verified", error.to_string()));
+            return Err(mount_error(
+                "Mount record could not be verified",
+                error.to_string(),
+            ));
         }
     };
     let signal_handler = match MountSignalHandler::new() {
         Ok(handler) => handler,
         Err(error) => {
             let _ = view.detach();
-            return Err(mount_error("Mount signal handling could not be started", error));
+            return Err(mount_error(
+                "Mount signal handling could not be started",
+                error,
+            ));
         }
     };
     let source = format!("orna-{}", status.view_hex());
     let session = match crate::fuse_mount::spawn_read_only(
-        &repository, view.commit(), view.context(), status.mountpoint(), source,
+        &repository,
+        view.commit(),
+        view.context(),
+        status.mountpoint(),
+        source,
     ) {
         Ok(session) => session,
         Err(error) => {
@@ -73,12 +86,14 @@ pub(super) fn run_mount(
 #[cfg(target_os = "linux")]
 fn attach_refusal(error: orna_repository_v1::MountError) -> Diagnostic {
     match error {
-        orna_repository_v1::MountError::MountpointAlreadyAttached => Diagnostic::target_with_detail(
-            "E2000",
-            "Mount was refused",
-            "a view is already registered at this mountpoint; run unmount DIR to release it when no mount process serves it",
-            error.to_string(),
-        ),
+        orna_repository_v1::MountError::MountpointAlreadyAttached => {
+            Diagnostic::target_with_detail(
+                "E2000",
+                "Mount was refused",
+                "a view is already registered at this mountpoint; run unmount DIR to release it when no mount process serves it",
+                error.to_string(),
+            )
+        }
         error => mount_error("Mount was refused", error.to_string()),
     }
 }
@@ -87,7 +102,9 @@ fn attach_refusal(error: orna_repository_v1::MountError) -> Diagnostic {
 /// released: it is an Orna FUSE mount and its mountpoint answers ENOTCONN.
 #[cfg(target_os = "linux")]
 fn is_releasable_dead_mount(identity: &MountedFuseIdentity, disconnected: bool) -> bool {
-    identity.filesystem.starts_with("fuse") && is_orna_mount_source(&identity.source) && disconnected
+    identity.filesystem.starts_with("fuse")
+        && is_orna_mount_source(&identity.source)
+        && disconnected
 }
 
 /// Whether the mount now found at the path is still the mount that was judged
@@ -143,8 +160,9 @@ fn release_dead_mount(repository: &Repository, mountpoint: &Path) -> Result<(), 
                 &identity,
                 || mounted_mount_for_path(&mountpoint),
                 || {
-                    crate::fuse_mount::unmount_dead_mountpoint(&mountpoint)
-                        .map_err(|error| mount_error("Dead Orna mount could not be released", error))
+                    crate::fuse_mount::unmount_dead_mountpoint(&mountpoint).map_err(|error| {
+                        mount_error("Dead Orna mount could not be released", error)
+                    })
                 },
             )
         })
@@ -169,7 +187,10 @@ fn release_dead_mount(repository: &Repository, mountpoint: &Path) -> Result<(), 
             }
             Err(orna_repository_v1::MountError::NotAttached) => {}
             Err(error) => {
-                return Err(mount_error("Mount view could not be opened", error.to_string()));
+                return Err(mount_error(
+                    "Mount view could not be opened",
+                    error.to_string(),
+                ));
             }
         }
     }
@@ -270,7 +291,10 @@ pub(super) fn run_mount(
     _mountpoint: &Path,
     _selector: &str,
 ) -> Result<(), Diagnostic> {
-    Err(mount_error("Workspace mounts are unavailable", "mount DIR --at requires Linux FUSE support"))
+    Err(mount_error(
+        "Workspace mounts are unavailable",
+        "mount DIR --at requires Linux FUSE support",
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -336,7 +360,9 @@ fn edit_refusal(error: crate::fuse_mount::EditError) -> Diagnostic {
             "run mount DIR --cwd to read the current row, then reapply the retained draft",
             detail,
         ),
-        crate::fuse_mount::EditError::Failed(detail) => mount_error("Edit was not accepted", detail),
+        crate::fuse_mount::EditError::Failed(detail) => {
+            mount_error("Edit was not accepted", detail)
+        }
     }
 }
 
@@ -608,7 +634,10 @@ fn mounted_edit_target(
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn run_edit(_endpoint: &Endpoint, _path: &str, _row: bool) -> Result<(), Diagnostic> {
-    Err(mount_error("Workspace editing is unavailable", "orna edit requires Linux VFS support"))
+    Err(mount_error(
+        "Workspace editing is unavailable",
+        "orna edit requires Linux VFS support",
+    ))
 }
 
 /// Grace period for a termination-signal unmount. A non-lazy unmount fails
@@ -713,7 +742,7 @@ impl MountSignalHandler {
     }
 
     #[allow(clippy::items_after_statements)]
-#[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines)]
     /// Waits for the FUSE session to end. A termination signal, or the loss of
     /// the registered view, stops the mount: unresolved drafts are retained and
     /// reported first (ORNA-VFS-024), then the mount is unmounted.
@@ -952,7 +981,9 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                 }
                 Err(crate::fuse_mount::UnmountPreparationError::ReadOnlyMount) => {
                     let unresolved = crate::fuse_mount::has_unresolved_drafts(&mountpoint)
-                        .map_err(|error| mount_error("Mount draft state could not be read", error))?;
+                        .map_err(|error| {
+                            mount_error("Mount draft state could not be read", error)
+                        })?;
                     if unresolved {
                         return Err(unresolved_drafts_refusal(&mountpoint));
                     }
@@ -963,7 +994,10 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                 // view; accepted saves and fsynced scratch are in the runtime.
                 Err(crate::fuse_mount::UnmountPreparationError::Disconnected) => (false, true),
                 Err(crate::fuse_mount::UnmountPreparationError::Operation(error)) => {
-                    return Err(mount_error("Mount draft state could not be quiesced", error));
+                    return Err(mount_error(
+                        "Mount draft state could not be quiesced",
+                        error,
+                    ));
                 }
             };
             match mounted_mount_for_path(&mountpoint)? {
@@ -980,13 +1014,14 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
                             "FUSE unmount helper returned successfully but the validated mount remains attached".to_owned()
                         });
                         if quiesced {
-                            crate::fuse_mount::cancel_unmount(&mountpoint)
-                                .map_err(|resume_error| {
+                            crate::fuse_mount::cancel_unmount(&mountpoint).map_err(
+                                |resume_error| {
                                     mount_error(
                                         "FUSE unmount failed and the mount could not resume",
                                         format!("{detail}; {resume_error}"),
                                     )
-                                })?;
+                                },
+                            )?;
                         }
                         return Err(mount_error("FUSE unmount failed", detail));
                     }
@@ -1035,8 +1070,12 @@ pub(super) fn run_unmount(endpoint: &Endpoint, mountpoint: &Path) -> Result<(), 
             .into_iter()
             .find(|status| status.mountpoint() == mountpoint)
         else {
-            writeln!(io::stdout().lock(), "already unmounted {}", mountpoint.display())
-                .map_err(|_| stdout_error())?;
+            writeln!(
+                io::stdout().lock(),
+                "already unmounted {}",
+                mountpoint.display()
+            )
+            .map_err(|_| stdout_error())?;
             return Ok(());
         };
         let view = repository
@@ -1097,7 +1136,11 @@ fn unresolved_drafts_refusal(mountpoint: &Path) -> Diagnostic {
             }
         }
         Err(error) => {
-            let _ = writeln!(stderr, "unresolved drafts could not be listed: {}", draft_listing_failure(error));
+            let _ = writeln!(
+                stderr,
+                "unresolved drafts could not be listed: {}",
+                draft_listing_failure(error)
+            );
         }
     }
     Diagnostic::target_with_detail(
@@ -1147,11 +1190,15 @@ fn detach_view_with_retry(
             Err(orna_repository_v1::MountError::NotAttached) => Ok(()),
             Err(recovery_error) => Err(mount_error(
                 "Mount view could not be detached",
-                format!("{first_error}; retry failed: {second_error}; recovery lookup failed: {recovery_error}"),
+                format!(
+                    "{first_error}; retry failed: {second_error}; recovery lookup failed: {recovery_error}"
+                ),
             )),
             Ok(_) => Err(mount_error(
                 "Mount view remains attached after FUSE unmount",
-                format!("{first_error}; retry failed: {second_error}; run unmount again to retry view cleanup"),
+                format!(
+                    "{first_error}; retry failed: {second_error}; run unmount again to retry view cleanup"
+                ),
             )),
         },
     }
@@ -1304,7 +1351,8 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
                 .map_err(|_| stdout_error())?;
             }
             if let Some(error) = listing.error {
-                writeln!(out, "  drafts could not be listed: {error}").map_err(|_| stdout_error())?;
+                writeln!(out, "  drafts could not be listed: {error}")
+                    .map_err(|_| stdout_error())?;
             }
         }
     }
@@ -1312,7 +1360,11 @@ pub(super) fn run_mount_status(endpoint: &Endpoint, json: bool) -> Result<(), Di
 }
 
 fn human_row(status: &MountStatus) -> String {
-    let access = if status.is_writable() { "writable" } else { "read-only" };
+    let access = if status.is_writable() {
+        "writable"
+    } else {
+        "read-only"
+    };
     format!(
         "{} snapshot {} view {} format {} legacy {} {access}",
         status.mountpoint().display(),
@@ -1579,7 +1631,7 @@ fn optional_json(value: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{escape_json, mount_row_json, DraftEntry, DraftListing, DraftSource};
+    use super::{DraftEntry, DraftListing, DraftSource, escape_json, mount_row_json};
     use std::path::Path;
 
     #[test]
@@ -1611,8 +1663,15 @@ mod tests {
             source: Some(DraftSource::Fields),
             ..DraftListing::default()
         };
-        let object =
-            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &listing);
+        let object = mount_row_json(
+            Path::new("/mnt/library"),
+            "aa",
+            "bb",
+            3,
+            false,
+            true,
+            &listing,
+        );
         assert!(
             object.contains("\"writable\":true,\"read_only\":false,\"draft_source\":\"fields\",\"drafts_truncated\":false,\"drafts_omitted\":0"),
             "{object}"
@@ -1637,10 +1696,19 @@ mod tests {
             source: Some(DraftSource::List),
             error: None,
         };
-        let object =
-            mount_row_json(Path::new("/mnt/library"), "aa", "bb", 3, false, true, &listing);
+        let object = mount_row_json(
+            Path::new("/mnt/library"),
+            "aa",
+            "bb",
+            3,
+            false,
+            true,
+            &listing,
+        );
         assert!(
-            object.contains("\"draft_source\":\"list\",\"drafts_truncated\":true,\"drafts_omitted\":3"),
+            object.contains(
+                "\"draft_source\":\"list\",\"drafts_truncated\":true,\"drafts_omitted\":3"
+            ),
             "{object}"
         );
         assert!(
@@ -1710,24 +1778,47 @@ mod tests {
         let live = draft_listing_failure(Errno::NODATA);
         assert!(stale.starts_with("stale mount record"), "{stale}");
         assert_eq!(stale, missing);
-        assert!(live.starts_with("could not list Orna mount drafts"), "{live}");
+        assert!(
+            live.starts_with("could not list Orna mount drafts"),
+            "{live}"
+        );
         assert!(!live.contains("stale"), "{live}");
 
         let stale_listing = DraftListing {
             error: Some(stale.clone()),
             ..DraftListing::default()
         };
-        let stale_json =
-            mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &stale_listing);
-        assert!(stale_json.contains("\"draft_error\":\"stale mount record"), "{stale_json}");
+        let stale_json = mount_row_json(
+            Path::new("/mnt/gone"),
+            "aa",
+            "bb",
+            3,
+            false,
+            true,
+            &stale_listing,
+        );
+        assert!(
+            stale_json.contains("\"draft_error\":\"stale mount record"),
+            "{stale_json}"
+        );
         assert!(stale_json.contains("\"writable\":true"), "{stale_json}");
         let live_listing = DraftListing {
             error: Some(live.clone()),
             ..DraftListing::default()
         };
-        let live_json =
-            mount_row_json(Path::new("/mnt/gone"), "aa", "bb", 3, false, true, &live_listing);
-        assert!(live_json.contains("could not list Orna mount drafts"), "{live_json}");
+        let live_json = mount_row_json(
+            Path::new("/mnt/gone"),
+            "aa",
+            "bb",
+            3,
+            false,
+            true,
+            &live_listing,
+        );
+        assert!(
+            live_json.contains("could not list Orna mount drafts"),
+            "{live_json}"
+        );
         assert!(!live_json.contains("stale"), "{live_json}");
     }
 
@@ -1740,13 +1831,17 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn draft_listing_falls_back_to_the_list_xattr_when_fields_are_unserved() {
-        use super::{draft_listing, DraftSource};
+        use super::{DraftSource, draft_listing};
         use rustix::io::Errno;
 
         let fallback = draft_listing(Err(Errno::NODATA), || {
             Ok("Music/london/data.orna\tstale edit\n".to_owned())
         });
-        assert_eq!(fallback.source, Some(DraftSource::List), "an older daemon's list is the fallback");
+        assert_eq!(
+            fallback.source,
+            Some(DraftSource::List),
+            "an older daemon's list is the fallback"
+        );
         assert_eq!(fallback.error, None);
         assert_eq!(fallback.drafts.len(), 1);
         assert_eq!(fallback.drafts[0].code, None);
@@ -1763,7 +1858,11 @@ mod tests {
 
         let gone = draft_listing(Err(Errno::NODATA), || Err(Errno::NOTCONN));
         assert_eq!(gone.source, None);
-        assert!(gone.error.as_deref().is_some_and(|error| error.contains("stale mount record")));
+        assert!(
+            gone.error
+                .as_deref()
+                .is_some_and(|error| error.contains("stale mount record"))
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -1794,7 +1893,11 @@ mod tests {
                 .expect_err("a retained draft leaves the outcome unknown");
             assert_eq!(diagnostic.code, "E2010");
             assert_eq!(&*diagnostic.title, "Edit outcome is unknown");
-            assert!(diagnostic.help.contains("orna status"), "{}", diagnostic.help);
+            assert!(
+                diagnostic.help.contains("orna status"),
+                "{}",
+                diagnostic.help
+            );
             let detail = diagnostic.detail.unwrap_or_default();
             assert!(detail.contains(&draft.display().to_string()), "{detail}");
         }
@@ -1833,7 +1936,10 @@ mod tests {
             let diagnostic = settle_owner_reply(Err(Errno::STALE), &draft)
                 .expect_err("a stale baseline is refused");
             assert_eq!(diagnostic.code, "E2000");
-            assert_eq!(&*diagnostic.title, "Edit is stale against the mounted baseline");
+            assert_eq!(
+                &*diagnostic.title,
+                "Edit is stale against the mounted baseline"
+            );
         }
     }
 }
@@ -1862,7 +1968,10 @@ mod mountinfo_identity_tests {
                 source: VIEW.to_owned(),
             }
         );
-        assert_eq!(mount_identity_in_mountinfo(&dead, path), Some(identity.clone()));
+        assert_eq!(
+            mount_identity_in_mountinfo(&dead, path),
+            Some(identity.clone())
+        );
         assert_ne!(mount_identity_in_mountinfo(&live, path), Some(identity));
     }
 

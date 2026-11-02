@@ -16,12 +16,12 @@ use orna_repository_v1::TypedKey;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
+#[path = "support/editor_mount.rs"]
+mod editor_mount;
 #[path = "support/format3.rs"]
 mod format3;
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[path = "support/editor_mount.rs"]
-mod editor_mount;
 use editor_mount::{
     repository_with_music_rows, repository_with_music_rows_and_modules, require_fuse_or_skip,
     spawn_mount_process,
@@ -40,7 +40,13 @@ fn read_view(path: &Path) -> String {
 fn sorted_names(directory: &Path) -> Vec<String> {
     let mut names = std::fs::read_dir(directory)
         .expect("list the directory")
-        .map(|entry| entry.expect("directory entry").file_name().to_string_lossy().into_owned())
+        .map(|entry| {
+            entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
         .collect::<Vec<_>>();
     names.sort();
     names
@@ -76,9 +82,19 @@ async fn profile_nested_collection_directories_follow_the_module_path() {
     let deep = mountpoint.join("lib/inner/deep.orna");
     mounted.await_path(&deep);
 
-    assert_eq!(read_view(&deep), DEEP_SOURCE, "the nested module reads its committed bytes");
-    assert_eq!(sorted_names(&mountpoint.join("lib")), vec!["inner".to_owned()]);
-    assert_eq!(sorted_names(&mountpoint.join("lib/inner")), vec!["deep.orna".to_owned()]);
+    assert_eq!(
+        read_view(&deep),
+        DEEP_SOURCE,
+        "the nested module reads its committed bytes"
+    );
+    assert_eq!(
+        sorted_names(&mountpoint.join("lib")),
+        vec!["inner".to_owned()]
+    );
+    assert_eq!(
+        sorted_names(&mountpoint.join("lib/inner")),
+        vec!["deep.orna".to_owned()]
+    );
 }
 
 /// profiles/vfs-1.md:44-50 and ORNA-VFS-016: UTF-8 bytes outside `[A-Za-z0-9._-]`
@@ -98,7 +114,10 @@ async fn key_components_escape_utf8_percent_and_tilde_per_profile() {
         ("a/b", "a%2Fb"),
         ("a.b", "a.b"),
     ];
-    let documents = keys.iter().map(|(key, _)| music_row(key)).collect::<Vec<_>>();
+    let documents = keys
+        .iter()
+        .map(|(key, _)| music_row(key))
+        .collect::<Vec<_>>();
     let rows = keys
         .iter()
         .zip(&documents)
@@ -112,14 +131,27 @@ async fn key_components_escape_utf8_percent_and_tilde_per_profile() {
     let last = music.join("a.b/data.orna");
     mounted.await_path(&last);
 
-    let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
+    let mut expected = keys
+        .iter()
+        .map(|(_, encoded)| (*encoded).to_owned())
+        .collect::<Vec<_>>();
     expected.sort();
-    assert_eq!(sorted_names(&music), expected, "every escaped key directory is listed");
+    assert_eq!(
+        sorted_names(&music),
+        expected,
+        "every escaped key directory is listed"
+    );
     for (key, encoded) in &keys {
         let data = music.join(encoded).join("data.orna");
         let view = read_view(&data);
-        assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
-        assert!(view.contains("artist: \"Kieran\""), "{encoded} keeps the row's artist field");
+        assert!(
+            view.contains(&format!("title: \"{key}\"")),
+            "{encoded} reads the row titled {key:?}"
+        );
+        assert!(
+            view.contains("artist: \"Kieran\""),
+            "{encoded} keeps the row's artist field"
+        );
     }
 }
 
@@ -135,7 +167,10 @@ async fn reserved_key_components_escape_first_byte() {
         return;
     }
     let keys = [(".git", "%2Egit"), (".orna", "%2Eorna"), ("CON", "%43ON")];
-    let documents = keys.iter().map(|(key, _)| music_row(key)).collect::<Vec<_>>();
+    let documents = keys
+        .iter()
+        .map(|(key, _)| music_row(key))
+        .collect::<Vec<_>>();
     let rows = keys
         .iter()
         .zip(&documents)
@@ -149,12 +184,22 @@ async fn reserved_key_components_escape_first_byte() {
     let last = music.join("%43ON/data.orna");
     mounted.await_path(&last);
 
-    let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
+    let mut expected = keys
+        .iter()
+        .map(|(_, encoded)| (*encoded).to_owned())
+        .collect::<Vec<_>>();
     expected.sort();
-    assert_eq!(sorted_names(&music), expected, "every reserved key has one directory");
+    assert_eq!(
+        sorted_names(&music),
+        expected,
+        "every reserved key has one directory"
+    );
     for (key, encoded) in &keys {
         let view = read_view(&music.join(encoded).join("data.orna"));
-        assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
+        assert!(
+            view.contains(&format!("title: \"{key}\"")),
+            "{encoded} reads the row titled {key:?}"
+        );
     }
 }
 
@@ -178,7 +223,10 @@ async fn reserved_spelling_beyond_vfs_1_text_is_conservative() {
         ("com10", "com10"),
         ("console", "console"),
     ];
-    let documents = keys.iter().map(|(key, _)| music_row(key)).collect::<Vec<_>>();
+    let documents = keys
+        .iter()
+        .map(|(key, _)| music_row(key))
+        .collect::<Vec<_>>();
     let rows = keys
         .iter()
         .zip(&documents)
@@ -192,12 +240,22 @@ async fn reserved_spelling_beyond_vfs_1_text_is_conservative() {
     let last = music.join("%43LOCK%24/data.orna");
     mounted.await_path(&last);
 
-    let mut expected = keys.iter().map(|(_, encoded)| (*encoded).to_owned()).collect::<Vec<_>>();
+    let mut expected = keys
+        .iter()
+        .map(|(_, encoded)| (*encoded).to_owned())
+        .collect::<Vec<_>>();
     expected.sort();
-    assert_eq!(sorted_names(&music), expected, "every conservative key has one directory");
+    assert_eq!(
+        sorted_names(&music),
+        expected,
+        "every conservative key has one directory"
+    );
     for (key, encoded) in &keys {
         let view = read_view(&music.join(encoded).join("data.orna"));
-        assert!(view.contains(&format!("title: \"{key}\"")), "{encoded} reads the row titled {key:?}");
+        assert!(
+            view.contains(&format!("title: \"{key}\"")),
+            "{encoded} reads the row titled {key:?}"
+        );
     }
 }
 
@@ -221,11 +279,25 @@ async fn long_key_over_200_encoded_bytes_projects_as_sha256_key_alias() {
     let data = mountpoint.join("Music").join(&alias).join("data.orna");
     mounted.await_path(&data);
 
-    assert_eq!(alias.len(), "~key-".len() + 64, "the alias carries a 64-hex digest");
+    assert_eq!(
+        alias.len(),
+        "~key-".len() + 64,
+        "the alias carries a 64-hex digest"
+    );
     let view = read_view(&data);
-    assert!(view.contains("title: \"Long\""), "the alias resolves the long-key row: {view:?}");
-    assert!(view.contains("artist: \"Kieran\""), "the alias keeps the row's artist field");
-    assert_eq!(sorted_names(&mountpoint.join("Music")), vec![alias], "only the alias is listed");
+    assert!(
+        view.contains("title: \"Long\""),
+        "the alias resolves the long-key row: {view:?}"
+    );
+    assert!(
+        view.contains("artist: \"Kieran\""),
+        "the alias keeps the row's artist field"
+    );
+    assert_eq!(
+        sorted_names(&mountpoint.join("Music")),
+        vec![alias],
+        "only the alias is listed"
+    );
 }
 
 /// ORNA-VFS-016 and profiles/vfs-1.md:44-47: `.`, `%` and a literal `~empty`
@@ -277,7 +349,10 @@ async fn empty_key_is_admitted_as_tilde_empty() {
     let empty_row = mountpoint.join("Music/~empty/data.orna");
     mounted.await_path(&empty_row);
 
-    assert!(read_view(&empty_row).contains("Empty"), "the empty key is ~empty");
+    assert!(
+        read_view(&empty_row).contains("Empty"),
+        "the empty key is ~empty"
+    );
 }
 
 /// ORNA-VFS-016 and profiles/vfs-1.md:52-56: a key over 300 characters is
@@ -326,19 +401,40 @@ async fn large_str_projects_as_txt_and_utf8_write_replaces_the_str() {
     let title = row.join("title.txt");
     mounted.await_path(&title);
 
-    assert!(std::fs::read(&title).unwrap() == big.as_bytes(), "the .txt is the full Str, byte-exact");
+    assert!(
+        std::fs::read(&title).unwrap() == big.as_bytes(),
+        "the .txt is the full Str, byte-exact"
+    );
     let data = read_view(&row.join("data.orna"));
-    assert!(data.contains("./title.txt"), "data.orna names the .txt file: {data:?}");
-    assert!(data.contains("encoding: \"utf-8\""), "data.orna names utf-8: {data:?}");
-    assert!(!data.contains(&big), "data.orna no longer carries the 70 KiB text");
+    assert!(
+        data.contains("./title.txt"),
+        "data.orna names the .txt file: {data:?}"
+    );
+    assert!(
+        data.contains("encoding: \"utf-8\""),
+        "data.orna names utf-8: {data:?}"
+    );
+    assert!(
+        !data.contains(&big),
+        "data.orna no longer carries the 70 KiB text"
+    );
     editor_mount::write_and_sync(&title, "short replacement")
         .expect("a UTF-8 write replaces the Str");
     // profiles/vfs-1.md:63-66: the 64 KiB bound applies to the replaced value, so a short
     // Str projects inline again and the `.txt` sibling is gone.
-    assert!(!title.exists(), "a short replacement is inline; no title.txt remains");
+    assert!(
+        !title.exists(),
+        "a short replacement is inline; no title.txt remains"
+    );
     let data = read_view(&row.join("data.orna"));
-    assert!(data.contains("short replacement"), "data.orna shows the replaced Str: {data:?}");
-    assert!(!data.contains("./title.txt"), "data.orna no longer names a .txt: {data:?}");
+    assert!(
+        data.contains("short replacement"),
+        "data.orna shows the replaced Str: {data:?}"
+    );
+    assert!(
+        !data.contains("./title.txt"),
+        "data.orna no longer names a .txt: {data:?}"
+    );
 }
 
 /// profiles/vfs-1.md:63-66: the 64 KiB bound is exclusive. A Str of exactly 65536 bytes stays
@@ -365,7 +461,11 @@ async fn large_str_bound_is_exclusive_at_64_kib() {
 
     assert_eq!(std::fs::read(&over).unwrap(), over_bound.as_bytes());
     let inline = mountpoint.join("Music/inline");
-    assert_eq!(sorted_names(&inline), vec!["data.orna".to_owned()], "no .txt at the bound");
+    assert_eq!(
+        sorted_names(&inline),
+        vec!["data.orna".to_owned()],
+        "no .txt at the bound"
+    );
     assert!(read_view(&inline.join("data.orna")).contains(&at_bound));
 }
 
@@ -399,7 +499,11 @@ async fn large_str_text_rejects_invalid_utf8_and_keeps_the_row() {
         "non-UTF-8 text is refused"
     );
     drop(file);
-    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        big.as_bytes(),
+        "the accepted .txt is unchanged"
+    );
     assert!(read_view(&row.join("data.orna")).contains("./title.txt"));
 }
 
@@ -436,14 +540,19 @@ async fn stale_large_str_candidate_is_retained_before_fsync_replies() {
         .open(&data)
         .expect("a write-intent open of data.orna");
     std::io::Write::write_all(&mut other, advanced.as_bytes()).expect("the bytes are buffered");
-    other.sync_all().expect("the other writer's save is accepted");
+    other
+        .sync_all()
+        .expect("the other writer's save is accepted");
     drop(other);
     assert!(read_view(&data).contains("artist: \"Other\""));
 
     let candidate = "stale candidate text";
     std::io::Write::write_all(&mut stale_text, candidate.as_bytes())
         .expect("the bytes are buffered");
-    assert!(stale_text.sync_all().is_err(), "a stale .txt candidate is refused at fsync");
+    assert!(
+        stale_text.sync_all().is_err(),
+        "a stale .txt candidate is refused at fsync"
+    );
     drop(stale_text);
 
     let records = editor_mount::retained_drafts(&repository);
@@ -454,7 +563,11 @@ async fn stale_large_str_candidate_is_retained_before_fsync_replies() {
         }),
         "the stale candidate is retained in recovery storage: {records:?}"
     );
-    assert_eq!(std::fs::read(&title).unwrap(), big.as_bytes(), "the accepted .txt is unchanged");
+    assert_eq!(
+        std::fs::read(&title).unwrap(),
+        big.as_bytes(),
+        "the accepted .txt is unchanged"
+    );
 }
 
 /// Collects list entry names as decimal positions, failing on any name that is not a canonical
@@ -465,7 +578,11 @@ fn positions_of(entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>
             let name = entry.expect("directory entry").file_name();
             let name = name.to_str().expect("list names are UTF-8");
             let index: usize = name.parse().expect("list names are decimal indices");
-            assert_eq!(name, index.to_string(), "decimal indices have no leading zeros");
+            assert_eq!(
+                name,
+                index.to_string(),
+                "decimal indices have no leading zeros"
+            );
             index
         })
         .collect();
@@ -477,7 +594,8 @@ fn positions_of(entries: impl Iterator<Item = std::io::Result<std::fs::DirEntry>
 fn read_handle(file: &mut std::fs::File) -> String {
     use std::io::Read as _;
     let mut text = String::new();
-    file.read_to_string(&mut text).expect("read the handle's captured generation");
+    file.read_to_string(&mut text)
+        .expect("read the handle's captured generation");
     text
 }
 
@@ -485,7 +603,8 @@ fn nested_row(label: &str, rank: u32, tags: &str) -> String {
     format!("{{ meta: {{ label: \"{label}\", rank: {rank}, }}, tags: {tags}, }}\n")
 }
 
-const NESTED_TAGS: &str = "[\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\", \"j\", \"k\"]";
+const NESTED_TAGS: &str =
+    "[\"a\", \"b\", \"c\", \"d\", \"e\", \"f\", \"g\", \"h\", \"i\", \"j\", \"k\"]";
 
 #[allow(clippy::too_many_lines)]
 /// profiles/vfs-1.md:71-75: a record field projects as an escaped directory of its fields, and a
@@ -538,12 +657,20 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
         "b",
         "list elements are decimal indices"
     );
-    assert_eq!(read_view(&row.join("tags/10")), "k", "positions past nine are decimal names");
+    assert_eq!(
+        read_view(&row.join("tags/10")),
+        "k",
+        "positions past nine are decimal names"
+    );
 
     // An accepted save of data.orna replaces the nested fields through the row document.
     editor_mount::write_and_sync(&row.join("data.orna"), &nested_row("w", 2, NESTED_TAGS))
         .expect("a complete row document with changed nested fields is accepted");
-    assert_eq!(read_view(&label), "w", "a new open shows the accepted nested field");
+    assert_eq!(
+        read_view(&label),
+        "w",
+        "a new open shows the accepted nested field"
+    );
     assert_eq!(read_view(&rank), "2");
 
     // Handles opened on this generation: a directory whose first entry is read before the
@@ -558,11 +685,9 @@ async fn nested_record_and_list_fields_project_as_pinned_directories() {
         "london",
         &nested_row("yy", 3, "[\"q\"]"),
     );
-    let error = editor_mount::write_and_sync(
-        &row.join("data.orna"),
-        &nested_row("zzz", 4, "[\"r\"]"),
-    )
-    .expect_err("a save against a row another writer changed is stale");
+    let error =
+        editor_mount::write_and_sync(&row.join("data.orna"), &nested_row("zzz", 4, "[\"r\"]"))
+            .expect_err("a save against a row another writer changed is stale");
     assert_eq!(
         error.raw_os_error(),
         Some(EAGAIN),
@@ -826,8 +951,15 @@ async fn nested_directory_named_like_a_reserved_host_name_projects_escaped() {
     let row = mountpoint.join("Music/london");
     let escaped = row.join("%63on/x");
     mounted.await_path(&escaped);
-    assert_eq!(read_view(&escaped), "1", "the escaped nested directory reads its field");
-    assert!(!row.join("con").exists(), "the raw reserved name is not a host name");
+    assert_eq!(
+        read_view(&escaped),
+        "1",
+        "the escaped nested directory reads its field"
+    );
+    assert!(
+        !row.join("con").exists(),
+        "the raw reserved name is not a host name"
+    );
 }
 
 /// profiles/vfs-1.md:71-75 and :132: a list longer than one page lists a page at a time, and a
@@ -898,13 +1030,25 @@ async fn held_read_write_row_handle_refuses_a_stale_save() {
         .write(true)
         .open(&data)
         .expect("a read-write open of data.orna");
-    edit_outside_mount(repository_directory.path(), "london", &nested_row("yy", 3, "[\"q\"]"));
+    edit_outside_mount(
+        repository_directory.path(),
+        "london",
+        &nested_row("yy", 3, "[\"q\"]"),
+    );
     let error = std::io::Write::write_all(&mut held, nested_row("zzz", 4, "[\"r\"]").as_bytes())
         .and_then(|()| held.sync_all())
         .expect_err("a save from a read-write handle on a changed row is stale");
-    assert_eq!(error.raw_os_error(), Some(EAGAIN), "the stale save is refused with EAGAIN");
+    assert_eq!(
+        error.raw_os_error(),
+        Some(EAGAIN),
+        "the stale save is refused with EAGAIN"
+    );
     drop(held);
 
-    assert_eq!(read_view(&label), "yy", "a new open shows the other writer's nested field");
+    assert_eq!(
+        read_view(&label),
+        "yy",
+        "a new open shows the other writer's nested field"
+    );
     assert_eq!(read_view(&row.join("tags/0")), "q");
 }

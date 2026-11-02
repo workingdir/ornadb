@@ -234,9 +234,17 @@ fn initialize(client: &mut Client) {
             .iter()
             .any(|token_type| token_type == "parameter")
     );
-    for token_type in ["function", "namespace", "enumMember", "property", "interface"] {
+    for token_type in [
+        "function",
+        "namespace",
+        "enumMember",
+        "property",
+        "interface",
+    ] {
         assert!(
-            token_types.iter().any(|advertised| advertised == token_type),
+            token_types
+                .iter()
+                .any(|advertised| advertised == token_type),
             "missing semantic token type {token_type}: {token_types:?}"
         );
     }

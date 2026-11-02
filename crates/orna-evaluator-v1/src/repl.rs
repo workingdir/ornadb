@@ -560,7 +560,6 @@ impl ReplSession {
         Ok(())
     }
 
-
     fn import(&mut self, path: &str, tail: UseTail) -> Result<(), EvaluationError> {
         match tail {
             UseTail::Alias { name, .. } => {
@@ -1592,7 +1591,9 @@ mod tests {
         );
         assert_eq!(session.submit("2;").expect("statement"), None);
         assert_eq!(
-            session.submit("$_").expect("previous result remains available"),
+            session
+                .submit("$_")
+                .expect("previous result remains available"),
             Some(Value::int(40.into())),
         );
     }

@@ -259,7 +259,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
                 [0x5d; 32],
                 TerminalOutcome::new(vec![0x5e]).unwrap(),
                 &orna_runtime_v1::NoFault,
-                orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+                orna_runtime_v1::ActivationEffectReport::declare(
+                    orna_runtime_v1::DeclaredEffectSet::None
+                ),
             )
             .await,
         Err(RuntimeError::StaleCapture { .. })
@@ -288,7 +290,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
             [0x59; 32],
             TerminalOutcome::new(vec![0x5a]).unwrap(),
             &orna_runtime_v1::NoFault,
-            orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
         )
         .await
         .unwrap();
@@ -313,7 +317,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
         transfer.content_identity().sha256()
     );
     assert_eq!(
-        committed_blob.descriptor_oid().map(orna_value_v1::NativeOid::as_bytes),
+        committed_blob
+            .descriptor_oid()
+            .map(orna_value_v1::NativeOid::as_bytes),
         Some(transfer.descriptor_oid().as_bytes())
     );
     assert_eq!(
@@ -396,7 +402,9 @@ async fn cli_consumer_commits_captured_annotated_blob_with_its_request() {
                 [0x65; 32],
                 TerminalOutcome::new(vec![0x66]).unwrap(),
                 &FailAt(FaultPoint::AfterMutation),
-                orna_runtime_v1::ActivationEffectReport::declare(orna_runtime_v1::DeclaredEffectSet::None),
+                orna_runtime_v1::ActivationEffectReport::declare(
+                    orna_runtime_v1::DeclaredEffectSet::None
+                ),
             )
             .await,
         Err(RuntimeError::FaultInjected(FaultPoint::AfterMutation))

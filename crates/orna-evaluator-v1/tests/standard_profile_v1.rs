@@ -6,57 +6,43 @@ use orna_standard_sources::{
 };
 
 use orna_standard_sources::{
-    REFERENCE_STANDARD_COLLECTION_PATH_V1, REFERENCE_STANDARD_MATH_PATH_V1,
-    REFERENCE_STANDARD_MONEY_PATH_V1,
-    REFERENCE_STANDARD_BITS_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
-    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1,
-    REFERENCE_STANDARD_STATS_PATH_V1,
-    REFERENCE_STANDARD_TIME_PATH_V1,
-    REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
-    REFERENCE_STANDARD_STREAM_PATH_V1,
-    REFERENCE_STANDARD_RANDOM_PATH_V1, REFERENCE_STANDARD_HASH_PATH_V1,
-    REFERENCE_STANDARD_ENCODING_PATH_V1, REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1,
-    REFERENCE_STANDARD_ENCODING_OVB_PATH_V1, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1,
-    REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1,
-    REFERENCE_STANDARD_NET_PATH_V1, REFERENCE_STANDARD_URL_PATH_V1,
-    REFERENCE_STANDARD_NET_HTTP_PATH_V1, REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1,
-    REFERENCE_STANDARD_TIME_COMPACT_PATH_V1, REFERENCE_STANDARD_TIME_CLOCK_PATH_V1,
-    REFERENCE_STANDARD_TIME_WORDS_PATH_V1, REFERENCE_STANDARD_TIME_ISO_PATH_V1,
-    REFERENCE_STANDARD_OPTION_PATH_V1, REFERENCE_STANDARD_RESULT_PATH_V1,
-    REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
-    REFERENCE_STANDARD_SET_PATH_V1,
-    REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_FS_PATH_V1,
-    REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1, REFERENCE_STANDARD_IO_METADATA_PATH_V1,
-    REFERENCE_STANDARD_IO_BUFFER_PATH_V1,
-    REFERENCE_STANDARD_IO_PROCESS_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
+    REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_BITS_PATH_V1,
+    REFERENCE_STANDARD_BYTES_PATH_V1, REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1, REFERENCE_STANDARD_COLLECTION_PATH_V1,
     REFERENCE_STANDARD_CONCURRENT_PATH_V1, REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1,
-    REFERENCE_STANDARD_ERROR_PATH_V1,
-    REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1,
-    REFERENCE_STANDARD_NUMERIC_PATH_V1,
-    REFERENCE_STANDARD_TEST_PATH_V1,
-    REFERENCE_STANDARD_GENERICS_PATH_V1, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1,
-    REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_REGEX_PATH_V1,
-    REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1,
-    REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1,
-    REFERENCE_STANDARD_SORTING_PATH_V1,
-    REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1,
-    REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1,
-    REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
-    REFERENCE_STANDARD_BYTES_PATH_V1,
-    REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1,
-    REFERENCE_STANDARD_ITERATION_PATH_V1,
-    REFERENCE_STANDARD_ITERATOR_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
-    REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1,
-    REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1,
-    REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1,
-    REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1,
-    REFERENCE_STANDARD_MEMO_PATH_V1,
-    REFERENCE_STANDARD_LAZY_PATH_V1,
-    REFERENCE_STANDARD_VIEWS_PATH_V1,
-    REFERENCE_STANDARD_INTROSPECTION_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
-    REFERENCE_STANDARD_ALGORITHM_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
-    REFERENCE_STANDARD_FORMAT_PATH_V1, REFERENCE_STANDARD_PARSE_PATH_V1,
-    REFERENCE_STANDARD_PRELUDE_PATH_V1, REFERENCE_STANDARD_PRELUDE_EXPORTS_V1,
+    REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_ORNA_PATH_V1, REFERENCE_STANDARD_ENCODING_OVB_PATH_V1,
+    REFERENCE_STANDARD_ENCODING_PATH_V1, REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1, REFERENCE_STANDARD_ERROR_PATH_V1,
+    REFERENCE_STANDARD_FORMAT_PATH_V1, REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1,
+    REFERENCE_STANDARD_FS_PATH_V1, REFERENCE_STANDARD_GENERICS_PATH_V1,
+    REFERENCE_STANDARD_HASH_PATH_V1, REFERENCE_STANDARD_INTROSPECTION_PATH_V1,
+    REFERENCE_STANDARD_IO_BUFFER_PATH_V1, REFERENCE_STANDARD_IO_ENVIRONMENT_PATH_V1,
+    REFERENCE_STANDARD_IO_METADATA_PATH_V1, REFERENCE_STANDARD_IO_PATH_MODULE_PATH_V1,
+    REFERENCE_STANDARD_IO_PATH_V1, REFERENCE_STANDARD_IO_PROCESS_PATH_V1,
+    REFERENCE_STANDARD_ITERATION_PATH_V1, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1,
+    REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1, REFERENCE_STANDARD_ITERATOR_PATH_V1,
+    REFERENCE_STANDARD_LAZY_ADAPTERS_PATH_V1, REFERENCE_STANDARD_LAZY_PATH_V1,
+    REFERENCE_STANDARD_LIST_PATH_V1, REFERENCE_STANDARD_MAP_PATH_V1,
+    REFERENCE_STANDARD_MATH_PATH_V1, REFERENCE_STANDARD_MEMO_PATH_V1,
+    REFERENCE_STANDARD_MONEY_PATH_V1, REFERENCE_STANDARD_NET_HTTP_PATH_V1,
+    REFERENCE_STANDARD_NET_PATH_V1, REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1,
+    REFERENCE_STANDARD_NUMERIC_PATH_V1, REFERENCE_STANDARD_OPTION_PATH_V1,
+    REFERENCE_STANDARD_PARSE_PATH_V1, REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_PATTERN_PATH_V1, REFERENCE_STANDARD_PRELUDE_EXPORTS_V1,
+    REFERENCE_STANDARD_PRELUDE_PATH_V1, REFERENCE_STANDARD_QUERY_PATH_V1,
+    REFERENCE_STANDARD_RANDOM_PATH_V1, REFERENCE_STANDARD_REFLECTION_PATH_V1,
+    REFERENCE_STANDARD_REGEX_PATH_V1, REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1,
+    REFERENCE_STANDARD_RESULT_PATH_V1, REFERENCE_STANDARD_SET_PATH_V1,
+    REFERENCE_STANDARD_SORTING_PATH_V1, REFERENCE_STANDARD_STATS_PATH_V1,
+    REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1, REFERENCE_STANDARD_STREAM_PATH_V1,
+    REFERENCE_STANDARD_TEST_PATH_V1, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1,
+    REFERENCE_STANDARD_TEXT_PATH_V1, REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
+    REFERENCE_STANDARD_TIME_CLOCK_PATH_V1, REFERENCE_STANDARD_TIME_COMPACT_PATH_V1,
+    REFERENCE_STANDARD_TIME_ISO_PATH_V1, REFERENCE_STANDARD_TIME_PATH_V1,
+    REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1, REFERENCE_STANDARD_TIME_WORDS_PATH_V1,
+    REFERENCE_STANDARD_TYPE_UTILS_PATH_V1, REFERENCE_STANDARD_UI_PATH_V1,
+    REFERENCE_STANDARD_URL_PATH_V1, REFERENCE_STANDARD_VIEWS_PATH_V1,
     reference_standard_sources_v1,
 };
 
@@ -74,7 +60,8 @@ fn reference_standard_profile_v1() -> StandardDependencyProfile {
 }
 
 /// Builds the semantic catalogue from the pinned Orna 1.0.0 source.
-fn reference_standard_catalogue_v1() -> Result<Catalogue, orna_semantic_v1::StandardCatalogueError> {
+fn reference_standard_catalogue_v1() -> Result<Catalogue, orna_semantic_v1::StandardCatalogueError>
+{
     Catalogue::from_standard_sources(
         &reference_standard_profile_v1(),
         reference_standard_sources_v1(),
@@ -86,10 +73,8 @@ fn pinned_ui_presentation_helpers_are_included_as_source() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources.len(), 77);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
-    let parsed = orna_syntax_v1::parse_module_with_file(
-        &sources[49].1,
-        REFERENCE_STANDARD_UI_PATH_V1,
-    );
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(&sources[49].1, REFERENCE_STANDARD_UI_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
 }
 
@@ -165,7 +150,10 @@ fn pinned_concurrent_result_helpers_are_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1)
         .expect("the pinned source bundle includes std.concurrent.result");
-    assert_eq!(index, 56, "the async result helper source appends to the bundle");
+    assert_eq!(
+        index, 56,
+        "the async result helper source appends to the bundle"
+    );
     assert_eq!(path, REFERENCE_STANDARD_CONCURRENT_RESULT_PATH_V1);
     for declaration in [
         "pub fn values<T, E>(",
@@ -191,7 +179,10 @@ fn pinned_iterator_adapters_are_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1)
         .expect("the pinned source bundle includes std.iterator.adapters");
-    assert_eq!(index, 57, "the adapter module appends without moving old sources");
+    assert_eq!(
+        index, 57,
+        "the adapter module appends without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_ITERATOR_ADAPTERS_PATH_V1);
     for declaration in [
         "pub fn filter_map<T, U>(",
@@ -206,7 +197,10 @@ fn pinned_iterator_adapters_are_included_in_the_captured_snapshot() {
         "Drains each mapped cursor before requesting the next source item.",
         "after the first rejected item",
     ] {
-        assert!(source.contains(contract), "missing iterator adapter contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing iterator adapter contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -223,7 +217,10 @@ fn pinned_iterator_consumers_are_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1)
         .expect("the pinned source bundle includes std.iterator.consumers");
-    assert_eq!(index, 61, "iterator consumers append without moving old sources");
+    assert_eq!(
+        index, 61,
+        "iterator consumers append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_ITERATOR_CONSUMERS_PATH_V1);
     for declaration in [
         "pub fn any<T>(",
@@ -236,7 +233,10 @@ fn pinned_iterator_consumers_are_included_in_the_captured_snapshot() {
         "pub fn partition<T>(",
         "pub fn reduce<T>(",
     ] {
-        assert!(source.contains(declaration), "missing iterator consumer `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing iterator consumer `{declaration}`"
+        );
     }
     for contract in [
         "Stops at the first item accepted by `predicate`",
@@ -248,7 +248,10 @@ fn pinned_iterator_consumers_are_included_in_the_captured_snapshot() {
         "stable accepted and rejected lists",
         "Reduces a nonempty finite cursor from left to right",
     ] {
-        assert!(source.contains(contract), "missing iterator consumer contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing iterator consumer contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -271,7 +274,10 @@ fn pinned_collection_adapters_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1)
         .expect("the pinned source bundle includes std.collection.adapters");
-    assert_eq!(index, 62, "collection adapters append without moving old sources");
+    assert_eq!(
+        index, 62,
+        "collection adapters append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_COLLECTION_ADAPTERS_PATH_V1);
     for declaration in [
         "pub fn enumerate<T>(values: [T]): [(Int, T)]",
@@ -279,7 +285,10 @@ fn pinned_collection_adapters_are_included_and_typecheck() {
         "pub fn zip_with<T, U, V>(left: [T], right: [U], combine: fn(T, U): V): [V]",
         "pub fn unzip<T, U>(pairs: [(T, U)]): ([T], [U])",
     ] {
-        assert!(source.contains(declaration), "missing collection adapter `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing collection adapter `{declaration}`"
+        );
     }
     for contract in [
         "zero-based source position",
@@ -287,7 +296,10 @@ fn pinned_collection_adapters_are_included_and_typecheck() {
         "stops at the shorter input",
         "Splits pairs into parallel lists",
     ] {
-        assert!(source.contains(contract), "missing collection adapter contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing collection adapter contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -310,7 +322,10 @@ fn pinned_collection_advanced_adapters_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1)
         .expect("the pinned source bundle includes std.collection.advanced");
-    assert_eq!(index, 73, "advanced collection adapters append without moving old sources");
+    assert_eq!(
+        index, 73,
+        "advanced collection adapters append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_COLLECTION_ADVANCED_PATH_V1);
     for declaration in [
         "pub fn filter_map<T, U>(values: [T], transform: fn(T): U?): [U]",
@@ -321,7 +336,10 @@ fn pinned_collection_advanced_adapters_are_included_and_typecheck() {
         "pub fn scan<T, S>(values: [T], seed: S, stepper: fn(S, T): S): [S]",
         "pub fn zip_longest<T, U>(left: [T], right: [U]): [(T?, U?)]",
     ] {
-        assert!(source.contains(declaration), "missing advanced collection adapter `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing advanced collection adapter `{declaration}`"
+        );
     }
     for contract in [
         "keeps only `Some` values",
@@ -332,7 +350,10 @@ fn pinned_collection_advanced_adapters_are_included_and_typecheck() {
         "the seed is not included",
         "using null for a missing side",
     ] {
-        assert!(source.contains(contract), "missing advanced collection contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing advanced collection contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -355,7 +376,10 @@ fn pinned_iteration_and_traversal_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_ITERATION_PATH_V1)
         .expect("the pinned source bundle includes std.iteration");
-    assert_eq!(index, 74, "iteration utilities append without moving old sources");
+    assert_eq!(
+        index, 74,
+        "iteration utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_ITERATION_PATH_V1);
     for declaration in [
         "pub fn fold<T, U>(values: [T], initial: U, combine: fn(U, T): U): U",
@@ -364,7 +388,10 @@ fn pinned_iteration_and_traversal_utilities_are_included_and_typecheck() {
         "pub fn breadth_first<T>(root: T, neighbors: fn(T): [T]): [T]",
         "pub fn reachable<T>(root: T, target: T, neighbors: fn(T): [T]): Bool",
     ] {
-        assert!(source.contains(declaration), "missing iteration utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing iteration utility `{declaration}`"
+        );
     }
     for contract in [
         "from left to right",
@@ -373,7 +400,10 @@ fn pinned_iteration_and_traversal_utilities_are_included_and_typecheck() {
         "stable neighbor order",
         "stopping as soon as it is found",
     ] {
-        assert!(source.contains(contract), "missing iteration contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing iteration contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -396,7 +426,10 @@ fn pinned_text_line_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_TEXT_LINES_PATH_V1)
         .expect("the pinned source bundle includes std.text.lines");
-    assert_eq!(index, 75, "text line utilities append without moving old sources");
+    assert_eq!(
+        index, 75,
+        "text line utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_TEXT_LINES_PATH_V1);
     for declaration in [
         "pub fn split(value: Str): [Str]",
@@ -404,7 +437,10 @@ fn pinned_text_line_utilities_are_included_and_typecheck() {
         "pub fn count(value: Str): Int",
         "pub fn normalise(value: Str): Str",
     ] {
-        assert!(source.contains(declaration), "missing text line utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing text line utility `{declaration}`"
+        );
     }
     for contract in [
         "Empty text has no lines",
@@ -416,7 +452,10 @@ fn pinned_text_line_utilities_are_included_and_typecheck() {
         "standardizing",
         "every recognized separator to one LF.",
     ] {
-        assert!(source.contains(contract), "missing text line contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing text line contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -446,7 +485,10 @@ fn pinned_text_slicing_utilities_are_included_and_typecheck() {
         "pub fn drop(value: Str, count: Int): Str",
         "pub fn slice(value: Str, start: Int, count: Int): Str",
     ] {
-        assert!(source.contains(declaration), "missing text slicing utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing text slicing utility `{declaration}`"
+        );
     }
     for contract in [
         "Unicode scalar values",
@@ -454,7 +496,10 @@ fn pinned_text_slicing_utilities_are_included_and_typecheck() {
         "std.collection.negative_count",
         "values past the end produce empty text",
     ] {
-        assert!(source.contains(contract), "missing text slicing contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing text slicing contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -491,7 +536,10 @@ fn pinned_lazy_sequence_adapters_are_included_and_typecheck() {
         "pub fn drop<T>(",
         "pub fn collect<T>(source: fn(): std.iterator.Iterator<T>): fn(): [T]",
     ] {
-        assert!(source.contains(declaration), "missing lazy sequence adapter `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing lazy sequence adapter `{declaration}`"
+        );
     }
     for contract in [
         "Building a pipeline does not call its source thunk",
@@ -499,7 +547,10 @@ fn pinned_lazy_sequence_adapters_are_included_and_typecheck() {
         "requires a finite cursor",
         "infinite sources, bound with `take`",
     ] {
-        assert!(source.contains(contract), "missing lazy sequence adapter contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing lazy sequence adapter contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -522,7 +573,10 @@ fn pinned_stream_adapters_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1)
         .expect("the pinned source bundle includes std.stream.adapters");
-    assert_eq!(index, 64, "stream adapters append without moving old sources");
+    assert_eq!(
+        index, 64,
+        "stream adapters append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_STREAM_ADAPTERS_PATH_V1);
     for declaration in [
         "pub fn from_iterator<T>(",
@@ -531,7 +585,10 @@ fn pinned_stream_adapters_are_included_and_typecheck() {
         "pub fn from_sequence_batches<T>(",
         "pub fn buffered_batches<T>(",
     ] {
-        assert!(source.contains(declaration), "missing stream adapter `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing stream adapter `{declaration}`"
+        );
     }
     for contract in [
         "These helpers require finite",
@@ -540,7 +597,10 @@ fn pinned_stream_adapters_are_included_and_typecheck() {
         "final short batch is retained",
         "Item order and the final short batch are preserved",
     ] {
-        assert!(source.contains(contract), "missing stream adapter contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing stream adapter contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -572,7 +632,10 @@ fn pinned_memo_helpers_are_included_and_typecheck() {
         "pub fn remove<K, V>(",
         "pub fn clear<K, V>(",
     ] {
-        assert!(source.contains(declaration), "missing memo helper `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing memo helper `{declaration}`"
+        );
     }
     for contract in [
         "immutable",
@@ -581,7 +644,10 @@ fn pinned_memo_helpers_are_included_and_typecheck() {
         "cached null",
         "lawful equality relation",
     ] {
-        assert!(source.contains(contract), "missing memoization contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing memoization contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -601,7 +667,10 @@ fn pinned_error_combinators_are_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1)
         .expect("the pinned source bundle includes std.error.combinators");
-    assert_eq!(index, 58, "the error combinators append without moving old sources");
+    assert_eq!(
+        index, 58,
+        "the error combinators append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_ERROR_COMBINATORS_PATH_V1);
     for declaration in [
         "pub fn with_context(value: Error, code: Str, message: Str): Error",
@@ -619,7 +688,10 @@ fn pinned_error_combinators_are_included_in_the_captured_snapshot() {
         "matches vacuously",
         "breadth-first order",
     ] {
-        assert!(source.contains(contract), "missing error combinator contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing error combinator contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -636,7 +708,10 @@ fn pinned_numeric_conversions_are_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_NUMERIC_PATH_V1)
         .expect("the pinned source bundle includes std.numeric");
-    assert_eq!(index, 59, "the numeric module appends without moving old sources");
+    assert_eq!(
+        index, 59,
+        "the numeric module appends without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_NUMERIC_PATH_V1);
     for declaration in [
         "pub fn integer_from_text(input: Str): Int?",
@@ -653,7 +728,10 @@ fn pinned_numeric_conversions_are_included_in_the_captured_snapshot() {
         "fractional part must contain digits",
         "No rounding is performed",
     ] {
-        assert!(source.contains(contract), "missing numeric conversion contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing numeric conversion contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -687,10 +765,8 @@ fn pinned_numeric_algorithms_typecheck_behavior_proofs() {
     let catalogue = reference_standard_catalogue_v1()
         .expect("numeric algorithms resolve in the captured standard catalogue");
     let consumer = include_str!("fixtures/v1_numeric_algorithms_consumer_t770s.orna");
-    let parsed = orna_syntax_v1::parse_module_with_file(
-        consumer,
-        "numeric_algorithms_consumer.orna",
-    );
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(consumer, "numeric_algorithms_consumer.orna");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new(
@@ -728,7 +804,10 @@ fn pinned_text_builder_is_included_in_the_captured_snapshot() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1)
         .expect("the pinned source bundle includes std.text.builder");
-    assert_eq!(index, 60, "the text builder appends without moving old source entries");
+    assert_eq!(
+        index, 60,
+        "the text builder appends without moving old source entries"
+    );
     assert_eq!(path, REFERENCE_STANDARD_TEXT_BUILDER_PATH_V1);
     for declaration in [
         "pub fn new(): [Str]",
@@ -747,7 +826,10 @@ fn pinned_text_builder_is_included_in_the_captured_snapshot() {
         "Adds one line followed by LF",
         "Emptiness describes the built text",
     ] {
-        assert!(source.contains(contract), "missing string builder contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing string builder contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -770,19 +852,43 @@ fn pinned_std_entrypoint_imports_optional_content_modules() {
     assert!(entrypoint.lines().any(|line| line.trim() == "use hash;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use random;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use money;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use encoding;"));
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use encoding;")
+    );
     assert!(entrypoint.lines().any(|line| line.trim() == "use url;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use net;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use test;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use generics;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use type_utils;"));
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use generics;")
+    );
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use type_utils;")
+    );
     assert!(entrypoint.lines().any(|line| line.trim() == "use pattern;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use regex;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use iterator;"));
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use iterator;")
+    );
     assert!(entrypoint.lines().any(|line| line.trim() == "use lazy;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use views;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use introspection;"));
-    assert!(entrypoint.lines().any(|line| line.trim() == "use reflection;"));
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use introspection;")
+    );
+    assert!(
+        entrypoint
+            .lines()
+            .any(|line| line.trim() == "use reflection;")
+    );
     assert!(entrypoint.lines().any(|line| line.trim() == "use format;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use parse;"));
     assert!(entrypoint.lines().any(|line| line.trim() == "use prelude;"));
@@ -796,7 +902,10 @@ fn pinned_std_prelude_publishes_its_versioned_curated_export_set() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_PRELUDE_PATH_V1)
         .expect("the pinned source bundle includes std.prelude");
-    assert_eq!(index, 54, "the facade appends without renumbering old source entries");
+    assert_eq!(
+        index, 54,
+        "the facade appends without renumbering old source entries"
+    );
     for declaration in [
         "pub fn api_version(): Str",
         "pub fn version(): Str",
@@ -841,17 +950,17 @@ fn pinned_test_should_contracts_typecheck_from_the_captured_module() {
         .verify_source(&test_source.0, &test_source.1)
         .expect("the test contracts use bytes from the captured std snapshot");
     let sources = vec![test_source];
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/test-assert-contracts",
-        sources.clone(),
-    )
-    .expect("the selected pinned test source forms a captured module snapshot");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/test-assert-contracts", sources.clone())
+            .expect("the selected pinned test source forms a captured module snapshot");
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources)
         .expect("the pinned test module resolves without host test-runner imports");
     let consumer = include_str!("fixtures/v1_test_consumer.orna");
-    let analysis =
-        analyze_with_catalogue(&[ModuleInput::new("test_consumer.orna", consumer)], &catalogue);
+    let analysis = analyze_with_catalogue(
+        &[ModuleInput::new("test_consumer.orna", consumer)],
+        &catalogue,
+    );
     assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
 }
 
@@ -859,8 +968,16 @@ fn pinned_test_should_contracts_typecheck_from_the_captured_module() {
 fn pinned_format_and_parse_modules_are_captured_and_resolve() {
     let sources = reference_standard_sources_v1();
     for (index, path, export) in [
-        (52, REFERENCE_STANDARD_FORMAT_PATH_V1, "pub fn integer(value: Int): Str"),
-        (53, REFERENCE_STANDARD_PARSE_PATH_V1, "pub fn integer(input: Str): Int?"),
+        (
+            52,
+            REFERENCE_STANDARD_FORMAT_PATH_V1,
+            "pub fn integer(value: Int): Str",
+        ),
+        (
+            53,
+            REFERENCE_STANDARD_PARSE_PATH_V1,
+            "pub fn integer(input: Str): Int?",
+        ),
     ] {
         assert_eq!(sources[index].0, path);
         assert!(sources[index].1.contains(export));
@@ -881,7 +998,8 @@ fn pinned_pattern_surface_typechecks_exhaustive_matches_and_destructuring() {
         .find(|(path, _)| path == REFERENCE_STANDARD_PATTERN_PATH_V1)
         .expect("the pinned source bundle includes std.pattern")
         .1;
-    let parsed = orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_PATTERN_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     reference_standard_catalogue_v1().expect("the pinned pattern module checks with std sources");
 }
@@ -894,7 +1012,10 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_PATH_V1)
         .expect("the regex package is included in the captured source bundle");
-    assert_eq!(regex_index, 47, "new source units append to preserve existing indexes");
+    assert_eq!(
+        regex_index, 47,
+        "new source units append to preserve existing indexes"
+    );
     assert_eq!(regex_path, REFERENCE_STANDARD_REGEX_PATH_V1);
     for declaration in [
         "pub enum Regex",
@@ -924,7 +1045,10 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         "preserve empty fields",
         "silently truncated",
     ] {
-        assert!(regex_source.contains(contract), "missing regex contract `{contract}`");
+        assert!(
+            regex_source.contains(contract),
+            "missing regex contract `{contract}`"
+        );
     }
 
     let profile = reference_standard_profile_v1();
@@ -945,7 +1069,10 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         "pub fn map_right<L, R, U>(",
         "pub fn bimap<L, R, A, B>(",
     ] {
-        assert!(pattern_source.contains(declaration), "missing {declaration}");
+        assert!(
+            pattern_source.contains(declaration),
+            "missing {declaration}"
+        );
     }
     profile
         .verify_source(pattern_path, pattern_source)
@@ -960,11 +1087,7 @@ fn pinned_regex_and_pattern_surfaces_are_versioned_and_snapshot_bound() {
         &[ModuleInput::new("regex_pattern_consumer.orna", consumer)],
         &catalogue,
     );
-    assert!(
-        analysis.is_ok(),
-        "{:#?}",
-        analysis.diagnostics
-    );
+    assert!(analysis.is_ok(), "{:#?}", analysis.diagnostics);
 }
 
 #[test]
@@ -975,7 +1098,10 @@ fn pinned_regex_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1)
         .expect("the pinned source bundle includes std.regex.utilities");
-    assert_eq!(index, 66, "regex utilities append without moving old sources");
+    assert_eq!(
+        index, 66,
+        "regex utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_REGEX_UTILITIES_PATH_V1);
     for declaration in [
         "pub fn capture_at(value: std.regex.Match, index: Int): Str?",
@@ -987,7 +1113,10 @@ fn pinned_regex_utilities_are_included_and_typecheck() {
         "pub fn capture_column(values: [std.regex.Match], index: Int): [Str?]",
         "pub fn zero_width_count(values: [std.regex.Match]): Int",
     ] {
-        assert!(source.contains(declaration), "missing regex utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing regex utility `{declaration}`"
+        );
     }
     for contract in [
         "Negative,",
@@ -996,7 +1125,10 @@ fn pinned_regex_utilities_are_included_and_typecheck() {
         "Preserve the source order, duplicate text, and empty matches",
         "result stays aligned with the input match list",
     ] {
-        assert!(source.contains(contract), "missing regex utility contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing regex utility contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -1016,7 +1148,10 @@ fn pinned_time_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1)
         .expect("the pinned source bundle includes std.time.utilities");
-    assert_eq!(index, 67, "time utilities append without moving old sources");
+    assert_eq!(
+        index, 67,
+        "time utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_TIME_UTILITIES_PATH_V1);
     for declaration in [
         "pub fn is_weekend(year: Int, month: Int, day: Int): Bool?",
@@ -1029,7 +1164,10 @@ fn pinned_time_utilities_are_included_and_typecheck() {
         "pub fn instant_in_closed_range(value: Instant, left: Instant, right: Instant): Bool",
         "pub fn instant_distance(left: Instant, right: Instant): Duration",
     ] {
-        assert!(source.contains(declaration), "missing time utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing time utility `{declaration}`"
+        );
     }
     for contract in [
         "Weekdays use ISO numbering",
@@ -1038,7 +1176,10 @@ fn pinned_time_utilities_are_included_and_typecheck() {
         "Test membership in a closed instant interval",
         "nonnegative, exact elapsed distance",
     ] {
-        assert!(source.contains(contract), "missing time utility contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing time utility contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -1058,7 +1199,10 @@ fn pinned_sorting_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_SORTING_PATH_V1)
         .expect("the pinned source bundle includes std.sorting");
-    assert_eq!(index, 68, "sorting utilities append without moving old sources");
+    assert_eq!(
+        index, 68,
+        "sorting utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_SORTING_PATH_V1);
     for declaration in [
         "pub fn compare<K>",
@@ -1071,7 +1215,10 @@ fn pinned_sorting_utilities_are_included_and_typecheck() {
         "pub fn min_by<T, K>",
         "pub fn max_by<T, K>",
     ] {
-        assert!(source.contains(declaration), "missing sorting utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing sorting utility `{declaration}`"
+        );
     }
     for contract in [
         "Sort operations evaluate the key once for each input value.",
@@ -1080,7 +1227,10 @@ fn pinned_sorting_utilities_are_included_and_typecheck() {
         "Return the first value with the minimum key",
         "Return the first value with the maximum key",
     ] {
-        assert!(source.contains(contract), "missing sorting utility contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing sorting utility contract `{contract}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -1100,7 +1250,10 @@ fn pinned_string_formatting_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1)
         .expect("the pinned source bundle includes std.format.strings");
-    assert_eq!(index, 69, "string formatting utilities append without moving old sources");
+    assert_eq!(
+        index, 69,
+        "string formatting utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_FORMAT_STRINGS_PATH_V1);
     for declaration in [
         "pub fn repeat(value: Str, count: Int): Str",
@@ -1110,7 +1263,10 @@ fn pinned_string_formatting_utilities_are_included_and_typecheck() {
         "pub fn truncate(value: Str, width: Int, suffix: Str = \"…\"): Str",
         "pub fn indent(value: Str, prefix: Str): Str",
     ] {
-        assert!(source.contains(declaration), "missing string formatting utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing string formatting utility `{declaration}`"
+        );
     }
     for contract in [
         "Unicode scalar values",
@@ -1118,7 +1274,10 @@ fn pinned_string_formatting_utilities_are_included_and_typecheck() {
         "padding scalar goes on the right",
         "preserving empty lines and a final trailing newline",
     ] {
-        assert!(source.contains(contract), "missing string formatting contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing string formatting contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1137,7 +1296,10 @@ fn pinned_parsing_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1)
         .expect("the pinned source bundle includes std.parse.utilities");
-    assert_eq!(index, 70, "parsing utilities append without moving old sources");
+    assert_eq!(
+        index, 70,
+        "parsing utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_PARSE_UTILITIES_PATH_V1);
     for declaration in [
         "pub fn integer_or(input: Str, fallback: Int): Int",
@@ -1146,7 +1308,10 @@ fn pinned_parsing_utilities_are_included_and_typecheck() {
         "pub fn boolean_list(input: Str, separator: Str): [Bool]?",
         "pub fn split_once(input: Str, separator: Str): (Str, Str)?",
     ] {
-        assert!(source.contains(declaration), "missing parsing utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing parsing utility `{declaration}`"
+        );
     }
     for contract in [
         "all-or-nothing",
@@ -1156,7 +1321,10 @@ fn pinned_parsing_utilities_are_included_and_typecheck() {
         "complete remainder",
         "after it",
     ] {
-        assert!(source.contains(contract), "missing parsing utility contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing parsing utility contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1175,7 +1343,10 @@ fn pinned_unicode_and_encoding_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1)
         .expect("the pinned source bundle includes std.encoding.utilities");
-    assert_eq!(index, 71, "Unicode and encoding utilities append without moving old sources");
+    assert_eq!(
+        index, 71,
+        "Unicode and encoding utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_ENCODING_UTILITIES_PATH_V1);
     for declaration in [
         "pub fn unicode_scalars(value: Str): [Str]",
@@ -1185,7 +1356,10 @@ fn pinned_unicode_and_encoding_utilities_are_included_and_typecheck() {
         "pub fn base64url_encode(input: Blob): Str",
         "pub fn base64url_decode(input: Str): Blob",
     ] {
-        assert!(source.contains(declaration), "missing Unicode/encoding utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing Unicode/encoding utility `{declaration}`"
+        );
     }
     for contract in [
         "Unicode scalar values",
@@ -1194,7 +1368,10 @@ fn pinned_unicode_and_encoding_utilities_are_included_and_typecheck() {
         "unpadded URL-safe Base64",
         "nonzero unused trailing bits",
     ] {
-        assert!(source.contains(contract), "missing Unicode/encoding contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing Unicode/encoding contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1213,7 +1390,10 @@ fn pinned_byte_buffer_utilities_are_included_and_typecheck() {
         .enumerate()
         .find(|(_, (path, _))| path == REFERENCE_STANDARD_BYTES_PATH_V1)
         .expect("the pinned source bundle includes std.bytes");
-    assert_eq!(index, 72, "byte utilities append without moving old sources");
+    assert_eq!(
+        index, 72,
+        "byte utilities append without moving old sources"
+    );
     assert_eq!(path, REFERENCE_STANDARD_BYTES_PATH_V1);
     for declaration in [
         "pub fn is_byte(value: Int): Bool",
@@ -1227,7 +1407,10 @@ fn pinned_byte_buffer_utilities_are_included_and_typecheck() {
         "pub fn read_unsigned(",
         "pub fn write_unsigned(",
     ] {
-        assert!(source.contains(declaration), "missing byte utility `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing byte utility `{declaration}`"
+        );
     }
     for contract in [
         "immutable lists of unsigned octets",
@@ -1237,7 +1420,10 @@ fn pinned_byte_buffer_utilities_are_included_and_typecheck() {
         "big` byte order",
         "The write never grows the buffer",
     ] {
-        assert!(source.contains(contract), "missing byte buffer contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing byte buffer contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1259,19 +1445,19 @@ fn pinned_iterator_and_lazy_surfaces_typecheck_as_ordinary_std_modules() {
         let parsed = orna_syntax_v1::parse_module_with_file(&sources[index].1, path);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     }
-    reference_standard_catalogue_v1().expect("iterator and lazy module sources check in the pinned profile");
+    reference_standard_catalogue_v1()
+        .expect("iterator and lazy module sources check in the pinned profile");
 }
 
 #[test]
 fn pinned_collection_views_and_slices_typecheck_as_an_ordinary_std_module() {
     let sources = reference_standard_sources_v1();
     assert_eq!(sources[39].0, REFERENCE_STANDARD_VIEWS_PATH_V1);
-    let parsed = orna_syntax_v1::parse_module_with_file(
-        &sources[39].1,
-        REFERENCE_STANDARD_VIEWS_PATH_V1,
-    );
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(&sources[39].1, REFERENCE_STANDARD_VIEWS_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
-    let catalogue = reference_standard_catalogue_v1().expect("views source checks in the pinned std profile");
+    let catalogue =
+        reference_standard_catalogue_v1().expect("views source checks in the pinned std profile");
     let consumer = include_str!("fixtures/v1_views_consumer_wc6kr.orna");
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("views_consumer.orna", consumer)],
@@ -1319,7 +1505,10 @@ fn pinned_option_combinators_are_in_the_captured_snapshot() {
         "calls `fallback` only for null",
         "callback runs only when both options contain values",
     ] {
-        assert!(source.contains(contract), "missing option contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing option contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1399,7 +1588,10 @@ fn pinned_bits_source_includes_bit_and_unsigned_byte_contracts() {
         "most-significant byte first",
         "Leading zero bytes are accepted",
     ] {
-        assert!(source.contains(contract), "missing bit/byte contract `{contract}`");
+        assert!(
+            source.contains(contract),
+            "missing bit/byte contract `{contract}`"
+        );
     }
     reference_standard_profile_v1()
         .verify_source(path, source)
@@ -1524,8 +1716,7 @@ fn pinned_map_ovb_order_projection_is_snapshot_bound_and_typechecks() {
 
 #[test]
 fn pinned_query_and_statistics_aggregates_accept_relation_inputs() {
-    let catalogue = reference_standard_catalogue_v1()
-        .expect("the pinned std profile checks");
+    let catalogue = reference_standard_catalogue_v1().expect("the pinned std profile checks");
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new(
             "relation_statistics_consumer.orna",
@@ -1569,8 +1760,7 @@ fn pinned_query_and_statistics_aggregates_accept_relation_inputs() {
 }
 #[test]
 fn pinned_query_plan_hint_exports_structured_plan() {
-    let catalogue = reference_standard_catalogue_v1()
-        .expect("the pinned std profile checks");
+    let catalogue = reference_standard_catalogue_v1().expect("the pinned std profile checks");
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new(
             "query_plan_hint_consumer.orna",
@@ -1606,10 +1796,8 @@ fn pinned_calendar_arithmetic_source_typechecks_against_core() {
         .find(|(path, _)| path == REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1)
         .expect("the pinned source bundle includes std.time.calendar")
         .1;
-    let parsed = orna_syntax_v1::parse_module_with_file(
-        &source,
-        REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
-    );
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(&source, REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1);
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
         &[ModuleInput::new("calendar.orna", source)],
@@ -1637,7 +1825,10 @@ fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
         "pub fn offset_at(instant: Instant, zone: Str): Int",
         "pub fn resolve_local(local: Str, zone: Str, ambiguous: Str, gap: Str? = null): Instant",
     ] {
-        assert!(time.contains(declaration), "missing std.time declaration `{declaration}`");
+        assert!(
+            time.contains(declaration),
+            "missing std.time declaration `{declaration}`"
+        );
     }
     assert!(time.contains("orna-iana-2024a"));
     let parsed = orna_syntax_v1::parse_module_with_file(time, REFERENCE_STANDARD_TIME_PATH_V1);
@@ -1646,7 +1837,10 @@ fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
         .expect("time-zone APIs and calendar helpers resolve in the captured std profile");
     let consumer = include_str!("fixtures/v1_timezone_calendar_consumer_b8tgd.orna");
     let analysis = analyze_with_catalogue(
-        &[ModuleInput::new("timezone_calendar_consumer.orna", consumer)],
+        &[ModuleInput::new(
+            "timezone_calendar_consumer.orna",
+            consumer,
+        )],
         &catalogue,
     );
     assert!(
@@ -1661,9 +1855,11 @@ fn pinned_timezone_and_calendar_surfaces_typecheck_and_publish_in_snapshot() {
     );
     let mut changed_time = time.clone();
     changed_time.push_str("\n// changed after the captured snapshot\n");
-    assert!(reference_standard_profile_v1()
-        .verify_source(REFERENCE_STANDARD_TIME_PATH_V1, &changed_time)
-        .is_err());
+    assert!(
+        reference_standard_profile_v1()
+            .verify_source(REFERENCE_STANDARD_TIME_PATH_V1, &changed_time)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1701,7 +1897,9 @@ fn pinned_encoding_entrypoint_exports_its_named_codec_modules() {
     let entrypoint = include_str!("../../../stdlib/std/encoding/main.orna");
     for module in ["base64", "json", "orna", "ovb"] {
         assert!(
-            entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
+            entrypoint
+                .lines()
+                .any(|line| line.trim() == format!("use {module};")),
             "std.encoding must import {module}"
         );
     }
@@ -1712,7 +1910,9 @@ fn pinned_network_entrypoint_exports_http_and_websocket_modules() {
     let entrypoint = include_str!("../../../stdlib/std/net/main.orna");
     for module in ["http", "websocket"] {
         assert!(
-            entrypoint.lines().any(|line| line.trim() == format!("use {module};")),
+            entrypoint
+                .lines()
+                .any(|line| line.trim() == format!("use {module};")),
             "std.net must import {module}"
         );
     }
@@ -1746,7 +1946,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[0].0, REFERENCE_STANDARD_MATH_PATH_V1);
     assert!(sources[0].1.contains("pub fn increment(value: Int): Int"));
     for name in [
-        "abs", "signum", "is_even", "is_odd", "square", "cube", "gcd", "lcm",
+        "abs",
+        "signum",
+        "is_even",
+        "is_odd",
+        "square",
+        "cube",
+        "gcd",
+        "lcm",
         "pow_nonnegative",
     ] {
         assert!(sources[0].1.contains(&format!("pub fn {name}(")));
@@ -1756,18 +1963,45 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert_eq!(sources[2].0, REFERENCE_STANDARD_QUERY_PATH_V1);
     // `filter` is a root intrinsic (09-standard-library:7); std.query re-exports
     // intrinsics only optionally (:9), so assert its own pinned declaration.
-    assert!(sources[2].1.contains("pub fn chunk<T>(values: [T], size: Int)"));
+    assert!(
+        sources[2]
+            .1
+            .contains("pub fn chunk<T>(values: [T], size: Int)")
+    );
     assert_eq!(sources[3].0, REFERENCE_STANDARD_TEXT_PATH_V1);
-    assert!(sources[3].1.contains("pub fn normalise(value: Str, form: Str)"));
+    assert!(
+        sources[3]
+            .1
+            .contains("pub fn normalise(value: Str, form: Str)")
+    );
     for name in [
-        "trim", "split", "join", "starts_with", "ends_with", "contains", "replace",
-        "normalise", "lower", "upper",
+        "trim",
+        "split",
+        "join",
+        "starts_with",
+        "ends_with",
+        "contains",
+        "replace",
+        "normalise",
+        "lower",
+        "upper",
     ] {
         assert!(sources[3].1.contains(&format!("pub fn {name}(")));
     }
     assert_eq!(sources[4].0, REFERENCE_STANDARD_BITS_PATH_V1);
-    assert!(sources[4].1.contains("pub fn shift_right(value: Int, count: Int)"));
-    for name in ["bit_or", "bit_and", "bit_xor", "bit_not", "shift_left", "shift_right"] {
+    assert!(
+        sources[4]
+            .1
+            .contains("pub fn shift_right(value: Int, count: Int)")
+    );
+    for name in [
+        "bit_or",
+        "bit_and",
+        "bit_xor",
+        "bit_not",
+        "shift_left",
+        "shift_right",
+    ] {
         assert!(sources[4].1.contains(&format!("pub fn {name}(")));
     }
     assert_eq!(sources[5].0, REFERENCE_STANDARD_STATS_PATH_V1);
@@ -1787,7 +2021,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn derivative<T>(points: [(Instant, T)]): [(Instant, T)]",
         "pub fn integrate<T>(points: [(Instant, T)]): T?",
     ] {
-        assert!(sources[5].1.contains(declaration), "missing stats declaration `{declaration}`");
+        assert!(
+            sources[5].1.contains(declaration),
+            "missing stats declaration `{declaration}`"
+        );
     }
     for contract in [
         "Empty sum is the additive zero",
@@ -1796,7 +2033,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "strictly increasing timestamps",
         "trapezoidal integration",
     ] {
-        assert!(sources[5].1.contains(contract), "missing stats contract `{contract}`");
+        assert!(
+            sources[5].1.contains(contract),
+            "missing stats contract `{contract}`"
+        );
     }
     assert_eq!(sources[6].0, REFERENCE_STANDARD_TIME_PATH_V1);
     assert!(sources[6].1.contains("pub fn timezone_data_version()"));
@@ -1808,8 +2048,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         (10, REFERENCE_STANDARD_TIME_ISO_PATH_V1, "iso"),
     ] {
         assert_eq!(sources[index].0, path);
-        assert!(sources[index].1.contains("pub fn format("), "{operation} formatter export");
-        assert!(sources[index].1.contains("fn __format("), "{operation} formatter body");
+        assert!(
+            sources[index].1.contains("pub fn format("),
+            "{operation} formatter export"
+        );
+        assert!(
+            sources[index].1.contains("fn __format("),
+            "{operation} formatter body"
+        );
     }
     assert_eq!(sources[20].0, REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1);
     for declaration in [
@@ -1818,14 +2064,33 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn is_valid_date(year: Int, month: Int, day: Int): Bool",
         "pub fn day_of_year(year: Int, month: Int, day: Int): Int?",
     ] {
-        assert!(sources[20].1.contains(declaration), "missing `{declaration}`");
+        assert!(
+            sources[20].1.contains(declaration),
+            "missing `{declaration}`"
+        );
     }
     for name in [
-        "chunk", "flatten", "partition", "zip", "zip_exact", "unique", "group_by", "pairs",
-        "window", "split_when", "rank", "bucket_by",
+        "chunk",
+        "flatten",
+        "partition",
+        "zip",
+        "zip_exact",
+        "unique",
+        "group_by",
+        "pairs",
+        "window",
+        "split_when",
+        "rank",
+        "bucket_by",
     ] {
-        assert!(sources[1].1.contains(&format!("pub fn {name}<")), "std.collection.{name}");
-        assert!(sources[2].1.contains(&format!("pub fn {name}<")), "std.query.{name}");
+        assert!(
+            sources[1].1.contains(&format!("pub fn {name}<")),
+            "std.collection.{name}"
+        );
+        assert!(
+            sources[2].1.contains(&format!("pub fn {name}<")),
+            "std.query.{name}"
+        );
     }
     assert_eq!(sources[21].0, REFERENCE_STANDARD_STREAM_PATH_V1);
     for declaration in [
@@ -1840,7 +2105,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn retry<T>(",
         "pub fn recover<T>(stream: Stream<T>, handler: fn(Error): T): Stream<T>",
     ] {
-        assert!(sources[21].1.contains(declaration), "missing stream declaration `{declaration}`");
+        assert!(
+            sources[21].1.contains(declaration),
+            "missing stream declaration `{declaration}`"
+        );
     }
     for contract in [
         "canonical typed digest",
@@ -1852,7 +2120,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "without advancing the checkpoint",
         "cannot acknowledge an ordered delivery by silently skipping it",
     ] {
-        assert!(sources[21].1.contains(contract), "missing stream contract `{contract}`");
+        assert!(
+            sources[21].1.contains(contract),
+            "missing stream contract `{contract}`"
+        );
     }
     for contract in [
         "consecutive nonempty groups",
@@ -1865,8 +2136,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "split_when starts a group before a matching item",
         "competition ranks (ties share a rank",
     ] {
-        assert!(sources[1].1.contains(contract), "missing collection contract `{contract}`");
-        assert!(sources[2].1.contains(contract), "missing query contract `{contract}`");
+        assert!(
+            sources[1].1.contains(contract),
+            "missing collection contract `{contract}`"
+        );
+        assert!(
+            sources[2].1.contains(contract),
+            "missing query contract `{contract}`"
+        );
     }
     assert_eq!(sources[22].0, REFERENCE_STANDARD_RANDOM_PATH_V1);
     for declaration in [
@@ -1875,7 +2152,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn choose<T>(values: [T]): T?",
         "pub fn shuffle<T>(values: [T]): [T]",
     ] {
-        assert!(sources[22].1.contains(declaration), "missing random declaration `{declaration}`");
+        assert!(
+            sources[22].1.contains(declaration),
+            "missing random declaration `{declaration}`"
+        );
     }
     for contract in [
         "host cryptographically secure random source",
@@ -1885,7 +2165,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Return null for an empty list",
         "unbiased Fisher-Yates permutation",
     ] {
-        assert!(sources[22].1.contains(contract), "missing random contract `{contract}`");
+        assert!(
+            sources[22].1.contains(contract),
+            "missing random contract `{contract}`"
+        );
     }
     assert_eq!(sources[23].0, REFERENCE_STANDARD_HASH_PATH_V1);
     for declaration in [
@@ -1895,7 +2178,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn to_hex(digest: Digest): Str",
         "pub fn from_hex(value: Str): Digest?",
     ] {
-        assert!(sources[23].1.contains(declaration), "missing hash declaration `{declaration}`");
+        assert!(
+            sources[23].1.contains(declaration),
+            "missing hash declaration `{declaration}`"
+        );
     }
     for contract in [
         "complete Blob",
@@ -1905,7 +2191,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Hashes of low-entropy secret values are sensitive",
         "Digests are fingerprints, not equality proofs",
     ] {
-        assert!(sources[23].1.contains(contract), "missing hash contract `{contract}`");
+        assert!(
+            sources[23].1.contains(contract),
+            "missing hash contract `{contract}`"
+        );
     }
     assert_eq!(sources[24].0, REFERENCE_STANDARD_ENCODING_PATH_V1);
     for module in ["base64", "json", "orna", "ovb"] {
@@ -1916,7 +2205,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn encode<T>(value: T): Str",
         "pub fn decode<T>(input: Str): T",
     ] {
-        assert!(sources[25].1.contains(declaration), "missing Orna codec declaration `{declaration}`");
+        assert!(
+            sources[25].1.contains(declaration),
+            "missing Orna codec declaration `{declaration}`"
+        );
     }
     for contract in [
         "schema directed",
@@ -1928,14 +2220,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "padded standard Base64",
         "decode(input, as: T)",
     ] {
-        assert!(sources[25].1.contains(contract), "missing canonical text contract `{contract}`");
+        assert!(
+            sources[25].1.contains(contract),
+            "missing canonical text contract `{contract}`"
+        );
     }
     assert_eq!(sources[26].0, REFERENCE_STANDARD_ENCODING_OVB_PATH_V1);
     for declaration in [
         "pub fn encode<T>(value: T): Blob",
         "pub fn decode<T>(input: Blob): T",
     ] {
-        assert!(sources[26].1.contains(declaration), "missing OVB declaration `{declaration}`");
+        assert!(
+            sources[26].1.contains(declaration),
+            "missing OVB declaration `{declaration}`"
+        );
     }
     for contract in [
         "OVB-1 is the pinned binary value profile",
@@ -1946,7 +2244,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Nominal records, enums, references and system values",
         "explicit type witness",
     ] {
-        assert!(sources[26].1.contains(contract), "missing OVB contract `{contract}`");
+        assert!(
+            sources[26].1.contains(contract),
+            "missing OVB contract `{contract}`"
+        );
     }
     assert_eq!(sources[27].0, REFERENCE_STANDARD_ENCODING_JSON_PATH_V1);
     for declaration in [
@@ -1956,7 +2257,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "input: Str,",
         "ignore_unknown_fields: Bool = false",
     ] {
-        assert!(sources[27].1.contains(declaration), "missing JSON declaration `{declaration}`");
+        assert!(
+            sources[27].1.contains(declaration),
+            "missing JSON declaration `{declaration}`"
+        );
     }
     for contract in [
         "schema directed",
@@ -1966,14 +2270,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Unknown fields fail by default",
         "nonstandard numeric tokens",
     ] {
-        assert!(sources[27].1.contains(contract), "missing JSON contract `{contract}`");
+        assert!(
+            sources[27].1.contains(contract),
+            "missing JSON contract `{contract}`"
+        );
     }
     assert_eq!(sources[28].0, REFERENCE_STANDARD_ENCODING_BASE64_PATH_V1);
     for declaration in [
         "pub fn encode(input: Blob): Str",
         "pub fn decode(input: Str): Blob",
     ] {
-        assert!(sources[28].1.contains(declaration), "missing Base64 declaration `{declaration}`");
+        assert!(
+            sources[28].1.contains(declaration),
+            "missing Base64 declaration `{declaration}`"
+        );
     }
     for contract in [
         "RFC 4648 alphabet",
@@ -1982,7 +2292,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "nonzero unused trailing bits",
         "URL-safe Base64",
     ] {
-        assert!(sources[28].1.contains(contract), "missing Base64 contract `{contract}`");
+        assert!(
+            sources[28].1.contains(contract),
+            "missing Base64 contract `{contract}`"
+        );
     }
     assert_eq!(sources[29].0, REFERENCE_STANDARD_NET_PATH_V1);
     for module in ["http", "websocket"] {
@@ -1998,7 +2311,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn query_parameters(value: Str): [(Str, Str?)]",
         "pub fn with_query_parameter(value: Str, name: Str, parameter: Str?): Str",
     ] {
-        assert!(sources[30].1.contains(declaration), "missing URL declaration `{declaration}`");
+        assert!(
+            sources[30].1.contains(declaration),
+            "missing URL declaration `{declaration}`"
+        );
     }
     for contract in [
         "http, https",
@@ -2011,7 +2327,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "'+' is a literal plus",
         "never transmit a fragment",
     ] {
-        assert!(sources[30].1.contains(contract), "missing URL contract `{contract}`");
+        assert!(
+            sources[30].1.contains(contract),
+            "missing URL contract `{contract}`"
+        );
     }
     assert_eq!(sources[31].0, REFERENCE_STANDARD_NET_HTTP_PATH_V1);
     for declaration in [
@@ -2022,7 +2341,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn cancel(handle: Uuid): Bool",
         "pub fn send(",
     ] {
-        assert!(sources[31].1.contains(declaration), "missing HTTP declaration `{declaration}`");
+        assert!(
+            sources[31].1.contains(declaration),
+            "missing HTTP declaration `{declaration}`"
+        );
     }
     for contract in [
         "ordered list of name/value pairs",
@@ -2036,7 +2358,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "caller may cancel explicitly",
         "cannot retract bytes already sent",
     ] {
-        assert!(sources[31].1.contains(contract), "missing HTTP contract `{contract}`");
+        assert!(
+            sources[31].1.contains(contract),
+            "missing HTTP contract `{contract}`"
+        );
     }
     assert_eq!(sources[32].0, REFERENCE_STANDARD_NET_WEBSOCKET_PATH_V1);
     for declaration in [
@@ -2047,7 +2372,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn close(connection: Uuid, code: Int, reason: Str): Unit",
         "pub fn cancel(connection: Uuid): Bool",
     ] {
-        assert!(sources[32].1.contains(declaration), "missing WebSocket declaration `{declaration}`");
+        assert!(
+            sources[32].1.contains(declaration),
+            "missing WebSocket declaration `{declaration}`"
+        );
     }
     for contract in [
         "Only ws/wss URLs",
@@ -2060,7 +2388,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Return null only after an orderly peer close",
         "Immediate cancellation aborts pending reads/writes",
     ] {
-        assert!(sources[32].1.contains(contract), "missing WebSocket contract `{contract}`");
+        assert!(
+            sources[32].1.contains(contract),
+            "missing WebSocket contract `{contract}`"
+        );
     }
     assert_eq!(sources[11].0, REFERENCE_STANDARD_OPTION_PATH_V1);
     assert!(sources[11].1.contains("pub fn and_then<T, U>"));
@@ -2076,7 +2407,14 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         assert!(sources[14].1.contains(&format!("pub fn {name}<")));
     }
     assert_eq!(sources[15].0, REFERENCE_STANDARD_SET_PATH_V1);
-    for name in ["from_list", "contains", "insert", "union", "intersection", "difference"] {
+    for name in [
+        "from_list",
+        "contains",
+        "insert",
+        "union",
+        "intersection",
+        "difference",
+    ] {
         assert!(sources[15].1.contains(&format!("pub fn {name}<")));
     }
     assert_eq!(sources[16].0, REFERENCE_STANDARD_IO_PATH_V1);
@@ -2084,17 +2422,29 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     assert!(sources[16].1.contains("use buffer;"));
     assert_eq!(sources[17].0, REFERENCE_STANDARD_FS_PATH_V1);
     for name in [
-        "read_text", "write_text", "append_text", "exists", "is_directory", "list",
-        "create_dir", "remove_file", "copy_file", "move_file",
+        "read_text",
+        "write_text",
+        "append_text",
+        "exists",
+        "is_directory",
+        "list",
+        "create_dir",
+        "remove_file",
+        "copy_file",
+        "move_file",
     ] {
         assert!(sources[17].1.contains(&format!("pub fn {name}(")));
     }
-    assert!(sources[17]
-        .1
-        .contains("pub fn read_text(root: Str, path: Str): Str"));
-    assert!(sources[17]
-        .1
-        .contains("pub fn write_text(root: Str, path: Str, contents: Str, overwrite: Bool)"));
+    assert!(
+        sources[17]
+            .1
+            .contains("pub fn read_text(root: Str, path: Str): Str")
+    );
+    assert!(
+        sources[17]
+            .1
+            .contains("pub fn write_text(root: Str, path: Str, contents: Str, overwrite: Bool)")
+    );
     assert!(sources[17].1.contains("source_path: Str"));
     assert!(sources[17].1.contains("destination_path: Str"));
     assert!(sources[17].1.contains("overwrite: Bool"));
@@ -2105,7 +2455,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn timeout<T>(callback: fn(): T, duration: Duration): T",
         "pub fn sleep(duration: Duration): Null",
     ] {
-        assert!(sources[18].1.contains(declaration), "missing `{declaration}`");
+        assert!(
+            sources[18].1.contains(declaration),
+            "missing `{declaration}`"
+        );
     }
     for contract in [
         "input order",
@@ -2114,7 +2467,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "clock/waiting effect",
         "cancellation-aware",
     ] {
-        assert!(sources[18].1.contains(contract), "missing contract: {contract}");
+        assert!(
+            sources[18].1.contains(contract),
+            "missing contract: {contract}"
+        );
     }
     assert_eq!(sources[33].0, REFERENCE_STANDARD_TEST_PATH_V1);
     for declaration in [
@@ -2141,7 +2497,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn run_fixture(",
         "pub fn with_isolated_database<T>(",
     ] {
-        assert!(sources[33].1.contains(declaration), "missing std.test declaration `{declaration}`");
+        assert!(
+            sources[33].1.contains(declaration),
+            "missing std.test declaration `{declaration}`"
+        );
     }
     for contract in [
         "Core `assert` remains",
@@ -2154,7 +2513,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "lower-inclusive",
         "upper-exclusive",
     ] {
-        assert!(sources[33].1.contains(contract), "missing std.test contract `{contract}`");
+        assert!(
+            sources[33].1.contains(contract),
+            "missing std.test contract `{contract}`"
+        );
     }
     assert_eq!(sources.len(), 77);
     assert_eq!(sources[49].0, REFERENCE_STANDARD_UI_PATH_V1);
@@ -2167,7 +2529,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn Form<A>(fields: [UI], submit: A? = null): UI",
         "pub fn Input<T, A>(",
     ] {
-        assert!(sources[49].1.contains(declaration), "missing std.ui declaration `{declaration}`");
+        assert!(
+            sources[49].1.contains(declaration),
+            "missing std.ui declaration `{declaration}`"
+        );
     }
     for contract in [
         "original value and its runtime type",
@@ -2175,7 +2540,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "never execute action descriptors",
         "a present value agrees with the event handle",
     ] {
-        assert!(sources[49].1.contains(contract), "missing std.ui contract `{contract}`");
+        assert!(
+            sources[49].1.contains(contract),
+            "missing std.ui contract `{contract}`"
+        );
     }
     assert_eq!(sources[34].0, REFERENCE_STANDARD_GENERICS_PATH_V1);
     for declaration in [
@@ -2186,7 +2554,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn both<T, U, V>(",
         "pub fn pipe<T, U, V>(",
     ] {
-        assert!(sources[34].1.contains(declaration), "missing std.generics declaration `{declaration}`");
+        assert!(
+            sources[34].1.contains(declaration),
+            "missing std.generics declaration `{declaration}`"
+        );
     }
     for contract in [
         "do not box values or add runtime reflection",
@@ -2194,7 +2565,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Composition applies `first` before `then`",
         "transform_left runs before transform_right",
     ] {
-        assert!(sources[34].1.contains(contract), "missing std.generics contract `{contract}`");
+        assert!(
+            sources[34].1.contains(contract),
+            "missing std.generics contract `{contract}`"
+        );
     }
     assert_eq!(sources[35].0, REFERENCE_STANDARD_TYPE_UTILS_PATH_V1);
     for declaration in [
@@ -2208,14 +2582,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn some<T>(value: T): T?",
         "pub fn map_option<T, U>(value: T?, transform: fn(T): U): U?",
     ] {
-        assert!(sources[35].1.contains(declaration), "missing std.type_utils declaration `{declaration}`");
+        assert!(
+            sources[35].1.contains(declaration),
+            "missing std.type_utils declaration `{declaration}`"
+        );
     }
     for contract in [
         "preserve each component's inferred type",
         "dynamic Any are not introduced",
         "Transform the first component before the second",
     ] {
-        assert!(sources[35].1.contains(contract), "missing std.type_utils contract `{contract}`");
+        assert!(
+            sources[35].1.contains(contract),
+            "missing std.type_utils contract `{contract}`"
+        );
     }
     assert_eq!(sources[36].0, REFERENCE_STANDARD_PATTERN_PATH_V1);
     for declaration in [
@@ -2229,14 +2609,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn right_or<L, R>(value: Either<L, R>, fallback: R): R",
         "pub fn swap<L, R>(value: Either<L, R>): Either<R, L>",
     ] {
-        assert!(sources[36].1.contains(declaration), "missing std.pattern declaration `{declaration}`");
+        assert!(
+            sources[36].1.contains(declaration),
+            "missing std.pattern declaration `{declaration}`"
+        );
     }
     for contract in [
         "Orna's `case` expression remains the matching syntax",
         "Return null when the requested branch is inactive",
         "Split into two optional projections",
     ] {
-        assert!(sources[36].1.contains(contract), "missing std.pattern contract `{contract}`");
+        assert!(
+            sources[36].1.contains(contract),
+            "missing std.pattern contract `{contract}`"
+        );
     }
     assert_eq!(sources[37].0, REFERENCE_STANDARD_ITERATOR_PATH_V1);
     for declaration in [
@@ -2253,7 +2639,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn collect<T>(source: Iterator<T>): [T]",
         "pub fn nth<T>(source: Iterator<T>, index: Int): T?",
     ] {
-        assert!(sources[37].1.contains(declaration), "missing std.iterator declaration `{declaration}`");
+        assert!(
+            sources[37].1.contains(declaration),
+            "missing std.iterator declaration `{declaration}`"
+        );
     }
     for contract in [
         "Creating or composing one does",
@@ -2264,7 +2653,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "iterator count must be nonnegative",
         "iterator index must be nonnegative",
     ] {
-        assert!(sources[37].1.contains(contract), "missing std.iterator contract `{contract}`");
+        assert!(
+            sources[37].1.contains(contract),
+            "missing std.iterator contract `{contract}`"
+        );
     }
     assert_eq!(sources[38].0, REFERENCE_STANDARD_LAZY_PATH_V1);
     for declaration in [
@@ -2275,14 +2667,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn zip<T, U>(left: fn(): T, right: fn(): U): fn(): (T, U)",
         "pub fn constant<T>(value: T): fn(): T",
     ] {
-        assert!(sources[38].1.contains(declaration), "missing std.lazy declaration `{declaration}`");
+        assert!(
+            sources[38].1.contains(declaration),
+            "missing std.lazy declaration `{declaration}`"
+        );
     }
     for contract in [
         "return thunks without evaluating their computations",
         "Every `force` call invokes its thunk again",
         "call-by-name with no memoization",
     ] {
-        assert!(sources[38].1.contains(contract), "missing std.lazy contract `{contract}`");
+        assert!(
+            sources[38].1.contains(contract),
+            "missing std.lazy contract `{contract}`"
+        );
     }
     assert_eq!(sources[39].0, REFERENCE_STANDARD_VIEWS_PATH_V1);
     for declaration in [
@@ -2297,7 +2695,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn to_list<T>(view: View<T>): [T]",
         "pub fn windows<T>(view: View<T>, width: Int, step: Int = 1): [View<T>]",
     ] {
-        assert!(sources[39].1.contains(declaration), "missing std.views declaration `{declaration}`");
+        assert!(
+            sources[39].1.contains(declaration),
+            "missing std.views declaration `{declaration}`"
+        );
     }
     for contract in [
         "zero-based half-open range",
@@ -2308,7 +2709,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "view count must be nonnegative",
         "An incomplete final window is omitted",
     ] {
-        assert!(sources[39].1.contains(contract), "missing std.views contract `{contract}`");
+        assert!(
+            sources[39].1.contains(contract),
+            "missing std.views contract `{contract}`"
+        );
     }
     assert_eq!(sources[40].0, REFERENCE_STANDARD_INTROSPECTION_PATH_V1);
     for declaration in [
@@ -2326,7 +2730,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn explain_query<T>(query: Query<T>): sys.Plan",
         "pub fn explain_diagnostic(diagnostic: sys.Diagnostic): sys.Explanation",
     ] {
-        assert!(sources[40].1.contains(declaration), "missing std.introspection declaration `{declaration}`");
+        assert!(
+            sources[40].1.contains(declaration),
+            "missing std.introspection declaration `{declaration}`"
+        );
     }
     assert_eq!(sources[41].0, REFERENCE_STANDARD_REFLECTION_PATH_V1);
     for declaration in [
@@ -2337,7 +2744,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "pub fn await_result<T>(",
         "pub fn cancel<T>(",
     ] {
-        assert!(sources[41].1.contains(declaration), "missing std.reflection declaration `{declaration}`");
+        assert!(
+            sources[41].1.contains(declaration),
+            "missing std.reflection declaration `{declaration}`"
+        );
     }
     let reflection_contract_text = sources[41]
         .1
@@ -2351,20 +2761,32 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         "Asynchronous starts use a separate transaction by default",
         "A timeout does not cancel the child",
     ] {
-        assert!(reflection_contract_text.contains(contract), "missing std.reflection contract `{contract}`");
+        assert!(
+            reflection_contract_text.contains(contract),
+            "missing std.reflection contract `{contract}`"
+        );
     }
     assert_eq!(sources[19].0, REFERENCE_STANDARD_ERROR_PATH_V1);
-    assert!(sources[19].1.contains("pub fn make(code: Str, message: Str): Error"));
-    assert!(sources[19]
-        .1
-        .contains("pub fn caused_by(code: Str, message: Str, cause: Error): Error"));
+    assert!(
+        sources[19]
+            .1
+            .contains("pub fn make(code: Str, message: Str): Error")
+    );
+    assert!(
+        sources[19]
+            .1
+            .contains("pub fn caused_by(code: Str, message: Str, cause: Error): Error")
+    );
     for declaration in [
         "pub fn fold<T, E, U>(",
         "pub fn map_or<T, E, U>(",
         "pub fn map_or_else<T, E, U>(",
         "pub fn flatten<T, E>(result: Result<Result<T, E>, E>): Result<T, E>",
     ] {
-        assert!(sources[12].1.contains(declaration), "missing `{declaration}`");
+        assert!(
+            sources[12].1.contains(declaration),
+            "missing `{declaration}`"
+        );
     }
     let option_module_analysis = analyze_with_catalogue(
         &[ModuleInput::new("option.orna", &sources[11].1)],
@@ -2410,19 +2832,28 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     );
     let mut changed_error_source = sources[19].1.clone();
     changed_error_source.push_str("\n// changed after the captured snapshot\n");
-    assert!(profile
-        .verify_source(REFERENCE_STANDARD_ERROR_PATH_V1, &changed_error_source)
-        .is_err());
+    assert!(
+        profile
+            .verify_source(REFERENCE_STANDARD_ERROR_PATH_V1, &changed_error_source)
+            .is_err()
+    );
     let mut changed_calendar_source = sources[20].1.clone();
     changed_calendar_source.push_str("\n// changed after the captured snapshot\n");
-    assert!(profile
-        .verify_source(REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1, &changed_calendar_source)
-        .is_err());
+    assert!(
+        profile
+            .verify_source(
+                REFERENCE_STANDARD_TIME_CALENDAR_PATH_V1,
+                &changed_calendar_source
+            )
+            .is_err()
+    );
     let mut changed_stream_source = sources[21].1.clone();
     changed_stream_source.push_str("\n// changed after the captured snapshot\n");
-    assert!(profile
-        .verify_source(REFERENCE_STANDARD_STREAM_PATH_V1, &changed_stream_source)
-        .is_err());
+    assert!(
+        profile
+            .verify_source(REFERENCE_STANDARD_STREAM_PATH_V1, &changed_stream_source)
+            .is_err()
+    );
     for (path, source_index) in [
         (REFERENCE_STANDARD_RANDOM_PATH_V1, 22),
         (REFERENCE_STANDARD_HASH_PATH_V1, 23),
@@ -2454,12 +2885,9 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
         let parsed = orna_syntax_v1::parse_module_with_file(source, path);
         assert!(parsed.is_ok(), "{path}: {:?}", parsed.diagnostics);
     }
-    let serialization_calls =
-        include_str!("fixtures/v1_serialization_calls.orna");
-    let parsed_serialization_calls = orna_syntax_v1::parse_module_with_file(
-        serialization_calls,
-        "serialization_calls.orna",
-    );
+    let serialization_calls = include_str!("fixtures/v1_serialization_calls.orna");
+    let parsed_serialization_calls =
+        orna_syntax_v1::parse_module_with_file(serialization_calls, "serialization_calls.orna");
     assert!(
         parsed_serialization_calls.is_ok(),
         "{:?}",
@@ -2468,7 +2896,11 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let network_calls = include_str!("fixtures/v1_network_calls.orna");
     let parsed_network_calls =
         orna_syntax_v1::parse_module_with_file(network_calls, "network_calls.orna");
-    assert!(parsed_network_calls.is_ok(), "{:?}", parsed_network_calls.diagnostics);
+    assert!(
+        parsed_network_calls.is_ok(),
+        "{:?}",
+        parsed_network_calls.diagnostics
+    );
     let catalogue = reference_standard_catalogue_v1().expect("the standard module checks");
     let consumer = include_str!("fixtures/v1_collection_operations_consumer.orna");
     let asof_consumer = include_str!("fixtures/v1_standard_consumer.orna");
@@ -2486,12 +2918,20 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
     let generics_type_utils_consumer =
         include_str!("fixtures/v1_generics_type_utils_consumer.orna");
     for (path, source) in [
-        ("list_consumer.orna", include_str!("fixtures/v1_list_consumer.orna")),
-        ("map_consumer.orna", include_str!("fixtures/v1_map_consumer.orna")),
-        ("set_consumer.orna", include_str!("fixtures/v1_set_consumer.orna")),
+        (
+            "list_consumer.orna",
+            include_str!("fixtures/v1_list_consumer.orna"),
+        ),
+        (
+            "map_consumer.orna",
+            include_str!("fixtures/v1_map_consumer.orna"),
+        ),
+        (
+            "set_consumer.orna",
+            include_str!("fixtures/v1_set_consumer.orna"),
+        ),
     ] {
-        let module_analysis =
-            analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue);
+        let module_analysis = analyze_with_catalogue(&[ModuleInput::new(path, source)], &catalogue);
         assert!(
             module_analysis.is_ok(),
             "{path}: {}",
@@ -2518,7 +2958,10 @@ fn reference_standard_uses_pinned_orna_1_source_and_resolves_its_imports() {
             ModuleInput::new("serialization_consumer.orna", serialization_consumer),
             ModuleInput::new("network_consumer.orna", network_consumer),
             ModuleInput::new("test_consumer.orna", test_consumer),
-            ModuleInput::new("generics_type_utils_consumer.orna", generics_type_utils_consumer),
+            ModuleInput::new(
+                "generics_type_utils_consumer.orna",
+                generics_type_utils_consumer,
+            ),
         ],
         &catalogue,
     );
@@ -2572,7 +3015,10 @@ fn pinned_money_operations_are_bound_to_the_captured_source_snapshot() {
         "fn __allocate<T>(",
         "fn __format<T>(",
     ] {
-        assert!(source.contains(declaration), "missing std.money declaration `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing std.money declaration `{declaration}`"
+        );
     }
     let profile = reference_standard_profile_v1();
     profile
@@ -2611,7 +3057,12 @@ fn pinned_filesystem_effect_is_visible_to_consumers_and_forbidden_in_assertions(
         .find(|module| module.namespace.display() == "io_consumer")
         .expect("filesystem consumer module");
     let reads = consumer.symbols.get("reads").expect("filesystem wrapper");
-    assert!(reads.effects.effects.contains(&orna_semantic_v1::EffectKind::Filesystem));
+    assert!(
+        reads
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::Filesystem)
+    );
     assert!(reads.effects.may_fail);
 }
 
@@ -2647,8 +3098,7 @@ fn pinned_filesystem_path_and_metadata_modules_are_captured_and_typecheck() {
 
     let catalogue = reference_standard_catalogue_v1()
         .expect("the path and metadata modules resolve in the captured std profile");
-    let consumer_source =
-        include_str!("fixtures/v1_filesystem_paths_metadata_consumer_l80o5.orna");
+    let consumer_source = include_str!("fixtures/v1_filesystem_paths_metadata_consumer_l80o5.orna");
     let parsed = orna_syntax_v1::parse_module_with_file(
         consumer_source,
         "filesystem_paths_metadata_consumer.orna",
@@ -2697,7 +3147,10 @@ fn pinned_io_buffer_module_is_captured_and_resolves_stream_adapters() {
         "std.collection.flatten",
         "std.io.writer.write_all_text",
     ] {
-        assert!(source.contains(declaration), "missing buffer contract `{declaration}`");
+        assert!(
+            source.contains(declaration),
+            "missing buffer contract `{declaration}`"
+        );
     }
     let parsed = orna_syntax_v1::parse_module_with_file(source, path);
     assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
@@ -2747,20 +3200,27 @@ fn pinned_process_and_environment_modules_are_captured_and_typecheck() {
     }
 
     let io_entrypoint = include_str!("../../../stdlib/std/io/main.orna");
-    assert!(io_entrypoint.lines().any(|line| line.trim() == "use process;"));
-    assert!(io_entrypoint
-        .lines()
-        .any(|line| line.trim() == "use environment;"));
+    assert!(
+        io_entrypoint
+            .lines()
+            .any(|line| line.trim() == "use process;")
+    );
+    assert!(
+        io_entrypoint
+            .lines()
+            .any(|line| line.trim() == "use environment;")
+    );
     let catalogue = reference_standard_catalogue_v1()
         .expect("process and environment modules resolve in the captured std profile");
     let consumer = include_str!("fixtures/v1_process_environment_consumer_xbf3n.orna");
-    let parsed = orna_syntax_v1::parse_module_with_file(
-        consumer,
-        "process_environment_consumer.orna",
-    );
+    let parsed =
+        orna_syntax_v1::parse_module_with_file(consumer, "process_environment_consumer.orna");
     assert!(parsed.is_ok(), "{:#?}", parsed.diagnostics);
     let analysis = analyze_with_catalogue(
-        &[ModuleInput::new("process_environment_consumer.orna", consumer)],
+        &[ModuleInput::new(
+            "process_environment_consumer.orna",
+            consumer,
+        )],
         &catalogue,
     );
     assert!(
@@ -2789,8 +3249,11 @@ fn qualified_relation_pipeline_stage_is_checked_as_a_named_callable() {
     let codes: Vec<&str> = analysis.diagnostics.iter().map(|d| d.code()).collect();
     assert!(!codes.contains(&"ORNA-S022-UNSUPPORTED"), "{codes:?}");
     assert!(
-        analysis.diagnostics.iter().any(|d| d.code() == "ORNA-S012-UNRESOLVED"
-            && format!("{:?}", d.notes()).contains("unresolved member: std.query.filter")),
+        analysis
+            .diagnostics
+            .iter()
+            .any(|d| d.code() == "ORNA-S012-UNRESOLVED"
+                && format!("{:?}", d.notes()).contains("unresolved member: std.query.filter")),
         "{codes:?}"
     );
 }

@@ -85,12 +85,12 @@ impl Fixture {
         let remote = root.path().join("remote.git");
         fs::create_dir(&worktree).unwrap();
         git(root.path(), &["init", "--bare", remote.to_str().unwrap()]);
-        git(root.path(), &["init", "-b", "main", worktree.to_str().unwrap()]);
-        git(&worktree, &["config", "user.name", "kierandrewett"]);
         git(
-            &worktree,
-            &["config", "user.email", "kieran@drewett.dev"],
+            root.path(),
+            &["init", "-b", "main", worktree.to_str().unwrap()],
         );
+        git(&worktree, &["config", "user.name", "kierandrewett"]);
+        git(&worktree, &["config", "user.email", "kieran@drewett.dev"]);
         git(&worktree, &["config", "commit.gpgsign", "false"]);
         git(
             &worktree,
@@ -105,15 +105,20 @@ impl Fixture {
         fs::write(&watermark_file, "1").unwrap();
         let watermark = git(
             &worktree,
-            &["hash-object", "-w", "--no-filters", watermark_file.to_str().unwrap()],
+            &[
+                "hash-object",
+                "-w",
+                "--no-filters",
+                watermark_file.to_str().unwrap(),
+            ],
         );
         git(&worktree, &["update-ref", ALLOCATOR_REF, &watermark]);
+        git(&worktree, &["update-ref", CHECKPOINT_REF, &initial]);
+        git(&worktree, &["update-ref", PIN_REF, &initial]);
         git(
             &worktree,
-            &["update-ref", CHECKPOINT_REF, &initial],
+            &["push", "origin", "refs/heads/main:refs/heads/main"],
         );
-        git(&worktree, &["update-ref", PIN_REF, &initial]);
-        git(&worktree, &["push", "origin", "refs/heads/main:refs/heads/main"]);
         git(
             &worktree,
             &[
@@ -249,7 +254,11 @@ fn push_refuses_a_remote_that_dropped_a_continuity_ref() {
         None,
         "a refused push must not re-create the refused continuity ref"
     );
-    assert_eq!(fixture.head(), before, "a refused push must not move local HEAD");
+    assert_eq!(
+        fixture.head(),
+        before,
+        "a refused push must not move local HEAD"
+    );
 }
 
 #[test]

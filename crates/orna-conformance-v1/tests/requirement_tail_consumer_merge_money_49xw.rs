@@ -1,7 +1,5 @@
 use orna_semantic_v1::{Catalogue, ModuleInput, Type, analyze_with_catalogue};
-use orna_stream_v1::{
-    CheckpointPositionMerge, Component, Position, merge_checkpoint_position,
-};
+use orna_stream_v1::{CheckpointPositionMerge, Component, Position, merge_checkpoint_position};
 
 fn analyze(source: &str) -> orna_semantic_v1::Analysis {
     analyze_with_catalogue(
@@ -22,13 +20,19 @@ fn position(token: &str) -> Position {
 #[test]
 fn durable_consumer_with_multiple_checkpointed_roots_gets_guidance() {
     let result = analyze(include_str!("fixtures/streams-pa0p-multiple-roots.orna"));
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == "E9102"
-            && diagnostic.message().starts_with(
-                "a durable consumer function may own only one checkpointed source root",
-            )
-            && diagnostic.message().contains("extract separate named consumer functions")
-    }), "unexpected diagnostics: {:?}", result.diagnostics);
+    assert!(
+        result.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == "E9102"
+                && diagnostic.message().starts_with(
+                    "a durable consumer function may own only one checkpointed source root",
+                )
+                && diagnostic
+                    .message()
+                    .contains("extract separate named consumer functions")
+        }),
+        "unexpected diagnostics: {:?}",
+        result.diagnostics
+    );
 }
 
 // Specified: ORNA-MONEY-001/002, source/05-types.md:276,278.
@@ -42,22 +46,30 @@ fn money_literal_is_typed_exactly_and_cross_currency_addition_is_rejected() {
     ));
     assert!(exact.is_ok(), "{:?}", exact.diagnostics);
     let amount = &exact.modules.values().next().unwrap().exports["amount"];
-    assert!(matches!(
-        &amount.ty,
-        Type::Function { result, .. }
-            if result.as_ref() == &Type::Applied {
-                base: "Money".into(),
-                arguments: vec![Type::Named("GBP".into())],
-            }
-    ), "unexpected exact-money result type: {:?}", amount.ty);
+    assert!(
+        matches!(
+            &amount.ty,
+            Type::Function { result, .. }
+                if result.as_ref() == &Type::Applied {
+                    base: "Money".into(),
+                    arguments: vec![Type::Named("GBP".into())],
+                }
+        ),
+        "unexpected exact-money result type: {:?}",
+        amount.ty
+    );
 
     let mixed = analyze(include_str!(
         "fixtures/semantic/traceability-money-cross-currency-add.orna"
     ));
-    assert!(mixed.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code() == "E5003"
-            && diagnostic.message() == "cannot add different currencies without conversion"
-    }), "unexpected diagnostics: {:?}", mixed.diagnostics);
+    assert!(
+        mixed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code() == "E5003"
+                && diagnostic.message() == "cannot add different currencies without conversion"
+        }),
+        "unexpected diagnostics: {:?}",
+        mixed.diagnostics
+    );
 }
 
 // Specified: ORNA-CONSUMER-008, source/11-streams.md:56, and ORNA-MERGE-011,

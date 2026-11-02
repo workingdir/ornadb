@@ -28,7 +28,10 @@ fn diff_streams_native_output_and_preserves_exit_code_for_paths_with_spaces() {
     let file = repository.path().join("changed path.orna");
     std::fs::write(&file, FIXTURE).expect("write checked-in Orna fixture");
     git_succeeds(repository.path(), &["init", "--quiet"]);
-    git_succeeds(repository.path(), &["config", "user.email", "kieran@drewett.dev"]);
+    git_succeeds(
+        repository.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
     git_succeeds(repository.path(), &["config", "user.name", "kierandrewett"]);
     git_succeeds(repository.path(), &["add", "--", "changed path.orna"]);
     git_succeeds(repository.path(), &["commit", "--quiet", "-m", "baseline"]);
@@ -47,7 +50,12 @@ fn diff_streams_native_output_and_preserves_exit_code_for_paths_with_spaces() {
         .expect("CLI diff starts");
     println!(
         "normal: native exit={:?} stdout={:?} stderr={:?}; CLI exit={:?} stdout={:?} stderr={:?}",
-        native.status.code(), native.stdout, native.stderr, cli.status.code(), cli.stdout, cli.stderr
+        native.status.code(),
+        native.stdout,
+        native.stderr,
+        cli.status.code(),
+        cli.stdout,
+        cli.stderr
     );
     assert_eq!(native.status.code(), Some(0));
     assert_eq!(cli.status.code(), native.status.code());
@@ -65,8 +73,12 @@ fn diff_streams_native_output_and_preserves_exit_code_for_paths_with_spaces() {
         .expect("CLI diff --exit-code starts");
     println!(
         "exit-code: native exit={:?} stdout={:?} stderr={:?}; CLI exit={:?} stdout={:?} stderr={:?}",
-        native_exit_code.status.code(), native_exit_code.stdout, native_exit_code.stderr,
-        cli_exit_code.status.code(), cli_exit_code.stdout, cli_exit_code.stderr
+        native_exit_code.status.code(),
+        native_exit_code.stdout,
+        native_exit_code.stderr,
+        cli_exit_code.status.code(),
+        cli_exit_code.stdout,
+        cli_exit_code.stderr
     );
     assert_eq!(native_exit_code.status.code(), Some(1));
     assert_eq!(cli_exit_code.status.code(), native_exit_code.status.code());

@@ -99,7 +99,10 @@ fn relation_stage(input: Expr, name: &str, arguments: Vec<Expr>) -> Expr {
                 text: name.into(),
                 span: span.clone(),
             }),
-            arguments: arguments.into_iter().map(|value| argument(value, &span)).collect(),
+            arguments: arguments
+                .into_iter()
+                .map(|value| argument(value, &span))
+                .collect(),
             span: span.clone(),
         }),
         span,
@@ -139,8 +142,14 @@ fn invoke(body: Expr, effects: &mut OrderedRows) -> CanonicalValue {
             environment: Environment::new(),
         },
     )]);
-    invoke_named_with_effects("run", &functions, &Environment::new(), Limits::default(), effects)
-        .unwrap_or_else(|error| panic!("relation evaluation failed: {}", error.code()))
+    invoke_named_with_effects(
+        "run",
+        &functions,
+        &Environment::new(),
+        Limits::default(),
+        effects,
+    )
+    .unwrap_or_else(|error| panic!("relation evaluation failed: {}", error.code()))
 }
 
 fn rows(values: &[i64]) -> Vec<CanonicalValue> {
@@ -152,7 +161,10 @@ fn rows(values: &[i64]) -> Vec<CanonicalValue> {
 
 fn first_window(values: &[i64]) -> CanonicalValue {
     let window = Value::new(Raw::Array(
-        values.iter().map(|value| Raw::Int((*value).into())).collect(),
+        values
+            .iter()
+            .map(|value| Raw::Int((*value).into()))
+            .collect(),
     ))
     .unwrap();
     let option = Value::option(Some(window)).unwrap();

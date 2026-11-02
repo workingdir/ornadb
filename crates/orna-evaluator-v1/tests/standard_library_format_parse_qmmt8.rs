@@ -21,16 +21,22 @@ fn captured_sources() -> Vec<(String, String)> {
 
 fn pinned_session() -> AdmittedReplSession {
     let sources = captured_sources();
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/qmmt8-format-parse",
-        sources.clone(),
-    )
-    .expect("format, parse, text, and collection source bytes form a pinned dependency profile");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/qmmt8-format-parse", sources.clone())
+            .expect(
+                "format, parse, text, and collection source bytes form a pinned dependency profile",
+            );
     let catalogue = Catalogue::authoritative_core()
         .with_standard_sources(&profile, sources.clone())
         .expect("captured format and parse dependencies resolve against core");
-    AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default())
-        .unwrap_or_else(|error| panic!("could not load captured format/parse snapshot: {}", error.code()))
+    AdmittedReplSession::from_catalogue(&[], catalogue, sources, Limits::default()).unwrap_or_else(
+        |error| {
+            panic!(
+                "could not load captured format/parse snapshot: {}",
+                error.code()
+            )
+        },
+    )
 }
 
 #[test]
@@ -66,11 +72,11 @@ fn format_and_parse_modules_are_captured_by_the_selected_std_snapshot() {
         let parsed = orna_syntax_v1::parse_module_with_file(source, path);
         assert!(parsed.is_ok(), "{path}: {:#?}", parsed.diagnostics);
     }
-    let profile = StandardDependencyProfile::from_sources(
-        "orna.std/qmmt8-format-parse",
-        sources.clone(),
-    )
-    .expect("format, parse, text, and collection source bytes form a pinned dependency profile");
+    let profile =
+        StandardDependencyProfile::from_sources("orna.std/qmmt8-format-parse", sources.clone())
+            .expect(
+                "format, parse, text, and collection source bytes form a pinned dependency profile",
+            );
     for (path, source) in &sources {
         profile
             .verify_source(path, source)
@@ -98,13 +104,20 @@ fn optional_format_parse_imports_do_not_replace_core_without_std() {
         include_str!("fixtures/stdlib-use-parse-without-snapshot-qmmt8.orna"),
     ] {
         let mut session = AdmittedReplSession::new(Limits::default());
-        assert_eq!(session.submit(import).unwrap_err().code(), "ORNA-S010-IMPORT");
         assert_eq!(
-            session.submit(include_str!("fixtures/stdlib-core-without-format-parse-qmmt8.orna")),
+            session.submit(import).unwrap_err().code(),
+            "ORNA-S010-IMPORT"
+        );
+        assert_eq!(
+            session.submit(include_str!(
+                "fixtures/stdlib-core-without-format-parse-qmmt8.orna"
+            )),
             Ok(None)
         );
         assert_eq!(
-            session.submit(include_str!("fixtures/stdlib-core-call-without-format-parse-qmmt8.orna")),
+            session.submit(include_str!(
+                "fixtures/stdlib-core-call-without-format-parse-qmmt8.orna"
+            )),
             Ok(Some(bool_value(true)))
         );
     }

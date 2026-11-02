@@ -1,8 +1,7 @@
 use std::process::Command;
 
 // Legacy 1.0.0 snapshot (144 scenarios). The 1.1.0 corpus has 279 scenario oracles.
-const LEGACY_REFERENCE_SCENARIOS: &str =
-    include_str!("fixtures/legacy-1.0.0/tests/scenarios.json");
+const LEGACY_REFERENCE_SCENARIOS: &str = include_str!("fixtures/legacy-1.0.0/tests/scenarios.json");
 const BATCH_31_60: &[&str] = &[
     "CP-003",
     "CP-004",
@@ -188,19 +187,26 @@ fn executes_batch_two_and_pins_unexecuted_follow_up() {
         .expect("bounded conformance runner starts");
     let cli_exit_code = output.status.code().expect("runner exits normally");
     println!("bounded CLI exit code: {cli_exit_code}");
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
-        panic!(
-            "runner stdout is not a conformance report JSON: {error}; stderr: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-    });
-    let reported = report["scenarios"].as_array().expect("scenario report array");
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            panic!(
+                "runner stdout is not a conformance report JSON: {error}; stderr: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+    let reported = report["scenarios"]
+        .as_array()
+        .expect("scenario report array");
     assert_eq!(reported.len(), 279);
     let by_id = reported
         .iter()
         .map(|result| (result["scenario"].as_str().expect("scenario ID"), result))
         .collect::<std::collections::BTreeMap<_, _>>();
-    assert_eq!(by_id.len(), 279, "scenario IDs are unique in the 1.1.0 report");
+    assert_eq!(
+        by_id.len(),
+        279,
+        "scenario IDs are unique in the 1.1.0 report"
+    );
 
     let mut passed = 0;
     let mut passed_ids = Vec::new();
@@ -237,12 +243,21 @@ fn executes_batch_two_and_pins_unexecuted_follow_up() {
             other => panic!("{expected_id}: unrecognized status {other:?}"),
         }
     }
-    println!("batch 31-60 totals: passed={passed} failed={failed} absent={absent} legacy_only={}", legacy_only.len());
+    println!(
+        "batch 31-60 totals: passed={passed} failed={failed} absent={absent} legacy_only={}",
+        legacy_only.len()
+    );
     println!("FOLLOW-UP 61-144: {}", FOLLOW_UP_61_144.join(", "));
     assert_eq!(legacy_only, ["FIELD-002", "FLOAT-STATS-001"]);
     assert_eq!(passed, 2, "only witnessed scenarios may be reported passed");
     assert_eq!(passed_ids, ["EVAL-003", "FAIL-001"]);
-    assert_eq!(failed, 0, "scenario failures require a fixture-level repair");
+    assert_eq!(
+        failed, 0,
+        "scenario failures require a fixture-level repair"
+    );
     assert_eq!(absent, 26, "all non-witnessed scenarios remain absent");
-    assert_eq!(cli_exit_code, 1, "the full bounded report remains incomplete");
+    assert_eq!(
+        cli_exit_code, 1,
+        "the full bounded report remains incomplete"
+    );
 }

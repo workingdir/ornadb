@@ -124,7 +124,10 @@ fn initialized_database(directory: &TempDir, source: &str) -> PathBuf {
     );
     assert_success(&init, "orna init");
     git(&root, &["config", "user.name", "Orna Test"]);
-    git(&root, &["config", "user.email", "orna-test@example.invalid"]);
+    git(
+        &root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
     git(&root, &["config", "commit.gpgsign", "false"]);
     std::fs::write(root.join("main.orna"), source).expect("write main.orna");
     root
@@ -254,7 +257,11 @@ fn concurrent_publication_from_a_cold_and_a_warm_partial_clone_keeps_one_winner(
     let mut init = Command::new("git");
     isolate_git(&mut init);
     let initialized = init
-        .args(["init", "--bare", remote.to_str().expect("UTF-8 remote path")])
+        .args([
+            "init",
+            "--bare",
+            remote.to_str().expect("UTF-8 remote path"),
+        ])
         .output()
         .expect("the git init process starts");
     assert!(

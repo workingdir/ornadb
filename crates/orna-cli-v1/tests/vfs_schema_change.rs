@@ -54,10 +54,8 @@ const ADMITTED_V2: &str =
 
 const ADMITTED_GENRE_FIRST: &str =
     "{\n    artist: \"Kieran\",\n    genre: \"first\",\n    title: \"Original\",\n}\n";
-const V2_GENRE_FIRST: &str =
-    "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"first\",\n}\n";
-const V3_GENRE_SECOND: &str =
-    "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"second\",\n}\n";
+const V2_GENRE_FIRST: &str = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"first\",\n}\n";
+const V3_GENRE_SECOND: &str = "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    genre: Str = \"second\",\n}\n";
 const V2_REQUIRED_NOTE: &str =
     "pub table Music(id: Str) {\n    title: Str,\n    artist: Str,\n    note: Str,\n}\n";
 
@@ -281,7 +279,10 @@ fn vfs_019_second_remount_keeps_admitted_v2_write() {
     let status = again
         .wait_for_exit(Duration::from_secs(10))
         .expect("the second remounted process exits after unmount");
-    assert!(status.success(), "second remounted process exited with {status}");
+    assert!(
+        status.success(),
+        "second remounted process exited with {status}"
+    );
 }
 
 /// Proof for bead ornadb-eufo.2.1 (F1): a field a later commit introduces is filled on remount with
@@ -375,7 +376,11 @@ fn vfs_019_commit_the_row_cannot_admit_is_refused_and_mount_keeps_row() {
         !refused.status.success() && refusal.contains("E2101"),
         "the commit the committed row cannot admit is refused: {refusal}"
     );
-    assert_eq!(head(&root), head_before, "a refused commit does not move HEAD");
+    assert_eq!(
+        head(&root),
+        head_before,
+        "a refused commit does not move HEAD"
+    );
     git(&root, &["checkout", "HEAD", "--", "main.orna"]);
 
     let mut remounted = wait_for_mount(start_mount_process(&root, &mountpoint));
@@ -496,7 +501,8 @@ fn vfs_019_unreadable_persisted_scratch_is_reported_and_left_on_disk() {
         stderr = mounted.stderr_text();
     }
     assert!(
-        stderr.contains("unreadable persisted temporary scratch") && stderr.contains("0000.scratch"),
+        stderr.contains("unreadable persisted temporary scratch")
+            && stderr.contains("0000.scratch"),
         "the damaged record is reported on mount stderr: {stderr:?}"
     );
     assert_eq!(
@@ -577,7 +583,11 @@ fn legacy_record_from_v2(v2: &[u8]) -> Vec<u8> {
         let length = u64::from_le_bytes(record[at..at + 8].try_into().expect("8-byte length"));
         at + 8 + usize::try_from(length).expect("field length fits in memory")
     }
-    assert_eq!(&v2[..8], b"ORNAVFS2", "the seeded record is written as ORNAVFS2");
+    assert_eq!(
+        &v2[..8],
+        b"ORNAVFS2",
+        "the seeded record is written as ORNAVFS2"
+    );
     let mut at = skip_bytes(v2, 8);
     at += 16; // relation id
     at = skip_bytes(v2, at); // key
@@ -625,9 +635,16 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
     let records: Vec<PathBuf> = fs::read_dir(&scratch_directory)
         .expect("list the scratch store")
         .map(|entry| entry.expect("scratch entry").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "scratch"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "scratch")
+        })
         .collect();
-    assert_eq!(records.len(), 1, "the synced scratch is persisted as one record");
+    assert_eq!(
+        records.len(),
+        1,
+        "the synced scratch is persisted as one record"
+    );
     let record = records[0].clone();
     let v2 = fs::read(&record).expect("read the ORNAVFS2 record");
     fs::write(&record, legacy_record_from_v2(&v2)).expect("rewrite the record as ORNAVFS1");
@@ -647,7 +664,10 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
     }
     let stderr = remounted.stderr_text();
 
-    assert!(!record.exists(), "the legacy record is removed once retained; stderr: {stderr}");
+    assert!(
+        !record.exists(),
+        "the legacy record is removed once retained; stderr: {stderr}"
+    );
     assert!(
         !restarted_row.join(".data.orna.persisted-scratch").exists(),
         "a legacy candidate is not bound to the live schema as a mounted scratch; stderr: {stderr}"
@@ -655,9 +675,16 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
     let drafts: Vec<PathBuf> = fs::read_dir(root.join(".git/orna/vfs-retained-drafts-v1"))
         .expect("list the retained drafts")
         .map(|entry| entry.expect("draft entry").path())
-        .filter(|path| path.extension().is_some_and(|extension| extension == "draft"))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "draft")
+        })
         .collect();
-    assert_eq!(drafts.len(), 1, "the legacy candidate is listed as one retained draft; stderr: {stderr}");
+    assert_eq!(
+        drafts.len(),
+        1,
+        "the legacy candidate is listed as one retained draft; stderr: {stderr}"
+    );
     let draft = fs::read(&drafts[0]).expect("read the retained draft");
     let header = String::from_utf8_lossy(&draft[..draft.len().min(256)]).into_owned();
     assert!(
@@ -665,7 +692,9 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
         "the retained draft records the stale cause: {header:?}"
     );
     assert!(
-        draft.windows(expected.len()).any(|window| window == expected),
+        draft
+            .windows(expected.len())
+            .any(|window| window == expected),
         "the candidate bytes are recoverable from the retained draft; stderr: {stderr}"
     );
     assert!(

@@ -65,7 +65,10 @@ fn display_implementation_write_is_rejected() {
     );
     let result = analyze(&[ModuleInput::new("display-write.orna", &source)]);
     assert!(
-        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         "Display write must fail as a type/effect diagnostic: {:#?}",
         result.diagnostics
     );
@@ -79,7 +82,10 @@ fn present_implementation_write_is_rejected() {
     );
     let result = analyze(&[ModuleInput::new("present-write.orna", &source)]);
     assert!(
-        result.diagnostics.iter().any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DIAG_DISPLAY_READ_ONLY),
         "Present write must fail as a type/effect diagnostic: {:#?}",
         result.diagnostics
     );
@@ -95,13 +101,19 @@ fn secret_values_cannot_cross_display_or_present_boundaries() {
         &Catalogue::authoritative_core(),
     );
     assert!(
-        result.diagnostics.iter().any(|diagnostic| {
-            diagnostic.message() == "secret values cannot be displayed"
-        }),
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "secret values cannot be displayed" }),
         "Display must reject secret values: {:#?}",
         result.diagnostics
     );
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.message() == "secret values cannot be presented"
-    }), "secret values must not enter renderer-neutral UI trees: {:#?}", result.diagnostics);
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message() == "secret values cannot be presented" }),
+        "secret values must not enter renderer-neutral UI trees: {:#?}",
+        result.diagnostics
+    );
 }

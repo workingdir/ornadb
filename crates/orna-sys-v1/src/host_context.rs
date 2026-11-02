@@ -122,7 +122,10 @@ mod tests {
             RuntimeMode::Embedded,
         ]
         .map(RuntimeMode::label);
-        assert_eq!(labels, ["repl", "run", "serve", "command_owner", "embedded"]);
+        assert_eq!(
+            labels,
+            ["repl", "run", "serve", "command_owner", "embedded"]
+        );
     }
 
     #[test]

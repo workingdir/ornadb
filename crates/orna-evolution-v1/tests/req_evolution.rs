@@ -46,7 +46,12 @@ fn req_orna_evol_007_explicit_rekey_keeps_old_and_new_addresses() {
             new_key: new_key.clone(),
         }],
     };
-    let plan = plan(&schema(&case["from"]), &schema(&case["from"]), &rekey_request).unwrap();
+    let plan = plan(
+        &schema(&case["from"]),
+        &schema(&case["from"]),
+        &rekey_request,
+    )
+    .unwrap();
 
     assert_eq!(
         plan.operations(),

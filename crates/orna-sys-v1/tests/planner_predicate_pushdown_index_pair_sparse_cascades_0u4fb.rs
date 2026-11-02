@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use orna_sys_v1::{
-    explain_query_with_partial_indexes, ExplainError, ExpressionRef, ObjectRef, PlanDetail,
-    PlanNode, PlanNodeKind, QueryJoinDescription, QueryPartialIndexDescription,
-    QueryPlanDescription, QuerySourceStatistics, SnapshotRef,
+    ExplainError, ExpressionRef, ObjectRef, PlanDetail, PlanNode, PlanNodeKind,
+    QueryJoinDescription, QueryPartialIndexDescription, QueryPlanDescription,
+    QuerySourceStatistics, SnapshotRef, explain_query_with_partial_indexes,
 };
 
 const FIXTURE: &str =

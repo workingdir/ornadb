@@ -63,7 +63,10 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
     ] {
         command.env_remove(name);
     }
-    command.args(arguments).output().expect("CLI process starts")
+    command
+        .args(arguments)
+        .output()
+        .expect("CLI process starts")
 }
 
 fn text(bytes: Vec<u8>) -> String {

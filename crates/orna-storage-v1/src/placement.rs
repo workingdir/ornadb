@@ -276,13 +276,7 @@ pub fn plan_storage_placement(
         all_body_bytes = all_body_bytes
             .checked_add(body_bytes)
             .ok_or(StoragePlacementError::SizeOverflow)?;
-        if keyed
-            .insert(
-                key,
-                (candidate, action, body_bytes),
-            )
-            .is_some()
-        {
+        if keyed.insert(key, (candidate, action, body_bytes)).is_some() {
             return Err(StoragePlacementError::DuplicateKey);
         }
     }
@@ -293,21 +287,29 @@ pub fn plan_storage_placement(
         .ok_or(StoragePlacementError::RowCountOverflow)?;
 
     let (mut new_row_placement, mut reason) = match preference {
-        StoragePreference::Editable => (PhysicalPlacement::Editable, PlacementReason::ExplicitPreference),
-        StoragePreference::Compact => (PhysicalPlacement::Compact, PlacementReason::ExplicitPreference),
+        StoragePreference::Editable => (
+            PhysicalPlacement::Editable,
+            PlacementReason::ExplicitPreference,
+        ),
+        StoragePreference::Compact => (
+            PhysicalPlacement::Compact,
+            PlacementReason::ExplicitPreference,
+        ),
         StoragePreference::Automatic if compact_data_exists => (
             PhysicalPlacement::Compact,
             PlacementReason::AutomaticTableAlreadyCompact,
         ),
-        StoragePreference::Automatic
-            if resulting_row_count > AUTOMATIC_EDITABLE_MAX_ROWS =>
-        {
-            (PhysicalPlacement::Compact, PlacementReason::AutomaticRowLimit)
-        }
+        StoragePreference::Automatic if resulting_row_count > AUTOMATIC_EDITABLE_MAX_ROWS => (
+            PhysicalPlacement::Compact,
+            PlacementReason::AutomaticRowLimit,
+        ),
         StoragePreference::Automatic
             if all_body_bytes > AUTOMATIC_EDITABLE_MAX_PUBLICATION_BYTES =>
         {
-            (PhysicalPlacement::Compact, PlacementReason::AutomaticPublicationBytes)
+            (
+                PhysicalPlacement::Compact,
+                PlacementReason::AutomaticPublicationBytes,
+            )
         }
         StoragePreference::Automatic if !all_insert_paths => {
             // One key beyond the portable path bounds closes placement over
@@ -600,7 +602,10 @@ impl StorageRewritePlan {
                 .map_err(|_| StorageRewriteError::InvalidCanonicalRow)?;
             let value = CanonicalValue::decode(&value_bytes)
                 .map_err(|_| StorageRewriteError::InvalidCanonicalRow)?;
-            if key.encode().map_err(|_| StorageRewriteError::InvalidCanonicalRow)? != key_bytes
+            if key
+                .encode()
+                .map_err(|_| StorageRewriteError::InvalidCanonicalRow)?
+                != key_bytes
                 || value
                     .encode()
                     .map_err(|_| StorageRewriteError::InvalidCanonicalRow)?
@@ -673,9 +678,7 @@ pub fn plan_storage_rewrite(
         &CompactKeyIdentity,
         &CanonicalValue,
     ) -> Result<Vec<u8>, StorageRewriteError>,
-    mut decode_editable_row: impl FnMut(
-        &[u8],
-    ) -> Result<(Vec<u8>, Vec<u8>), StorageRewriteError>,
+    mut decode_editable_row: impl FnMut(&[u8]) -> Result<(Vec<u8>, Vec<u8>), StorageRewriteError>,
 ) -> Result<StorageRewritePlan, StorageRewriteError> {
     let compact = base.compact();
     if compact.table_id() != profile.table_id()
@@ -725,10 +728,7 @@ pub fn plan_storage_rewrite(
             return Err(StorageRewriteError::ResourceLimit);
         }
         if rows
-            .insert(
-                key.clone(),
-                (value.clone(), PhysicalPlacement::Editable),
-            )
+            .insert(key.clone(), (value.clone(), PhysicalPlacement::Editable))
             .is_some()
         {
             return Err(StorageRewriteError::DuplicateKey);
@@ -775,9 +775,17 @@ pub fn plan_storage_rewrite(
             .ok_or(StorageRewriteError::ResourceLimit)?;
         let mut hasher = Sha256::new();
         hasher.update(b"orna.storage.row.v1\0");
-        hasher.update(u64::try_from(key_bytes.len()).map_err(|_| StorageRewriteError::ResourceLimit)?.to_be_bytes());
+        hasher.update(
+            u64::try_from(key_bytes.len())
+                .map_err(|_| StorageRewriteError::ResourceLimit)?
+                .to_be_bytes(),
+        );
         hasher.update(&key_bytes);
-        hasher.update(u64::try_from(value_bytes.len()).map_err(|_| StorageRewriteError::ResourceLimit)?.to_be_bytes());
+        hasher.update(
+            u64::try_from(value_bytes.len())
+                .map_err(|_| StorageRewriteError::ResourceLimit)?
+                .to_be_bytes(),
+        );
         hasher.update(&value_bytes);
         let row_hash = hasher.finalize().into();
         let (destination, editable_path, editable_bytes) = match target {
@@ -826,9 +834,10 @@ pub fn plan_storage_rewrite(
         });
     }
     if let StorageRewriteTarget::Editable = target
-        && portable_siblings_collide(output.iter().filter_map(|row| row.editable_path.as_ref())) {
-            return Err(StorageRewriteError::UnrepresentablePath);
-        }
+        && portable_siblings_collide(output.iter().filter_map(|row| row.editable_path.as_ref()))
+    {
+        return Err(StorageRewriteError::UnrepresentablePath);
+    }
     let logical_digest = digest_rows(
         output
             .iter()
@@ -858,9 +867,17 @@ fn digest_rows<'a>(
     let mut hasher = Sha256::new();
     hasher.update(b"orna.storage.logical-rows.v1\0");
     for (key, value) in rows {
-        hasher.update(u64::try_from(key.len()).map_err(|_| StorageRewriteError::ResourceLimit)?.to_be_bytes());
+        hasher.update(
+            u64::try_from(key.len())
+                .map_err(|_| StorageRewriteError::ResourceLimit)?
+                .to_be_bytes(),
+        );
         hasher.update(key);
-        hasher.update(u64::try_from(value.len()).map_err(|_| StorageRewriteError::ResourceLimit)?.to_be_bytes());
+        hasher.update(
+            u64::try_from(value.len())
+                .map_err(|_| StorageRewriteError::ResourceLimit)?
+                .to_be_bytes(),
+        );
         hasher.update(value);
     }
     Ok(hasher.finalize().into())
@@ -929,7 +946,9 @@ impl std::fmt::Display for StorageRewriteError {
             Self::AlreadyAtTarget => "storage rewrite target already matches the table placement",
             Self::DuplicateKey => "storage rewrite found duplicate logical keys",
             Self::PathCollision => "storage rewrite paths collide",
-            Self::UnrepresentablePath => "storage rewrite cannot represent a key as a portable path",
+            Self::UnrepresentablePath => {
+                "storage rewrite cannot represent a key as a portable path"
+            }
             Self::InvalidEditableRow => "storage rewrite produced an invalid editable row",
             Self::InvalidCanonicalRow => "storage rewrite row is not canonical",
             Self::CandidateMismatch => "storage rewrite candidate changes logical rows",

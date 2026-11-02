@@ -69,7 +69,10 @@ fn git_head(directory: &std::path::Path) -> String {
         .output()
         .expect("read Git HEAD");
     assert!(output.status.success());
-    String::from_utf8(output.stdout).expect("HEAD text").trim().to_owned()
+    String::from_utf8(output.stdout)
+        .expect("HEAD text")
+        .trim()
+        .to_owned()
 }
 
 fn commit_project(directory: &std::path::Path) {
@@ -124,12 +127,24 @@ fn checked_in_source_fixture_passes_check_with_and_without_debug() {
 #[test]
 fn normal_fetch_diagnostic_hides_raw_repository_detail_but_keeps_remedy() {
     let directory = project();
-    let output = run(directory.path(), &["--color", "never", "fetch", "missing", "main"]);
+    let output = run(
+        directory.path(),
+        &["--color", "never", "fetch", "missing", "main"],
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.starts_with("error[E2100]: Git fetch failed\n"), "{stderr}");
-    assert!(stderr.contains("help: check the configured remote and retry `fetch`\n"), "{stderr}");
-    assert!(!stderr.contains("\n  "), "raw technical detail leaked: {stderr}");
+    assert!(
+        stderr.starts_with("error[E2100]: Git fetch failed\n"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("help: check the configured remote and retry `fetch`\n"),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("\n  "),
+        "raw technical detail leaked: {stderr}"
+    );
     assert!(output.stdout.is_empty());
 }
 
@@ -142,9 +157,18 @@ fn debug_fetch_diagnostic_reveals_raw_repository_detail() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(stderr.starts_with("error[E2100]: Git fetch failed\n"), "{stderr}");
-    assert!(stderr.contains("\n  "), "debug detail was not rendered: {stderr}");
-    assert!(stderr.contains("help: check the configured remote and retry `fetch`\n"), "{stderr}");
+    assert!(
+        stderr.starts_with("error[E2100]: Git fetch failed\n"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("\n  "),
+        "debug detail was not rendered: {stderr}"
+    );
+    assert!(
+        stderr.contains("help: check the configured remote and retry `fetch`\n"),
+        "{stderr}"
+    );
     assert!(output.stdout.is_empty());
 }
 
@@ -157,8 +181,14 @@ fn debug_flag_after_color_option_keeps_the_selected_nonterminal_style() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(1), "{stderr}");
-    assert!(!stderr.contains("\x1b["), "debug mode changed color policy: {stderr:?}");
-    assert!(stderr.contains("\n  "), "debug detail was not rendered: {stderr}");
+    assert!(
+        !stderr.contains("\x1b["),
+        "debug mode changed color policy: {stderr:?}"
+    );
+    assert!(
+        stderr.contains("\n  "),
+        "debug detail was not rendered: {stderr}"
+    );
 }
 
 #[test]
@@ -176,7 +206,12 @@ fn repl_uses_ordinary_module_imports_without_a_namespace_command() {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("Orna init process");
-    assert_eq!(initialized.status.code(), Some(0), "{:?}", initialized.stderr);
+    assert_eq!(
+        initialized.status.code(),
+        Some(0),
+        "{:?}",
+        initialized.stderr
+    );
 
     let output = run_repl(directory.path(), REPL_USE_LIBRARY);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -194,9 +229,15 @@ fn repl_status_and_last_result_bindings_remain_session_local_and_redacted() {
     assert!(stdout.contains("ORNA-S021-TYPE"), "{stdout}");
     assert!(stdout.contains("42 : Int"), "{stdout}");
     assert!(stdout.contains("<redacted>"), "{stdout}");
-    assert!(!stdout.contains("private"), "sensitive fixture text leaked: {stdout}");
+    assert!(
+        !stdout.contains("private"),
+        "sensitive fixture text leaked: {stdout}"
+    );
     let whole = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
-    assert!(!whole.contains("private"), "sensitive fixture text leaked: {whole}");
+    assert!(
+        !whole.contains("private"),
+        "sensitive fixture text leaked: {whole}"
+    );
     assert!(output.stderr.is_empty());
 }
 
@@ -246,7 +287,12 @@ fn repl_opens_a_project_with_enums_types_and_protocols_and_evaluates_them() {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("Orna init process");
-    assert_eq!(initialized.status.code(), Some(0), "{:?}", initialized.stderr);
+    assert_eq!(
+        initialized.status.code(),
+        Some(0),
+        "{:?}",
+        initialized.stderr
+    );
 
     let output = run_repl(directory.path(), REPL_PROJECT_ITEMS_INPUT);
     let stdout = String::from_utf8_lossy(&output.stdout);

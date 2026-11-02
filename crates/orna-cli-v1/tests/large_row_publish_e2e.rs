@@ -525,7 +525,11 @@ fn a_composite_key_predicate_scan_pages_every_row() {
     // boundary and continue past it.
     for index in 0..300 {
         let name = format!("tone{index:03}.txt");
-        let mime = if index >= 200 { "text/plain" } else { "application/octet-stream" };
+        let mime = if index >= 200 {
+            "text/plain"
+        } else {
+            "application/octet-stream"
+        };
         std::fs::write(root.join(&name), vec![b'r'; 64]).expect("write the captured file");
         let input = format!(
             r#"let raw = sys.blob.capture_file({media_root}, "{name}", 4096);
@@ -542,7 +546,16 @@ main.Stock.insert({{ location: "north", sku: "widget {index:03}", quantity: {ind
     let scanned = json(
         &orna(
             &root,
-            &["query", relation.as_str(), "--kind", "text/plain", "--limit", "256", "--format", "json"],
+            &[
+                "query",
+                relation.as_str(),
+                "--kind",
+                "text/plain",
+                "--limit",
+                "256",
+                "--format",
+                "json",
+            ],
         ),
         "orna query composite predicate scan",
     );
@@ -578,7 +591,17 @@ fn a_bound_of_the_wrong_key_type_is_refused_naming_the_valid_spelling() {
     );
     publish(&root, "Add one tick");
 
-    let refused = orna(&root, &["query", relation.as_str(), "--from", "text:a", "--format", "json"]);
+    let refused = orna(
+        &root,
+        &[
+            "query",
+            relation.as_str(),
+            "--from",
+            "text:a",
+            "--format",
+            "json",
+        ],
+    );
     assert!(
         !refused.status.success() && transcript(&refused).contains("int:N"),
         "a text bound on an Int key is refused naming int:N:\n{}",
@@ -606,7 +629,16 @@ fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
     let scanned = json(
         &orna(
             &root,
-            &["query", &relation, "--from", "int:0", "--kind", "text/plain", "--format", "json"],
+            &[
+                "query",
+                &relation,
+                "--from",
+                "int:0",
+                "--kind",
+                "text/plain",
+                "--format",
+                "json",
+            ],
         ),
         "orna query --from int:0 --kind text/plain",
     );
@@ -638,7 +670,10 @@ fn history_resolves_an_integer_looking_key_past_the_row_lookup() {
     );
     publish(&root, "Add tick seven");
 
-    let history = orna(&root, &["history", relation.as_str(), "7", "--format", "json"]);
+    let history = orna(
+        &root,
+        &["history", relation.as_str(), "7", "--format", "json"],
+    );
     let stderr = transcript(&history);
     assert!(
         !history.status.success() && stderr.contains("DescriptorNotInRow"),
@@ -670,7 +705,17 @@ fn a_bound_on_a_composite_key_is_refused_for_every_spelling() {
     publish(&root, "Add one stock row");
 
     for bound in ["text:north", "int:1", "uint:1", "bytes:0102"] {
-        let refused = orna(&root, &["query", relation.as_str(), "--from", bound, "--format", "json"]);
+        let refused = orna(
+            &root,
+            &[
+                "query",
+                relation.as_str(),
+                "--from",
+                bound,
+                "--format",
+                "json",
+            ],
+        );
         assert!(
             !refused.status.success()
                 && transcript(&refused).contains("composite primary key")
@@ -697,7 +742,17 @@ fn a_bytes_bound_on_a_str_key_is_refused_naming_text() {
     );
     publish(&root, "Add one note");
 
-    let refused = orna(&root, &["query", relation.as_str(), "--from", "bytes:61", "--format", "json"]);
+    let refused = orna(
+        &root,
+        &[
+            "query",
+            relation.as_str(),
+            "--from",
+            "bytes:61",
+            "--format",
+            "json",
+        ],
+    );
     assert!(
         !refused.status.success() && transcript(&refused).contains("text:KEY"),
         "a bytes bound on a Str key is refused naming text:KEY:\n{}",
@@ -725,19 +780,46 @@ fn a_bool_keyed_table_is_refused_for_bounds_and_key_lookup() {
     let scanned = json(
         &orna(
             &root,
-            &["query", relation.as_str(), "--kind", "text/plain", "--format", "json"],
+            &[
+                "query",
+                relation.as_str(),
+                "--kind",
+                "text/plain",
+                "--format",
+                "json",
+            ],
         ),
         "orna query Bool predicate scan",
     );
     assert_eq!(scanned["rows"], 1, "{scanned}");
 
-    let bounded = orna(&root, &["query", relation.as_str(), "--from", "text:true", "--format", "json"]);
+    let bounded = orna(
+        &root,
+        &[
+            "query",
+            relation.as_str(),
+            "--from",
+            "text:true",
+            "--format",
+            "json",
+        ],
+    );
     assert!(
         !bounded.status.success() && transcript(&bounded).contains("ornadb-5il1.461"),
         "a bound on a Bool key is refused naming ornadb-5il1.461:\n{}",
         transcript(&bounded)
     );
-    let keyed = orna(&root, &["query", relation.as_str(), "--key", "text:true", "--format", "json"]);
+    let keyed = orna(
+        &root,
+        &[
+            "query",
+            relation.as_str(),
+            "--key",
+            "text:true",
+            "--format",
+            "json",
+        ],
+    );
     assert!(
         !keyed.status.success() && transcript(&keyed).contains("ornadb-5il1.461"),
         "a --key lookup on a Bool key is refused naming ornadb-5il1.461:\n{}",

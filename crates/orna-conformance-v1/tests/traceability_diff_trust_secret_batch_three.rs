@@ -1,19 +1,31 @@
-use std::{
-    collections::BTreeMap,
-    process::Command,
-};
+use std::{collections::BTreeMap, process::Command};
 
 use futures::executor::block_on;
-use orna_core::{CatalogueRevisionId, SchemaId, catalogue::CatalogueSnapshot, catalogue::SchemaDefinition, catalogue::QualifiedSemanticName, catalogue_diff::{SemanticChange, catalogue_diff}};
+use orna_core::{
+    CatalogueRevisionId, SchemaId,
+    catalogue::CatalogueSnapshot,
+    catalogue::QualifiedSemanticName,
+    catalogue::SchemaDefinition,
+    catalogue_diff::{SemanticChange, catalogue_diff},
+};
 use orna_foundation_v1::{CanonicalValue, OvbRaw, SchemaDescriptor};
-use orna_live_v1::{Error as LiveError, Limits as LiveLimits, LiveCredentialIssuer, LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata, TransportLimits, WireRequest};
+use orna_live_v1::{
+    Error as LiveError, Limits as LiveLimits, LiveCredentialIssuer, LiveHost, LiveSessionAuthority,
+    LiveTransport, SessionMetadata, TransportLimits, WireRequest,
+};
 use orna_repository_v1::CompactCommittedSegmentProjection;
 use orna_runtime_v1::{PublicationRowEncoding, PublicationValueEncoding};
-use orna_security_v1::{CredentialIssuer, Origin, OriginPolicy, SecretMetadata, SecretRef, SecretResolver, SessionBoundary, SessionDeletionAdapter};
+use orna_security_v1::{
+    CredentialIssuer, Origin, OriginPolicy, SecretMetadata, SecretRef, SecretResolver,
+    SessionBoundary, SessionDeletionAdapter,
+};
 use orna_serving_v1::{Limits as ServingLimits, Serving};
-use orna_storage_v1::{CompactBaseState, CompactKeyIdentity, CompactOvbProfile, CompactWriterInput, CompactWriterMutation, CompactWriterMutationState, fold_compact_committed_base};
-use orna_sys_v1::{Diagnostic, DiagnosticField, TypeId, TypedValue};
+use orna_storage_v1::{
+    CompactBaseState, CompactKeyIdentity, CompactOvbProfile, CompactWriterInput,
+    CompactWriterMutation, CompactWriterMutationState, fold_compact_committed_base,
+};
 use orna_syntax_v1::parse_module;
+use orna_sys_v1::{Diagnostic, DiagnosticField, TypeId, TypedValue};
 use tempfile::tempdir;
 
 const SOURCE: &str = include_str!("fixtures/traceability-diff-trust-secret.orna");
@@ -26,8 +38,8 @@ fn require_fixture() {
 #[test]
 fn semantic_catalogue_diff_reports_a_schema_addition() {
     require_fixture();
-    let base = CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([1; 16]), vec![], vec![])
-        .unwrap();
+    let base =
+        CatalogueSnapshot::new(CatalogueRevisionId::from_bytes([1; 16]), vec![], vec![]).unwrap();
     let candidate = CatalogueSnapshot::new(
         CatalogueRevisionId::from_bytes([2; 16]),
         vec![SchemaDefinition::new(
@@ -203,7 +215,10 @@ fn default_live_listener_reports_loopback_exposure() {
     require_fixture();
     let listener = LiveTransport::bind_default_listener(0).unwrap();
     assert!(listener.status().address.ip().is_loopback());
-    assert_eq!(listener.status().exposure, orna_live_v1::ListenerExposure::Loopback);
+    assert_eq!(
+        listener.status().exposure,
+        orna_live_v1::ListenerExposure::Loopback
+    );
 }
 
 #[test]
@@ -232,26 +247,32 @@ fn anonymous_delete_is_denied_before_session_mutation() {
 fn secret_reference_fixture_contains_a_stable_name_not_secret_material() {
     require_fixture();
     assert!(SOURCE.contains("std.secret.ref(\"google.personal\")"));
-    assert!(!SOURCE
-        .as_bytes()
-        .windows(TEST_SECRET.len())
-        .any(|window| window == TEST_SECRET));
+    assert!(
+        !SOURCE
+            .as_bytes()
+            .windows(TEST_SECRET.len())
+            .any(|window| window == TEST_SECRET)
+    );
 
     let directory = tempdir().unwrap();
     let repository = directory.path();
-    assert!(Command::new("git")
-        .args(["init", "--quiet"])
-        .current_dir(repository)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(repository)
+            .status()
+            .unwrap()
+            .success()
+    );
     std::fs::write(repository.join("safe-reference.orna"), SOURCE).unwrap();
-    assert!(Command::new("git")
-        .args(["add", "--", "safe-reference.orna"])
-        .current_dir(repository)
-        .status()
-        .unwrap()
-        .success());
+    assert!(
+        Command::new("git")
+            .args(["add", "--", "safe-reference.orna"])
+            .current_dir(repository)
+            .status()
+            .unwrap()
+            .success()
+    );
     let staged = Command::new("git")
         .args(["show", ":safe-reference.orna"])
         .current_dir(repository)
@@ -259,7 +280,12 @@ fn secret_reference_fixture_contains_a_stable_name_not_secret_material() {
         .unwrap();
     assert!(staged.status.success());
     assert!(String::from_utf8_lossy(&staged.stdout).contains("google.personal"));
-    assert!(!staged.stdout.windows(TEST_SECRET.len()).any(|window| window == TEST_SECRET));
+    assert!(
+        !staged
+            .stdout
+            .windows(TEST_SECRET.len())
+            .any(|window| window == TEST_SECRET)
+    );
 }
 
 #[test]
@@ -292,7 +318,11 @@ impl SecretResolver for Resolver {
         &self,
         reference: &SecretRef,
     ) -> Result<SecretMetadata, orna_security_v1::SecretBoundaryError> {
-        Ok(SecretMetadata::new(reference.clone(), "test-provider", true))
+        Ok(SecretMetadata::new(
+            reference.clone(),
+            "test-provider",
+            true,
+        ))
     }
 
     fn with_secret<T>(
@@ -314,7 +344,10 @@ fn secret_ref_displays_by_stable_name_and_not_resolved_value() {
     assert!(display.contains("test-provider"));
     assert!(!display.contains(std::str::from_utf8(TEST_SECRET).unwrap()));
     let mut consume = |value: &[u8]| value.len();
-    assert_eq!(Resolver.with_secret(&reference, &mut consume), Ok(TEST_SECRET.len()));
+    assert_eq!(
+        Resolver.with_secret(&reference, &mut consume),
+        Ok(TEST_SECRET.len())
+    );
 }
 
 #[test]

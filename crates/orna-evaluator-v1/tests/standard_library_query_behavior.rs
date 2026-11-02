@@ -14,9 +14,10 @@ fn pinned_query_exports_execute_their_source_bodies() {
     let fixture = include_str!("fixtures/stdlib-query-complete-behavior-yn4vz.orna");
     for (index, behavior) in fixture.split("\n&& ").enumerate() {
         assert_eq!(
-            session
-                .submit(behavior)
-                .unwrap_or_else(|error| panic!("query behavior {index} failed: {} ({behavior})", error.code())),
+            session.submit(behavior).unwrap_or_else(|error| panic!(
+                "query behavior {index} failed: {} ({behavior})",
+                error.code()
+            )),
             expected,
             "query behavior {index}: {behavior}"
         );

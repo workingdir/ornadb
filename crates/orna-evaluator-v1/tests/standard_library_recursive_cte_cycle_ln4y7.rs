@@ -23,5 +23,9 @@ fn session() -> AdmittedReplSession {
 fn recursive_cte_cycle_is_cut_by_the_identity_set() {
     let mut session = session();
     let source = include_str!("fixtures/stdlib-query-recursive-cte-cycle-guard-ln4y7.orna");
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

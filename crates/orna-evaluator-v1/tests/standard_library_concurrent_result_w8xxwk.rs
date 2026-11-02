@@ -44,7 +44,11 @@ fn pinned_runtime() -> (Functions, NominalDefinitions) {
             )
         })
         .collect::<Vec<_>>();
-    assert_eq!(selected.len(), 4, "the result adapter's pinned modules exist");
+    assert_eq!(
+        selected.len(),
+        4,
+        "the result adapter's pinned modules exist"
+    );
 
     let mut functions = Functions::new();
     for (path, source) in selected {
@@ -77,19 +81,13 @@ fn pinned_runtime() -> (Functions, NominalDefinitions) {
         }
     }
 
-    let result_definition = NominalDefinition::new(
-        [1; 16],
-        Some("std.result".into()),
-        Vec::new(),
-    )
-    .with_enum_variants(vec![
-        NominalVariant::new([2; 16], "Ok"),
-        NominalVariant::new([3; 16], "Err"),
-    ]);
-    let nominal_definitions = NominalDefinitions::from([(
-        "std.result.Result".into(),
-        result_definition,
-    )]);
+    let result_definition = NominalDefinition::new([1; 16], Some("std.result".into()), Vec::new())
+        .with_enum_variants(vec![
+            NominalVariant::new([2; 16], "Ok"),
+            NominalVariant::new([3; 16], "Err"),
+        ]);
+    let nominal_definitions =
+        NominalDefinitions::from([("std.result.Result".into(), result_definition)]);
     (functions, nominal_definitions)
 }
 

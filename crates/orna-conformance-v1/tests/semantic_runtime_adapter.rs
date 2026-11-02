@@ -161,9 +161,8 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
     }
 
     let mut evaluator = TransactionalEvaluator::new("main", Limits::default());
-    let inserted = evaluator.execute_source(&source(include_str!(
-        "fixtures/decimal-cursor-insert.orna"
-    )));
+    let inserted =
+        evaluator.execute_source(&source(include_str!("fixtures/decimal-cursor-insert.orna")));
     assert!(
         matches!(inserted, StageOutcome::Passed),
         "source insertion failed: {inserted:?}"
@@ -172,9 +171,8 @@ fn admitted_source_relation_pages_traverse_decimal_keys() {
     // Relation evaluation is admitted source execution. Decimal-key pages
     // must resume at the canonical numeric successor without replaying or
     // skipping a row.
-    let paged = evaluator.execute_source(&source(include_str!(
-        "fixtures/decimal-cursor-pages.orna"
-    )));
+    let paged =
+        evaluator.execute_source(&source(include_str!("fixtures/decimal-cursor-pages.orna")));
     assert!(
         matches!(paged, StageOutcome::Passed),
         "Decimal page assertions failed: {paged:?}"
@@ -491,7 +489,6 @@ fn semantic_project_adapter_rejects_non_string_sys_resolve_argument_at_typecheck
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
 
-
 #[test]
 fn semantic_project_adapter_admits_sys_snapshot_string_as_pinned_read() {
     let source = include_str!("fixtures/sys-snapshot-string.orna");
@@ -542,8 +539,7 @@ fn semantic_project_adapter_admits_sys_current_snapshot_as_snapshot_ref_observat
         &Catalogue::authoritative_fixture(),
     );
     assert!(analysis.is_ok(), "{:?}", analysis.diagnostics);
-    let current_snapshot =
-        &analysis.modules.values().next().unwrap().exports["current_snapshot"];
+    let current_snapshot = &analysis.modules.values().next().unwrap().exports["current_snapshot"];
     assert!(matches!(
         &current_snapshot.ty,
         Type::Function { result, .. }
@@ -564,9 +560,11 @@ fn semantic_project_adapter_rejects_unsupported_sys_current_member_at_typecheck(
     let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
         panic!("unsupported sys.current member must fail at typecheck");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA-S022-UNSUPPORTED"
+    );
 }
-
 
 #[test]
 fn semantic_project_adapter_rejects_non_string_sys_snapshot_argument_at_typecheck() {
@@ -607,7 +605,9 @@ fn semantic_project_adapter_admits_sys_database_cwd_as_snapshot_ref_read() {
             if result.as_ref() == &Type::Named("sys.SnapshotRef".into())
     ));
     assert!(
-        cwd.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead),
+        cwd.effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead),
         "{:?}",
         cwd.effects
     );
@@ -637,7 +637,10 @@ fn semantic_project_adapter_admits_sys_database_writable_as_bool_read() {
         Type::Function { result, .. } if result.as_ref() == &Type::Bool
     ));
     assert!(
-        writable.effects.effects.contains(&orna_semantic_v1::EffectKind::TableRead),
+        writable
+            .effects
+            .effects
+            .contains(&orna_semantic_v1::EffectKind::TableRead),
         "{:?}",
         writable.effects
     );
@@ -654,7 +657,10 @@ fn semantic_project_adapter_rejects_unsupported_sys_database_member_at_typecheck
     let StageOutcome::Failed(diagnostic) = adapter.typecheck_project(&project) else {
         panic!("unsupported sys.database member must fail at typecheck");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S022-UNSUPPORTED");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA-S022-UNSUPPORTED"
+    );
 }
 
 #[test]
@@ -698,7 +704,10 @@ fn semantic_project_adapter_rejects_removed_sys_runtime_with_native_diagnostic()
     let StageOutcome::Failed(diagnostic) = adapter.resolve_project(&project) else {
         panic!("removed sys.runtime must fail during source resolution");
     };
-    assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA100-E-SYS-RUNTIME");
+    assert_eq!(
+        adapter.diagnostic_code(&diagnostic),
+        "ORNA100-E-SYS-RUNTIME"
+    );
     assert_eq!(
         adapter.diagnostic_message(&diagnostic),
         "`sys.runtime` was renamed to `sys.rt`"
@@ -887,7 +896,6 @@ fn semantic_project_adapter_rejects_typed_sys_start_without_explicit_witness() {
     );
 }
 
-
 #[test]
 fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
     let source = include_str!("fixtures/typed-start-mismatch.orna");
@@ -905,7 +913,6 @@ fn semantic_project_adapter_rejects_typed_sys_start_mismatched_witness() {
         "sys.start explicit type argument must match the as: witness"
     );
 }
-
 
 #[test]
 fn semantic_project_adapter_admits_inferred_and_explicit_typed_sys_await() {
@@ -942,7 +949,6 @@ fn semantic_project_adapter_rejects_mismatched_explicit_sys_await_type() {
     };
     assert_eq!(adapter.diagnostic_code(&diagnostic), "ORNA-S021-TYPE");
 }
-
 
 #[tokio::test]
 async fn project_stream_ignores_unrelated_false_module_assertion() {
@@ -1040,7 +1046,11 @@ async fn project_stream_ignores_unrelated_false_module_assertion() {
         .expect("runtime state");
     assert_eq!(state.committed_table_rows("Loan").await.unwrap().len(), 1);
     assert_eq!(
-        state.committed_table_rows("sensors.Reading").await.unwrap().len(),
+        state
+            .committed_table_rows("sensors.Reading")
+            .await
+            .unwrap()
+            .len(),
         2
     );
 
@@ -1489,7 +1499,10 @@ fn project_row_admission_resolves_declared_owner_path_key_and_evaluated_body() {
     let rows = orna_conformance_v1::row_admission::admit_project_rows(
         &project,
         &analysis,
-        &orna_conformance_v1::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() },
+        &orna_conformance_v1::row_admission::RowAdmissionIdentity {
+            database_id: [0; 16],
+            tables: std::collections::BTreeMap::new(),
+        },
         Limits::default(),
     )
     .expect("project-context row admission");
@@ -1647,7 +1660,8 @@ fn project_row_admission_admits_automatic_and_composite_keys() {
                 fixture_id: "project-rows-key-shapes".into(),
                 source_id: "logical/project/inventory/Reading/greenhouse/2.orna".into(),
                 parse_as: "row_unit".into(),
-                source: include_str!("fixtures/row-admission/key-shapes-reading-greenhouse-2.orna").into(),
+                source: include_str!("fixtures/row-admission/key-shapes-reading-greenhouse-2.orna")
+                    .into(),
             },
         ],
         expectations: ProjectExpectations {
@@ -1727,7 +1741,10 @@ fn project_row_admission_accepts_exact_current_container_forms() {
     let rows = orna_conformance_v1::row_admission::admit_project_rows(
         &project,
         &analysis,
-        &orna_conformance_v1::row_admission::RowAdmissionIdentity { database_id: [0; 16], tables: std::collections::BTreeMap::new() },
+        &orna_conformance_v1::row_admission::RowAdmissionIdentity {
+            database_id: [0; 16],
+            tables: std::collections::BTreeMap::new(),
+        },
         Limits::default(),
     )
     .expect("container row admission");
@@ -2368,7 +2385,8 @@ fn bounded_evaluator_invokes_retained_functions_with_named_arguments_and_default
 #[test]
 fn bounded_evaluator_executes_only_profile_verified_pure_standard_sources() {
     let source = include_str!("fixtures/bounded-evaluator-standard-math.orna");
-    let unverified_source = include_str!("fixtures/bounded-evaluator-standard-math-unverified.orna");
+    let unverified_source =
+        include_str!("fixtures/bounded-evaluator-standard-math-unverified.orna");
     let profile = orna_semantic_v1::StandardDependencyProfile::from_sources(
         "std-snapshot-1",
         [("std/math.orna".into(), source.into())],
@@ -2714,7 +2732,11 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
         .committed_table_rows("sensors.Reading")
         .await
         .expect("first committed rows");
-    assert_eq!(rows.len(), 2, "both zero-based list items must be delivered");
+    assert_eq!(
+        rows.len(),
+        2,
+        "both zero-based list items must be delivered"
+    );
     let streams = state.stream_observations().await.expect("first stream");
     assert_eq!(streams.len(), 1);
     let first_stream = &streams[0];
@@ -2826,11 +2848,17 @@ async fn project_stream_checkpoint_restarts_by_position_and_binds_list_contents(
             "changed list item {value} must be delivered from position zero"
         );
     }
-    let streams = state.stream_observations().await.expect("all stream observations");
-    assert_eq!(streams.len(), 2, "changed source identity creates a new stream");
+    let streams = state
+        .stream_observations()
+        .await
+        .expect("all stream observations");
+    assert_eq!(
+        streams.len(),
+        2,
+        "changed source identity creates a new stream"
+    );
     assert_ne!(
-        streams[0].checkpoint.source,
-        streams[1].checkpoint.source,
+        streams[0].checkpoint.source, streams[1].checkpoint.source,
         "the complete immutable list content participates in source identity"
     );
     for stream in streams {

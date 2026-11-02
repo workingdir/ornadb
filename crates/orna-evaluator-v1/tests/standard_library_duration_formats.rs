@@ -49,7 +49,9 @@ fn pinned_duration_formatters_apply_explicit_context_and_elapsed_units() {
     }
     assert_eq!(
         session
-            .submit(include_str!("fixtures/stdlib-time-duration-bad-locale-b1e0.orna"))
+            .submit(include_str!(
+                "fixtures/stdlib-time-duration-bad-locale-b1e0.orna"
+            ))
             .unwrap_err()
             .code(),
         "ORNA-EVAL-VALUE"

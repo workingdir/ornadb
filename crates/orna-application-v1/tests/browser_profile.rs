@@ -34,10 +34,17 @@ fn independent_http_renderer_and_second_app_use_the_public_profile_entry() {
     let second_app = execute_browser_profile(SECOND_APP_SOURCE, "home")
         .expect("second ordinary application uses the same public profile entry");
 
-    assert_eq!(response.raw(), &OvbRaw::Text(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<main><button>Run</button></main>".to_owned(),
-    ));
-    assert_eq!(second_app.raw(), &OvbRaw::Text("A second ordinary source-hosted app".to_owned()));
+    assert_eq!(
+        response.raw(),
+        &OvbRaw::Text(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<main><button>Run</button></main>"
+                .to_owned(),
+        )
+    );
+    assert_eq!(
+        second_app.raw(),
+        &OvbRaw::Text("A second ordinary source-hosted app".to_owned())
+    );
 }
 
 #[test]

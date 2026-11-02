@@ -15,9 +15,6 @@ use serde_json::Value;
 #[path = "../src/abi_version.rs"]
 #[allow(dead_code)]
 mod abi_version;
-#[path = "../src/host_registry_model.rs"]
-#[allow(dead_code)]
-mod host_registry_model;
 #[path = "../build_host.rs"]
 #[allow(dead_code)]
 mod build_host;
@@ -27,6 +24,9 @@ mod build_provider;
 #[path = "../build_support.rs"]
 #[allow(dead_code)]
 mod build_support;
+#[path = "../src/host_registry_model.rs"]
+#[allow(dead_code)]
+mod host_registry_model;
 
 const GENERIC_KEYWORD_STUB_FIXTURE: &str = include_str!("fixtures/sys-invoke-generic-keyword.orna");
 const GENERIC_START_KEYWORD_STUB_FIXTURE: &str =
@@ -2432,10 +2432,7 @@ fn generated_provider_metadata_edges_match_schema_and_bindings() {
 
     let descriptor = system_function_descriptor(api_function)
         .expect("sys.meta has a macro-generated public API descriptor");
-    assert_eq!(
-        descriptor.signature,
-        fixture["signature"].as_str().unwrap()
-    );
+    assert_eq!(descriptor.signature, fixture["signature"].as_str().unwrap());
 
     let api: Value = serde_json::from_str(&system_api_json())
         .expect("generated system API inventory is valid JSON");

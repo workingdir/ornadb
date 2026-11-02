@@ -106,9 +106,7 @@ impl SopsProvider {
             .map_err(|_| UNAVAILABLE)?;
         staged.as_file().sync_all().map_err(|_| UNAVAILABLE)?;
         ciphertext.zeroize();
-        staged
-            .persist(&encrypted_path)
-            .map_err(|_| UNAVAILABLE)?;
+        staged.persist(&encrypted_path).map_err(|_| UNAVAILABLE)?;
         Ok(())
     }
 
@@ -131,10 +129,7 @@ impl SopsProvider {
         self.run_sops("encrypt", plaintext, encrypted_path)
     }
 
-    fn decrypt(
-        &self,
-        encrypted_path: &Path,
-    ) -> Result<Zeroizing<Vec<u8>>, SecretBoundaryError> {
+    fn decrypt(&self, encrypted_path: &Path) -> Result<Zeroizing<Vec<u8>>, SecretBoundaryError> {
         let file_type = fs::symlink_metadata(encrypted_path)
             .map_err(|_| UNAVAILABLE)?
             .file_type();
@@ -176,16 +171,17 @@ impl SopsProvider {
 }
 
 impl SecretResolver for SopsProvider {
-    fn metadata(
-        &self,
-        reference: &SecretRef,
-    ) -> Result<SecretMetadata, SecretBoundaryError> {
+    fn metadata(&self, reference: &SecretRef) -> Result<SecretMetadata, SecretBoundaryError> {
         // Availability includes whether the local identity can decrypt this
         // file, so metadata probes through SOPS. That can contact a configured
         // KMS on each lookup, but SOPS emits plaintext only to this short-lived
         // zeroizing memory buffer; no bytes are returned through metadata.
         let available = self.decrypt(&self.encrypted_path(reference)).is_ok();
-        Ok(SecretMetadata::new(reference.clone(), PROVIDER_NAME, available))
+        Ok(SecretMetadata::new(
+            reference.clone(),
+            PROVIDER_NAME,
+            available,
+        ))
     }
 
     fn with_secret<T>(

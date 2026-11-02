@@ -195,10 +195,15 @@ pub fn capture_failure(
     max_bytes: u64,
 ) -> String {
     let source = format!("sys.blob.capture_file({root:?}, {path:?}, {max_bytes})");
-    evaluate_expression_ovb2_with_effects(&source, &BTreeMap::default(), Limits::default(), bindings)
-        .unwrap_err()
-        .code()
-        .to_owned()
+    evaluate_expression_ovb2_with_effects(
+        &source,
+        &BTreeMap::default(),
+        Limits::default(),
+        bindings,
+    )
+    .unwrap_err()
+    .code()
+    .to_owned()
 }
 
 pub fn empty_format3_repository() -> (TempDir, Repository, [u8; 16]) {
@@ -431,8 +436,12 @@ pub fn format3_repository_with_context_and_modules(
         format3_repository_parts(media_source, &[table_name], extra_modules);
     let relation = relations.into_iter().next().unwrap();
     let commit = repository.head().unwrap().unwrap();
-    let context =
-        persisted_format3_context(&repository, commit.as_str(), &relation.schema_oid, &store_root);
+    let context = persisted_format3_context(
+        &repository,
+        commit.as_str(),
+        &relation.schema_oid,
+        &store_root,
+    );
     (directory, repository, relation.relation_id, context)
 }
 
@@ -479,7 +488,11 @@ fn format3_repository_parts(
     let database =
         format!("{{\n    repository_format: 3,\n    database_id: \"{database_uuid}\",\n}}\n");
     let mut modules = vec![ModuleInput::new("main.orna", media_source)];
-    modules.extend(extra_modules.iter().map(|&(path, source)| ModuleInput::new(path, source)));
+    modules.extend(
+        extra_modules
+            .iter()
+            .map(|&(path, source)| ModuleInput::new(path, source)),
+    );
     let analysis = analyze(&modules);
     let identities = ObjectIdentityManifest::reconcile(&modules, None).unwrap();
     let manifest_bytes = identities.encode().unwrap();

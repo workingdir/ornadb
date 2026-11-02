@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use orna_value_v1::{
-    decode_rov3, decode_rov3_in_context, encode_rov3, AvailabilityState, Blob, BlobResolver,
-    ContentIdentity, ContentReference, ContextValue, Error, Format3Context, Format3Quota, GitHash,
-    NativeOid, OwnerLifetime, Snapshot, ValueFormat,
+    AvailabilityState, Blob, BlobResolver, ContentIdentity, ContentReference, ContextValue, Error,
+    Format3Context, Format3Quota, GitHash, NativeOid, OwnerLifetime, Snapshot, ValueFormat,
+    decode_rov3, decode_rov3_in_context, encode_rov3,
 };
 
 struct FixedResolver(Vec<u8>);

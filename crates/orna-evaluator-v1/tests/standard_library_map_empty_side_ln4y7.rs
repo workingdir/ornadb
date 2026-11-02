@@ -10,11 +10,16 @@ fn reference_map_session() -> AdmittedReplSession {
     let mut session = AdmittedReplSession::with_reference_standard(Limits::default())
         .unwrap_or_else(|error| panic!("reference standard failed to load: {}", error.code()));
     assert_eq!(
-        session.submit(include_str!("fixtures/stdlib-use-collection-alias-yfifu.orna")),
+        session.submit(include_str!(
+            "fixtures/stdlib-use-collection-alias-yfifu.orna"
+        )),
         Ok(None)
     );
     assert_eq!(session.submit("use std.map as map;"), Ok(None));
-    assert_eq!(session.submit("let empty_pairs: [(Str, Int)] = [];"), Ok(None));
+    assert_eq!(
+        session.submit("let empty_pairs: [(Str, Int)] = [];"),
+        Ok(None)
+    );
     session
 }
 
@@ -24,8 +29,15 @@ fn map_merge_with_an_empty_side_is_identity_on_the_other_side() {
     let fixture = include_str!("fixtures/stdlib-map-empty-side-ln4y7.orna");
     for (index, expression) in fixture.split("\n&& ").enumerate() {
         let actual = session.submit(expression).unwrap_or_else(|error| {
-            panic!("map empty-side behavior {index} failed: {} ({expression})", error.code())
+            panic!(
+                "map empty-side behavior {index} failed: {} ({expression})",
+                error.code()
+            )
         });
-        assert_eq!(actual, Some(boolean(true)), "map empty-side behavior {index}: {expression}");
+        assert_eq!(
+            actual,
+            Some(boolean(true)),
+            "map empty-side behavior {index}: {expression}"
+        );
     }
 }

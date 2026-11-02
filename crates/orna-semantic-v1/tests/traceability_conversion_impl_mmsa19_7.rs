@@ -204,7 +204,12 @@ pub fn rejected(): Plain = keep(Plain { value: "a" });
 "#,
     )]);
 
-    assert_eq!(count_protocol_diagnostics(&result), 1, "{:#?}", result.diagnostics);
+    assert_eq!(
+        count_protocol_diagnostics(&result),
+        1,
+        "{:#?}",
+        result.diagnostics
+    );
     assert!(
         returns_nominal(&export(&result, "accepted").ty, "Username"),
         "{:?}",
@@ -237,7 +242,12 @@ pub fn rejected(): Bare = keep(Bare.from(8080));
 "#,
     )]);
 
-    assert_eq!(count_protocol_diagnostics(&result), 1, "{:#?}", result.diagnostics);
+    assert_eq!(
+        count_protocol_diagnostics(&result),
+        1,
+        "{:#?}",
+        result.diagnostics
+    );
 }
 
 // Specified: ORNA-CONVERT-001, ORNA-CONVERT-002, ORNA-CONVERT-007, CONVERT-1 steps 2 and 6.

@@ -2,8 +2,8 @@ use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    CheckpointKey, CheckpointResetRequest, Component, ConsumerIdentity, NoFault,
-    RuntimeIdentity, RuntimeState, StreamAdministrationOutcome, TableMutation,
+    CheckpointKey, CheckpointResetRequest, Component, ConsumerIdentity, NoFault, RuntimeIdentity,
+    RuntimeState, StreamAdministrationOutcome, TableMutation,
 };
 use orna_stream_v1::CheckpointPrecondition;
 use tempfile::TempDir;
@@ -29,17 +29,17 @@ fn repository() -> (TempDir, Repository) {
         directory.path(),
         &["init", "--quiet", "--initial-branch=main", "--template="],
     );
-    git(
-        directory.path(),
-        &["config", "user.name", "kierandrewett"],
-    );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
     git(
         directory.path(),
         &["config", "user.email", "kieran@drewett.dev"],
     );
     fs::write(directory.path().join("main.orna"), MAIN).expect("write fixture module");
     git(directory.path(), &["add", "main.orna"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "history fixture"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "history fixture"],
+    );
     let repository = Repository::discover(directory.path()).expect("discover repository");
     (directory, repository)
 }
@@ -107,8 +107,7 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
         .commit_table_activation(
             writer,
             &activation,
-            &[TableMutation::new([45; 16], "records", vec![1], Some(b"row".to_vec()))
-                .unwrap()],
+            &[TableMutation::new([45; 16], "records", vec![1], Some(b"row".to_vec())).unwrap()],
             [46; 32],
             &NoFault,
         )
@@ -194,7 +193,10 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
         )
         .await
         .expect("record redacted reset after generation one");
-    let activation = state.begin_activation().await.expect("capture next activation");
+    let activation = state
+        .begin_activation()
+        .await
+        .expect("capture next activation");
     state
         .commit_table_activation(
             writer,
@@ -220,7 +222,11 @@ async fn governance_reads_and_row_attestations_follow_immutable_checkpoint_cuts(
         2,
         "generation one must not absorb later governance actions"
     );
-    assert_eq!(generation_one.generation(), 1, "pins retain their selected generation");
+    assert_eq!(
+        generation_one.generation(),
+        1,
+        "pins retain their selected generation"
+    );
     assert_eq!(
         state
             .select_historical_snapshot(u64::MAX)

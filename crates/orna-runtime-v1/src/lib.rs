@@ -76,14 +76,13 @@ mod catalogue;
 mod checkpoint_bootstrap;
 mod invocation;
 mod query;
+mod repository_identity;
 /// FUSE-free projected file and EDIT-1 replacement APIs for runtime owners.
 pub mod vfs;
-mod repository_identity;
 pub use repository_identity::{
     migration_copy_runtime_identity, repository_runtime_identity, runtime_identity_for_database_id,
 };
 mod stream_carry;
-pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 pub use catalogue::{
     CatalogueAdmission, CatalogueAdmissionResult, CatalogueDeclaration, CatalogueError,
     CatalogueFunction, CatalogueFunctionDeclaration, CatalogueModule, CatalogueModuleDeclaration,
@@ -96,10 +95,11 @@ pub use invocation::{
     InvocationObservationStatus, InvocationObservationTailCursor, InvocationObservationTailEntry,
     InvocationObservationTailPage, MaterializedProcedure, MaterializedProcedureParameter,
 };
+pub use stream_carry::{StreamCarry, StreamCarryError, import_stream_carry, read_stream_carry};
 
 pub use query::{
-    QueryObservation, QueryObservationRegistration, SysMaterializationProjection,
-    SysQueryProjection, SYS_MATERIALIZATION_TABLE_ID, SYS_QUERY_TABLE_ID,
+    QueryObservation, QueryObservationRegistration, SYS_MATERIALIZATION_TABLE_ID,
+    SYS_QUERY_TABLE_ID, SysMaterializationProjection, SysQueryProjection,
 };
 
 const SCHEMA: &str = r#"
@@ -2489,7 +2489,9 @@ pub enum RuntimeError {
     AdminInvocationConflict,
     OwnerLost,
     RecoveryPending,
-    StaleCapture { current: Box<CwdCapture> },
+    StaleCapture {
+        current: Box<CwdCapture>,
+    },
     InvalidCapture,
     EmptyMutationBatch,
     InvalidTableMutation,
@@ -2569,14 +2571,18 @@ impl fmt::Display for RuntimeError {
                 "runtime invocation observation conflicts with retained state"
             }
             Self::InvocationStateConflict => "runtime invocation state transition conflicts",
-            Self::QueryObservationConflict => "runtime query observation conflicts with retained state",
+            Self::QueryObservationConflict => {
+                "runtime query observation conflicts with retained state"
+            }
             Self::QueryStateConflict => "runtime query state transition conflicts",
             Self::InvocationChildrenActive => "runtime invocation has active child invocations",
             Self::InvocationOwnerInvalid => "runtime invocation owner or arguments are invalid",
             Self::InvocationTailInvalid => "runtime invocation tail cursor is invalid",
             Self::InvocationTailLimit => "runtime invocation tail page limit is invalid",
             Self::StreamIdentityMismatch => "stream source identity mismatch",
-            Self::MigrationCarryTargetDiffers => "migration carry target holds stream rows that differ from the carry",
+            Self::MigrationCarryTargetDiffers => {
+                "migration carry target holds stream rows that differ from the carry"
+            }
             Self::StreamSourceNotReplayable => "stream source does not support durable recovery",
             Self::StreamCheckpointStale => "stream checkpoint is stale",
             Self::CheckpointNotReplayable => "checkpoint target is not replayable",
@@ -2584,7 +2590,9 @@ impl fmt::Display for RuntimeError {
             Self::SnapshotIncomplete => "historical runtime generation is incomplete",
             Self::SnapshotContextMismatch => "historical snapshot contexts do not match",
             Self::StreamFailureStale => "stream failure changed after it was observed",
-            Self::StreamFailureStateConflict => "stream failure transition is not allowed from its state",
+            Self::StreamFailureStateConflict => {
+                "stream failure transition is not allowed from its state"
+            }
             Self::StreamFailureSkipUnsupported => "stream failure cannot be skipped safely",
             Self::LeaseHeld => "runtime writer is held",
             Self::AdminBusy => "runtime administration callback is busy",
@@ -5045,7 +5053,10 @@ impl RuntimeState {
         // Receipt recovery opens runtime while the repository journal can still
         // be pending. Owner cleanup defers in that state and retains the full
         // departed-owner chain until publication becomes terminal.
-        if let WriterAuthority::Owner { lock: owner_lock, .. } = &state.writer_authority {
+        if let WriterAuthority::Owner {
+            lock: owner_lock, ..
+        } = &state.writer_authority
+        {
             owner_lock
                 .reclaim_departed_owner_pins(&accepted_pending)
                 .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -6523,9 +6534,9 @@ impl RuntimeState {
         self.require_owner(&transaction, lease).await?;
         let receipt = load_admin_invocation_receipt(&transaction, descriptor.invocation_id).await?;
         let result = match receipt.as_ref() {
-            Some(receipt) => Some(
-                admin_result_from_receipt(&transaction, operation, descriptor, receipt).await?,
-            ),
+            Some(receipt) => {
+                Some(admin_result_from_receipt(&transaction, operation, descriptor, receipt).await?)
+            }
             None => None,
         };
         transaction
@@ -6595,7 +6606,10 @@ impl RuntimeState {
                 .ok(),
         };
         let (terminal_outcome, stale_capture) = match (observed_generation, error) {
-            (None, error) => (format!("failure:unobservable:{}", admin_failure_class(error)), None),
+            (None, error) => (
+                format!("failure:unobservable:{}", admin_failure_class(error)),
+                None,
+            ),
             (Some(_), RuntimeError::StaleCapture { current }) => {
                 ("failure:stale_capture".to_owned(), Some(&**current))
             }
@@ -11224,14 +11238,9 @@ impl RuntimeState {
         let next = append_mutations_tx(&tx, expected_capture, &encoded, next_digest, faults)
             .await
             .map_err(StreamTableDeliveryError::Runtime)?;
-        let rows = table_rows_tx(
-            &tx,
-            validator.tables(),
-            &validator_object_ids,
-            &base,
-        )
-        .await
-        .map_err(StreamTableDeliveryError::Runtime)?;
+        let rows = table_rows_tx(&tx, validator.tables(), &validator_object_ids, &base)
+            .await
+            .map_err(StreamTableDeliveryError::Runtime)?;
         validator
             .validate_changed(&rows, &mutated_tables(mutations))
             .map_err(StreamTableDeliveryError::ValidationFailed)?;
@@ -13060,7 +13069,10 @@ impl RuntimeState {
             ActivationEffectReport::ExternalPossible => {
                 match self.request_status_for_identity(identity).await? {
                     Some(status) if status.state.is_terminal() => Ok(()),
-                    _ => self.record_external_effect(identity, fingerprint, lease).await,
+                    _ => {
+                        self.record_external_effect(identity, fingerprint, lease)
+                            .await
+                    }
                 }
             }
         }
@@ -14143,9 +14155,7 @@ impl RuntimeState {
     }
 
     pub async fn validate_recovery(&self) -> Result<(), RuntimeError> {
-        self.validate_recovery_with_pin_manifest()
-            .await
-            .map(|_| ())
+        self.validate_recovery_with_pin_manifest().await.map(|_| ())
     }
 
     async fn validate_recovery_with_pin_manifest(
@@ -23116,7 +23126,9 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(TableActivationError::Runtime(RuntimeError::StaleTableSchema))
+            Err(TableActivationError::Runtime(
+                RuntimeError::StaleTableSchema
+            ))
         ));
         assert_eq!(
             state
@@ -23126,7 +23138,10 @@ mod tests {
                 .map(|checkpoint| checkpoint.generation),
             before
         );
-        assert_eq!(state.committed_table_rows("books").await.unwrap(), before_rows);
+        assert_eq!(
+            state.committed_table_rows("books").await.unwrap(),
+            before_rows
+        );
         assert_eq!(state.capture().await.unwrap(), before_capture);
     }
 
@@ -23150,14 +23165,8 @@ mod tests {
             )))
             .await
             .unwrap();
-        let durable_save = || {
-            vfs::VfsDurableSave::new(
-                id(4),
-                activation_test_schema(),
-                identity.clone(),
-                vec![1],
-            )
-        };
+        let durable_save =
+            || vfs::VfsDurableSave::new(id(4), activation_test_schema(), identity.clone(), vec![1]);
         // Both saves build the same candidate, so the second one is the replay
         // of a save the relation already holds.
         let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
@@ -23301,14 +23310,8 @@ mod tests {
             )))
             .await
             .unwrap();
-        let durable_save = || {
-            vfs::VfsDurableSave::new(
-                id(4),
-                activation_test_schema(),
-                identity.clone(),
-                vec![1],
-            )
-        };
+        let durable_save =
+            || vfs::VfsDurableSave::new(id(4), activation_test_schema(), identity.clone(), vec![1]);
         let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
             move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
                 let replacement = vfs::VfsTableRowReplacement::new(
@@ -23424,14 +23427,8 @@ mod tests {
             )))
             .await
             .unwrap();
-        let durable_save = || {
-            vfs::VfsDurableSave::new(
-                id(4),
-                activation_test_schema(),
-                identity.clone(),
-                vec![1],
-            )
-        };
+        let durable_save =
+            || vfs::VfsDurableSave::new(id(4), activation_test_schema(), identity.clone(), vec![1]);
         let admit = |mutation_id: [u8; 16], identity: RuntimeTableIdentity, accepted: Vec<u8>| {
             move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
                 let replacement = vfs::VfsTableRowReplacement::new(
@@ -23703,7 +23700,10 @@ mod tests {
             .await
             .unwrap();
         let admitted: i64 = rows.next().await.unwrap().unwrap().get(0).unwrap();
-        assert_eq!(admitted, 0, "the fresh mutation of a rejected batch is not admitted");
+        assert_eq!(
+            admitted, 0,
+            "the fresh mutation of a rejected batch is not admitted"
+        );
     }
 
     async fn pending_count(connection: &Connection) -> i64 {
@@ -23731,14 +23731,8 @@ mod tests {
             )))
             .await
             .unwrap();
-        let durable_save = || {
-            vfs::VfsDurableSave::new(
-                id(4),
-                activation_test_schema(),
-                identity.clone(),
-                vec![1],
-            )
-        };
+        let durable_save =
+            || vfs::VfsDurableSave::new(id(4), activation_test_schema(), identity.clone(), vec![1]);
         let admit = |mutation_id: [u8; 16], accepted: Vec<u8>| {
             let identity = identity.clone();
             move |coordinates: vfs::VfsSaveCoordinates, bytes: Arc<[u8]>| async move {
@@ -23801,9 +23795,9 @@ mod tests {
         assert!(
             matches!(
                 reused,
-                Err(vfs::VfsSaveError::Activation(TableActivationError::Runtime(
-                    RuntimeError::InvalidTableMutation
-                )))
+                Err(vfs::VfsSaveError::Activation(
+                    TableActivationError::Runtime(RuntimeError::InvalidTableMutation)
+                ))
             ),
             "id reuse with different bytes must be InvalidTableMutation"
         );
@@ -23814,7 +23808,6 @@ mod tests {
             "the rejected reuse leaves the accepted row in place"
         );
     }
-
 
     /// One complete VFS row save candidate for `identity`, exactly as a caller's
     /// admission callback must build it: the typed row replacement plus the
@@ -23875,14 +23868,8 @@ mod tests {
             vfs::vfs_stale_failure_code(DiagnosticCode::StaleBaseline)
         );
 
-        let save = || {
-            vfs::VfsDurableSave::new(
-                id(4),
-                activation_test_schema(),
-                identity.clone(),
-                vec![1],
-            )
-        };
+        let save =
+            || vfs::VfsDurableSave::new(id(4), activation_test_schema(), identity.clone(), vec![1]);
         // Both editors open from the same captured baseline before either save
         // lands, which is what makes the loser stale rather than a replay.
         let first_draft = target.open_draft(1 << 20).await;
@@ -24948,7 +24935,10 @@ mod tests {
             state.committed_table_row("books", &[1]).await.unwrap(),
             Some(vec![9])
         );
-        assert_eq!(state.committed_table_row("books", &[2]).await.unwrap(), None);
+        assert_eq!(
+            state.committed_table_row("books", &[2]).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
@@ -25729,7 +25719,13 @@ mod tests {
             .with_table_object_id(object_id);
         assert!(matches!(
             state
-                .commit_table_activation(lease, snapshot.context(), &[duplicate], digest(6), &NoFault)
+                .commit_table_activation(
+                    lease,
+                    snapshot.context(),
+                    &[duplicate],
+                    digest(6),
+                    &NoFault
+                )
                 .await,
             Err(RuntimeError::InvalidTableMutation)
         ));
@@ -38092,11 +38088,7 @@ mod tests {
             .unwrap();
         assert_eq!(query.status, InvocationObservationStatus::Running);
         let query = state
-            .finish_query_observation(
-                writer,
-                query.id,
-                InvocationObservationStatus::Succeeded,
-            )
+            .finish_query_observation(writer, query.id, InvocationObservationStatus::Succeeded)
             .await
             .unwrap();
         assert_eq!(query.snapshot, capture);
@@ -38111,7 +38103,10 @@ mod tests {
             projected_query.snapshot,
             snapshot_reference(capture.database_id(), capture.snapshot().clone()).unwrap()
         );
-        assert_eq!(projected_query.started, observation_instant(query.started_ms).unwrap());
+        assert_eq!(
+            projected_query.started,
+            observation_instant(query.started_ms).unwrap()
+        );
         assert_eq!(
             projected_query.ended,
             query.ended_ms.map(observation_instant).transpose().unwrap()
@@ -38130,12 +38125,22 @@ mod tests {
         );
         assert!(materialization.valid);
         assert_ne!(materialization.digest, [0; 32]);
-        assert_eq!(materialization.reference.table_id, SYS_MATERIALIZATION_TABLE_ID);
+        assert_eq!(
+            materialization.reference.table_id,
+            SYS_MATERIALIZATION_TABLE_ID
+        );
 
         drop(state);
         let reopened = open_state(&repo).await;
         assert_eq!(reopened.query_observations().await.unwrap(), [query]);
-        assert_eq!(reopened.sys_materialization_projections().await.unwrap().len(), 1);
+        assert_eq!(
+            reopened
+                .sys_materialization_projections()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
     #[tokio::test]
     async fn sys_lifecycle_procedure_materialization_admits_durable_invocation() {
@@ -42125,9 +42130,16 @@ mod tests {
             .expect_err("capture failure must fail the call");
         assert_eq!(error, RuntimeError::RecoveryInvalid);
         let audits = state.admin_invocation_audits().await.unwrap();
-        assert_eq!(audits.len(), 1, "the failed call still gets one row: {audits:?}");
+        assert_eq!(
+            audits.len(),
+            1,
+            "the failed call still gets one row: {audits:?}"
+        );
         assert_eq!(audits[0].observed_generation, None);
-        assert_eq!(audits[0].terminal_outcome, "failure:unobservable:recovery_invalid");
+        assert_eq!(
+            audits[0].terminal_outcome,
+            "failure:unobservable:recovery_invalid"
+        );
         assert!(!audits[0].succeeded);
     }
 
@@ -42136,9 +42148,18 @@ mod tests {
         let (_temp, repo) = repository();
         let state = open_state(&repo).await;
         let cases: [(&str, RuntimeError); 4] = [
-            ("failure:unobservable:invalid_digest", RuntimeError::InvalidDigest),
-            ("failure:unobservable:stale_capture", RuntimeError::RecoveryInvalid),
-            ("failure:unobservable:fault_injected", RuntimeError::RecoveryInvalid),
+            (
+                "failure:unobservable:invalid_digest",
+                RuntimeError::InvalidDigest,
+            ),
+            (
+                "failure:unobservable:stale_capture",
+                RuntimeError::RecoveryInvalid,
+            ),
+            (
+                "failure:unobservable:fault_injected",
+                RuntimeError::RecoveryInvalid,
+            ),
             ("failure:unobservable", RuntimeError::RecoveryInvalid),
         ];
         for (index, (outcome, expected)) in cases.into_iter().enumerate() {
@@ -42208,16 +42229,25 @@ mod tests {
         macro_rules! count {
             ($sql:expr) => {{
                 let mut rows = state.connection.query($sql, ()).await.unwrap();
-                rows.next().await.unwrap().expect("count row").get::<i64>(0).unwrap()
+                rows.next()
+                    .await
+                    .unwrap()
+                    .expect("count row")
+                    .get::<i64>(0)
+                    .unwrap()
             }};
         }
         assert_eq!(
-            count!("SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation = 7 AND terminal_outcome = 'paused'"),
+            count!(
+                "SELECT COUNT(*) FROM admin_invocation_audit WHERE observed_generation = 7 AND terminal_outcome = 'paused'"
+            ),
             1,
             "legacy audit row keeps its generation"
         );
         assert_eq!(
-            count!("SELECT COUNT(*) FROM admin_invocation_checkpoint_result WHERE version = 3 AND committed_position = 'pos'"),
+            count!(
+                "SELECT COUNT(*) FROM admin_invocation_checkpoint_result WHERE version = 3 AND committed_position = 'pos'"
+            ),
             1,
             "checkpoint result child is kept"
         );
@@ -42237,7 +42267,11 @@ mod tests {
             1,
             "NULL generation row is accepted"
         );
-        assert_eq!(count!("SELECT COUNT(*) FROM admin_invocation_audit"), 2, "migration keeps every row");
+        assert_eq!(
+            count!("SELECT COUNT(*) FROM admin_invocation_audit"),
+            2,
+            "migration keeps every row"
+        );
     }
 
     #[test]
@@ -42248,53 +42282,134 @@ mod tests {
         let table: &[(RuntimeError, &str)] = &[
             (RuntimeError::InvalidIdentity, "invalid_identity"),
             (RuntimeError::InvalidDigest, "invalid_digest"),
-            (RuntimeError::InvalidObservationReference, "invalid_observation_reference"),
-            (RuntimeError::ObservationCoordinateMismatch, "observation_coordinate_mismatch"),
-            (RuntimeError::ProcedureMaterializationConflict, "procedure_materialization_conflict"),
-            (RuntimeError::InvocationObservationConflict, "invocation_observation_conflict"),
-            (RuntimeError::InvocationStateConflict, "invocation_state_conflict"),
-            (RuntimeError::QueryObservationConflict, "query_observation_conflict"),
+            (
+                RuntimeError::InvalidObservationReference,
+                "invalid_observation_reference",
+            ),
+            (
+                RuntimeError::ObservationCoordinateMismatch,
+                "observation_coordinate_mismatch",
+            ),
+            (
+                RuntimeError::ProcedureMaterializationConflict,
+                "procedure_materialization_conflict",
+            ),
+            (
+                RuntimeError::InvocationObservationConflict,
+                "invocation_observation_conflict",
+            ),
+            (
+                RuntimeError::InvocationStateConflict,
+                "invocation_state_conflict",
+            ),
+            (
+                RuntimeError::QueryObservationConflict,
+                "query_observation_conflict",
+            ),
             (RuntimeError::QueryStateConflict, "query_state_conflict"),
-            (RuntimeError::InvocationChildrenActive, "invocation_children_active"),
-            (RuntimeError::InvocationOwnerInvalid, "invocation_owner_invalid"),
-            (RuntimeError::InvocationTailInvalid, "invocation_tail_invalid"),
+            (
+                RuntimeError::InvocationChildrenActive,
+                "invocation_children_active",
+            ),
+            (
+                RuntimeError::InvocationOwnerInvalid,
+                "invocation_owner_invalid",
+            ),
+            (
+                RuntimeError::InvocationTailInvalid,
+                "invocation_tail_invalid",
+            ),
             (RuntimeError::InvocationTailLimit, "invocation_tail_limit"),
-            (RuntimeError::StreamIdentityMismatch, "stream_identity_mismatch"),
-            (RuntimeError::StreamSourceNotReplayable, "stream_source_not_replayable"),
-            (RuntimeError::StreamCheckpointStale, "stream_checkpoint_stale"),
-            (RuntimeError::CheckpointNotReplayable, "checkpoint_not_replayable"),
+            (
+                RuntimeError::StreamIdentityMismatch,
+                "stream_identity_mismatch",
+            ),
+            (
+                RuntimeError::StreamSourceNotReplayable,
+                "stream_source_not_replayable",
+            ),
+            (
+                RuntimeError::StreamCheckpointStale,
+                "stream_checkpoint_stale",
+            ),
+            (
+                RuntimeError::CheckpointNotReplayable,
+                "checkpoint_not_replayable",
+            ),
             (RuntimeError::SnapshotNotFound, "snapshot_not_found"),
             (RuntimeError::SnapshotIncomplete, "snapshot_incomplete"),
-            (RuntimeError::SnapshotContextMismatch, "snapshot_context_mismatch"),
+            (
+                RuntimeError::SnapshotContextMismatch,
+                "snapshot_context_mismatch",
+            ),
             (RuntimeError::LeaseHeld, "lease_held"),
             (RuntimeError::AdminBusy, "admin_busy"),
-            (RuntimeError::AdminInvocationConflict, "admin_invocation_conflict"),
+            (
+                RuntimeError::AdminInvocationConflict,
+                "admin_invocation_conflict",
+            ),
             (RuntimeError::OwnerLost, "owner_lost"),
             (RuntimeError::RecoveryPending, "recovery_pending"),
             (RuntimeError::InvalidCapture, "invalid_capture"),
             (RuntimeError::EmptyMutationBatch, "empty_mutation_batch"),
             (RuntimeError::InvalidTableMutation, "invalid_table_mutation"),
             (RuntimeError::StaleTableSchema, "stale_table_schema"),
-            (RuntimeError::ConflictingPublicationIntent, "conflicting_publication_intent"),
-            (RuntimeError::ConflictingPublicationCommit, "conflicting_publication_commit"),
-            (RuntimeError::InvalidPublicationCommit, "invalid_publication_commit"),
-            (RuntimeError::InvalidPublicationPolicy, "invalid_publication_policy"),
-            (RuntimeError::CompactPublicationRequired, "compact_publication_required"),
-            (RuntimeError::CompactReceiptKeyMismatch, "compact_receipt_key_mismatch"),
-            (RuntimeError::InvalidCompactReceipt, "invalid_compact_receipt"),
+            (
+                RuntimeError::ConflictingPublicationIntent,
+                "conflicting_publication_intent",
+            ),
+            (
+                RuntimeError::ConflictingPublicationCommit,
+                "conflicting_publication_commit",
+            ),
+            (
+                RuntimeError::InvalidPublicationCommit,
+                "invalid_publication_commit",
+            ),
+            (
+                RuntimeError::InvalidPublicationPolicy,
+                "invalid_publication_policy",
+            ),
+            (
+                RuntimeError::CompactPublicationRequired,
+                "compact_publication_required",
+            ),
+            (
+                RuntimeError::CompactReceiptKeyMismatch,
+                "compact_receipt_key_mismatch",
+            ),
+            (
+                RuntimeError::InvalidCompactReceipt,
+                "invalid_compact_receipt",
+            ),
             (RuntimeError::RequestUnknown, "request_unknown"),
-            (RuntimeError::RequestFingerprintMismatch, "request_fingerprint_mismatch"),
+            (
+                RuntimeError::RequestFingerprintMismatch,
+                "request_fingerprint_mismatch",
+            ),
             (RuntimeError::RequestOwnerConflict, "request_owner_conflict"),
             (RuntimeError::RequestStateConflict, "request_state_conflict"),
             (RuntimeError::SessionClosed, "session_closed"),
             (RuntimeError::SessionWorkActive, "session_work_active"),
-            (RuntimeError::TerminalOutcomeTooLarge, "terminal_outcome_too_large"),
+            (
+                RuntimeError::TerminalOutcomeTooLarge,
+                "terminal_outcome_too_large",
+            ),
             (RuntimeError::RecoveryInvalid, "recovery_invalid"),
-            (RuntimeError::SystemProviderAbiInvalid, "system_provider_abi_invalid"),
+            (
+                RuntimeError::SystemProviderAbiInvalid,
+                "system_provider_abi_invalid",
+            ),
             (RuntimeError::StorageUnavailable, "storage_unavailable"),
             (RuntimeError::StreamFailureStale, "stream_failure_stale"),
-            (RuntimeError::StreamFailureStateConflict, "stream_failure_state_conflict"),
-            (RuntimeError::StreamFailureSkipUnsupported, "stream_failure_skip_unsupported"),
+            (
+                RuntimeError::StreamFailureStateConflict,
+                "stream_failure_state_conflict",
+            ),
+            (
+                RuntimeError::StreamFailureSkipUnsupported,
+                "stream_failure_skip_unsupported",
+            ),
         ];
         assert_eq!(table.len(), 49);
         for (variant, class) in table {
@@ -42324,8 +42439,14 @@ mod tests {
     fn admin_failure_replays_legacy_outcome_names() {
         // Outcomes stored before stable failure classes keep replaying as
         // their original variants.
-        assert_eq!(admin_failure_from_class("unavailable"), RuntimeError::StorageUnavailable);
-        assert_eq!(admin_failure_from_class("admin_busy"), RuntimeError::AdminBusy);
+        assert_eq!(
+            admin_failure_from_class("unavailable"),
+            RuntimeError::StorageUnavailable
+        );
+        assert_eq!(
+            admin_failure_from_class("admin_busy"),
+            RuntimeError::AdminBusy
+        );
         assert_eq!(
             admin_failure_from_class("runtime administration callback is busy"),
             RuntimeError::AdminBusy,
@@ -47512,7 +47633,7 @@ mod tests {
         );
     }
 
-// ORNA-ERR-007: after an external-effect marker, fault recovery reports uncertainty rather than claiming reversal.
+    // ORNA-ERR-007: after an external-effect marker, fault recovery reports uncertainty rather than claiming reversal.
     #[tokio::test]
     async fn external_effect_marker_keeps_fault_recovery_uncertain() {
         let (_temp, repo) = repository();
@@ -48868,10 +48989,19 @@ mod tests {
                 .map(|_| ()),
             Err(RuntimeError::LeaseHeld)
         );
-        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+        assert!(
+            owner
+                .request_status_for_identity(identity)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
-    fn secondary_observed_registration(identity: RequestIdentity, invocation: u8) -> RunObservationRegistration {
+    fn secondary_observed_registration(
+        identity: RequestIdentity,
+        invocation: u8,
+    ) -> RunObservationRegistration {
         RunObservationRegistration {
             request: identity,
             consumer_identity: stream_delivery("secondary", "admission").consumer,
@@ -48891,12 +49021,22 @@ mod tests {
         let fingerprint = digest(173);
         assert_eq!(
             secondary
-                .begin_observed_request(secondary_observed_registration(identity, 174), fingerprint, lease)
+                .begin_observed_request(
+                    secondary_observed_registration(identity, 174),
+                    fingerprint,
+                    lease
+                )
                 .await
                 .map(|_| ()),
             Err(RuntimeError::LeaseHeld)
         );
-        assert!(owner.request_status_for_identity(identity).await.unwrap().is_none());
+        assert!(
+            owner
+                .request_status_for_identity(identity)
+                .await
+                .unwrap()
+                .is_none()
+        );
         let (_, capability) = owner
             .reserve_request_with_admission(identity, fingerprint)
             .await
@@ -48946,7 +49086,10 @@ mod tests {
         let owner = open_state(&repo).await;
         let secondary = open_state(&repo).await;
         let lease = owner.acquire_lease(id(190)).await.unwrap();
-        assert_eq!(secondary.current_lease().await, Err(RuntimeError::LeaseHeld));
+        assert_eq!(
+            secondary.current_lease().await,
+            Err(RuntimeError::LeaseHeld)
+        );
         assert_eq!(
             secondary.acquire_lease(id(190)).await,
             Err(RuntimeError::LeaseHeld)
@@ -50136,7 +50279,9 @@ mod tests {
         let replacement = other.takeover_lease(old, id(145)).await.unwrap();
         let secondary = open_state(&repo).await;
         assert_eq!(
-            secondary.reserve_request(request(146, 147), digest(148)).await,
+            secondary
+                .reserve_request(request(146, 147), digest(148))
+                .await,
             Err(RuntimeError::LeaseHeld)
         );
         assert_eq!(
@@ -50318,7 +50463,9 @@ mod tests {
         assert_eq!(winner.epoch, abandoned.epoch + 1);
         let secondary = open_state(&repo).await;
         assert_eq!(
-            secondary.reserve_request(request(167, 168), digest(169)).await,
+            secondary
+                .reserve_request(request(167, 168), digest(169))
+                .await,
             Err(RuntimeError::LeaseHeld)
         );
         assert_eq!(
@@ -50388,7 +50535,12 @@ mod tests {
 
         assert_eq!(
             state
-                .complete_observed_request_with_owner(identity, fingerprint, abandoned, outcome(181))
+                .complete_observed_request_with_owner(
+                    identity,
+                    fingerprint,
+                    abandoned,
+                    outcome(181)
+                )
                 .await,
             Err(RuntimeError::OwnerLost)
         );
@@ -51733,7 +51885,7 @@ mod tests {
         );
     }
 
-// ORNA-FAILURE-009: failed run observations retain a safe diagnostic and distinguish failure from cancellation/completion.
+    // ORNA-FAILURE-009: failed run observations retain a safe diagnostic and distinguish failure from cancellation/completion.
     #[tokio::test]
     async fn observed_request_lifecycle_admits_before_work_and_keeps_terminals_distinct() {
         let (_temp, repo) = repository();
@@ -53556,7 +53708,7 @@ mod tests {
         assert!(!completed.live);
     }
 
-// ORNA-FAILURE-009: stream failure persists as a sys.Failure reference.
+    // ORNA-FAILURE-009: stream failure persists as a sys.Failure reference.
     #[tokio::test]
     async fn stream_observation_projects_nullable_partition_and_failure_sys_dto_across_reopen() {
         let (_temp, repo) = repository();

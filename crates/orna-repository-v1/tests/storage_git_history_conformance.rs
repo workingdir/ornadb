@@ -101,7 +101,10 @@ impl Fixture {
         let next = git(&self.source, &["rev-parse", "HEAD"]);
         git(&self.source, &["update-ref", INTERNAL_REF, &next]);
         let next_watermark = watermark(&self.source, "2");
-        git(&self.source, &["update-ref", ALLOCATOR_REF, &next_watermark]);
+        git(
+            &self.source,
+            &["update-ref", ALLOCATOR_REF, &next_watermark],
+        );
         next
     }
 }
@@ -136,10 +139,7 @@ fn clone_synchronizes_internal_refs_without_checking_out_the_fixture() {
     Repository::clone_from(fixture.remote.to_str().unwrap(), &destination).unwrap();
 
     assert!(git(&destination, &["symbolic-ref", "--quiet", "HEAD"]).starts_with("refs/heads/"));
-    assert_eq!(
-        git(&destination, &["rev-parse", INTERNAL_REF]),
-        initial
-    );
+    assert_eq!(git(&destination, &["rev-parse", INTERNAL_REF]), initial);
     assert_eq!(
         git(&destination, &["rev-parse", ALLOCATOR_REF]),
         git(&fixture.source, &["rev-parse", ALLOCATOR_REF])
@@ -170,17 +170,13 @@ fn fetch_synchronizes_advertised_internal_refs_with_the_requested_branch() {
 
     assert_eq!(git(&destination, &["rev-parse", INTERNAL_REF]), old);
     client
-        .fetch(
-            &FetchRequest::new(
-                "origin",
-                [RequestedRef::Branch("main".to_owned())],
-                [],
-            )
-            .unwrap(),
-        )
+        .fetch(&FetchRequest::new("origin", [RequestedRef::Branch("main".to_owned())], []).unwrap())
         .unwrap();
 
-    assert_eq!(git(&destination, &["rev-parse", "refs/remotes/origin/main"]), next);
+    assert_eq!(
+        git(&destination, &["rev-parse", "refs/remotes/origin/main"]),
+        next
+    );
     assert_eq!(git(&destination, &["rev-parse", INTERNAL_REF]), next);
     assert_eq!(
         git(&destination, &["rev-parse", ALLOCATOR_REF]),
@@ -198,7 +194,10 @@ fn push_advances_allocator_before_making_the_branch_visible() {
     let hook = fixture.remote.join("hooks/update");
     fs::write(
         &hook,
-        format!("#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\n", hook_log.display()),
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$1\" >> '{}'\n",
+            hook_log.display()
+        ),
     )
     .unwrap();
     let mut permissions = fs::metadata(&hook).unwrap().permissions();
@@ -219,7 +218,10 @@ fn push_advances_allocator_before_making_the_branch_visible() {
 
     let updates = fs::read_to_string(hook_log).unwrap();
     assert_eq!(updates.lines().next(), Some(ALLOCATOR_REF));
-    assert_eq!(git(&fixture.remote, &["rev-parse", "refs/heads/main"]), next);
+    assert_eq!(
+        git(&fixture.remote, &["rev-parse", "refs/heads/main"]),
+        next
+    );
     assert_eq!(
         git(&fixture.remote, &["rev-parse", ALLOCATOR_REF]),
         git(&fixture.source, &["rev-parse", ALLOCATOR_REF])

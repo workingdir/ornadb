@@ -52,8 +52,7 @@ use super::{compact_date_value, legacy_fixture_writer::with_page_checksums};
 const TABLE_NAMESPACE: u64 = 0x018f_0000_0000_7100;
 const FIELD_NAMESPACE: u64 = 0x018f_0000_0000_7200;
 const SEGMENT_NAMESPACE: u64 = 0x018f_0000_0000_7000;
-const FORMAT_1: &str =
-    "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
+const FORMAT_1: &str = "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
 const GITLINK_PATH: &str = "vendor/stdlib";
 const AUTHOR_NAME: &str = "orna-fixture";
 const AUTHOR_EMAIL: &str = "orna-fixture@example.invalid";
@@ -146,10 +145,7 @@ impl Column {
         let schema_descriptor =
             Arc::new(parse_message_type(&message).expect("fixture message type"));
         let metadata = vec![
-            KeyValue::new(
-                "orna.profile".to_owned(),
-                Some(PROFILE.to_owned()),
-            ),
+            KeyValue::new("orna.profile".to_owned(), Some(PROFILE.to_owned())),
             KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
             KeyValue::new(
                 "orna.schema.sha256".to_owned(),
@@ -325,7 +321,15 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
     fs::write(table_dir.join("manifest.orna"), manifest).unwrap();
 
     git(root, &["add", "--all"]);
-    git(root, &["commit", "--quiet", "-m", "orna: publish compact runtime data"]);
+    git(
+        root,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "orna: publish compact runtime data",
+        ],
+    );
 }
 
 /// One shard entry, before it is rendered into `shards/00000000.orna`.
@@ -480,8 +484,8 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::cmp::Ordering;
     use super::*;
+    use std::cmp::Ordering;
 
     #[test]
     fn key_order_is_value_order_for_negative_dates_and_ints() {

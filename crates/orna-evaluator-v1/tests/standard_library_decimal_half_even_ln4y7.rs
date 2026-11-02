@@ -22,5 +22,9 @@ fn session() -> AdmittedReplSession {
 fn decimal_half_even_rounds_zero_quotient_ties_to_even() {
     let mut session = session();
     let source = include_str!("fixtures/stdlib-decimal-half-even-zero-quotient-ln4y7.orna");
-    assert_eq!(session.submit(source), Ok(Some(bool_value(true))), "{source}");
+    assert_eq!(
+        session.submit(source),
+        Ok(Some(bool_value(true))),
+        "{source}"
+    );
 }

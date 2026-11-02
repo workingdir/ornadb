@@ -36,9 +36,11 @@ fn scenarios_61_through_90_report_specification_and_bounded_execution_separately
     assert_eq!(scenarios.len(), declared, "frozen corpus scenario count");
     let batch = &scenarios[60..90];
     let batch_ids = ids(batch);
-    assert!(batch.iter().all(|scenario| {
-        scenario["implementation_status"] == "not-executed"
-    }));
+    assert!(
+        batch
+            .iter()
+            .all(|scenario| { scenario["implementation_status"] == "not-executed" })
+    );
 
     // Exercise the shipped composite profile rather than substituting a test-
     // only adapter. Exit 1 is valid evidence when the full report has skipped
@@ -49,7 +51,10 @@ fn scenarios_61_through_90_report_specification_and_bounded_execution_separately
         .output()
         .expect("bounded-expression-runtime profile launches");
     let child_exit = output.status.code().expect("CLI exits with a code");
-    assert!(matches!(child_exit, 0 | 1), "unexpected CLI exit {child_exit}");
+    assert!(
+        matches!(child_exit, 0 | 1),
+        "unexpected CLI exit {child_exit}"
+    );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
         panic!(
             "bounded profile emitted invalid JSON ({error}); stderr={}",

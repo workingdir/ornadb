@@ -393,11 +393,7 @@ fn init_rejects_symlinked_metadata_or_source_without_touching_targets() {
 fn successful_reinitialization_preserves_git_and_metadata_state() {
     let fixture = initialized_repository();
     commit_fixture_source(fixture.path(), VERSION_1_SOURCE);
-    fs::write(
-        fixture.path().join("main.orna"),
-        VERSION_2_SOURCE,
-    )
-    .expect("unstaged source written");
+    fs::write(fixture.path().join("main.orna"), VERSION_2_SOURCE).expect("unstaged source written");
 
     let before_head = git(fixture.path(), &["rev-parse", "HEAD"]).stdout;
     let before_index = bytes(&fixture.path().join(".git/index"));
@@ -465,8 +461,7 @@ fn init_ignores_hostile_git_routing_variables() {
     let foreign = fixture.path().join("foreign");
     fs::create_dir(&foreign).expect("foreign repository directory");
     git_succeeds(&foreign, &["init", "--quiet"]);
-    fs::write(foreign.join("tracked.orna"), FOREIGN_SOURCE)
-    .expect("foreign source written");
+    fs::write(foreign.join("tracked.orna"), FOREIGN_SOURCE).expect("foreign source written");
     git_succeeds(&foreign, &["add", "tracked.orna"]);
     git_succeeds(
         &foreign,
@@ -520,11 +515,26 @@ fn init_ignores_hostile_git_routing_variables() {
 fn init_then_check_accepts_unchanged_authoritative_reference_sources() {
     let fixture = tempfile::tempdir().expect("temporary reference project");
     let original = [
-        ("main.orna", include_str!("fixtures/reference-project/main.orna")),
-        ("library.orna", include_str!("fixtures/reference-project/library.orna")),
-        ("warehouse.orna", include_str!("fixtures/reference-project/warehouse.orna")),
-        ("sensors.orna", include_str!("fixtures/reference-project/sensors.orna")),
-        ("values.orna", include_str!("fixtures/reference-project/values.orna")),
+        (
+            "main.orna",
+            include_str!("fixtures/reference-project/main.orna"),
+        ),
+        (
+            "library.orna",
+            include_str!("fixtures/reference-project/library.orna"),
+        ),
+        (
+            "warehouse.orna",
+            include_str!("fixtures/reference-project/warehouse.orna"),
+        ),
+        (
+            "sensors.orna",
+            include_str!("fixtures/reference-project/sensors.orna"),
+        ),
+        (
+            "values.orna",
+            include_str!("fixtures/reference-project/values.orna"),
+        ),
     ];
     let original = original
         .iter()

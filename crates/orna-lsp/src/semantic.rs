@@ -334,17 +334,20 @@ mod tests {
                     start += token.delta_start;
                 }
                 let utf16 = lines[line as usize].encode_utf16().collect::<Vec<_>>();
-                let lexeme = String::from_utf16(
-                    &utf16[start as usize..(start + token.length) as usize],
-                )
-                .unwrap();
+                let lexeme =
+                    String::from_utf16(&utf16[start as usize..(start + token.length) as usize])
+                        .unwrap();
                 let modifiers = editor::TOKEN_MODIFIERS
                     .iter()
                     .enumerate()
                     .filter(|(bit, _)| token.token_modifiers_bitset & (1 << bit) != 0)
                     .map(|(_, modifier)| *modifier)
                     .collect();
-                (lexeme, legend[token.token_type as usize].to_owned(), modifiers)
+                (
+                    lexeme,
+                    legend[token.token_type as usize].to_owned(),
+                    modifiers,
+                )
             })
             .collect()
     }
@@ -364,10 +367,9 @@ mod tests {
 
     #[test]
     fn advertised_legend_matches_checked_in_editor_attach_legend() {
-        let artifact: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../editors/semantic-token-legend.json"
-        ))
-        .expect("editor legend artifact is JSON");
+        let artifact: serde_json::Value =
+            serde_json::from_str(include_str!("../../../editors/semantic-token-legend.json"))
+                .expect("editor legend artifact is JSON");
         let editor_types = artifact["tokenTypes"]
             .as_array()
             .expect("tokenTypes is an array")
@@ -393,8 +395,16 @@ mod tests {
     #[test]
     fn semantic_tokens_refine_lexical_classes_with_declarations_and_scoped_names() {
         let classes = classes(SOURCE);
-        assert!(classes.iter().any(|(_, token_type, _)| token_type == "function"));
-        assert!(classes.iter().any(|(_, token_type, _)| token_type == "parameter"));
+        assert!(
+            classes
+                .iter()
+                .any(|(_, token_type, _)| token_type == "function")
+        );
+        assert!(
+            classes
+                .iter()
+                .any(|(_, token_type, _)| token_type == "parameter")
+        );
         assert!(
             classes
                 .iter()
@@ -423,15 +433,33 @@ mod tests {
         assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
         let classes = classes(TEXT);
 
-        assert_eq!(class_of(&classes, "Length", 0), ("type", &["declaration", "readonly"][..]));
+        assert_eq!(
+            class_of(&classes, "Length", 0),
+            ("type", &["declaration", "readonly"][..])
+        );
         assert_eq!(class_of(&classes, "Length", 1), ("type", &["readonly"][..]));
-        assert_eq!(class_of(&classes, "metre", 0), ("variable", &["declaration", "readonly"][..]));
-        assert_eq!(class_of(&classes, "metre", 1), ("variable", &["readonly"][..]));
+        assert_eq!(
+            class_of(&classes, "metre", 0),
+            ("variable", &["declaration", "readonly"][..])
+        );
+        assert_eq!(
+            class_of(&classes, "metre", 1),
+            ("variable", &["readonly"][..])
+        );
         assert_eq!(class_of(&classes, "Display", 0).0, "interface");
-        assert_eq!(class_of(&classes, "draft", 0), ("enumMember", &["declaration", "readonly"][..]));
-        assert_eq!(class_of(&classes, "draft", 1), ("enumMember", &["readonly"][..]));
+        assert_eq!(
+            class_of(&classes, "draft", 0),
+            ("enumMember", &["declaration", "readonly"][..])
+        );
+        assert_eq!(
+            class_of(&classes, "draft", 1),
+            ("enumMember", &["readonly"][..])
+        );
         assert_eq!(class_of(&classes, "Status", 2), ("enum", &["readonly"][..]));
-        assert_eq!(class_of(&classes, "text", 0), ("property", &["declaration"][..]));
+        assert_eq!(
+            class_of(&classes, "text", 0),
+            ("property", &["declaration"][..])
+        );
         assert_eq!(class_of(&classes, "text", 1), ("property", &[][..]));
         assert_eq!(class_of(&classes, "text", 2), ("property", &[][..]));
         assert_eq!(class_of(&classes, "badge", 1), ("property", &[][..]));
@@ -447,8 +475,14 @@ mod tests {
         const TEXT: &str = "use std.math.{increment};\n\
             pub fn next(value: Int): Int = std.math.increment(increment(value));\n";
         let classes = classes(TEXT);
-        assert_eq!(class_of(&classes, "std", 1), ("namespace", &["defaultLibrary"][..]));
-        assert_eq!(class_of(&classes, "math", 1), ("namespace", &["defaultLibrary"][..]));
+        assert_eq!(
+            class_of(&classes, "std", 1),
+            ("namespace", &["defaultLibrary"][..])
+        );
+        assert_eq!(
+            class_of(&classes, "math", 1),
+            ("namespace", &["defaultLibrary"][..])
+        );
         assert_eq!(
             class_of(&classes, "increment", 1),
             ("function", &["readonly", "defaultLibrary"][..])

@@ -255,9 +255,7 @@ fn portable_sys_api_has_exact_declared_counts_and_surface() {
 #[test]
 fn sys_admin_effects_match_the_administration_contract() {
     let document = sys_api_document();
-    let functions = document["functions"]
-        .as_array()
-        .expect("sys API functions");
+    let functions = document["functions"].as_array().expect("sys API functions");
     let mut admin_entries = 0;
     let mut plan_checkout_entries = 0;
 
@@ -288,7 +286,10 @@ fn sys_admin_effects_match_the_administration_contract() {
         );
     }
 
-    assert!(admin_entries > 0, "expected state-changing sys.admin entries");
+    assert!(
+        admin_entries > 0,
+        "expected state-changing sys.admin entries"
+    );
     assert!(
         plan_checkout_entries > 0,
         "expected sys.admin.plan_checkout overloads"

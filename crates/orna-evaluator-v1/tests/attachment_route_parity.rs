@@ -2,8 +2,8 @@ use std::{cell::Cell, fs, path::Path, process::Command};
 
 use orna_evaluator_v1::{AdmittedReplSession, Limits};
 use orna_project_v1::{
-    AttachedDatabaseSession, AttachmentError, PackageResolver, PinnedDatabase, ProjectLoader,
-    ReboundPathCheckpoint, PACKAGE_PIN_MANIFEST_PATH,
+    AttachedDatabaseSession, AttachmentError, PACKAGE_PIN_MANIFEST_PATH, PackageResolver,
+    PinnedDatabase, ProjectLoader, ReboundPathCheckpoint,
 };
 use orna_repository_v1::Repository;
 use orna_value_v1::Value;
@@ -28,17 +28,17 @@ fn repository(source: &str) -> (TempDir, Repository, String) {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("main.orna"), source).unwrap();
     git(directory.path(), &["init", "--quiet"]);
-    git(
-        directory.path(),
-        &["config", "user.name", "kierandrewett"],
-    );
+    git(directory.path(), &["config", "user.name", "kierandrewett"]);
     git(
         directory.path(),
         &["config", "user.email", "kieran@drewett.dev"],
     );
     git(directory.path(), &["config", "commit.gpgsign", "false"]);
     git(directory.path(), &["add", "main.orna"]);
-    git(directory.path(), &["commit", "--quiet", "-m", "route fixture"]);
+    git(
+        directory.path(),
+        &["commit", "--quiet", "-m", "route fixture"],
+    );
     let commit = git(directory.path(), &["rev-parse", "HEAD"]);
     let repository = Repository::discover(directory.path()).unwrap();
     (directory, repository, commit)
@@ -47,7 +47,10 @@ fn repository(source: &str) -> (TempDir, Repository, String) {
 fn commit_source(directory: &Path, source: &str) -> String {
     fs::write(directory.join("main.orna"), source).unwrap();
     git(directory, &["add", "main.orna"]);
-    git(directory, &["commit", "--quiet", "-m", "advance package snapshot"]);
+    git(
+        directory,
+        &["commit", "--quiet", "-m", "advance package snapshot"],
+    );
     git(directory, &["rev-parse", "HEAD"])
 }
 
@@ -85,9 +88,8 @@ fn commit_snapshot(
 fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     let (_primary_dir, primary_repository, primary_commit) =
         repository(include_str!("fixtures/attachment-route-primary.orna"));
-    let (package_dir, package_repository, main_alias_commit) = repository(include_str!(
-        "fixtures/attachment-route-package.orna"
-    ));
+    let (package_dir, package_repository, main_alias_commit) =
+        repository(include_str!("fixtures/attachment-route-package.orna"));
     let longer_alias_commit = commit_source(
         package_dir.path(),
         &include_str!("fixtures/attachment-route-package.orna").replace("42", "43"),
@@ -181,14 +183,14 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     assert!(remaining_modules.iter().any(|module| {
         module.logical_path == "main/main.orna" && module.source.contains("= 42")
     }));
-    assert!(!remaining_modules
-        .iter()
-        .any(|module| module.logical_path == "main_archive.orna"));
-    let mut main_only_session = AdmittedReplSession::from_attached_database_session(
-        &without_archive,
-        Limits::default(),
-    )
-    .unwrap();
+    assert!(
+        !remaining_modules
+            .iter()
+            .any(|module| module.logical_path == "main_archive.orna")
+    );
+    let mut main_only_session =
+        AdmittedReplSession::from_attached_database_session(&without_archive, Limits::default())
+            .unwrap();
     assert_eq!(main_only_session.submit("use main;"), Ok(None));
     assert_eq!(
         main_only_session.submit("main.package_value()"),
@@ -223,9 +225,11 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         Err(AttachmentError::AttachmentNotFound)
     ));
     let after_exact_detach = databases.module_inputs();
-    assert!(!after_exact_detach
-        .iter()
-        .any(|module| module.logical_path == "main/main.orna"));
+    assert!(
+        !after_exact_detach
+            .iter()
+            .any(|module| module.logical_path == "main/main.orna")
+    );
     assert!(after_exact_detach.iter().any(|module| {
         module.logical_path == "main_archive.orna" && module.source.contains("= 43")
     }));
@@ -253,12 +257,16 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     assert!(after_archive_detach.iter().any(|module| {
         module.logical_path == "main.orna" && module.source.contains("primary_value")
     }));
-    assert!(!after_archive_detach
-        .iter()
-        .any(|module| module.logical_path == "main/main.orna"));
-    assert!(!after_archive_detach
-        .iter()
-        .any(|module| module.logical_path == "main_archive.orna"));
+    assert!(
+        !after_archive_detach
+            .iter()
+            .any(|module| module.logical_path == "main/main.orna")
+    );
+    assert!(
+        !after_archive_detach
+            .iter()
+            .any(|module| module.logical_path == "main_archive.orna")
+    );
     assert!(archive_detached.database("main_archive").is_none());
     assert!(databases.database("main_archive").is_some());
 
@@ -280,12 +288,7 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         module.logical_path == "main_archive.orna" && module.source.contains("= 43")
     }));
     assert_eq!(
-        databases
-            .database("main")
-            .unwrap()
-            .pin()
-            .commit()
-            .as_str(),
+        databases.database("main").unwrap().pin().commit().as_str(),
         main_alias_commit
     );
     databases.detach_database("main").unwrap();
@@ -294,13 +297,8 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         package_dir.path(),
         &include_str!("fixtures/attachment-route-package.orna").replace("42", "99"),
     );
-    let replacement = PinnedDatabase::resolve(
-        "main",
-        package_repository,
-        &replacement_commit,
-        loader,
-    )
-    .unwrap();
+    let replacement =
+        PinnedDatabase::resolve("main", package_repository, &replacement_commit, loader).unwrap();
     databases.attach_database(replacement).unwrap();
     let mut replacement_session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
@@ -309,18 +307,13 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         replacement_session.submit("main.package_value()"),
         Ok(Some(Value::int(99.into())))
     );
-    assert_eq!(
-        replacement_session.submit("use main_archive;"),
-        Ok(None)
-    );
+    assert_eq!(replacement_session.submit("use main_archive;"), Ok(None));
     assert_eq!(
         replacement_session.submit("main_archive.package_value()"),
         Ok(Some(Value::int(43.into())))
     );
     assert_eq!(
-        historical_session
-            .clone()
-            .submit("main.package_value()"),
+        historical_session.clone().submit("main.package_value()"),
         Ok(Some(Value::int(42.into())))
     );
     assert_eq!(
@@ -340,16 +333,20 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
     assert!(after_source_detach.iter().any(|module| {
         module.logical_path == "main/main.orna" && module.source.contains("= 99")
     }));
-    assert!(!after_source_detach
-        .iter()
-        .any(|module| module.logical_path == "main_archive.orna"));
+    assert!(
+        !after_source_detach
+            .iter()
+            .any(|module| module.logical_path == "main_archive.orna")
+    );
     let mut after_detach_session =
         AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
-    assert!(after_detach_session
-        .attached_databases()
-        .unwrap()
-        .database("main_archive")
-        .is_none());
+    assert!(
+        after_detach_session
+            .attached_databases()
+            .unwrap()
+            .database("main_archive")
+            .is_none()
+    );
     assert_eq!(
         session
             .attached_databases()
@@ -401,9 +398,7 @@ fn main_alias_and_prefix_alias_import_their_own_pinned_root_modules() {
         after_detach_session.submit("main.package_value()"),
         Ok(Some(Value::int(99.into())))
     );
-    assert!(after_detach_session
-        .submit("use main_archive;")
-        .is_err());
+    assert!(after_detach_session.submit("use main_archive;").is_err());
     assert_eq!(
         session.submit("main.package_value()"),
         Ok(Some(Value::int(42.into())))
@@ -438,8 +433,7 @@ fn overlapping_attachment_aliases_decode_nested_module_paths_exactly() {
     );
     let _longer_root_commit = commit_source(
         package_dir.path(),
-        &include_str!("fixtures/attachment-route-package-with-archive.orna")
-            .replace("42", "43"),
+        &include_str!("fixtures/attachment-route-package-with-archive.orna").replace("42", "43"),
     );
     let longer_alias_commit = commit_module_source(
         package_dir.path(),
@@ -575,42 +569,27 @@ fn attached_alias_imports_obey_local_explicit_and_wildcard_precedence() {
     databases.attach_database(short_alias).unwrap();
     databases.attach_database(long_alias).unwrap();
 
-    let mut explicit = AdmittedReplSession::from_attached_database_session(
-        &databases,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut explicit =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
     assert_eq!(explicit.submit("use main.*;"), Ok(None));
     assert_eq!(explicit.submit("use main_archive.{choice};"), Ok(None));
-    assert_eq!(
-        explicit.submit("choice()"),
-        Ok(Some(Value::int(42.into())))
-    );
+    assert_eq!(explicit.submit("choice()"), Ok(Some(Value::int(42.into()))));
 
-    let mut local = AdmittedReplSession::from_attached_database_session(
-        &databases,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut local =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
     assert_eq!(local.submit("let choice = 99;"), Ok(None));
     assert_eq!(local.submit("use main.*;"), Ok(None));
     assert_eq!(local.submit("use main_archive.*;"), Ok(None));
     assert_eq!(local.submit("choice"), Ok(Some(Value::int(99.into()))));
 
-    let mut forward = AdmittedReplSession::from_attached_database_session(
-        &databases,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut forward =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
     assert_eq!(forward.submit("use main.*;"), Ok(None));
     assert_eq!(forward.submit("use main_archive.*;"), Ok(None));
     let forward_error = forward.submit("choice()").unwrap_err();
 
-    let mut reverse = AdmittedReplSession::from_attached_database_session(
-        &databases,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut reverse =
+        AdmittedReplSession::from_attached_database_session(&databases, Limits::default()).unwrap();
     assert_eq!(reverse.submit("use main_archive.*;"), Ok(None));
     assert_eq!(reverse.submit("use main.*;"), Ok(None));
     let reverse_error = reverse.submit("choice()").unwrap_err();
@@ -635,13 +614,8 @@ fn nested_admitted_clones_preserve_archive_pin_identity_after_alias_churn() {
     let loader = ProjectLoader::default();
     let primary =
         PinnedDatabase::resolve("app", primary_repository, &primary_commit, loader).unwrap();
-    let main = PinnedDatabase::resolve(
-        "main",
-        package_repository.clone(),
-        &main_commit,
-        loader,
-    )
-    .unwrap();
+    let main =
+        PinnedDatabase::resolve("main", package_repository.clone(), &main_commit, loader).unwrap();
     let archive = PinnedDatabase::resolve(
         "main_archive",
         package_repository.clone(),
@@ -660,13 +634,8 @@ fn nested_admitted_clones_preserve_archive_pin_identity_after_alias_churn() {
     databases.detach_database("main").unwrap();
     databases
         .attach_database(
-            PinnedDatabase::resolve(
-                "main",
-                package_repository,
-                &replacement_commit,
-                loader,
-            )
-            .unwrap(),
+            PinnedDatabase::resolve("main", package_repository, &replacement_commit, loader)
+                .unwrap(),
         )
         .unwrap();
     databases.detach_database("main_archive").unwrap();
@@ -833,13 +802,8 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             loader,
         )
         .unwrap(),
-        PinnedDatabase::resolve(
-            aliases[4],
-            package_repository.clone(),
-            &leaf_final,
-            loader,
-        )
-        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_final, loader)
+            .unwrap(),
     ];
     let same_depth_second_pair = [
         PinnedDatabase::resolve(
@@ -904,10 +868,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Limits::default(),
     )
     .unwrap();
-    assert_eq!(
-        evaluator.submit(&format!("use {};", aliases[4])),
-        Ok(None)
-    );
+    assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
     assert_eq!(
         evaluator.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(96.into())))
@@ -1085,14 +1046,8 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             .map(|(alias, database)| (alias.to_owned(), database.pin().clone()))
             .collect::<Vec<_>>()
     };
-    assert_eq!(
-        same_pin_foreign_label.wave(),
-        initial_depth_label.wave()
-    );
-    assert_eq!(
-        same_pin_foreign_label.depth(),
-        initial_depth_label.depth()
-    );
+    assert_eq!(same_pin_foreign_label.wave(), initial_depth_label.wave());
+    assert_eq!(same_pin_foreign_label.depth(), initial_depth_label.depth());
     assert_eq!(
         independent_first_stage.retained_wave(0).unwrap()[0]
             .primary()
@@ -1108,7 +1063,10 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     let depth_zero_waves = [first_pair.clone()];
     let depth_one_waves = [second_pair.clone()];
     let depth_zero_plans = [(&initial_depth_label, depth_zero_waves.as_slice())];
-    let depth_one_plans = [(saved_middle_handoff.depth_label(), depth_one_waves.as_slice())];
+    let depth_one_plans = [(
+        saved_middle_handoff.depth_label(),
+        depth_one_waves.as_slice(),
+    )];
     let depth_label_rounds = [depth_zero_plans.as_slice(), depth_one_plans.as_slice()];
     let nested_depth_folds = resolver
         .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels(
@@ -1136,10 +1094,16 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
-    let depth_slot_round_zero = [Some((&initial_depth_label, depth_zero_waves.as_slice())), None];
+    let depth_slot_round_zero = [
+        Some((&initial_depth_label, depth_zero_waves.as_slice())),
+        None,
+    ];
     let depth_slot_round_one = [
         None,
-        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+        Some((
+            saved_middle_handoff.depth_label(),
+            depth_one_waves.as_slice(),
+        )),
     ];
     let nested_omission_rounds = [
         depth_slot_round_zero.as_slice(),
@@ -1197,7 +1161,10 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Ok(Some(Value::int(96.into())))
     );
     let crossed_omission_slot = [
-        Some((saved_middle_handoff.depth_label(), depth_one_waves.as_slice())),
+        Some((
+            saved_middle_handoff.depth_label(),
+            depth_one_waves.as_slice(),
+        )),
         None,
     ];
     let crossed_omission_rounds = [
@@ -1205,10 +1172,11 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         crossed_omission_slot.as_slice(),
     ];
     assert!(matches!(
-        resolver.extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
-            &first_stage,
-            &crossed_omission_rounds,
-        ),
+        resolver
+            .extend_nested_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+                &first_stage,
+                &crossed_omission_rounds,
+            ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
@@ -1286,22 +1254,21 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         assert_eq!(label.wave(), wave);
         assert_eq!(label.depth(), 0);
 
-        let mut checkpoint_root = AdmittedReplSession::from_attached_database_session(
-            &retained[0],
-            Limits::default(),
-        )
-        .unwrap();
-        assert_eq!(checkpoint_root.submit(&format!("use {};", aliases[2])), Ok(None));
+        let mut checkpoint_root =
+            AdmittedReplSession::from_attached_database_session(&retained[0], Limits::default())
+                .unwrap();
+        assert_eq!(
+            checkpoint_root.submit(&format!("use {};", aliases[2])),
+            Ok(None)
+        );
         assert_eq!(
             checkpoint_root.submit(&format!("{}.package_value()", aliases[2])),
             Ok(Some(Value::int(80.into())))
         );
 
-        let mut after_first_rebind = AdmittedReplSession::from_attached_database_session(
-            &retained[1],
-            Limits::default(),
-        )
-        .unwrap();
+        let mut after_first_rebind =
+            AdmittedReplSession::from_attached_database_session(&retained[1], Limits::default())
+                .unwrap();
         assert_eq!(
             after_first_rebind.submit(&format!("use {};", aliases[3])),
             Ok(None)
@@ -1338,8 +1305,13 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
     for wave in [4, 6, 8] {
         let retained = nested_checkpoint_storm.retained_wave(wave).unwrap();
-        assert_eq!(pin_route(&retained[0]), pin_route(saved_middle_handoff.handoff()));
-        let label = nested_checkpoint_storm.retained_depth_label(wave, 0).unwrap();
+        assert_eq!(
+            pin_route(&retained[0]),
+            pin_route(saved_middle_handoff.handoff())
+        );
+        let label = nested_checkpoint_storm
+            .retained_depth_label(wave, 0)
+            .unwrap();
         assert_eq!(label.wave(), wave);
         assert_eq!(label.depth(), 0);
     }
@@ -1419,7 +1391,10 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     let first_cascade_label = checkpoint_cascades.retained_depth_label(4, 0).unwrap();
     assert_eq!(first_cascade_label.wave(), 4);
     assert_eq!(first_cascade_label.depth(), 0);
-    assert_eq!(pin_route(first_cascade_root), pin_route(saved_handoff.handoff()));
+    assert_eq!(
+        pin_route(first_cascade_root),
+        pin_route(saved_handoff.handoff())
+    );
 
     let middle_cascade_root = &checkpoint_cascades.retained_wave(8).unwrap()[0];
     let middle_cascade_label = checkpoint_cascades.retained_depth_label(8, 0).unwrap();
@@ -1429,11 +1404,9 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         pin_route(middle_cascade_root),
         pin_route(saved_middle_handoff.handoff())
     );
-    let mut middle_cascade_eval = AdmittedReplSession::from_attached_database_session(
-        middle_cascade_root,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut middle_cascade_eval =
+        AdmittedReplSession::from_attached_database_session(middle_cascade_root, Limits::default())
+            .unwrap();
     assert_eq!(
         middle_cascade_eval.submit(&format!("use {};", aliases[3])),
         Ok(None)
@@ -1457,10 +1430,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     );
 
     let first_terminal_anchor_chain = resolver
-        .extend_nested_terminal_pair_checkpoint_cascades(
-            &first_stage,
-            &[checkpoint_plans[0]],
-        )
+        .extend_nested_terminal_pair_checkpoint_cascades(&first_stage, &[checkpoint_plans[0]])
         .unwrap_or_else(|error| panic!("first terminal anchor chain failed: {error:?}"));
     let final_terminal_anchor_chain = resolver
         .extend_nested_terminal_pair_checkpoint_cascades(
@@ -1481,8 +1451,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         ),
     ];
     assert_ne!(
-        expected_terminal_anchor_transitions[0].0,
-        expected_terminal_anchor_transitions[0].1,
+        expected_terminal_anchor_transitions[0].0, expected_terminal_anchor_transitions[0].1,
         "the first checkpoint anchor rebinds the terminal nested pin"
     );
     let (validated_terminal_anchor_chains, observed_terminal_anchor_transitions) = resolver
@@ -1493,8 +1462,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         )
         .unwrap();
     assert_eq!(
-        observed_terminal_anchor_transitions,
-        expected_terminal_anchor_transitions,
+        observed_terminal_anchor_transitions, expected_terminal_anchor_transitions,
         "each paired terminal anchor chain reports its computed identity edge"
     );
     assert_eq!(
@@ -1503,7 +1471,9 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         "the final nested anchor chain keeps the computed terminal route identity"
     );
     assert_eq!(
-        validated_terminal_anchor_chains.retained_depth_label(0, 1).unwrap(),
+        validated_terminal_anchor_chains
+            .retained_depth_label(0, 1)
+            .unwrap(),
         saved_middle_handoff.depth_label().clone(),
         "the nested anchor remains bound to its original retained depth"
     );
@@ -1530,16 +1500,10 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
-    let terminal_excursion_plan = [(
-        &saved_middle_handoff,
-        middle_checkpoint_waves.as_slice(),
-    )];
+    let terminal_excursion_plan = [(&saved_middle_handoff, middle_checkpoint_waves.as_slice())];
     let terminal_restore_plan = [(&saved_handoff, anchor_a_waves.as_slice())];
     let first_restoration_excursion = resolver
-        .extend_nested_terminal_pair_checkpoint_cascades(
-            &first_stage,
-            &terminal_excursion_plan,
-        )
+        .extend_nested_terminal_pair_checkpoint_cascades(&first_stage, &terminal_excursion_plan)
         .unwrap();
     let first_restoration_return = resolver
         .extend_nested_terminal_pair_checkpoint_cascades(
@@ -1551,13 +1515,11 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
     let excursion_terminal_identity = first_restoration_excursion.terminal_route_identity();
     let restored_terminal_identity = first_restoration_return.terminal_route_identity();
     assert_ne!(
-        starting_terminal_identity,
-        excursion_terminal_identity,
+        starting_terminal_identity, excursion_terminal_identity,
         "the middle checkpoint moves the terminal route away from its starting pin"
     );
     assert_eq!(
-        starting_terminal_identity,
-        restored_terminal_identity,
+        starting_terminal_identity, restored_terminal_identity,
         "the paired root checkpoint restores the exact original terminal route identity"
     );
     let single_restoration_transitions = [
@@ -1570,10 +1532,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             restored_terminal_identity.clone(),
         ),
     ];
-    let restoration_anchor_pair = [
-        terminal_excursion_plan[0],
-        terminal_restore_plan[0],
-    ];
+    let restoration_anchor_pair = [terminal_excursion_plan[0], terminal_restore_plan[0]];
     let repeated_restoration_folds = [restoration_anchor_pair, restoration_anchor_pair];
     let expected_restoration_transitions = [
         single_restoration_transitions.clone(),
@@ -1596,8 +1555,7 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         "each checkpoint restoration fold is consumed once"
     );
     assert_eq!(
-        observed_restoration_transitions,
-        expected_restoration_transitions,
+        observed_restoration_transitions, expected_restoration_transitions,
         "each repeated paired restoration fold records its actual excursion and return edges"
     );
     assert_eq!(
@@ -1641,17 +1599,17 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
         Limits::default(),
     )
     .unwrap();
-    assert_eq!(restored_value.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        restored_value.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
     assert_eq!(
         restored_value.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(94.into()))),
         "paired checkpoint restoration computes the nested pin's restored fixture value"
     );
 
-    let non_restoring_pair = [
-        terminal_excursion_plan[0],
-        terminal_excursion_plan[0],
-    ];
+    let non_restoring_pair = [terminal_excursion_plan[0], terminal_excursion_plan[0]];
     let non_restoring_transitions = [[
         (
             starting_terminal_identity.clone(),
@@ -1718,11 +1676,9 @@ fn fresh_nested_route_pair_chains_evaluate_rebound_closure_values() {
             .as_str(),
         terminal_initial
     );
-    let mut replay_handoff_eval = AdmittedReplSession::from_attached_database_session(
-        &replay_handoff,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut replay_handoff_eval =
+        AdmittedReplSession::from_attached_database_session(&replay_handoff, Limits::default())
+            .unwrap();
     assert_eq!(
         replay_handoff_eval.submit(&format!("use {};", aliases[2])),
         Ok(None)
@@ -1905,7 +1861,11 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
             &pages,
         )
         .unwrap();
-    assert_eq!(page_transitions.len(), 3, "empty pages retain their boundary");
+    assert_eq!(
+        page_transitions.len(),
+        3,
+        "empty pages retain their boundary"
+    );
     assert_eq!(
         page_transitions.iter().map(Vec::len).collect::<Vec<_>>(),
         [1, 0, 1],
@@ -1956,7 +1916,10 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
         assert_eq!(before, &terminal_identity);
         assert_eq!(after, &terminal_identity);
     }
-    assert_eq!(rotated_compacted.terminal_route_identity(), terminal_identity);
+    assert_eq!(
+        rotated_compacted.terminal_route_identity(),
+        terminal_identity
+    );
     assert_eq!(
         rotated_compacted.retained_depth_label(0, 0).unwrap(),
         second_label,
@@ -2046,7 +2009,11 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
             spill_fold_stream,
         )
         .unwrap();
-    assert_eq!(consumed_spill_folds.get(), 2, "each yielded pair is consumed once");
+    assert_eq!(
+        consumed_spill_folds.get(),
+        2,
+        "each yielded pair is consumed once"
+    );
     assert_eq!(spill_transitions.len(), 2);
     for (before, after) in &spill_transitions {
         assert_eq!(before, &terminal_identity);
@@ -2066,7 +2033,9 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
     let restored_spill_route = &spill_compacted.retained_wave(0).unwrap()[0];
     for alias in aliases {
         assert_eq!(
-            restored_spill_route.database(alias).map(|database| database.pin()),
+            restored_spill_route
+                .database(alias)
+                .map(|database| database.pin()),
             dropped_checkpoint
                 .handoff()
                 .database(alias)
@@ -2086,7 +2055,10 @@ fn paired_terminal_checkpoint_spill_compaction_folds_preserve_nested_rebind_iden
         Limits::default(),
     )
     .unwrap();
-    assert_eq!(spill_replay.submit(&format!("use {};", aliases[3])), Ok(None));
+    assert_eq!(
+        spill_replay.submit(&format!("use {};", aliases[3])),
+        Ok(None)
+    );
     assert_eq!(
         spill_replay.submit(&format!("{}.package_value()", aliases[3])),
         Ok(Some(Value::int(84.into()))),
@@ -2381,22 +2353,18 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     );
     let branch_a_checkpoint = folded_branch_a.handoff_checkpoint(2, 0).unwrap();
     let no_pair_waves: [[PinnedDatabase; 2]; 0] = [];
-    assert!(resolver
-        .extend_nested_terminal_pair_checkpoint_storms(
-            &folded_branch_a,
-            &[(
-                &branch_a_checkpoint,
-                no_pair_waves.as_slice(),
-            )],
-        )
-        .is_ok());
+    assert!(
+        resolver
+            .extend_nested_terminal_pair_checkpoint_storms(
+                &folded_branch_a,
+                &[(&branch_a_checkpoint, no_pair_waves.as_slice(),)],
+            )
+            .is_ok()
+    );
     assert!(matches!(
         resolver.extend_nested_terminal_pair_checkpoint_storms(
             &folded_branch_b,
-            &[(
-                &branch_a_checkpoint,
-                no_pair_waves.as_slice(),
-            )],
+            &[(&branch_a_checkpoint, no_pair_waves.as_slice(),)],
         ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
@@ -2487,9 +2455,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         checkpoint
             .handoff()
             .attached()
-            .map(|(name, database)| {
-                (name.to_owned(), database.pin().commit().as_str().to_owned())
-            })
+            .map(|(name, database)| (name.to_owned(), database.pin().commit().as_str().to_owned()))
             .collect::<Vec<_>>()
     };
     assert_eq!(
@@ -2537,10 +2503,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
     let nested_folded = resolver
-        .extend_sibling_terminal_pair_checkpoint_storms_from_siblings(
-            &folded,
-            &continuation_plans,
-        )
+        .extend_sibling_terminal_pair_checkpoint_storms_from_siblings(&folded, &continuation_plans)
         .unwrap_or_else(|error| panic!("nested sibling checkpoint folds failed: {error:?}"));
     assert_eq!(nested_folded.routes().len(), 3);
     for row in 0..3 {
@@ -2588,11 +2551,9 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
             },
             "the nested row keeps the expected terminal pin"
         );
-        let mut evaluator = AdmittedReplSession::from_attached_database_session(
-            final_session,
-            Limits::default(),
-        )
-        .unwrap();
+        let mut evaluator =
+            AdmittedReplSession::from_attached_database_session(final_session, Limits::default())
+                .unwrap();
         assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
         assert_eq!(
             evaluator.submit(&format!("{}.package_value()", aliases[4])),
@@ -2633,8 +2594,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     ];
     let label_storms_a = [(&depth_label_a, middle_waves_a.as_slice())];
     let label_storms_b = [(&depth_label_b, root_waves_b.as_slice())];
-    let label_storms_independent_a =
-        [(&depth_label_independent_a, middle_waves_a.as_slice())];
+    let label_storms_independent_a = [(&depth_label_independent_a, middle_waves_a.as_slice())];
     let label_plans = [
         label_storms_a.as_slice(),
         label_storms_b.as_slice(),
@@ -2648,7 +2608,9 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
     assert!(matches!(
         resolver.extend_sibling_terminal_pair_checkpoint_storms_from_depth_labels(
             &nested_folded,
-            &equal_pin_crossed_labels.each_ref().map(|row| row.as_slice()),
+            &equal_pin_crossed_labels
+                .each_ref()
+                .map(|row| row.as_slice()),
         ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
@@ -2699,10 +2661,7 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
     let depth_continued = resolver
-        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(
-            &nested_folded,
-            &depth_plans,
-        )
+        .extend_sibling_terminal_pair_checkpoint_storms_from_depths(&nested_folded, &depth_plans)
         .unwrap_or_else(|error| panic!("depth-selected sibling continuation failed: {error:?}"));
     for (row, depth, original_label, expected_value) in [
         (0, 1, &depth_label_a, 91),
@@ -2793,7 +2752,9 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         (2, 1, &depth_label_independent_a, 91),
     ] {
         assert_eq!(
-            omission_continued.retained_depth_label(row, 6, depth).unwrap(),
+            omission_continued
+                .retained_depth_label(row, 6, depth)
+                .unwrap(),
             *source_label,
             "an omitted paired closure does not shift the row's retained depth identity"
         );
@@ -2809,10 +2770,11 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
         Some((&depth_label_a, middle_waves_a.as_slice())),
     ];
     assert!(matches!(
-        resolver.extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
-            &nested_folded,
-            &[crossed_equal_pin_omission_round.as_slice()],
-        ),
+        resolver
+            .extend_sibling_terminal_pair_checkpoint_storm_rounds_from_depth_labels_with_omissions(
+                &nested_folded,
+                &[crossed_equal_pin_omission_round.as_slice()],
+            ),
         Err(AttachmentError::RetainedSnapshotUnavailable)
     ));
 
@@ -2868,7 +2830,9 @@ fn sibling_checkpoint_folds_keep_tabular_anchor_identities() {
                 leaf_b.as_str()
             }
         );
-        let batch_label = twice_continued.retained_depth_label(row, 10, next_depth).unwrap();
+        let batch_label = twice_continued
+            .retained_depth_label(row, 10, next_depth)
+            .unwrap();
         assert_eq!(batch_label.wave(), 10);
         assert_eq!(batch_label.depth(), next_depth);
         assert_eq!(
@@ -2968,7 +2932,11 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         PinnedDatabase::resolve(
             aliases[2],
             package_repository.clone(),
-            &snapshot("71", Some(&format!("{} {}\n", aliases[3], route_three_middle)), "outer pair route"),
+            &snapshot(
+                "71",
+                Some(&format!("{} {}\n", aliases[3], route_three_middle)),
+                "outer pair route",
+            ),
             loader,
         )
         .unwrap(),
@@ -2988,13 +2956,8 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
             loader,
         )
         .unwrap(),
-        PinnedDatabase::resolve(
-            aliases[4],
-            package_repository.clone(),
-            &leaf_final,
-            loader,
-        )
-        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_final, loader)
+            .unwrap(),
     ];
     let first_stage = resolver
         .extend_nested_terminal_pair_chain(&initial_route, std::slice::from_ref(&first_pair))
@@ -3254,13 +3217,8 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
             loader,
         )
         .unwrap(),
-        PinnedDatabase::resolve(
-            aliases[4],
-            package_repository.clone(),
-            &leaf_middle,
-            loader,
-        )
-        .unwrap(),
+        PinnedDatabase::resolve(aliases[4], package_repository.clone(), &leaf_middle, loader)
+            .unwrap(),
     ];
     let middle_waves = [middle_terminal_pair];
     let active_terminal_round = [
@@ -3302,13 +3260,11 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     let middle_chain_identity = after_middle_rebind_chain.terminal_route_identity();
     let restored_chain_identity = after_restoring_rebind_chain.terminal_route_identity();
     assert_ne!(
-        first_chain_identity,
-        middle_chain_identity,
+        first_chain_identity, middle_chain_identity,
         "the nested rebind changes the terminal identity at its chain boundary"
     );
     assert_eq!(
-        first_chain_identity,
-        restored_chain_identity,
+        first_chain_identity, restored_chain_identity,
         "rebinding back to the same pins on the same route restores its terminal identity"
     );
     assert_eq!(
@@ -3443,7 +3399,10 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
     let expected_identity_transitions = [
         (initial_chain_identity, first_chain_identity.clone()),
         (first_chain_identity.clone(), middle_chain_identity.clone()),
-        (middle_chain_identity.clone(), restored_chain_identity.clone()),
+        (
+            middle_chain_identity.clone(),
+            restored_chain_identity.clone(),
+        ),
     ];
     let (transition_fold, observed_identity_transitions) = resolver
         .extend_nested_terminal_pair_sparse_checkpoint_storm_chains_capturing_terminal_identity_transitions(
@@ -3452,8 +3411,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         )
         .unwrap();
     assert_eq!(
-        observed_identity_transitions,
-        expected_identity_transitions,
+        observed_identity_transitions, expected_identity_transitions,
         "each sparse rebind chain records its exact before/after terminal identities"
     );
     assert_eq!(
@@ -3513,7 +3471,9 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         "each paired terminal pin fold follows its exact identity transition"
     );
     assert_eq!(
-        pin_fold_identity_checked.retained_depth_label(0, 1).unwrap(),
+        pin_fold_identity_checked
+            .retained_depth_label(0, 1)
+            .unwrap(),
         nested_label,
         "nested depth identity stays attached through each terminal pin fold"
     );
@@ -3566,8 +3526,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         )
         .unwrap();
     assert_eq!(
-        observed_cascade_transitions,
-        expected_cascade_identity_transitions,
+        observed_cascade_transitions, expected_cascade_identity_transitions,
         "each multi-chain rebind cascade validates and reports its exact paired terminal identity edge"
     );
     assert_eq!(
@@ -3749,8 +3708,7 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         )
         .unwrap();
     assert_eq!(
-        captured_chain_identities,
-        expected_chain_identities,
+        captured_chain_identities, expected_chain_identities,
         "the fold captures each sparse nested rebind chain's computed terminal identity"
     );
     assert_eq!(
@@ -3932,7 +3890,10 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
         Limits::default(),
     )
     .unwrap();
-    assert_eq!(middle_evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
+    assert_eq!(
+        middle_evaluator.submit(&format!("use {};", aliases[4])),
+        Ok(None)
+    );
     assert_eq!(
         middle_evaluator.submit(&format!("{}.package_value()", aliases[4])),
         Ok(Some(Value::int(94.into())))
@@ -3948,11 +3909,9 @@ fn sparse_nested_storm_folds_preserve_terminal_route_identity() {
                 .clone(),
         )
         .unwrap();
-    let mut evaluator = AdmittedReplSession::from_attached_database_session(
-        &evaluation_session,
-        Limits::default(),
-    )
-    .unwrap();
+    let mut evaluator =
+        AdmittedReplSession::from_attached_database_session(&evaluation_session, Limits::default())
+            .unwrap();
     assert_eq!(evaluator.submit(&format!("use {};", aliases[4])), Ok(None));
     assert_eq!(
         evaluator.submit(&format!("{}.package_value()", aliases[4])),
