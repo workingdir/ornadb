@@ -1272,6 +1272,7 @@ struct IndexChurnMetrics {
     allocations: (u64, u64),
     source_page_transfer: (usize, usize),
     new_tree_objects: usize,
+    new_blob_bytes: usize,
     media_transfer: (usize, usize),
 }
 
@@ -1332,6 +1333,7 @@ fn measure_index_churn(
     let source_page_transfer =
         index_data_delta(&fixture.index_data_blobs, &before_objects, &after_objects);
     let new_tree_objects = tree_object_delta(&before_objects, &after_objects);
+    let new_blob_bytes = blob_bytes_delta(&before_objects, &after_objects);
     let media_transfer =
         media_payload_delta(&fixture.media_payload_oids, &before_objects, &after_objects);
     assert_eq!(
@@ -1349,13 +1351,14 @@ fn measure_index_churn(
         allocations,
         source_page_transfer,
         new_tree_objects,
+        new_blob_bytes,
         media_transfer,
     }
 }
 
 fn report_index_churn(rows: u64, operation: &str, metrics: IndexChurnMetrics) {
     eprintln!(
-        "ORP-1 index_churn rows={} operation={} elapsed_ms={} index_created={} index_reused={} payload_objects_reused={} payload_bytes_read={} source_page_blobs={} source_page_bytes={} new_tree_objects={} media_blobs={} media_bytes={} allocs={} alloc_bytes={}",
+        "ORP-1 index_churn rows={} operation={} elapsed_ms={} index_created={} index_reused={} payload_objects_reused={} payload_bytes_read={} source_page_blobs={} source_page_bytes={} new_tree_objects={} new_blob_bytes={} media_blobs={} media_bytes={} allocs={} alloc_bytes={}",
         rows,
         operation,
         millis(metrics.elapsed),
@@ -1366,12 +1369,17 @@ fn report_index_churn(rows: u64, operation: &str, metrics: IndexChurnMetrics) {
         metrics.source_page_transfer.0,
         metrics.source_page_transfer.1,
         metrics.new_tree_objects,
+        metrics.new_blob_bytes,
         metrics.media_transfer.0,
         metrics.media_transfer.1,
         metrics.allocations.0,
         metrics.allocations.1,
     );
 }
+
+/// Mirrors `row_store::ROW_INLINE_LIMIT`, which is crate-private: a row whose
+/// encoding exceeds it is lowered to overflow (`fits_inline`, overflow.rs).
+const ROW_INLINE_LIMIT: usize = 8_192;
 
 fn exercise_index_churn(fixture: &Fixture) {
     let (_clone_holder, clone_path, _) = clone_partial(fixture.root.path());
@@ -1450,6 +1458,45 @@ fn exercise_index_churn(fixture: &Fixture) {
             true,
         ),
     );
+    // Above the inline bound the row is lowered to overflow. Digit text varies
+    // per byte, so the overflow chunks cannot dedupe into existing objects.
+    let mut overflow_row = Vec::with_capacity(ROW_INLINE_LIMIT + 1_024);
+    cbor_array(&mut overflow_row, 3);
+    cbor_uint(&mut overflow_row, bucket_for(fixture.row_count + 31));
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let overflow_text: String = (0..9_000)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            char::from(b'0' + ((state >> 33) % 10) as u8)
+        })
+        .collect();
+    cbor_text(&mut overflow_row, &overflow_text);
+    overflow_row.extend_from_slice(
+        fixture
+            .media_annotation
+            .as_deref()
+            .expect("valid fixture has a media annotation"),
+    );
+    let overflow_len = overflow_row.len();
+    assert!(overflow_len > ROW_INLINE_LIMIT);
+    let overflow_key = encode_uint(fixture.row_count + 31);
+    let overflow_row = RowIndexMutation::insert_canonical(&overflow_key, &overflow_row)
+        .expect("construct overflowing row with shared media reference");
+    let overflow_churn = measure_index_churn(
+        fixture,
+        &clone_path,
+        "insert overflow row",
+        overflow_row,
+        fixture.row_count + 1,
+        true,
+    );
+    assert!(
+        overflow_churn.new_blob_bytes >= overflow_len,
+        "the overflowed row's bytes are written as new blobs"
+    );
+    report_index_churn(fixture.row_count, "overflow_row", overflow_churn);
     let after_churn = object_inventory(&clone_path);
     assert!(
         fixture
@@ -1923,6 +1970,17 @@ fn tree_object_delta(before: &ObjectInventory, after: &ObjectInventory) -> usize
         .count()
 }
 
+fn blob_bytes_delta(before: &ObjectInventory, after: &ObjectInventory) -> usize {
+    after
+        .objects
+        .iter()
+        .filter(|(oid, object)| {
+            object.kind == ObjectKind::Blob && !before.objects.contains_key(*oid)
+        })
+        .map(|(_, object)| object.size)
+        .sum()
+}
+
 fn assert_rejected(
     fault: Fault,
     rows: u64,
@@ -2040,17 +2098,25 @@ mod format3;
 #[path = "../../orna-cli-v1/tests/support/media_commit.rs"]
 mod media_commit;
 
-/// Admits ten rows through a runtime request commit and publishes them with
-/// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
-/// the same sequence `orna publish` runs. The relation is seeded by the test
-/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
-/// the ten rows and the graph nodes that publication adds on top of that seed
-/// are written by the production writer.
-#[tokio::test]
-async fn orp1_production_writer_ten_rows() {
+/// Production-path publication fixture: the repository, the media directory,
+/// and the runtime state after ten rows were admitted through a runtime
+/// request commit and frozen. The relation is seeded by the test fixture with
+/// an empty ORP-1 row root (`format3::empty_format3_repository`).
+struct AdmittedProductionRows {
+    _repository_dir: TempDir,
+    _media: TempDir,
+    repository: Repository,
+    relation_id: [u8; 16],
+    head_before: orna_repository_v1::GitCommitRef,
+    state: orna_runtime_v1::RuntimeState,
+    freeze: orna_runtime_v1::PublicationFreeze,
+}
+
+/// Admits ten rows through a runtime request commit and freezes the admitted
+/// prefix. Publication is left to the caller.
+async fn admit_ten_production_rows() -> AdmittedProductionRows {
     use orna_evaluator_v1::SysHostBindingRegistry;
     use orna_runtime_v1::RuntimeState;
-    use orna_storage_v1::RuntimePublicationCoordinator;
     use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 
     let media_fixtures = concat!(
@@ -2112,6 +2178,7 @@ async fn orp1_production_writer_ten_rows() {
         )
         .await;
     }
+    drop(bindings);
 
     let checkpoint = state
         .latest_checkpoint()
@@ -2131,6 +2198,37 @@ async fn orp1_production_writer_ten_rows() {
         10,
         "every admitted row is in the frozen range"
     );
+    AdmittedProductionRows {
+        _repository_dir,
+        _media: media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    }
+}
+
+/// Admits ten rows through a runtime request commit and publishes them with
+/// the production writer (`prepare_allow_noop` -> `publish` -> `complete`),
+/// the same sequence `orna publish` runs. The relation is seeded by the test
+/// fixture with an empty ORP-1 row root (`format3::empty_format3_repository`);
+/// the ten rows and the graph nodes that publication adds on top of that seed
+/// are written by the production writer.
+#[tokio::test]
+async fn orp1_production_writer_ten_rows() {
+    use orna_storage_v1::RuntimePublicationCoordinator;
+
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_ten_production_rows().await;
+
     let head = repository
         .head()
         .expect("read repository head")
@@ -2209,6 +2307,183 @@ async fn orp1_production_writer_ten_rows() {
         stats.blob_references(),
         head_after.as_str(),
     );
+}
+
+/// Asserts that the committed relation's native graph is whole: exactly one
+/// store root and at least one ordered leaf are reachable from HEAD. A
+/// partially published graph fails here.
+fn assert_whole_store_graph(repository: &Repository, relation_id: [u8; 16]) {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    let stats = graph
+        .object_stats(&scope)
+        .expect("count reachable store nodes");
+    let kind_count = |name: &str| -> u64 {
+        stats
+            .nodes()
+            .iter()
+            .filter(|(kind, _)| format!("{kind:?}") == name)
+            .map(|(_, count)| *count)
+            .sum()
+    };
+    assert!(
+        kind_count("OrderedLeaf") >= 1,
+        "the ordered tree has at least one leaf"
+    );
+    assert_eq!(
+        kind_count("StoreRoot"),
+        1,
+        "exactly one store root is reachable"
+    );
+}
+
+/// Two publishers stage the same frozen prefix against one expected head and
+/// index, then race `publish` on two threads. Exactly one compare-and-set
+/// wins; the other fails with `RefConflict` and changes nothing.
+#[tokio::test]
+async fn orp1_production_publication_race() {
+    use orna_storage_v1::{Error as StorageError, RuntimePublicationCoordinator};
+
+    let AdmittedProductionRows {
+        _repository_dir,
+        _media,
+        repository,
+        relation_id,
+        head_before,
+        state,
+        freeze,
+    } = admit_ten_production_rows().await;
+    let head = repository
+        .head()
+        .expect("read repository head")
+        .expect("format-3 fixture has a head");
+    let index = repository
+        .index_generation()
+        .expect("read repository index generation");
+    let left_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index.clone(),
+        &freeze,
+        |_| Err(StorageError::InvalidKey),
+        "orna: publish race left",
+    )
+    .await
+    .expect("left publisher prepares")
+    .expect("ten admitted rows are a visible change");
+    let right_prepared = RuntimePublicationCoordinator::prepare_allow_noop(
+        &repository,
+        &state,
+        &head,
+        index,
+        &freeze,
+        |_| Err(StorageError::InvalidKey),
+        "orna: publish race right",
+    )
+    .await
+    .expect("right publisher prepares")
+    .expect("ten admitted rows are a visible change");
+
+    // Each publisher runs on its own thread with its own repository handle and
+    // both start together, so their compare-and-set attempts overlap.
+    let barrier = std::sync::Barrier::new(2);
+    let (left, right) = std::thread::scope(|scope| {
+        let left_repository = repository.clone();
+        let right_repository = repository.clone();
+        let barrier = &barrier;
+        let left = scope.spawn(move || {
+            let mut coordinator = left_prepared;
+            barrier.wait();
+            let result = coordinator.publish(&left_repository);
+            (coordinator, result)
+        });
+        let right = scope.spawn(move || {
+            let mut coordinator = right_prepared;
+            barrier.wait();
+            let result = coordinator.publish(&right_repository);
+            (coordinator, result)
+        });
+        (
+            left.join().expect("left publisher thread"),
+            right.join().expect("right publisher thread"),
+        )
+    });
+    let (mut winner, winner_generation, loser, loser_error) = match (left, right) {
+        ((coordinator, Ok(generation)), (loser, Err(error)))
+        | ((loser, Err(error)), (coordinator, Ok(generation))) => {
+            (coordinator, generation, loser, error)
+        }
+        (left, right) => panic!(
+            "exactly one publisher wins the ref compare-and-set: left={:?} right={:?}",
+            left.1, right.1
+        ),
+    };
+    assert_eq!(
+        loser_error,
+        StorageError::RefConflict,
+        "the losing publisher fails its ref compare-and-set"
+    );
+
+    winner
+        .complete(&repository, &state, &freeze)
+        .await
+        .expect("winning publisher completes its publication");
+    let head_after = repository
+        .head()
+        .expect("read published head")
+        .expect("publication leaves a head");
+    assert_eq!(
+        head_after.as_str(),
+        winner.candidate().commit().as_str(),
+        "HEAD advances to the winning candidate"
+    );
+    assert_ne!(
+        head_after.as_str(),
+        head_before.as_str(),
+        "publication advances HEAD"
+    );
+    assert!(
+        !repository
+            .head_contains_commit(loser.candidate().commit())
+            .expect("check the losing candidate against HEAD"),
+        "the losing candidate commit never reaches HEAD"
+    );
+    assert_eq!(
+        repository
+            .index_generation()
+            .expect("read repository index generation"),
+        winner_generation,
+        "only the winning publisher advances the index"
+    );
+
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the relation row map");
+    assert_eq!(
+        row_map.version().row_count(),
+        Some(10),
+        "the losing publisher adds no rows"
+    );
+    let rows = format3::committed_store_rows(&repository, relation_id);
+    assert_eq!(
+        rows.len(),
+        10,
+        "the winner's ten rows are readable from the store"
+    );
+
+    assert_whole_store_graph(&repository, relation_id);
 }
 
 #[test]
