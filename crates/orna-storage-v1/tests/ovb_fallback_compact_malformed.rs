@@ -117,6 +117,8 @@ fn metadata(profile: &CompactOvbProfile, column_descriptor: OvbRaw) -> Vec<KeyVa
     ]
 }
 
+/// The three Parquet parts are one fragment being encoded.
+#[allow(clippy::too_many_arguments)]
 fn parquet(
     profile: &CompactOvbProfile,
     descriptor_kind: Kind,
@@ -142,9 +144,11 @@ fn parquet(
     )
 }
 
+/// The three Parquet parts are one fragment being encoded.
+#[allow(clippy::too_many_arguments)]
 fn parquet_with_logical(
     profile: &CompactOvbProfile,
-    descriptor_kind: Kind,
+    _descriptor_kind: Kind,
     logical_kind: Kind,
     descriptor_encoding: &str,
     parameters: Vec<OvbRaw>,
@@ -592,6 +596,7 @@ fn footer_start(bytes: &[u8]) -> usize {
     let length = u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap());
     bytes.len() - 8 - length as usize
 }
+#[allow(clippy::too_many_arguments)]
 fn corrupt_dictionary_page_offset(bytes: Vec<u8>, offset_delta: i64) -> Vec<u8> {
     let reader = SerializedFileReader::new(Bytes::from(bytes.clone())).unwrap();
     let metadata = reader.metadata().clone();

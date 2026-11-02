@@ -825,11 +825,10 @@ pub fn plan_storage_rewrite(
             editable_bytes,
         });
     }
-    if let StorageRewriteTarget::Editable = target {
-        if portable_siblings_collide(output.iter().filter_map(|row| row.editable_path.as_ref())) {
+    if let StorageRewriteTarget::Editable = target
+        && portable_siblings_collide(output.iter().filter_map(|row| row.editable_path.as_ref())) {
             return Err(StorageRewriteError::UnrepresentablePath);
         }
-    }
     let logical_digest = digest_rows(
         output
             .iter()

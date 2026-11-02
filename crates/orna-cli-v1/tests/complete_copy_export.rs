@@ -265,12 +265,12 @@ fn commit_snapshot_with_secondary_root(
     append_cbor_bytes(&mut store_data, &git_oid_bytes(&relation_map_oid));
     let store_root =
         native_fixture_node(project, &store_data, &[(relation_map_oid.as_str(), "tree")]);
-    let database = std::fs::read(project.join(".orna/database.orna")).unwrap();
-    let database_oid = git_object(project, "blob", &database);
+    let ledger_bytes = std::fs::read(project.join(".orna/database.orna")).unwrap();
+    let ledger_oid = git_object(project, "blob", &ledger_bytes);
     let source_oid = git_object(project, "blob", &schema_source);
     let orna_tree = git_tree(
         project,
-        &format!("100644 blob {database_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
+        &format!("100644 blob {ledger_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
     );
     let root_tree = git_tree(
         project,
@@ -402,6 +402,7 @@ fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
         .expect("validate the copied native store root offline");
 }
 
+#[allow(clippy::too_many_lines)]
 #[test]
 /// ORNA-GIT-001: complete copies preserve the real snapshot gitlink and its dependency content.
 fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
@@ -570,6 +571,7 @@ fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 /// `orna publish` of a database holding an imported media row produces a
 /// complete copy whose history lists the publication commit and whose
 /// reconstructed copy reads the same row with no media fetch.
@@ -657,14 +659,12 @@ async fn publish_then_history_then_offline_copy_carries_the_publication_commit()
     assert_eq!(source_rows.len(), 1, "publish commits the imported row");
     let publication = stdout(&published)
         .split_whitespace()
-        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .map(str::to_owned)
-        .unwrap_or_else(|| {
+        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit())).map_or_else(|| {
             panic!(
                 "publish names the publication commit: {}",
                 stdout(&published)
             )
-        });
+        }, str::to_owned);
     let head = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
         .unwrap()
         .trim()
@@ -912,6 +912,7 @@ fn export_discovers_the_repository_from_a_subdirectory() {
     assert!(archive.join("manifest.tsv").is_file());
 }
 
+#[allow(clippy::too_many_lines)]
 /// A promised object that exists only at `origin` must not be fetched to make
 /// an otherwise incomplete local snapshot exportable.
 #[test]
@@ -1054,6 +1055,7 @@ fn export_fails_locally_for_a_missing_promisor_object() {
     );
 }
 
+#[allow(clippy::too_many_lines)]
 /// A streamed blob remains byte-identical after the source and its configured
 /// origin are unavailable; restore publishes only the verified local copy.
 #[test]
@@ -1074,7 +1076,7 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
 
     let payload_length = 8 * 1024 * 1024;
     let payload: Vec<u8> = (0..payload_length)
-        .map(|index| ((index * 31 + (index >> 8)) & 0xff) as u8)
+        .map(|index| u8::try_from((index * 31 + (index >> 8)) & 0xff).expect("masked to one byte"))
         .collect();
     let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
     std::fs::write(source.join("large-payload.bin"), &payload).unwrap();
@@ -1162,17 +1164,17 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
 
     let mut payload_file = std::fs::File::open(restored.join("large-payload.bin")).unwrap();
     let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     let mut restored_length = 0_u64;
     loop {
         let count = payload_file.read(&mut buffer).unwrap();
         if count == 0 {
             break;
         }
-        restored_length += count as u64;
+        restored_length += u64::try_from(count).expect("a read count fits u64");
         hasher.update(&buffer[..count]);
     }
-    assert_eq!(restored_length, payload_length as u64);
+    assert_eq!(restored_length, u64::try_from(payload_length).expect("payload length fits u64"));
     let restored_sha256: [u8; 32] = hasher.finalize().into();
     assert_eq!(
         restored_sha256, expected_sha256,
@@ -1183,6 +1185,7 @@ fn restore_streams_large_blob_after_source_and_origin_are_gone() {
 /// Committed legacy format-1 fixture (`tests/fixtures/legacy-format1.bundle`).
 const LEGACY_BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
 
+#[allow(clippy::too_many_lines)]
 /// Gate F (ACCEPTANCE.md:63-68): a complete copy of a workspace that holds a
 /// legacy format-1 snapshot and a format-3 snapshot exports both members, and
 /// each reconstructs offline with its recorded format intact. The format-3

@@ -5,6 +5,16 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
+/// Lowercase hex of a digest, shared with the format-3 fixture builder.
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
+}
+
 /// Returns the bundle's relative file paths, sorted: `index.tsv` plus every
 /// file under `media/`.
 pub fn bundle_files(directory: &Path) -> Vec<String> {
@@ -27,8 +37,8 @@ pub fn bundle_manifest(directory: &Path) -> Vec<u8> {
     for name in bundle_files(directory) {
         let bytes = std::fs::read(directory.join(&name)).expect("bundle file is readable");
         let digest = Sha256::digest(&bytes);
-        let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
-        manifest.push_str(&format!("{hex}  {name}\n"));
+        let hex = hex_encode(&digest);
+        manifest.extend([format!("{hex}  {name}\n")]);
     }
     manifest.into_bytes()
 }

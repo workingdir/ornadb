@@ -1885,7 +1885,6 @@ pub fn evaluate_expression(
 ///
 /// Evaluation proceeds only far enough to construct the relation plan. Source reads,
 /// callbacks, and terminal operators that materialize rows are not run.
-#[must_use]
 pub fn planner_metadata(
     source: &str,
     environment: &Environment,
@@ -2020,12 +2019,12 @@ pub fn evaluate_expression_ovb2_with_effects_and_cancellation(
     )
 }
 
-fn evaluate_expression_ovb2_with_optional_effects<'functions, 'effects>(
+fn evaluate_expression_ovb2_with_optional_effects(
     source: &str,
     environment: &BTreeMap<String, ContextValue>,
     limits: Limits,
-    effects: Option<&'effects mut dyn Ovb2EffectHandler>,
-    cancellation: Option<&'functions CancellationToken>,
+    effects: Option<&mut dyn Ovb2EffectHandler>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<ContextValue, EvaluationError> {
     check_limits(source, limits)?;
     let parsed = parse_expression(source);
@@ -4677,8 +4676,8 @@ impl Context<'_, '_> {
             key.supplied.clone(),
             depth,
         );
-        if let Ok(value) = &result {
-            if self.reuse.enabled && self.reuse.epoch == epoch && reusable_value(value) {
+        if let Ok(value) = &result
+            && self.reuse.enabled && self.reuse.epoch == epoch && reusable_value(value) {
                 if self.reuse.entries.len() == CALL_REUSE_CAPACITY {
                     self.reuse.entries.pop_front();
                 }
@@ -4689,7 +4688,6 @@ impl Context<'_, '_> {
                     value: value.clone(),
                 });
             }
-        }
         result
     }
 }
@@ -4703,11 +4701,11 @@ fn reusable_value(value: &Value) -> bool {
         Value::Tuple(values) => values.iter().all(reusable_value),
         Value::Record(fields) => fields.values().all(reusable_value),
         Value::NominalRecord { fields, .. } => fields.iter().all(|(_, field)| reusable_value(field)),
-        Value::Enum { payload, .. } => payload.as_deref().map_or(true, reusable_value),
-        Value::Option(payload) => payload.as_deref().map_or(true, reusable_value),
+        Value::Enum { payload, .. } => payload.as_deref().is_none_or(reusable_value),
+        Value::Option(payload) => payload.as_deref().is_none_or(reusable_value),
         Value::Range { lower, upper, .. } => {
-            lower.as_deref().map_or(true, reusable_value)
-                && upper.as_deref().map_or(true, reusable_value)
+            lower.as_deref().is_none_or(reusable_value)
+                && upper.as_deref().is_none_or(reusable_value)
         }
         _ => true,
     }
@@ -4722,9 +4720,12 @@ enum Transfer {
     Continue,
 }
 
+/// One relation row handed to the next stage. `Yield` carries a whole `Value`,
+/// which is large next to the other two variants, so it is boxed; the row
+/// vector is walked once per stage and the indirection costs nothing there.
 enum RelationRow {
     Skip,
-    Yield(Value),
+    Yield(Box<Value>),
     End,
 }
 
@@ -4764,6 +4765,9 @@ fn stream_elapsed_nanoseconds(later: Instant, earlier: Instant) -> Option<BigInt
     Some(seconds * BigInt::from(1_000_000_000u64) + nanoseconds)
 }
 
+/// these from the plan they are walking.
+/// One relation stage's rows, counters and visitor: the stage callers pass
+#[allow(clippy::too_many_arguments)]
 /// Runs one task callback on a worker thread. The child starts with the
 /// owner's active calls, so recursion through task combinators stays within
 /// `Limits::max_depth`.
@@ -4811,9 +4815,18 @@ fn invoke_task_callback(
     result
 }
 
+/// One worker-pool run: per-task outcomes, an optional aggregate value and the
+/// materialisation records each task produced.
+type TaskMaterialization = (
+    Vec<Option<Result<Value, EvaluationError>>>,
+    Option<Value>,
+    Vec<Vec<MaterializationRecord>>,
+);
+
 /// Run finite callback lists with a bounded number of owned worker threads.
 /// A first ordinary failure stops admission for `parallel`; a first success
 /// stops admission for `race`. In-flight children observe the shared token,
+#[allow(clippy::too_many_arguments)]
 /// and `thread::scope` joins every worker before the owner returns.
 fn run_task_callbacks(
     callbacks: &[Value],
@@ -4830,14 +4843,10 @@ fn run_task_callbacks(
     sys_host: ActivationSysHost<'_>,
     cancel_after_failure: bool,
     cancel_after_success: bool,
-) -> (
-    Vec<Option<Result<Value, EvaluationError>>>,
-    Option<Value>,
-    Vec<Vec<MaterializationRecord>>,
-) {
+) -> TaskMaterialization {
     const MAX_TASK_WORKERS: usize = 32;
     let available = std::thread::available_parallelism().map_or(1, usize::from);
-    let worker_count = callbacks.len().min(available).min(MAX_TASK_WORKERS).max(1);
+    let worker_count = callbacks.len().clamp(1, available.min(MAX_TASK_WORKERS));
     let next = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let shared_cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let child_effects = Arc::new(std::sync::Mutex::new(std::mem::take(&mut child_effects)));
@@ -6050,11 +6059,10 @@ impl Context<'_, '_> {
         {
             return None;
         }
-        if let Some(namespace) = self.namespace.as_deref() {
-            if self.functions.contains_key(&format!("{namespace}.{path}")) {
+        if let Some(namespace) = self.namespace.as_deref()
+            && self.functions.contains_key(&format!("{namespace}.{path}")) {
                 return None;
             }
-        }
         self.effects.as_deref()?.admitted_relation_source(&path)
     }
 
@@ -6553,10 +6561,8 @@ impl Context<'_, '_> {
         let count = count.to_usize().ok_or_else(|| error("ORNA-EVAL-LIMIT"))?;
         self.items(count)?;
         let mut values = Vec::with_capacity(count);
-        let mut value = lower;
-        for _ in 0..count {
-            values.push(Value::Int(value.clone()));
-            value += 1;
+        for offset in 0..count {
+            values.push(Value::Int(&lower + BigInt::from(offset)));
         }
         Ok(values)
     }
@@ -7075,7 +7081,7 @@ impl Context<'_, '_> {
                         RelationRow::Skip => {}
                         RelationRow::End => return Ok(false),
                         RelationRow::Yield(value) => {
-                            if !visit(context, value)? {
+                            if !visit(context, *value)? {
                                 return Ok(false);
                             }
                         }
@@ -7086,19 +7092,17 @@ impl Context<'_, '_> {
         let mut ended = false;
         self.for_each_sorted_relation(&prefix, depth, |context, value| {
             let flushed = state.push(value).map_err(bucket_error)?;
-            if let Some(bucket) = flushed {
-                if !emit(context, bucket)? {
+            if let Some(bucket) = flushed
+                && !emit(context, bucket)? {
                     ended = true;
                     return Ok(false);
                 }
-            }
             Ok(true)
         })?;
-        if !ended {
-            if let Some(bucket) = state.finish() {
+        if !ended
+            && let Some(bucket) = state.finish() {
                 emit(self, bucket)?;
             }
-        }
         Ok(())
     }
 
@@ -7483,7 +7487,7 @@ impl Context<'_, '_> {
                     RelationRow::Skip => {}
                     RelationRow::End => return Ok(false),
                     RelationRow::Yield(value) => {
-                        if !visit(context, value)? {
+                        if !visit(context, *value)? {
                             return Ok(false);
                         }
                     }
@@ -7582,6 +7586,9 @@ impl Context<'_, '_> {
         Ok(true)
     }
 
+    /// these from the plan they are walking.
+    /// One relation stage's rows, counters and visitor: the stage callers pass
+    #[allow(clippy::too_many_arguments)]
     fn apply_relation_stages(
         &mut self,
         mut value: Value,
@@ -7670,7 +7677,7 @@ impl Context<'_, '_> {
                 }
             }
         }
-        let mut rows = vec![RelationRow::Yield(value)];
+        let mut rows = vec![RelationRow::Yield(Box::new(value))];
         if stages.iter().enumerate().any(|(offset, stage)| {
             matches!(stage, RelationStage::Take(count) if counters[stage_offset + offset] >= *count)
         }) {
@@ -7679,6 +7686,9 @@ impl Context<'_, '_> {
         Ok(rows)
     }
 
+    /// these from the plan they are walking.
+    /// One relation stage's rows, counters and visitor: the stage callers pass
+    #[allow(clippy::too_many_arguments)]
     fn apply_relation_flat_map(
         &mut self,
         mapped: Value,
@@ -7818,6 +7828,9 @@ impl Context<'_, '_> {
         )
     }
 
+    /// these from the plan they are walking.
+    /// One relation stage's rows, counters and visitor: the stage callers pass
+    #[allow(clippy::too_many_arguments)]
     fn for_each_buffered_relation(
         &mut self,
         values: Vec<Value>,
@@ -7879,6 +7892,9 @@ impl Context<'_, '_> {
         )
     }
 
+    /// these from the plan they are walking.
+    /// One relation stage's rows, counters and visitor: the stage callers pass
+    #[allow(clippy::too_many_arguments)]
     fn for_each_buffered_stages(
         &mut self,
         values: Vec<Value>,
@@ -7917,7 +7933,7 @@ impl Context<'_, '_> {
                     RelationRow::Skip => {}
                     RelationRow::End => return Ok(()),
                     RelationRow::Yield(value) => {
-                        if !visit(self, value)? {
+                        if !visit(self, *value)? {
                             return Ok(());
                         }
                     }
@@ -8244,9 +8260,7 @@ impl Context<'_, '_> {
         if let Some((left, right)) = &plan.source_union {
             self.validate_relation_plan_sources(left)?;
             self.validate_relation_plan_sources(right)
-        } else if plan.source_values.is_some() {
-            Ok(())
-        } else if plan.source == SYS_MATERIALIZATION_SOURCE {
+        } else if plan.source_values.is_some() || plan.source == SYS_MATERIALIZATION_SOURCE {
             Ok(())
         } else {
             self.effects
@@ -10921,8 +10935,8 @@ impl Context<'_, '_> {
                 }
                 results
                     .into_iter()
-                    .enumerate()
-                    .find_map(|(_, result)| {
+                    
+                    .find_map(|result| {
                         result.and_then(|result| match result {
                             Err(failure) if failure.code() != "ORNA-EVAL-CANCELLED" => {
                                 Some(Err(failure))
@@ -14835,7 +14849,7 @@ fn named_arguments(
             expected
                 .iter()
                 .position(|expected| *expected == name)
-                .or_else(|| match (function, name) {
+                .or(match (function, name) {
                     // `std.math.clamp`'s pinned source uses `lower`/`upper`;
                     // the earlier evaluator surface also admitted `min`/`max`.
                     ("clamp", "lower" | "min") => Some(1),
@@ -14906,7 +14920,8 @@ fn portable_statistics_operation(
     resolved_function: Option<&str>,
     scope: &Scope,
 ) -> Option<&'static str> {
-    let operation = resolved_function
+    
+    resolved_function
         .and_then(statistics_function_operation)
         .or_else(|| {
             let root = function_root_name(expression)?;
@@ -14916,8 +14931,7 @@ fn portable_statistics_operation(
             function_name(expression)
                 .as_deref()
                 .and_then(statistics_function_operation)
-        });
-    operation
+        })
 }
 
 fn statistics_function_operation(name: &str) -> Option<&'static str> {

@@ -5305,7 +5305,7 @@ fn legacy_format_migration_preserves_protected_pin_refs_across_publication() {
             root.path(),
             &["show", &format!("{}:main.orna", old_head.as_str())]
         ),
-        git(root.path(), &["show", &format!("{pinned_blob}")])
+        git(root.path(), &["show", &pinned_blob.to_string()])
     );
 }
 
@@ -6267,7 +6267,7 @@ fn disposable_migration_copy_preserves_legacy_bytes_and_reports_its_coordinates(
 
         // The copy carries the source's commits under their original identity
         // and its own content, including the paths Git ignores.
-        let migrated = Repository::discover(&copy.destination()).unwrap();
+        let migrated = Repository::discover(copy.destination()).unwrap();
         assert_eq!(copy.source_commit(), &source_head);
         assert_eq!(migrated.head().unwrap(), Some(source_head.clone()));
         assert_eq!(

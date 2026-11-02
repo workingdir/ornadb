@@ -481,10 +481,11 @@ impl OfflineCopy {
     ) -> Result<OfflineImportPlan, OfflineCopyError> {
         let mut write_error = None;
         let plan = self.import_plan_with_progress(|progress| {
-            if output == OfflineImportOutput::Verbose && write_error.is_none() {
-                if let Err(error) = writeln!(out, "{progress}") {
-                    write_error = Some(error);
-                }
+            if output == OfflineImportOutput::Verbose
+                && write_error.is_none()
+                && let Err(error) = writeln!(out, "{progress}")
+            {
+                write_error = Some(error);
             }
         })?;
         match write_error {
@@ -665,10 +666,10 @@ fn validate_row(row: &OfflineRow) -> Result<(), OfflineCopyError> {
     if !token_ok(&row.media_type) {
         return Err(OfflineCopyError::InvalidRow("media type must be one token"));
     }
-    if let Some(suffix) = &row.suffix {
-        if !token_ok(suffix) {
-            return Err(OfflineCopyError::InvalidRow("suffix must be one token"));
-        }
+    if let Some(suffix) = &row.suffix
+        && !token_ok(suffix)
+    {
+        return Err(OfflineCopyError::InvalidRow("suffix must be one token"));
     }
     Ok(())
 }
@@ -720,7 +721,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
+    if !text.len().is_multiple_of(2) {
         return None;
     }
     text.as_bytes()

@@ -801,18 +801,16 @@ fn schema_descriptor_table(descriptor: &SchemaDescriptor) -> Result<Uuid, Reposi
 /// the logical type, encoding, parameters, and Parquet primitive must agree.
 /// This keeps a manifest from authorizing a file through arbitrary same-shape
 /// metadata that names the right leaf but a different logical field.
+/// Verified physical leaves: the fallback kind and physical info for each
+/// column index named by the manifest.
+type VerifiedPhysicalColumns = (BTreeMap<usize, OvbFallbackKind>, BTreeMap<usize, PhysicalColumnInfo>);
+
 fn verify_physical_columns(
     columns: &[u8],
     schema: &parquet::schema::types::SchemaDescriptor,
     descriptor: &SchemaDescriptor,
     segment_role: CompactSegmentRole,
-) -> Result<
-    (
-        BTreeMap<usize, OvbFallbackKind>,
-        BTreeMap<usize, PhysicalColumnInfo>,
-    ),
-    RepositoryError,
-> {
+) -> Result<VerifiedPhysicalColumns, RepositoryError> {
     let required_fields = required_physical_leaves(descriptor, segment_role)?;
     let value =
         CanonicalValue::decode(columns).map_err(|_| RepositoryError::InvalidCompactManifest)?;
@@ -869,7 +867,7 @@ fn verify_physical_columns(
         {
             return Err(RepositoryError::InvalidCompactManifest);
         }
-        if &fields[2] != &expected.logical_type {
+        if fields[2] != expected.logical_type {
             return Err(RepositoryError::InvalidCompactManifest);
         }
         let OvbRaw::Array(logical_type) = &fields[2] else {
@@ -1808,6 +1806,8 @@ fn required_physical_leaves(
     Ok(required)
 }
 
+/// The parameters describe one record; each caller passes them straight through.
+#[allow(clippy::too_many_arguments)]
 fn flatten_physical_type(
     field_id: Uuid,
     logical_type: &OvbRaw,

@@ -63,6 +63,7 @@ fn committed_rows(repository: &Repository, relation_id: [u8; 16]) -> Vec<Admitte
         .expect("read the committed rows")
 }
 
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn a_restored_complete_copy_opens_offline_and_reads_the_same_rows() {
     let (directory, repository, relation_id) = empty_format3_repository();

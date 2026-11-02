@@ -1,5 +1,10 @@
 //! Requirement-targeted entry point for production VFS integration coverage.
 
+// This target composes four VFS test files as modules; each of them includes
+// the shared support modules by path, so the same support file is loaded once
+// per composed module. The copies never exchange their types.
+#![allow(clippy::duplicate_mod)]
+
 use std::sync::Arc;
 
 #[path = "support/media_commit.rs"]

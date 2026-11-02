@@ -14,16 +14,12 @@
 //! new shape without EIO (ORNA-VFS-019; bead ornadb-eufo.2.1): the v1 CWD row is admitted to
 //! the committed v2 generation when read.
 
-#[allow(dead_code)]
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
-#[allow(dead_code)]
 #[path = "support/format3.rs"]
 mod format3;
-#[allow(dead_code)]
 #[path = "support/media_commit.rs"]
 mod media_commit;
-#[allow(dead_code)]
 #[path = "support/product.rs"]
 mod product;
 
@@ -551,7 +547,7 @@ fn vfs_019_persisted_scratch_is_restored_after_schema_change() {
     commit_source(&root, "Add optional note to Music");
 
     let restarted = mount_parent.path().join("restarted");
-    let mut remounted = spawn_mount_process(&root, &restarted);
+    let remounted = spawn_mount_process(&root, &restarted);
     let restarted_row = restarted.join("Music/london");
     let restored = restarted_row.join(".data.orna.persisted-scratch");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -640,7 +636,7 @@ fn vfs_019_legacy_scratch_record_is_retained_not_bound_to_live_schema() {
     commit_source(&root, "Add optional note to Music");
 
     let restarted = mount_parent.path().join("restarted");
-    let mut remounted = spawn_mount_process(&root, &restarted);
+    let remounted = spawn_mount_process(&root, &restarted);
     let restarted_row = restarted.join("Music/london");
     // Wait for the legacy record's disposition and its stderr report rather than for the row.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

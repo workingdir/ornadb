@@ -95,19 +95,6 @@ impl FileAnalysis {
         &self.tokens[start..end]
     }
 
-    /// The token containing `byte`, or ending at it.
-    pub(crate) fn token_at(&self, byte: usize) -> Option<&Token> {
-        let index = self.tokens.partition_point(|token| token.span.end < byte);
-        self.tokens[index..]
-            .iter()
-            .take_while(|token| token.span.start <= byte)
-            .find(|token| {
-                !matches!(token.kind, TokenKind::Eof)
-                    && token.span.start <= byte
-                    && byte <= token.span.end
-            })
-    }
-
     /// The keyword strictly containing `byte`.
     pub(crate) fn keyword_at(&self, byte: usize) -> Option<Keyword> {
         let index = self.tokens.partition_point(|token| token.span.end <= byte);

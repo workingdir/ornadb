@@ -24,13 +24,6 @@ impl Document {
         Self { uri, text, version }
     }
 
-    /// Returns the logical path used for compiler diagnostics.
-    ///
-    /// The full URI string is unique and always nonempty, which satisfies
-    /// the source bundle contract.
-    pub fn logical_path(&self) -> String {
-        self.uri.as_str().to_owned()
-    }
 }
 
 /// Converts between byte offsets and LSP positions for one source text.

@@ -1,6 +1,16 @@
 //! Gate E.1: a historical format-3 view is a real Linux FUSE mount backed by the
 //! published row graph, and Blob reads are served as verified byte ranges.
 
+// These fixtures mount a real cwd and index bounded fixture lengths: every cast
+// converts a value the test just bounded, and every long body is one mount
+// scenario written end to end. Both are scoped to this test file.
+#![allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+
 #![cfg(target_os = "linux")]
 
 use std::{
@@ -206,9 +216,7 @@ fn directory_entries(path: &Path) -> String {
     match std::fs::read_dir(path) {
         Ok(entries) => entries
             .map(|entry| {
-                entry
-                    .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                    .unwrap_or_else(|error| format!("<entry error: {error}>"))
+                entry.map_or_else(|error| format!("<entry error: {error}>"), |entry| entry.file_name().to_string_lossy().into_owned())
             })
             .collect::<Vec<_>>()
             .join(", "),
@@ -539,11 +547,11 @@ async fn mount_at_head_parent_pins_store_row_and_media_after_head_advances() {
             .id(orna_project_v1::ObjectKind::Field, &qualified_name)
             .expect("stored field identity exists")
     });
-    let expected_fields = expected_fields
-        .into_iter()
-        .map(|(name, value)| format!("    {name}: {value},\n"))
-        .collect::<String>();
-    let expected_document = format!("{{\n{expected_fields}}}\n");
+    let mut expected_fields_text = String::new();
+    for (name, value) in expected_fields {
+        expected_fields_text.extend([format!("    {name}: {value},\n")]);
+    }
+    let expected_document = format!("{{\n{expected_fields_text}}}\n");
     assert_eq!(document, expected_document);
 
     let options = mount_options(&mountpoint);
@@ -1840,7 +1848,7 @@ async fn mount_keeps_good_rows_available_when_one_row_has_duplicate_blob_values(
         "{{\n    title: \"bad\",\n    content: {capture},\n    duplicate: {capture},\n}}\n",
     );
     let good_row =
-        format!("{{\n    title: \"good\",\n    content: {capture},\n    duplicate: null,\n}}\n",);
+        format!("{{\n    title: \"good\",\n    content: {capture},\n    duplicate: null,\n}}\n");
     let (repository_directory, repository, relation_id, format_context) =
         format3::format3_repository_with_context(source, "Music");
 
@@ -3476,7 +3484,7 @@ fn pcm_wav(sample_rate: u32, samples: &[u8]) -> Vec<u8> {
 struct MountedBlobRow {
     mounted: MountedProcess,
     repository_directory: TempDir,
-    _repository: orna_repository_v1::Repository,
+    repository: orna_repository_v1::Repository,
     relation_id: [u8; 16],
     _media_root: TempDir,
     _mount_parent: TempDir,
@@ -3503,7 +3511,7 @@ fn spawn_cwd_mount(repository: &Path, mountpoint: &Path) -> MountedProcess {
 
 /// Deadline for a `mount --cwd` daemon to expose its mountpoint and the requested paths. Startup
 /// under load can exceed ten seconds, so readiness is polled against the kernel mount table.
-const MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const MOUNT_READY_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Waits until `mounted` is attached at its mountpoint (listed in /proc/self/mountinfo) and every
 /// path in `paths` resolves through it. Returns `false` when FUSE setup is optionally unavailable
@@ -3666,7 +3674,7 @@ async fn mount_captured_media_with_limit(
     Some(MountedBlobRow {
         mounted,
         repository_directory,
-        _repository: repository,
+        repository,
         relation_id,
         _media_root: media_root,
         _mount_parent: mount_parent,
@@ -3760,7 +3768,7 @@ async fn mount_blob_row_with_source(
     Some(MountedBlobRow {
         mounted,
         repository_directory,
-        _repository: repository,
+        repository,
         relation_id,
         _media_root: media_root,
         _mount_parent: mount_parent,
@@ -4141,7 +4149,7 @@ async fn cwd_mount_blob_write_open_accepts_write_and_fsync() {
 }
 
 #[tokio::test]
-/// ORNA-VFS-1 (41-vfs.md EDIT-1): O_TRUNC on a projected Blob truncates the private candidate, so the
+/// ORNA-VFS-1 (41-vfs.md EDIT-1): `O_TRUNC` on a projected Blob truncates the private candidate, so the
 /// file reads as empty before any write and zero-length Blob content is legal.
 async fn cwd_mount_blob_write_open_truncate_empties_candidate() {
     let original = lcg_bytes(0x0bad_f00d_dead_beef, 64 * 1024);
@@ -4307,7 +4315,7 @@ async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
     let original = lcg_bytes(0x7777_1111_2222_3333, 32 * 1024);
     let first = lcg_bytes(0x1111_0000_aaaa_bbbb, 32 * 1024);
     let second = lcg_bytes(0x2222_0000_cccc_dddd, 32 * 1024);
-    let Some(mut row) = mount_captured_blob(&original).await else {
+    let Some(row) = mount_captured_blob(&original).await else {
         return;
     };
     let blob_path = row.mounted.mountpoint.join("Music/london/content.mp3");
@@ -4359,7 +4367,7 @@ async fn cwd_mount_blob_sibling_handle_with_stale_baseline_is_refused() {
 async fn cwd_mount_blob_write_open_before_schema_change_is_stale_eagain() {
     let original = lcg_bytes(0x8181_0000_0000_0001, 32 * 1024);
     let replacement = lcg_bytes(0x8181_0000_0000_0002, 16 * 1024);
-    let Some(mut row) = mount_captured_blob(&original).await else {
+    let Some(row) = mount_captured_blob(&original).await else {
         return;
     };
     let repository = row.repository_directory.path().to_path_buf();
@@ -4465,7 +4473,7 @@ async fn cwd_mount_blob_racing_sibling_accepts_never_commit_mixed_bytes() {
         "at least one candidate is accepted: the first sync has no sibling accept before its fsync"
     );
     assert!(
-        final_bytes == original || accepted.iter().any(|candidate| *candidate == final_bytes),
+        final_bytes == original || accepted.contains(&final_bytes),
         "the committed Blob must equal one whole accepted candidate or the original, never a mix"
     );
 }
@@ -4978,7 +4986,7 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     // An unbound scratch, created after the accepted replacement, commits to the Blob its rename names.
     let unbound = row_path.join(".clip.wav.replace");
     create_scratch(&unbound, &replacement);
-    let document_before = std::fs::read(row_path.join("data.orna")).unwrap();
+    let _document_before = std::fs::read(row_path.join("data.orna")).unwrap();
     std::fs::rename(&unbound, &blob_path).expect("renaming unbound scratch over the Blob is accepted");
     assert_eq!(std::fs::read(&blob_path).unwrap(), replacement);
     // The row document carries the Blob's path and media type, not its bytes, so an accepted byte replacement leaves those names in place; the remount check below proves the document against the store.
@@ -4992,7 +5000,7 @@ async fn cwd_mount_blob_scratch_create_in_row_directory_is_supported() {
     unmount_and_reap(row.repository_directory.path(), &mut row.mounted);
 
     // Remount: data.orna and the Blob bytes must be rebuilt from the committed store row that holds the accepted replacement.
-    let committed = format3::committed_store_rows(&row._repository, row.relation_id);
+    let committed = format3::committed_store_rows(&row.repository, row.relation_id);
     assert_eq!(committed.len(), 1, "the relation keeps one committed row");
     assert!(committed[0].value().encoded_fields().is_some(), "the accepted row is inline");
     let mountpoint = row.mounted.mountpoint.clone();
@@ -5084,9 +5092,9 @@ async fn mount_table_rows(
             &context,
             table,
             &[media_commit::SourceCaptureRow {
-                key: *key,
+                key,
                 blob_fields: &[],
-                source_row: *source_row,
+                source_row,
                 ordinal: 0x92 + index as u16,
                 insert_only: true,
             }],
@@ -5199,9 +5207,8 @@ async fn cwd_mount_shrunk_str_drops_its_text_sibling() {
         document.contains("\"small\""),
         "data.orna inlines the shrunk Str: {document}"
     );
-    use std::io::Read as _;
     let mut captured = String::new();
-    pinned.read_to_string(&mut captured).unwrap();
+    std::io::Read::read_to_string(&mut pinned, &mut captured).expect("read the pinned title.txt");
     drop(pinned);
     assert_eq!(
         captured, large,

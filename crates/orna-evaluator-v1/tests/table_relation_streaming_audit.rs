@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
+/// One cursor restore chain: five stage payloads in order.
+type RestoreChain = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
+
 use orna_evaluator_v1::{
     EffectHandler, Environment, EvaluationError, Functions, Limits, PureFunction, RelationPage,
     RelationReadScope, StepBudget, invoke_named_with_effects,
@@ -1320,7 +1323,7 @@ fn incremental_view_refresh_keeps_values_scoped_across_read_batches() {
     ]);
     assert_eq!(
         run_with_fixture_functions(incremental_scoped_view_body(), &mut first_refresh)
-            .unwrap_or_else(|error| panic!("incremental view refresh failed with {}", error.to_string())),
+            .unwrap_or_else(|error| panic!("incremental view refresh failed with {}", error)),
         integer(18),
         "left odd rows and right even rows each retain their source filter across both pages"
     );
@@ -3973,7 +3976,6 @@ fn paired_sparse_window_folds_keep_identity_across_checkpoint_rotation_chains() 
         &[&[4, 3], &[8, 5], &[10, 7], &[12, 9], &[14, 11]],
         0,
     );
-    drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_checkpoint_rotation_functions();
@@ -5652,7 +5654,6 @@ fn paired_refreshes_keep_values_across_sparse_checkpoint_rotation_chains() {
         &[&[101, 102], &[103, 104, 105], &[106, 107, 108], &[109, 110]],
         1,
     );
-    drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_refresh_sparse_rotation_functions();
@@ -5854,7 +5855,6 @@ fn paired_snapshots_keep_values_across_sparse_escalation_fold_chains() {
         ],
         1,
     );
-    drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_snapshot_sparse_escalation_functions();
@@ -6000,7 +6000,6 @@ fn paired_nested_aggregates_keep_values_across_compaction_spill_folds() {
     add_restore("View.Right", &[&[3, 6], &[9, 12], &[15, 18]], 0);
     add_restore("View.Left", &[&[100], &[90, 80], &[70, 60, 50]], 3);
     add_restore("View.Right", &[&[5, 10], &[15], &[20, 25, 30]], 2);
-    drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_nested_spill_aggregate_functions();
@@ -6187,7 +6186,6 @@ fn paired_pagination_keeps_identity_across_nested_escalation_spill_folds() {
         &[&[5, 10], &[15], &[20, 25, 30], &[5000, 5001]],
         2,
     );
-    drop(add_restore);
 
     let mut source = PairedCursorRestoreSource::new(restores);
     let mut functions = paired_pagination_nested_escalation_functions();
@@ -6617,13 +6615,13 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
     let compacted_lengths = [511, 512, 255, 256, 511, 512, 255, 256];
     let cursor_chain = |lane: usize| {
         let refresh = lane / 2;
-        let base = if lane % 2 == 0 {
+        let base = if lane.is_multiple_of(2) {
             0x50 + refresh as u8
         } else {
             0x58 + refresh as u8
         };
         let long_a = if refresh == 0 {
-            vec![base; if lane % 2 == 0 { 255 } else { 256 }]
+            vec![base; if lane.is_multiple_of(2) { 255 } else { 256 }]
         } else {
             vec![base]
         };
@@ -6634,7 +6632,7 @@ fn paired_compaction_cursor_collisions_keep_escalation_scope_identity() {
         (long_a, compact_a, long_b, compact_b, after_compaction)
     };
     let cursor_chains = (0..8).map(cursor_chain).collect::<Vec<_>>();
-    let restore = |values: &[i64], chain: &(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)| {
+    let restore = |values: &[i64], chain: &RestoreChain| {
         assert_eq!(values.len(), 10);
         let rows = values.chunks(2).collect::<Vec<_>>();
         let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;
@@ -6808,13 +6806,13 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
     let compacted_lengths = [511, 512, 255, 256, 511, 512, 255, 256];
     let cursor_chain = |lane: usize| {
         let refresh = lane / 2;
-        let base = if lane % 2 == 0 {
+        let base = if lane.is_multiple_of(2) {
             0x50 + refresh as u8
         } else {
             0x58 + refresh as u8
         };
         let long_a = if refresh == 0 {
-            vec![base; if lane % 2 == 0 { 255 } else { 256 }]
+            vec![base; if lane.is_multiple_of(2) { 255 } else { 256 }]
         } else {
             vec![base]
         };
@@ -6825,7 +6823,7 @@ fn paired_pagination_keeps_nested_spill_identity_across_compactions() {
         (long_a, compact_a, long_b, compact_b, after_compaction)
     };
     let cursor_chains = (0..8).map(cursor_chain).collect::<Vec<_>>();
-    let restore = |values: &[i64], chain: &(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)| {
+    let restore = |values: &[i64], chain: &RestoreChain| {
         assert_eq!(values.len(), 10);
         let rows = values.chunks(2).collect::<Vec<_>>();
         let (long_a, compact_a, long_b, compact_b, after_compaction) = chain;

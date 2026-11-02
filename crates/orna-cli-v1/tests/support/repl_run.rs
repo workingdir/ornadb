@@ -14,7 +14,7 @@ use std::{
 
 use tempfile::TempDir;
 
-const TIMEOUT: Duration = Duration::from_secs(120);
+const TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Captured result of a finished REPL process.
 pub struct ReplRun {

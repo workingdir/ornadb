@@ -2,6 +2,10 @@
 //! into the destination, so delivery resumes exactly where the source committed.
 //! Stream state that cannot be carried must fail closed and leave the source intact.
 
+// The runtime's stream API returns large futures; each test awaits one at a
+// time, so boxing them here would only move the state to the heap.
+#![allow(clippy::large_futures)]
+
 use std::{fs, path::Path, process::Command};
 
 use orna_repository_v1::Repository;

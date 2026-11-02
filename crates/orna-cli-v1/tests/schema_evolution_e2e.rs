@@ -52,6 +52,7 @@ fn fields(values: &[(&str, Raw)]) -> std::collections::BTreeMap<String, Raw> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn a_schema_change_publishes_and_keeps_old_and_new_rows_readable() {
     let directory = TempDir::new().expect("create the test directory");
     let root = initialized_database(&directory, DECLARED);

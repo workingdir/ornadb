@@ -53,10 +53,13 @@ struct PlannedPage {
     ended: &'static [&'static str],
 }
 
+/// One page request: the page index and the header pairs it carried.
+type PageRequest = (usize, Vec<(String, Option<Vec<u8>>)>);
+
 struct ProviderHarness {
     pages: VecDeque<PlannedPage>,
     identities: BTreeMap<String, [u8; 32]>,
-    requests: Vec<(usize, Vec<(String, Option<Vec<u8>>)>)>,
+    requests: Vec<PageRequest>,
     committed_checkpoints: BTreeMap<String, Vec<u8>>,
     commit_batches: Vec<Vec<StreamCheckpoint>>,
     observed_values: Vec<String>,

@@ -9,6 +9,7 @@
 #[path = "support/format3.rs"]
 mod format3;
 
+use std::collections::BTreeMap;
 use std::{fs::File, io::Write, path::Path};
 
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
@@ -30,12 +31,11 @@ const READ_CHUNK: u64 = 8 * 1024 * 1024;
 fn product_capture_streams_a_source_larger_than_its_memory_budget() {
     let source_bytes = std::env::var("ORNA_CAPTURE_RSS_BYTES")
         .ok()
-        .map(|bytes| {
+        .map_or(DEFAULT_SOURCE_BYTES, |bytes| {
             bytes
                 .parse::<u64>()
                 .expect("ORNA_CAPTURE_RSS_BYTES is a byte count")
-        })
-        .unwrap_or(DEFAULT_SOURCE_BYTES);
+        });
     assert!(
         source_bytes > PEAK_RSS_BOUND,
         "the source must exceed the memory bound for the check to prove streaming"
@@ -60,7 +60,7 @@ fn product_capture_streams_a_source_larger_than_its_memory_budget() {
     );
     let value = evaluate_expression_ovb2_with_effects(
         &expression,
-        &Default::default(),
+        &BTreeMap::default(),
         Limits::default(),
         &mut bindings,
     )

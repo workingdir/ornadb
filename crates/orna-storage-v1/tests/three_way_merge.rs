@@ -4649,7 +4649,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             panic!("the upper segment deletion must materialize a tombstone")
         };
         assert!(rows.is_empty());
-        assert_eq!(tombstones, &[high_key.clone()]);
+        assert_eq!(tombstones, std::slice::from_ref(&high_key));
         assert!(matches!(segments[2], MergedSegment::Reuse { from: MergeSide::Left, .. }));
 
         // A changed but empty suffix still closes after the exact tombstone
@@ -4712,7 +4712,7 @@ fn zero_conflict_budget_reports_checkpoint_delete_after_segment_tombstone() {
             panic!("the upper segment deletion must materialize a tombstone")
         };
         assert!(rows.is_empty());
-        assert_eq!(tombstones, &[high_key.clone()]);
+        assert_eq!(tombstones, std::slice::from_ref(&high_key));
         let MergedSegment::Rows { rows, tombstones, .. } = &segments[2] else {
             panic!("the changed empty suffix must be scanned after tombstone closure")
         };
@@ -11625,7 +11625,7 @@ fn checkpoint_creation_orientations_survive_row_tombstones() {
             panic!("the independent row deletion must materialize its tombstone")
         };
         assert!(rows.is_empty());
-        assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        assert_eq!(tombstones, std::slice::from_ref(&deleted_row.key));
         assert_eq!(source.visited.len(), 3);
     }
 }
@@ -13794,19 +13794,19 @@ fn multi_table_row_conflicts_precede_checkpoint_resets_at_shared_budget() {
         {
             let table_id = id(table_number);
             let mut base_row = parse_fixture(base_source, RowKeyKind::Explicit);
-            base_row.table = table_id.clone();
+            base_row.table = table_id;
             let mut edited_row = parse_fixture(edit_source, RowKeyKind::Explicit);
-            edited_row.table = table_id.clone();
+            edited_row.table = table_id;
 
             let base_locator = format!("multi-budget-base-{table_number}");
             let left_locator = format!("multi-budget-left-{table_number}");
             let right_locator = format!("multi-budget-right-{table_number}");
             base.tables.insert(
-                table_id.clone(),
+                table_id,
                 manifest(10 + index as u8, 20 + index as u8, base_locator.as_bytes()),
             );
             left.tables.insert(
-                table_id.clone(),
+                table_id,
                 manifest(30 + index as u8, 40 + index as u8, left_locator.as_bytes()),
             );
             right.tables.insert(
@@ -13984,23 +13984,23 @@ fn multi_table_row_read_budget_stops_at_next_table_without_partial_plan() {
         {
             let table_id = id(table_number);
             let mut base_row = parse_fixture(base_source, RowKeyKind::Explicit);
-            base_row.table = table_id.clone();
+            base_row.table = table_id;
             let mut edited_row = parse_fixture(edit_source, RowKeyKind::Explicit);
-            edited_row.table = table_id.clone();
+            edited_row.table = table_id;
 
             let base_locator = format!("multi-read-budget-base-{table_number}");
             let left_locator = format!("multi-read-budget-left-{table_number}");
             let right_locator = format!("multi-read-budget-right-{table_number}");
             base.tables.insert(
-                table_id.clone(),
+                table_id,
                 manifest(70 + index as u8, 80 + index as u8, base_locator.as_bytes()),
             );
             left.tables.insert(
-                table_id.clone(),
+                table_id,
                 manifest(90 + index as u8, 100 + index as u8, left_locator.as_bytes()),
             );
             right.tables.insert(
-                table_id.clone(),
+                table_id,
                 manifest(110 + index as u8, 120 + index as u8, right_locator.as_bytes()),
             );
 
@@ -16300,7 +16300,7 @@ fn versioned_delete_survives_merge_as_a_tombstone_without_pruning_history() {
         panic!("all three versions changed and require a merged range")
     };
     assert_eq!(rows, &[edited_retained_row]);
-    assert_eq!(tombstones, &[deleted_row.key.clone()]);
+    assert_eq!(tombstones, std::slice::from_ref(&deleted_row.key));
     assert!(source.rows[&(MergeSide::Base, b"base".to_vec())].contains(&deleted_row));
 }
 
@@ -16805,7 +16805,7 @@ fn tombstone_chain_load_inputs(
     assert_eq!(chain_rows.len(), 7);
     let sibling_index = chain_rows.len() - 1;
     let left_keeps = |index: usize| {
-        index == sibling_index || (index % 2 == 0) == left_keeps_even_chain_keys
+        index == sibling_index || index.is_multiple_of(2) == left_keeps_even_chain_keys
     };
     let right_keeps = |index: usize| index == sibling_index || !left_keeps(index);
     let mut source = FixtureRows::default();
@@ -16939,7 +16939,7 @@ fn paired_tombstone_storm_inputs(
     };
     let table_one_rows = make_rows(id(1));
     let table_two_rows = make_rows(id(2));
-    let (table_one_bounds, table_two_bounds): (&[&str], &[&str]) = if layout % 2 == 0 {
+    let (table_one_bounds, table_two_bounds): (&[&str], &[&str]) = if layout.is_multiple_of(2) {
         (
             &["root/child", "root/child/deep", "root/child/deep/storm/c", "z"],
             &["root/child/deep", "root/child/deep/storm/e"],
@@ -17061,7 +17061,7 @@ fn paired_chained_storm_inputs_by_table(
             .filter(|row| !right_deleted.iter().any(|key| row.key == string(key)))
             .cloned()
             .collect::<Vec<_>>();
-        let boundaries: &[&str] = if (layout + table_index) % 2 == 0 {
+        let boundaries: &[&str] = if (layout + table_index).is_multiple_of(2) {
             &["root/child", "root/child/deep/leaf/twig", "z"]
         } else {
             &["root/child/deep", "root/child/deep/leaf/twig/bud", "z"]
@@ -17207,8 +17207,8 @@ fn paired_distinct_depth_chain_inputs(
 
     let keeps = |side: MergeSide, index: usize| match side {
         MergeSide::Base => true,
-        MergeSide::Left => index >= 3 || (index % 2 == 0) == second_left_keeps_even,
-        MergeSide::Right => index >= 3 || (index % 2 == 0) != second_left_keeps_even,
+        MergeSide::Left => index >= 3 || index.is_multiple_of(2) == second_left_keeps_even,
+        MergeSide::Right => index >= 3 || index.is_multiple_of(2) != second_left_keeps_even,
     };
     for (side, snapshot) in [
         (MergeSide::Base, &base),
@@ -18911,15 +18911,15 @@ fn paired_depth_delta_storms_restore_then_redelete_exact_keys() {
         let gate = Arc::clone(&start);
         workers.push(std::thread::spawn(move || {
             let mut source = BarrierFixtureRows { source, first_load: Some(gate) };
-            let plan = merge_three_way_snapshots(
+            
+            merge_three_way_snapshots(
                 &base,
                 &left,
                 &right,
                 &mut source,
                 BranchMergeBudget { max_rows_examined: 28, max_conflicts: 0 },
             )
-            .expect("each restored-key retry fits its private exact budget");
-            plan
+            .expect("each restored-key retry fits its private exact budget")
         }));
     }
 
@@ -19477,8 +19477,8 @@ fn paired_depth_restore_storm_retries_rebuild_after_later_table_failure() {
     );
     for table in [id(1), id(2)] {
         let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
-        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, std::slice::from_ref(restored));
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, std::slice::from_ref(restored));
     }
     let mut interrupted = FailOnTableAfterRowsFixtureRows {
         source,
@@ -19527,8 +19527,8 @@ fn paired_depth_restore_storm_retries_rebuild_after_later_table_failure() {
         );
         for table in [id(1), id(2)] {
             let restored = if table == id(1) { &restored_rows[0] } else { &restored_rows[1] };
-            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[restored.clone()]);
-            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[restored.clone()]);
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, std::slice::from_ref(restored));
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, std::slice::from_ref(restored));
         }
         if retry % 4 >= 2 {
             for rows in source.rows.values_mut() {
@@ -19741,14 +19741,14 @@ fn paired_depth_restore_retries_rebuild_after_chained_merge_waves() {
             &mut source,
             MergeSide::Left,
             table,
-            &[restored.clone()],
+            std::slice::from_ref(restored),
         );
         add_chained_storm_fixture_rows(
             &right,
             &mut source,
             MergeSide::Right,
             table,
-            &[restored.clone()],
+            std::slice::from_ref(restored),
         );
     }
     let mut interrupted = FailOnTableAfterRowsFixtureRows {
@@ -19799,14 +19799,14 @@ fn paired_depth_restore_retries_rebuild_after_chained_merge_waves() {
                 &mut source,
                 MergeSide::Left,
                 table,
-                &[restored.clone()],
+                std::slice::from_ref(restored),
             );
             add_chained_storm_fixture_rows(
                 &right,
                 &mut source,
                 MergeSide::Right,
                 table,
-                &[restored.clone()],
+                std::slice::from_ref(restored),
             );
         }
         if retry % 4 >= 2 {
@@ -19960,12 +19960,12 @@ fn paired_unequal_depth_restore_storms_rebuild_table_local_chains() {
         "unequal-restore-retry-failed",
     );
     for row in &root_restores {
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
-        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), std::slice::from_ref(row));
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), std::slice::from_ref(row));
     }
     for row in &anchor_restores {
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
-        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), std::slice::from_ref(row));
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), std::slice::from_ref(row));
     }
     let mut interrupted = FailOnTableAfterRowsFixtureRows {
         source,
@@ -20011,12 +20011,12 @@ fn paired_unequal_depth_restore_storms_rebuild_table_local_chains() {
             "unequal-restore-retry-recovered",
         );
         for row in &root_restores {
-            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
-            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), std::slice::from_ref(row));
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), std::slice::from_ref(row));
         }
         for row in &anchor_restores {
-            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
-            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), std::slice::from_ref(row));
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), std::slice::from_ref(row));
         }
         if retry >= RETRIES / 2 {
             for rows in source.rows.values_mut() {
@@ -20181,12 +20181,12 @@ fn paired_depth_storm_restore_retries_preserve_uneven_chain_history_across_three
         "uneven-depth-storm-wave-two-failed",
     );
     for row in &storm_restores {
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
-        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), std::slice::from_ref(row));
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), std::slice::from_ref(row));
     }
     for row in &anchor_restores {
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
-        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), std::slice::from_ref(row));
+        add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), std::slice::from_ref(row));
     }
     let mut interrupted = FailOnTableAfterRowsFixtureRows {
         source,
@@ -20232,12 +20232,12 @@ fn paired_depth_storm_restore_retries_preserve_uneven_chain_history_across_three
             "uneven-depth-storm-wave-two-recovered",
         );
         for row in &storm_restores {
-            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), &[row.clone()]);
-            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), &[row.clone()]);
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(1), std::slice::from_ref(row));
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(1), std::slice::from_ref(row));
         }
         for row in &anchor_restores {
-            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), &[row.clone()]);
-            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), &[row.clone()]);
+            add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, id(2), std::slice::from_ref(row));
+            add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, id(2), std::slice::from_ref(row));
         }
         if retry >= RETRIES / 2 {
             for rows in source.rows.values_mut() {
@@ -20358,13 +20358,13 @@ fn paired_depth_storm_restore_retries_preserve_uneven_chain_history_across_three
     );
     for row in [storm_z, anchor_b] {
         let table = if row.key == string("z") { id(1) } else { id(2) };
-        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
+        add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, std::slice::from_ref(row));
         add_chained_storm_fixture_rows(
             &right,
             &mut source,
             MergeSide::Right,
             table,
-            &[row.clone()],
+            std::slice::from_ref(row),
         );
     }
     let mut interrupted = FailOnTableAfterRowsFixtureRows {
@@ -20423,14 +20423,14 @@ fn paired_depth_storm_restore_retries_preserve_uneven_chain_history_across_three
                 &mut source,
                 MergeSide::Left,
                 table,
-                &[row.clone()],
+                std::slice::from_ref(row),
             );
             add_chained_storm_fixture_rows(
                 &right,
                 &mut source,
                 MergeSide::Right,
                 table,
-                &[row.clone()],
+                std::slice::from_ref(row),
             );
         }
         if retry >= THIRD_WAVE_RETRIES / 2 {
@@ -20636,14 +20636,14 @@ fn concurrent_uneven_depth_restore_retries_isolate_failed_attempts() {
                 &mut source,
                 MergeSide::Left,
                 table,
-                &[row.clone()],
+                std::slice::from_ref(row),
             );
             add_chained_storm_fixture_rows(
                 &right,
                 &mut source,
                 MergeSide::Right,
                 table,
-                &[row.clone()],
+                std::slice::from_ref(row),
             );
         }
         if retry >= RETRIES / 2 {
@@ -22466,8 +22466,10 @@ fn paired_recovery_retry_identity_tracks_results_across_uneven_row_segments() {
                 tombstones: vec![tombstone.clone()],
             }]
         };
-        let mut report = orna_storage_v1::BranchMergeReport::default();
-        report.rows_examined = if split_rows { 99 } else { 10 };
+        let report = orna_storage_v1::BranchMergeReport {
+            rows_examined: if split_rows { 99 } else { 10 },
+            ..orna_storage_v1::BranchMergeReport::default()
+        };
         SequencedBranchMergePlan {
             order,
             plan: BranchMergePlan {
@@ -25517,7 +25519,7 @@ fn paired_rollback_identity_survives_sparse_source_stream_rotation_merges() {
     ];
     let merged =
         merge_paired_checkpoint_redo_sparse_stream_chains_preserving_undo_and_segment_rotation_source_identity(
-            &[catalog_only.clone()],
+            std::slice::from_ref(&catalog_only),
             &source_chains,
         );
     assert_eq!(
@@ -26672,11 +26674,11 @@ fn paired_sparse_redo_folds_preserve_compaction_identity_across_chain_rotations(
         .enumerate()
     {
         let (left, mut right) = match index {
-            0 | 1 | 2 => (
+            0..=2 => (
                 BTreeMap::from([(alpha.clone(), left_base.clone())]),
                 BTreeMap::from([(alpha.clone(), right_base.clone())]),
             ),
-            3 | 4 | 5 => (
+            3..=5 => (
                 BTreeMap::from([(alpha.clone(), left_redo.clone())]),
                 BTreeMap::from([(alpha.clone(), right_redo.clone())]),
             ),
@@ -26841,11 +26843,11 @@ fn paired_sparse_compaction_preserves_redo_chain_identity_across_segment_rotatio
         .enumerate()
     {
         let (left, mut right) = match index {
-            0 | 1 | 2 => (
+            0..=2 => (
                 BTreeMap::from([(alpha.clone(), left_base.clone())]),
                 BTreeMap::from([(alpha.clone(), right_base.clone())]),
             ),
-            3 | 4 | 5 => (
+            3..=5 => (
                 BTreeMap::from([(alpha.clone(), left_redo.clone())]),
                 BTreeMap::from([(alpha.clone(), right_redo.clone())]),
             ),
@@ -27691,11 +27693,12 @@ fn paired_restore_cascade_receipt_normalizes_paired_delta_order() {
     assert_eq!(history, committed, "equivalent cascade receipts preserve committed history");
 
     let changed_paired = make_paired(true);
+    let changed_paired_repeat = changed_paired.clone();
     assert_eq!(
         history.bind_depth_fragment_retry_plans_with_recovery(
-            &[changed_paired.clone()],
+            std::slice::from_ref(&changed_paired),
             &recoveries,
-            &[changed_paired],
+            std::slice::from_ref(&changed_paired_repeat),
         ),
         Err(BranchMergeTombstoneHistoryError::ConflictingSubmission { order: 1 }),
         "receipt normalization does not hide changed materialized paired row content",
@@ -28369,8 +28372,8 @@ fn paired_depth_storm_tombstone_history_stabilizes_across_restore_waves() {
         );
         for table in [id(1), id(2)] {
             for row in &restores {
-                add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, &[row.clone()]);
-                add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, &[row.clone()]);
+                add_chained_storm_fixture_rows(&left, &mut source, MergeSide::Left, table, std::slice::from_ref(row));
+                add_chained_storm_fixture_rows(&right, &mut source, MergeSide::Right, table, std::slice::from_ref(row));
             }
         }
         jobs.push((order, base, left, right, source));
@@ -28896,10 +28899,7 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
         .filter(|row| row.key != string("z"))
         .cloned()
         .collect::<Vec<_>>();
-    let wave_three_anchor_base = anchor_rows
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>();
+    let wave_three_anchor_base = anchor_rows.to_vec();
     let wave_four_storm_base = storm_rows.clone();
     let wave_four_anchor_base = anchor_rows
         .iter()
@@ -29005,15 +29005,14 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
                 let storm_key = string("root/child/deep/storm/b");
                 let mut changed = false;
                 for ((side, _), rows) in &mut source.rows {
-                    if *side == MergeSide::Right {
-                        if let Some(row) = rows
+                    if *side == MergeSide::Right
+                        && let Some(row) = rows
                             .iter_mut()
                             .find(|row| row.table == id(1) && row.key == storm_key)
                         {
                             *row = edit_name(row, "concurrent branch edit");
                             changed = true;
                         }
-                    }
                 }
                 assert!(changed, "the storm conflict fixture row is in a right branch range");
             }
@@ -29023,14 +29022,14 @@ fn concurrent_paired_storm_waves_preserve_depth_event_lineage() {
                     &mut source,
                     MergeSide::Left,
                     *table,
-                    &[row.clone()],
+                    std::slice::from_ref(row),
                 );
                 add_chained_storm_fixture_rows(
                     &right,
                     &mut source,
                     MergeSide::Right,
                     *table,
-                    &[row.clone()],
+                    std::slice::from_ref(row),
                 );
             }
             if retry >= RETRIES_PER_WAVE / 2 {
@@ -29418,11 +29417,11 @@ fn recovery_storms_keep_unequal_depth_paired_chain_order() {
         let mut workers = Vec::with_capacity(RETRIES_PER_WAVE);
         for retry in 0..RETRIES_PER_WAVE {
             let index = wave * RETRIES_PER_WAVE + retry;
-            let first_table_split = index % 2 == 0;
+            let first_table_split = index.is_multiple_of(2);
             let (base, left, right, mut source) = paired_distinct_depth_chain_inputs(
                 first_table_split,
-                index % 3 == 0,
-                index % 3 != 0,
+                index.is_multiple_of(3),
+                !index.is_multiple_of(3),
             );
             if index % 3 == 1 {
                 for rows in source.rows.values_mut() {
@@ -29878,7 +29877,7 @@ fn unilateral_row_and_checkpoint_tombstones_resolve_in_both_orientations() {
                 panic!("the row deletion materializes beside the checkpoint deletion")
             };
             assert!(rows.is_empty());
-            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+            assert_eq!(tombstones, std::slice::from_ref(&deleted_row.key));
         }
     }
 }
@@ -29955,8 +29954,8 @@ fn nested_checkpoint_tombstones_pair_with_same_side_row_delete_and_disjoint_edit
         let MergedSegment::Rows { rows, tombstones, .. } = &plan.tables[&id(1)].segments[0] else {
             panic!("the disjoint retained-row edit merges beside the row tombstone")
         };
-        assert_eq!(rows, &[edited_retained_row.clone()]);
-        assert_eq!(tombstones, &[deleted_row.key.clone()]);
+        assert_eq!(rows, std::slice::from_ref(&edited_retained_row));
+        assert_eq!(tombstones, std::slice::from_ref(&deleted_row.key));
     }
 }
 
@@ -30043,7 +30042,7 @@ fn path_depth_tombstones_resolve_at_adjacent_segment_boundaries() {
     };
     assert_eq!(range.start.as_deref(), Some(boundary.as_slice()));
     assert_eq!(rows, &[sibling_edit]);
-    assert_eq!(tombstones, &[boundary_row.key.clone()]);
+    assert_eq!(tombstones, std::slice::from_ref(&boundary_row.key));
 }
 
 #[test]
@@ -30113,7 +30112,7 @@ fn checkpoint_tombstones_at_multiple_depths_preserve_deeper_and_prefix_states() 
                 panic!("the fixture row tombstone resolves alongside the depth-spanning checkpoint map")
             };
             assert!(rows.is_empty());
-            assert_eq!(tombstones, &[deleted_row.key.clone()]);
+            assert_eq!(tombstones, std::slice::from_ref(&deleted_row.key));
         }
     }
 }
@@ -34229,7 +34228,7 @@ fn paired_segment_pin_identity_survives_three_sparse_checkpoint_restore_chains()
     ];
     assert_eq!(
         orna_storage_v1::restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_pin_identity(
-            &[alpha.clone()],
+            std::slice::from_ref(&alpha),
             &malformed_count,
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationSparseRestoreChainError::SegmentIdentityCountMismatch {
@@ -34602,7 +34601,7 @@ fn paired_segment_pins_survive_three_sparse_segment_restore_chains() {
     ];
     assert_eq!(
         orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_merge_handoffs_preserving_pin_identity(
-            &[alpha.clone()],
+            std::slice::from_ref(&alpha),
             &malformed,
         ),
         Err(orna_storage_v1::BranchMergePairedCheckpointRedoFoldSegmentRotationMergeRestoreHandoffError::InvalidOrderRange {
@@ -41368,7 +41367,7 @@ fn repeated_checkpoint_streams_keep_paired_identity_across_sparse_rotation_chain
     };
     let merged =
         orna_storage_v1::merge_paired_checkpoint_redo_sparse_stream_chains_preserving_fold_and_segment_rotation_source_identity(
-            &[catalog_only.clone()],
+            std::slice::from_ref(&catalog_only),
             &[
                 vec![
                     stream(&other, vec![]),
@@ -41469,7 +41468,7 @@ fn repeated_checkpoint_streams_keep_paired_identity_across_sparse_rotation_chain
 
     let restored =
         orna_storage_v1::restore_paired_checkpoint_redo_sparse_merge_chains_preserving_fold_and_segment_rotation_source_pin_identity(
-            &[catalog_only.clone()],
+            std::slice::from_ref(&catalog_only),
             &[compacted.clone(), compacted.clone()],
         )
         .unwrap();
@@ -42974,7 +42973,7 @@ fn nested_spill_identity_survives_paired_checkpoint_merge_folds_f87() {
                     fold_ordinal: 3,
                     first_order: 19,
                     last_order: 19,
-                    left: (index % 2 == 0).then(|| {
+                    left: index.is_multiple_of(2).then(|| {
                         orna_storage_v1::BranchMergePairedCheckpointPinIdentity {
                             checkpoint_id: checkpoint_identity.left_checkpoint.clone(),
                             generation: generation.clone(),
@@ -44477,7 +44476,7 @@ fn nested_spill_identity_survives_paired_replay_restore_checkpoint_folds_f98() {
         vec![vec![nested_spill(3, &[(3, 90, false)], &[], false)]],
     );
     let expected_inner_error = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_replay_identity_restore_folds_preserving_pin_identity(
-        &[malformed_inner.clone()],
+        std::slice::from_ref(&malformed_inner),
     )
     .unwrap_err();
     let outer_error = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_restore_replay_identity_restore_folds_preserving_pin_identity(
@@ -48855,9 +48854,7 @@ fn nested_checkpoint_identity_survives_paired_restore_spill_compaction_folds_f14
         vec![alpha.clone()],
         vec![vec![nested_spill(1, u64::MAX, false)]],
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_restore_folds_preserving_pin_identity(&[
-        malformed_base.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed_base))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         fold(retry_nested_pair.clone(), malformed_base),
@@ -49115,9 +49112,7 @@ fn paired_spill_identity_survives_nested_checkpoint_restore_compaction_folds_f14
         vec![alpha.clone()],
         vec![vec![nested_spill(1, u64::MAX, false, false)]],
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         outer_fold(3, malformed),
@@ -49400,9 +49395,7 @@ fn nested_restore_identity_survives_paired_spill_compaction_checkpoint_folds_f14
         vec![alpha.clone()],
         Some((u64::MAX, false, false)),
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -49595,9 +49588,7 @@ fn paired_checkpoint_identity_survives_nested_compaction_restore_folds_f150() {
         .is_none());
 
     let malformed = outer_fold(3, vec![alpha.clone()], Some((u64::MAX, false, false)));
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -49828,9 +49819,7 @@ fn nested_spill_identity_survives_paired_compaction_restore_folds_f151() {
         ),
         spill_pair(3),
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -50058,9 +50047,7 @@ fn paired_restore_identity_survives_nested_compaction_checkpoint_folds_f152() {
         ),
         restore_pair(3),
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -50317,9 +50304,7 @@ fn nested_compaction_identity_survives_paired_restore_checkpoint_folds_f153() {
         ),
         compaction_pair(3),
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -50633,9 +50618,7 @@ fn paired_checkpoint_identity_survives_nested_restore_compaction_folds_f154() {
         compaction_pair(3),
     );
     let malformed = with_outer_checkpoint(malformed_fold, checkpoint_pair(3));
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -51002,9 +50985,7 @@ fn nested_restore_identity_survives_paired_checkpoint_compaction_folds_f155() {
     );
     let malformed = with_outer_checkpoint(malformed_fold, checkpoint_pair(3));
     let malformed = with_nested_restore(malformed, nested_restore_pair(3));
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -51423,9 +51404,7 @@ fn paired_compaction_identity_survives_nested_restore_checkpoint_folds_f156() {
     let malformed = with_outer_checkpoint(malformed_fold, checkpoint_pair(3));
     let malformed = with_nested_restore(malformed, nested_restore_pair(3));
     let malformed = with_paired_compaction(malformed, paired_compaction_pair(3));
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_paired_compaction_identity_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -51729,9 +51708,7 @@ fn nested_restore_identity_survives_paired_compaction_checkpoint_folds_f157() {
         nested_restore_identity: outer_restore_pair(3),
         restore_fold: malformed_fold,
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_paired_compaction_identity_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_paired_compaction_identity_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_restore_identity_paired_compaction_identity_nested_restore_identity_nested_compaction_identity_outer_checkpoint_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -51993,9 +51970,7 @@ fn nested_checkpoint_identity_survives_paired_restore_compaction_folds_f158() {
         ),
         nested_checkpoint_pair(3),
     );
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed_fold.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed_fold.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed_fold,
@@ -52038,12 +52013,12 @@ fn nested_handoff_identity_survives_paired_checkpoint_restore_compaction_folds_f
         };
         let restore_batches = order
             .map(|order| {
-                let valid_segments = (order != u64::MAX).then(|| {
+                let valid_segments = if order != u64::MAX { {
                     vec![orna_storage_v1::BranchMergePairedWriteAheadSegmentIdentity {
                         left_segment: b"f159/segment/left".to_vec(),
                         right_segment: b"f159/segment/right".to_vec(),
                     }]
-                }).unwrap_or_default();
+                } } else { Default::default() };
                 vec![vec![
                     orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedSpillIdentitySnapshot {
                         spill: orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedPairedCheckpointCompactionSnapshot {
@@ -52214,9 +52189,7 @@ fn nested_handoff_identity_survives_paired_checkpoint_restore_compaction_folds_f
         nested_handoff_identity: handoff_pair(3),
         restore_fold: make_f158_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -52447,9 +52420,7 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_folds_f160() {
         nested_compaction_identity: compaction_pair(3),
         restore_fold: make_f159_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -52614,11 +52585,11 @@ fn make_f160_restore_fold_for_f161(
         },
         restore_fold: fold,
     };
-    let fold = orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
+    
+    orna_storage_v1::BranchMergePairedCheckpointRedoFoldSpillNestedCompactionIdentityNestedHandoffIdentityNestedCheckpointIdentityNestedCompactionIdentityOuterRestoreIdentityNestedSpillIdentityOuterCheckpointIdentityRestoreIdentityOuterSpillIdentityRestoreCheckpointIdentityRestoreFoldSnapshot {
         nested_compaction_identity: compaction_identity.clone(),
         restore_fold: fold,
-    };
-    fold
+    }
 }
 
 #[test]
@@ -52722,9 +52693,7 @@ fn nested_rewind_identity_survives_paired_compaction_handoff_folds_f161() {
         nested_rewind_identity: rewind_pair(3),
         restore_fold: make_f160_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -52839,9 +52808,7 @@ fn nested_handoff_identity_survives_paired_rewind_checkpoint_folds_f162() {
         nested_handoff_identity: handoff_pair(3),
         restore_fold: make_f161_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -52971,9 +52938,7 @@ fn nested_checkpoint_identity_survives_paired_rewind_compaction_folds_f163() {
         nested_checkpoint_identity: checkpoint_pair(3),
         restore_fold: make_f162_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -53111,9 +53076,7 @@ fn nested_compaction_identity_survives_paired_rewind_handoff_checkpoint_folds_f1
         nested_compaction_identity: nested_compaction_pair(3),
         restore_fold: make_f163_fold(3, Some(u64::MAX)),
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
-        malformed.restore_fold.clone(),
-    ])
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold))
     .unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[
         malformed,
@@ -53259,7 +53222,7 @@ fn nested_handoff_identity_survives_paired_rewind_checkpoint_chain_folds_f165() 
         restore_fold: make_f164_fold(3, Some(u64::MAX)),
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F165FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -53420,7 +53383,7 @@ fn nested_checkpoint_identity_survives_paired_handoff_rewind_fold_chains_f166() 
         restore_fold: make_f165_fold(3, Some(u64::MAX)),
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F166FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -53612,7 +53575,7 @@ fn nested_rewind_identity_survives_paired_checkpoint_handoff_fold_chains_f167() 
         restore_fold: make_f166_fold(3, Some(u64::MAX)),
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F167FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -53803,7 +53766,7 @@ fn nested_handoff_identity_survives_paired_rewind_checkpoint_chain_folds_f168() 
         restore_fold: make_f167_fold(3, Some(u64::MAX)),
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F168FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -54009,7 +53972,7 @@ fn nested_rewind_identity_survives_paired_checkpoint_fold_handoff_chains_f169() 
         restore_fold: make_f168_fold(3, Some(u64::MAX)),
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F169FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -54235,7 +54198,7 @@ fn nested_checkpoint_identity_survives_paired_rewind_fold_handoff_chains_f170() 
         },
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F170FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -54488,7 +54451,7 @@ fn nested_rewind_identity_survives_paired_checkpoint_fold_chain_handoffs_f171() 
         },
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F171FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -54765,7 +54728,7 @@ fn nested_handoff_identity_survives_paired_rewind_fold_chain_checkpoints_f172() 
         },
     };
     let expected_source =
-        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+        orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F172FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -55089,7 +55052,7 @@ fn nested_checkpoint_identity_survives_paired_rewind_chain_fold_handoffs_f173() 
             },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F173FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -55450,7 +55413,7 @@ fn nested_rewind_identity_survives_paired_chain_checkpoint_fold_handoffs_f174() 
             },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F174FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -55843,7 +55806,7 @@ fn nested_handoff_identity_survives_paired_rewind_checkpoint_chain_folds_f175() 
             },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F175FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -56258,7 +56221,7 @@ fn nested_rewind_identity_survives_paired_checkpoint_chain_fold_handoffs_f176() 
             },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F176FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -56696,7 +56659,7 @@ fn nested_checkpoint_identity_survives_paired_rewind_checkpoint_chain_fold_hando
             },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F177FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -57157,7 +57120,7 @@ fn nested_handoff_identity_survives_paired_checkpoint_rewind_fold_handoff_chains
         },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F178FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -57642,7 +57605,7 @@ fn nested_compaction_identity_survives_paired_handoff_checkpoint_rewind_fold_han
         },
         },
     };
-    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed.restore_fold.clone()]).unwrap_err();
+    let expected_source = orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(std::slice::from_ref(&malformed.restore_fold)).unwrap_err();
     match orna_storage_v1::restore_paired_checkpoint_redo_sparse_spill_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_rewind_identity_nested_handoff_identity_nested_rewind_identity_nested_checkpoint_identity_nested_handoff_identity_nested_compaction_identity_nested_checkpoint_identity_nested_handoff_identity_nested_rewind_identity_nested_compaction_identity_nested_handoff_identity_nested_checkpoint_identity_nested_compaction_identity_outer_restore_identity_nested_spill_identity_outer_checkpoint_identity_restore_identity_outer_spill_identity_restore_checkpoint_identity_restore_folds_preserving_pin_identity(&[malformed]).unwrap_err() {
         F179FoldError::RestoreFold {
             restore_fold_ordinal,
@@ -58546,7 +58509,7 @@ fn nested_compaction_identity_survives_paired_checkpoint_restore_folds_f140() {
     )]]];
     let restored =
         orna_storage_v1::restore_paired_checkpoint_redo_sparse_segment_rotation_nested_compaction_restore_folds_preserving_pin_identity(
-            &[catalog_only.clone()],
+            std::slice::from_ref(&catalog_only),
             &[fold_zero, fold_one],
         )
         .unwrap();

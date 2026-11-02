@@ -5,7 +5,6 @@
 use std::path::Path;
 
 use orna_evaluator_v1::SysHostBindingRegistry;
-use orna_repository_v1::Repository;
 use orna_runtime_v1::{RuntimeIdentity, RuntimeState};
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
 use orna_value_v1::decode_rov3_blob_metadata;
@@ -54,9 +53,7 @@ fn stored_metadata(row: &[u8]) -> orna_value_v1::BlobMetadata {
 
 fn row_for<'a>(rows: &'a [(Vec<u8>, Vec<u8>)], key: &[u8]) -> &'a [u8] {
     rows.iter()
-        .find(|(candidate, _)| candidate == key)
-        .map(|(_, value)| value.as_slice())
-        .unwrap_or_else(|| panic!("committed row {key:?}"))
+        .find(|(candidate, _)| candidate == key).map_or_else(|| panic!("committed row {key:?}"), |(_, value)| value.as_slice())
 }
 
 fn fixture_expression(fixture: &str, root: &str) -> String {
@@ -95,8 +92,9 @@ fn git_log_subjects(root: &Path) -> Vec<String> {
         .collect()
 }
 
-#[tokio::test]
 /// Exercises format-3 Blob metadata and replacement identity against raw bytes.
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_untouched() {
     let (directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();
@@ -230,6 +228,7 @@ async fn replacing_a_blob_payload_writes_a_new_descriptor_and_leaves_other_rows_
 /// The other real payload's row: two rows, only one edited. Its media type and
 /// bytes differ from the edited row's, so nothing about the edit can reach it.
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn replacing_one_rows_payload_leaves_another_rows_payload_untouched() {
     let (_directory, repository, relation_id) = empty_format3_repository();
     let source = TempDir::new().unwrap();

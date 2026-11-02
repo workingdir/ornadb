@@ -59,7 +59,7 @@ fn parse_pcm_wave(bytes: &[u8]) -> Result<PcmWaveProperties, WaveInspectionError
         let padded_end = payload_end.checked_add(chunk_len & 1).ok_or(WaveInspectionError::MalformedContent)?;
         if payload_end > riff_end || padded_end > riff_end { return Err(WaveInspectionError::MalformedContent); }
         if id == b"fmt " { if fmt.is_some() || chunk_len < 16 { return Err(WaveInspectionError::MalformedContent); } fmt = Some(&bytes[header_end..payload_end]); }
-        else if id == b"data" { if data_len.replace(chunk_len).is_some() { return Err(WaveInspectionError::MalformedContent); } }
+        else if id == b"data" && data_len.replace(chunk_len).is_some() { return Err(WaveInspectionError::MalformedContent); }
         cursor = padded_end;
     }
     let fmt = fmt.ok_or(WaveInspectionError::MalformedContent)?; let data_len = data_len.ok_or(WaveInspectionError::MalformedContent)?;

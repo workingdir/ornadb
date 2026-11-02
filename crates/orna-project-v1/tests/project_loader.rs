@@ -1474,7 +1474,7 @@ fn worktree_row_discovery_skips_unreadable_git_administration() {
 
     let unreadable = directory.path().join(".git/unreadable/nested");
     fs::create_dir_all(&unreadable).unwrap();
-    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0)).unwrap();
+    fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
 
     let result = ProjectLoader::default().load(&repository);
     fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o700)).unwrap();

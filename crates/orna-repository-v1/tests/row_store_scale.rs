@@ -417,14 +417,13 @@ fn encode_leaf(domain: &[u8], rows: &[(u64, u64)], media_annotation: Option<&[u8
     for (key, value) in rows {
         cbor_array(&mut data, 2);
         data.extend_from_slice(&encode_uint(*key));
-        if *key == 0 {
-            if let Some(annotation) = media_annotation {
+        if *key == 0
+            && let Some(annotation) = media_annotation {
                 cbor_array(&mut data, 2);
                 cbor_uint(&mut data, *value);
                 data.extend_from_slice(annotation);
                 continue;
             }
-        }
         data.extend_from_slice(&encode_bucket(*value));
     }
     data
@@ -2009,8 +2008,7 @@ fn assert_rejected(
         .expect("admit malformed graph snapshot header");
     let error = context
         .load_row_map(fixture.relation_id)
-        .err()
-        .expect("production row-map loader must reject a malformed graph");
+        .expect_err("production row-map loader must reject a malformed graph");
     assert!(
         expected(&error),
         "{fault:?} must report its specific diagnostic, got {error:?}"

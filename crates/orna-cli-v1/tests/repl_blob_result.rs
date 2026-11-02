@@ -15,14 +15,14 @@ use std::{
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
-const MEDIA_SOURCE: &str = r#"pub table media(id: Str) {
+const MEDIA_SOURCE: &str = r"pub table media(id: Str) {
     title: Str,
     content: Blob,
 }
 
 pub fn add(id: Str, title: Str, content: Blob) =
     media.insert({ id: id, title: title, content: content });
-"#;
+";
 
 const PAYLOAD: &[u8] = b"bare-capture-payload-bytes";
 
@@ -156,7 +156,12 @@ fn query_rows(root: &Path, arguments: &[&str]) -> u64 {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        write!(out, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    out
 }
 
 /// Maximal runs of hexadecimal digits at least 40 long. A digest or an OID
@@ -228,12 +233,12 @@ fn four_sequential_capture_and_insert_lines_publish_four_rows() {
         let name = format!("clip-{index}.mp3");
         fs::write(root.join(&name), format!("sequential capture {index}"))
             .expect("write the captured file");
-        input.push_str(&format!(
+        input.extend([format!(
             "let raw_{index} = sys.blob.capture_file({root:?}, {name:?}, 64);\n\
              let audio_{index} = sys.blob.annotate(raw_{index}, \"audio/mpeg\");\n\
              main.add(\"clip-{index}\", \"Clip {index}\", audio_{index});\n",
             root = root.to_string_lossy().as_ref(),
-        ));
+        )]);
     }
     let captured = orna_repl(&root, input.trim_end());
     assert_success(&captured, "REPL sequential captures");
