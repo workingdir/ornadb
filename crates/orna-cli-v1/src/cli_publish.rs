@@ -314,6 +314,7 @@ fn publication_commit_id(
     })
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let message = parse_options(arguments)?;
     let path = local_project_path(endpoint)?;

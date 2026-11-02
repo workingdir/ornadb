@@ -7,6 +7,7 @@
 // lints that describe them are allowed here and nowhere else.
 #![allow(
     clippy::cast_possible_truncation,
+    clippy::decimal_bitwise_operands,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
     clippy::too_many_lines,

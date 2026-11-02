@@ -1569,6 +1569,7 @@ struct TreeChild {
     kind: TreeChildKind,
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn tree_children(
     entries: &[orna_repository_v1::CommittedTreeEntry],
     directory: &str,
@@ -1616,6 +1617,7 @@ fn tree_children(
     children
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
 const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
     match kind {
         TreeChildKind::Directory => 0,
@@ -1625,6 +1627,7 @@ const fn tree_child_rank(kind: &TreeChildKind) -> u8 {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn tree_child_node(commit: &GitCommitRef, directory: &str, child: &TreeChild) -> InspectionNode {
     let path = if directory.is_empty() {
         child.name.clone()
@@ -2056,6 +2059,7 @@ fn clear_cgi_environment(command: &mut Command) {
     }
 }
 
+#[allow(clippy::assigning_clones)]
 fn parse_cgi_response(output: &[u8]) -> io::Result<Response> {
     let header_end = output
         .windows(4)
@@ -2332,6 +2336,7 @@ fn read_request_body(
     Ok(body)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Writes `response`, all of it within `budget`.
 fn write_response(
     stream: &mut TcpStream,
@@ -2343,6 +2348,7 @@ fn write_response(
     write_before(stream, &[&head, &response.body], deadline)
 }
 
+#[allow(clippy::needless_pass_by_value)]
 /// Writes `parts` in order, all of them by `deadline`. Every blocked write
 /// is bounded by the time left, so a peer that stops reading, or reads a few
 /// bytes at a time, cannot hold the connection past the deadline.
@@ -2453,6 +2459,7 @@ fn json_string(value: &str) -> String {
     output
 }
 
+#[allow(clippy::items_after_statements)]
 fn format_uuid(bytes: [u8; 16]) -> String {
     let mut output = String::with_capacity(36);
     for (index, byte) in bytes.into_iter().enumerate() {
@@ -2465,6 +2472,7 @@ fn format_uuid(bytes: [u8; 16]) -> String {
     output
 }
 
+#[allow(clippy::items_after_statements)]
 fn now_ms() -> u64 {
     u64::try_from(
         SystemTime::now()
@@ -4744,10 +4752,10 @@ mod tests {
         {
             frame.push(0x80 | length);
         } else if let Ok(length) = u16::try_from(payload.len()) {
-            frame.push(0x80 | 126);
+            frame.push(0x80 | 0x7e);
             frame.extend_from_slice(&length.to_be_bytes());
         } else {
-            frame.push(0x80 | 127);
+            frame.push(0x80 | 0x7f);
             let length = u64::try_from(payload.len()).expect("frame length");
             frame.extend_from_slice(&length.to_be_bytes());
         }
@@ -4798,7 +4806,7 @@ mod tests {
     /// Reads until the server ends the connection, by end of stream or reset.
     fn read_until_closed(stream: &mut TcpStream) -> Vec<u8> {
         let mut received = Vec::new();
-        let mut chunk = [0; 64 * 1024];
+        let mut chunk = vec![0; 64 * 1024];
         loop {
             match stream.read(&mut chunk) {
                 Ok(0) => return received,
