@@ -251,11 +251,18 @@ fn read_tables(
 }
 
 /// Converts one table's runtime rows into evaluator records, ordered by evaluator key.
+/// One evaluator row as encoded key and stored-value bytes.
+pub type EvaluatorRow = (Vec<u8>, Vec<u8>);
+
+/// Field names of a table descriptor: by field id, and the stored (non-key)
+/// fields' names in storage order.
+pub type StoredFieldNames = (BTreeMap<[u8; 16], String>, Vec<String>);
+
 /// Each present Blob field reads as its [`blob_placeholder`].
 pub fn evaluator_rows(
     table: &CommittedTable,
     schema: &TableSchema,
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
+) -> Result<Vec<EvaluatorRow>, TableStorageError> {
     evaluator_rows_from_stored(schema, &table.storage_order, &table.rows)
 }
 
@@ -268,8 +275,8 @@ pub fn evaluator_rows(
 pub fn evaluator_rows_from_stored(
     schema: &TableSchema,
     storage_order: &[String],
-    rows: &[(Vec<u8>, Vec<u8>)],
-) -> Result<Vec<(Vec<u8>, Vec<u8>)>, TableStorageError> {
+    rows: &[EvaluatorRow],
+) -> Result<Vec<EvaluatorRow>, TableStorageError> {
     let (key_names, text_primary_key) = evaluator_keying(schema)?;
     let mut evaluator = BTreeMap::new();
     for (runtime_key, storage_row) in rows {
@@ -517,7 +524,7 @@ pub fn storage_row_from_record(
 /// fields' names in storage order.
 pub fn stored_field_names(
     descriptor: &Raw,
-) -> Result<(BTreeMap<[u8; 16], String>, Vec<String>), TableStorageError> {
+) -> Result<StoredFieldNames, TableStorageError> {
     let Raw::Map(entries) = descriptor else {
         return Err(TableStorageError);
     };
