@@ -47,19 +47,19 @@ fn nested_predicate_continuations_keep_each_lexical_row_identity() {
         let row = runtime
             .committed_row("Family", &Value::int(id.into()))
             .expect("matching family row was committed");
-        assert_eq!(row_field(&row, "expected"), &Raw::Text(expected.into()));
+        assert_eq!(row_field(row, "expected"), &Raw::Text(expected.into()));
     }
     for (id, family_id) in [(10, 1), (11, 1), (20, 2)] {
         let row = runtime
             .committed_row("Branch", &Value::int(id.into()))
             .expect("matching branch row was committed");
-        assert_eq!(row_field(&row, "family_id"), &Raw::Int(family_id.into()));
+        assert_eq!(row_field(row, "family_id"), &Raw::Int(family_id.into()));
     }
     for (id, branch_id) in [(100, 10), (101, 10), (110, 11), (200, 20), (999, 99)] {
         let row = runtime
             .committed_row("Leaf", &Value::int(id.into()))
             .expect("candidate leaf row was committed");
-        assert_eq!(row_field(&row, "branch_id"), &Raw::Int(branch_id.into()));
+        assert_eq!(row_field(row, "branch_id"), &Raw::Int(branch_id.into()));
     }
     for (id, family_id, branch_id, leaf_id, token) in [
         (1000, 1, 10, 100, "amber"),
@@ -72,10 +72,10 @@ fn nested_predicate_continuations_keep_each_lexical_row_identity() {
         let row = runtime
             .committed_row("Proof", &Value::int(id.into()))
             .expect("candidate proof row was committed");
-        assert_eq!(row_field(&row, "family_id"), &Raw::Int(family_id.into()));
-        assert_eq!(row_field(&row, "branch_id"), &Raw::Int(branch_id.into()));
-        assert_eq!(row_field(&row, "leaf_id"), &Raw::Int(leaf_id.into()));
-        assert_eq!(row_field(&row, "token"), &Raw::Text(token.into()));
+        assert_eq!(row_field(row, "family_id"), &Raw::Int(family_id.into()));
+        assert_eq!(row_field(row, "branch_id"), &Raw::Int(branch_id.into()));
+        assert_eq!(row_field(row, "leaf_id"), &Raw::Int(leaf_id.into()));
+        assert_eq!(row_field(row, "token"), &Raw::Text(token.into()));
     }
 }
 
@@ -144,19 +144,19 @@ fn named_predicate_continuations_keep_their_captured_fold_identity() {
         let family = runtime
             .committed_row("Family", &Value::int(id.into()))
             .expect("family value was committed");
-        assert_eq!(row_field(&family, "expected"), &Raw::Text(expected.into()));
+        assert_eq!(row_field(family, "expected"), &Raw::Text(expected.into()));
     }
     for (id, family_id) in [(10, 1), (11, 1), (20, 2)] {
         let branch = runtime
             .committed_row("Branch", &Value::int(id.into()))
             .expect("branch value was committed");
-        assert_eq!(row_field(&branch, "family_id"), &Raw::Int(family_id.into()));
+        assert_eq!(row_field(branch, "family_id"), &Raw::Int(family_id.into()));
     }
     for (id, branch_id) in [(100, 10), (101, 10), (110, 11), (200, 20), (999, 99)] {
         let leaf = runtime
             .committed_row("Leaf", &Value::int(id.into()))
             .expect("leaf value was committed");
-        assert_eq!(row_field(&leaf, "branch_id"), &Raw::Int(branch_id.into()));
+        assert_eq!(row_field(leaf, "branch_id"), &Raw::Int(branch_id.into()));
     }
     for (id, family_id, branch_id, leaf_id, token) in [
         (1000, 1, 10, 100, "amber"),
@@ -169,10 +169,10 @@ fn named_predicate_continuations_keep_their_captured_fold_identity() {
         let proof = runtime
             .committed_row("Proof", &Value::int(id.into()))
             .expect("proof value was committed");
-        assert_eq!(row_field(&proof, "family_id"), &Raw::Int(family_id.into()));
-        assert_eq!(row_field(&proof, "branch_id"), &Raw::Int(branch_id.into()));
-        assert_eq!(row_field(&proof, "leaf_id"), &Raw::Int(leaf_id.into()));
-        assert_eq!(row_field(&proof, "token"), &Raw::Text(token.into()));
+        assert_eq!(row_field(proof, "family_id"), &Raw::Int(family_id.into()));
+        assert_eq!(row_field(proof, "branch_id"), &Raw::Int(branch_id.into()));
+        assert_eq!(row_field(proof, "leaf_id"), &Raw::Int(leaf_id.into()));
+        assert_eq!(row_field(proof, "token"), &Raw::Text(token.into()));
     }
 }
 
