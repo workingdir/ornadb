@@ -11,8 +11,9 @@ use std::{
 use orna_evaluator_v1::{Limits, SysHostBindingRegistry, evaluate_expression_ovb2_with_effects};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    NoFault, RequestIdentity, RequestState, RuntimeState, TableMutation, TableObjectId,
-    TerminalOutcome, WriterLease,
+    ActivationEffectReport, FaultInjector, FaultPoint, NoFault, RecoveryDisposition,
+    RequestIdentity, RequestOwner, RequestState, RuntimeError, RuntimeState, TableMutation,
+    TableObjectId, TerminalOutcome, WriterLease,
 };
 use orna_storage_v1::RuntimePublicationCoordinator;
 use orna_sys_v1::{EnvironmentProvider, FilesystemProvider};
@@ -2305,6 +2306,167 @@ async fn capture_and_row_commit_recover_after_process_kill() {
             "{boundary}: recovery_publish_exit={}, second_publish_exit={}",
             resumed.status.code().unwrap(),
             second.status.code().unwrap()
+        );
+    }
+}
+
+/// Refuses one activation fault point without unwinding, so the caller can leave
+/// a request `Running` with its effect evidence already durable.
+#[derive(Debug)]
+struct RefuseAt(FaultPoint);
+
+impl FaultInjector for RefuseAt {
+    fn check(&self, point: FaultPoint) -> Result<(), RuntimeError> {
+        if point == self.0 {
+            return Err(RuntimeError::FaultInjected(point));
+        }
+        Ok(())
+    }
+}
+
+/// Gate D with ORNA-PUB-009 and REQUEST-1 step 5, at the publication entry
+/// point: a publication killed after its ref advanced is recovered by the next
+/// `orna publish`, and that recovery neither rolls the activation back nor
+/// promotes its possible external effect to a proven one. The controlled row is
+/// published; the external effect stays explicitly uncertain.
+#[tokio::test]
+async fn publication_recovery_keeps_uncertain_external_effects_uncertain() {
+    const REQUEST: RequestIdentity = RequestIdentity {
+        session_id: [61; 16],
+        request_id: [62; 16],
+    };
+    const FINGERPRINT: [u8; 32] = [63; 32];
+    const UNCERTAIN_PAYLOAD: u8 = 22;
+
+    for boundary in ["ref-cas", "tail"] {
+        let (directory, _source, repository, state, _base, relation_id, _format_context) =
+            seeded_project().await;
+        let root = directory.path();
+        let (identity, digest) = cli_runtime_identity(&repository);
+        drop(state);
+
+        // One activation reports a possible external effect and faults before its
+        // table write, so the request stays Running with that evidence durable.
+        let reopened = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let lease = reopened
+            .acquire_lease(identity.repository_id)
+            .await
+            .unwrap();
+        let (_, capability) = reopened
+            .reserve_request_with_admission(REQUEST, FINGERPRINT)
+            .await
+            .unwrap();
+        let capability = capability.expect("a fresh reservation issues one capability");
+        reopened
+            .start_request_with_owner_and_admission(REQUEST, FINGERPRINT, lease, capability)
+            .await
+            .unwrap();
+        let context = reopened.begin_activation().await.unwrap();
+        let mutation = TableMutation::insert([64; 16], "records", vec![1], vec![9]).unwrap();
+        assert!(
+            reopened
+                .commit_table_request_activation(
+                    lease,
+                    REQUEST,
+                    FINGERPRINT,
+                    &context,
+                    &[mutation],
+                    [65; 32],
+                    TerminalOutcome::new(vec![21]).unwrap(),
+                    &RefuseAt(FaultPoint::BeforeTableWrite),
+                    ActivationEffectReport::ExternalPossible,
+                )
+                .await
+                .is_err(),
+            "the refused activation must not report success"
+        );
+
+        // Recovery of the abandoned owner records the uncertainty and nothing else.
+        let fence = reopened
+            .recover_abandoned(lease.owner_id, [66; 16])
+            .await
+            .unwrap();
+        let recovered = reopened
+            .recover_running_request_with_outcomes(
+                REQUEST,
+                FINGERPRINT,
+                RequestOwner::from(lease),
+                fence,
+                TerminalOutcome::new(vec![21]).unwrap(),
+                TerminalOutcome::new(vec![UNCERTAIN_PAYLOAD]).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status.state, RequestState::Orphaned);
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain
+        );
+        drop(reopened);
+
+        // Publish, kill the child after its ref advanced, then let the next
+        // invocation recover the publication.
+        let crash = TempDir::new().unwrap();
+        let marker = crash.path().join(MARKER_FILE);
+        let mut child = launch(root, boundary, crash.path());
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !marker.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            marker.exists(),
+            "child never reached {boundary}; status: {:?}",
+            child.try_wait().unwrap()
+        );
+        child.kill().expect("SIGKILL publication child");
+        let status = child.wait().expect("wait for killed child");
+        assert!(!status.success(), "child returned at {boundary}");
+        std::fs::remove_file(&marker).unwrap();
+
+        let resumed = cli(root, &["--debug", "publish"]);
+        assert!(
+            resumed.status.success(),
+            "recovery publish at {boundary} failed: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        assert!(
+            repository.read_publication_journal().unwrap().is_none(),
+            "journal left after recovery at {boundary}"
+        );
+        let published = published_payload(&repository, relation_id);
+        assert!(
+            !published.is_empty(),
+            "the activation's controlled row was not published at {boundary}"
+        );
+
+        // The publication recovery changed neither the state nor the disposition.
+        let after = RuntimeState::open(&repository, identity, digest)
+            .await
+            .unwrap();
+        let request = after
+            .request_status(REQUEST, FINGERPRINT)
+            .await
+            .unwrap()
+            .expect("the recovered request survives publication");
+        assert_eq!(
+            request.state,
+            RequestState::Orphaned,
+            "{boundary}: publication recovery must not complete the request"
+        );
+        assert_eq!(
+            after
+                .request_recovery_disposition(REQUEST, FINGERPRINT)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain),
+            "{boundary}: publication recovery must not fabricate a rollback proof"
+        );
+        assert_eq!(
+            request.terminal_outcome,
+            Some(TerminalOutcome::new(vec![UNCERTAIN_PAYLOAD]).unwrap()),
+            "{boundary}: the uncertain payload survives publication"
         );
     }
 }
