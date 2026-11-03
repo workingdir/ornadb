@@ -36,21 +36,41 @@ fn refined_type_declarations_have_owner_plans_and_static_identity() {
         module.symbols.get("raw_port").unwrap().ty,
         "the refined nominal name remains distinct in semantic signatures"
     );
+    let plans = analysis.assertions.values().next().expect("refined plans");
+    let owners: Vec<&AssertionOwner> = plans.iter().map(|plan| &plan.owner).collect();
     assert_eq!(
-        analysis.assertions.values().next().expect("refined plans"),
-        &vec![
-            orna_semantic_v1::AssertionPlan {
-                owner: AssertionOwner::RefinedType("Port".into()),
-                dependencies: Default::default(),
-                effects: Default::default(),
-            },
-            orna_semantic_v1::AssertionPlan {
-                owner: AssertionOwner::RefinedType("Port".into()),
-                dependencies: Default::default(),
-                effects: Default::default(),
-            },
+        owners,
+        [
+            &AssertionOwner::RefinedType("Port".into()),
+            &AssertionOwner::RefinedType("Port".into()),
         ],
         "both declared predicates have analyzer owner plans"
+    );
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.dependencies.is_empty() && plan.effects == Default::default()),
+        "neither predicate references a table or carries effects"
+    );
+    // A refined assertion runs when a base value is constructed or converted
+    // into the refined type (ORNA-ASSERT-041), and the plans keep the
+    // declaration order the predicates appear in.
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.scope == orna_semantic_v1::AssertionScope::ValueConstruction),
+        "refined assertions are value-construction scoped"
+    );
+    let orders: Vec<usize> = plans.iter().map(|plan| plan.source_order).collect();
+    assert!(
+        orders.windows(2).all(|pair| pair[0] < pair[1]),
+        "plans keep declaration order, got {orders:?}"
+    );
+    assert!(
+        plans
+            .iter()
+            .all(|plan| plan.expression_span.end > plan.expression_span.start),
+        "every plan carries the span of its expression"
     );
 }
 
