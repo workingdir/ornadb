@@ -1202,6 +1202,178 @@ async fn cli_publication_reopens_after_external_edit_in_kill_window() {
     assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
 }
 
+/// Gate D (ACCEPTANCE.md): a killed publication owner keeps no way to write.
+///
+/// The owner is SIGKILLed while it holds `.git/index.lock`, so the lock and the
+/// attempt's pins outlive the process. The next publication is a different
+/// process with its own handle: it must reclaim the abandoned lock, adopt or
+/// clear the dead attempt's pins, publish its own batch, and leave no pin, lock
+/// or journal that the dead owner could still write through. This claims
+/// nothing about uncoordinated `git prune --expire now` (ORNA-GIT-010); the
+/// coordinated case is the test above.
+#[tokio::test]
+async fn abandoned_publication_owner_loses_the_index_lock_and_its_pins_after_a_kill() {
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+    git(root, &["add", "--", "unrelated-tracked.txt"]);
+    git(
+        root,
+        &["commit", "--quiet", "-m", "add unrelated tracked file"],
+    );
+    let base_head = head(&repository);
+    let base_tree = String::from_utf8_lossy(&git_output(
+        root,
+        &["rev-parse", "--verify", &format!("{base_head}^{{tree}}")],
+        None,
+    ))
+    .trim()
+    .to_owned();
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch(root, "index-lock", crash.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "child never reached index-lock; status: {:?}",
+        child.try_wait().unwrap()
+    );
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed child");
+    assert!(
+        !status.success(),
+        "child unexpectedly returned at index-lock"
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "index-lock");
+    std::fs::remove_file(&marker).unwrap();
+
+    // The dead owner's handle and its attempt's pins are both still on disk.
+    assert!(
+        root.join(".git/index.lock").exists(),
+        "the killed owner did not leave the index lock it held"
+    );
+    assert_attempt_pins(root, &base_head, &base_tree, "index-lock");
+    drop(state);
+
+    let resumed = cli(root, &["--debug", "publish"]);
+    assert!(
+        resumed.status.success(),
+        "recovery could not reclaim the abandoned lock (exit {:?}): {}",
+        resumed.status.code(),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(
+        !root.join(".git/index.lock").exists(),
+        "the abandoned owner's index lock survived recovery"
+    );
+    assert!(
+        publication_pin_refs(root).is_empty(),
+        "the abandoned owner kept pin refs: {:?}",
+        publication_pin_refs(root)
+    );
+    assert!(
+        repository.read_publication_journal().unwrap().is_none(),
+        "the abandoned owner kept a publication journal"
+    );
+    assert_ne!(
+        head(&repository),
+        base_head,
+        "the replacement publisher did not publish its own batch"
+    );
+    let second = cli(root, &["publish"]);
+    assert!(
+        second.status.success(),
+        "second publish after the abandoned owner failed (exit {:?}): {}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+}
+
+/// Gate D (ACCEPTANCE.md): coordinated GC/repack and a captured external edit in
+/// the same kill window.
+///
+/// The publisher is SIGKILLed at `index`, an external edit lands on a tracked
+/// file that Orna does not manage, and `git gc --prune=now` plus
+/// `git repack -a -d` run under the Orna coordination lock, the declared
+/// maintenance boundary (ORNA-CAP-006). Recovery must still publish, keep the
+/// external edit in the worktree, and leave no journal, lock or pin behind.
+#[tokio::test]
+async fn cli_publication_reopens_after_coordinated_gc_with_external_edit_in_kill_window() {
+    let (directory, _source, repository, state, _base, _relation_id, _format_context) =
+        seeded_project().await;
+    let root = directory.path();
+    std::fs::write(root.join("unrelated-tracked.txt"), b"committed baseline\n").unwrap();
+    git(root, &["add", "--", "unrelated-tracked.txt"]);
+    git(
+        root,
+        &["commit", "--quiet", "-m", "add unrelated tracked file"],
+    );
+    let base = head(&repository);
+
+    let crash = TempDir::new().unwrap();
+    let marker = crash.path().join(MARKER_FILE);
+    let mut child = launch(root, "index", crash.path());
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !marker.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker.exists(),
+        "child never reached index; status: {:?}",
+        child.try_wait().unwrap()
+    );
+    child.kill().expect("SIGKILL publication child");
+    let status = child.wait().expect("wait for killed child");
+    assert!(!status.success(), "child unexpectedly returned at index");
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "index");
+    std::fs::remove_file(&marker).unwrap();
+    drop(state);
+
+    let external = b"external edit during coordinated maintenance\n";
+    std::fs::write(root.join("unrelated-tracked.txt"), external).unwrap();
+    coordinated_gc_and_repack(&repository, root);
+
+    let resumed = cli(root, &["--debug", "publish"]);
+    assert!(
+        resumed.status.success(),
+        "recovery after coordinated GC and external edit failed (exit {:?}): {}",
+        resumed.status.code(),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_ne!(
+        head(&repository),
+        base,
+        "candidate not published after coordinated GC and external edit"
+    );
+    assert_eq!(
+        std::fs::read(root.join("unrelated-tracked.txt")).unwrap(),
+        external,
+        "external worktree edit lost through coordinated GC in the kill window"
+    );
+    assert!(
+        repository.read_publication_journal().unwrap().is_none(),
+        "journal left after coordinated GC and external edit"
+    );
+    assert!(
+        !root.join(".git/index.lock").exists(),
+        "index lock stranded after coordinated GC and external edit"
+    );
+    let second = cli(root, &["publish"]);
+    assert!(
+        second.status.success(),
+        "second publish failed (exit {:?}): {}",
+        second.status.code(),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stdout).contains("nothing to publish"));
+}
+
 /// Reads the published image bytes from the committed row map (format 3).
 fn published_payload(repository: &Repository, relation_id: [u8; 16]) -> Vec<u8> {
     let format = repository.open_format_context().unwrap();
