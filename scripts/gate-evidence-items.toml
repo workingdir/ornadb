@@ -31,6 +31,7 @@ expected = [
   "claims-fixed-row-batching",
   "claims-prune-expire",
   "claims-retired-row-writers",
+  "gate-c-million-rows",
 ]
 
 # Gate A: format and existing behaviour.
@@ -172,11 +173,9 @@ id = "C1"
 title = "Ten and one million rows use ORP-1"
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 production_writer "]
-limitations = [
-  "C1-C4 select the ten-row test only: the one-million-row case runs in gate-c-scale.yml (PR 9344, bead ornadb-5il1.373), which this workflow does not read (ornadb-5il1.6).",
-]
 
 [[item]]
 gate = "C"
@@ -186,6 +185,7 @@ select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:partial_clone_publication_race" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_publication_race" },
+  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 limitations = [
   "Concurrent publication is raced three ways: two publishers on one local repository (orp1_production_publication_race), and a cold and a warm partial clone that each publish their own row and then race the push to a shared bare remote (partial_clone_publication_race). The clone race asserts one push wins, the remote branch reaches only the winner commit, a fresh product reader over the remote reads the winner row and not the loser row, and the losing clone keeps its own publication as a local commit after fetching the published snapshot. It does not merge the two publications: both rewrite one store file and the format has no merge rule for two publications of one store. Still not covered: exercise_concurrent_writes computes the row index on two threads without publishing, and that driver runs only in the ignored one-million-row test (ornadb-mmsa.13).",
@@ -198,6 +198,7 @@ title = "Report root and tree traffic, payload traffic, latency, allocations and
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_production_writer_ten_rows" },
+  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 "]
 limitations = [
@@ -211,6 +212,7 @@ title = "Prepend, delete, rekey and large-row cases measure index churn separate
 select = [
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_ten_rows" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_index_churn_multi_page" },
+  { record = "gate-c-million-rows", package = "orna-repository-v1", target = "test:row_store_scale", test = "orp1_row_store_one_million_rows" },
 ]
 counters = ["^ORP-1 index_churn "]
 limitations = [
