@@ -566,6 +566,10 @@ impl Symbol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableSchema {
     pub fields: BTreeMap<String, Type>,
+    /// Stored references from this table's columns to other tables.
+    /// Populated once every table in the module is declared, because a
+    /// reference is resolved against the module's table symbols.
+    pub references: Vec<TableReference>,
     /// Visible field names in the order the declaration lists them. `fields`
     /// is a map, so it cannot carry declaration order; `sys.Table.columns`
     /// needs it (ORNA-SYS table columns, Gate G).
@@ -2000,6 +2004,7 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
     let mut symbol = fixture_symbol(SymbolKind::Table, Type::Named(name.into()));
     if let Type::Record(fields) = row {
         symbol.table_schema = Some(TableSchema {
+            references: Vec::new(),
             declaration_order: fields.keys().cloned().collect(),
             fields,
             admission: None,
@@ -2026,6 +2031,7 @@ fn fixture_nominal_type(name: &str, row: Type) -> (String, Symbol) {
     let (name, mut symbol) = fixture_type(name, Type::Named(name.into()));
     if let Type::Record(fields) = row {
         symbol.table_schema = Some(TableSchema {
+            references: Vec::new(),
             declaration_order: fields.keys().cloned().collect(),
             fields,
             admission: None,
@@ -2095,6 +2101,30 @@ pub enum AssertionOwner {
     Table(String),
     RefinedType(String),
 }
+/// What happens to a stored reference when its target row is deleted or
+/// re-keyed (`sys.ReferenceAction`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum ReferenceAction {
+    Restrict,
+    Cascade,
+    SetNone,
+}
+
+/// A stored reference from one table column to a row of another table
+/// (ORNA-REF-001). A table type used as a field denotes a stored reference,
+/// not an embedded row.
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct TableReference {
+    /// The referencing column in the owning table.
+    pub from_column: String,
+    /// The referenced table, as its symbol name.
+    pub to_table: String,
+    /// True when the column may hold no reference at all.
+    pub optional: bool,
+    pub on_delete: ReferenceAction,
+    pub on_rekey: ReferenceAction,
+}
+
 /// When an assertion is enforced (`sys.AssertionScope`).
 ///
 /// The spec names four values and says which boundary each owner belongs to:
@@ -2775,6 +2805,7 @@ fn analyze_recording_origins(
         let conversion_metadata = conversion_metadata(&scope);
         attach_conversion_metadata(&mut symbols, &conversion_metadata);
         attach_currency_metadata(&mut symbols, &scope.currency_types);
+        attach_table_references(&mut symbols);
         if let Some(module) = result.modules.get_mut(namespace) {
             module.symbols = symbols;
             module.exports = module
@@ -3324,6 +3355,7 @@ fn stabilize_function_summaries(
             let conversion_metadata = conversion_metadata(&scope);
             attach_conversion_metadata(&mut symbols, &conversion_metadata);
             attach_currency_metadata(&mut symbols, &scope.currency_types);
+            attach_table_references(&mut symbols);
             if let Some(module) = modules.get_mut(namespace) {
                 module.symbols = symbols;
                 module.exports = module
@@ -5270,6 +5302,62 @@ fn attach_conversion_metadata(
 
 /// Export which local nominal types implement the core `Currency` protocol,
 /// so an importer accepts them as currencies without reading their source.
+/// Resolve stored references from table columns to other tables.
+///
+/// A table type used as a field denotes a stored reference to a row of that
+/// table (ORNA-REF-001). Resolution runs after every table in the module is
+/// declared, because the target is named by symbol.
+///
+/// Actions follow ORNA-REF-003: a non-optional reference defaults to
+/// `restrict` on delete and re-key. An optional reference may hold no value,
+/// so it defaults to `set_none` on both actions. Automatic cascade is outside
+/// version 1.0 and is never produced.
+fn attach_table_references(symbols: &mut BTreeMap<String, Symbol>) {
+    let tables: BTreeSet<String> = symbols
+        .values()
+        .filter(|symbol| symbol.kind == SymbolKind::Table)
+        .filter_map(|symbol| match &symbol.ty {
+            Type::Named(name) => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    for symbol in symbols.values_mut() {
+        if symbol.kind != SymbolKind::Table {
+            continue;
+        }
+        let Some(schema) = symbol.table_schema.as_mut() else {
+            continue;
+        };
+        let mut references = Vec::new();
+        for (column, ty) in &schema.fields {
+            let (target, optional) = match ty {
+                Type::Named(target) => (target, false),
+                Type::Optional(inner) => match inner.as_ref() {
+                    Type::Named(target) => (target, true),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if !tables.contains(target) {
+                continue;
+            }
+            let action = if optional {
+                ReferenceAction::SetNone
+            } else {
+                ReferenceAction::Restrict
+            };
+            references.push(TableReference {
+                from_column: column.clone(),
+                to_table: target.clone(),
+                optional,
+                on_delete: action,
+                on_rekey: action,
+            });
+        }
+        schema.references = references;
+    }
+}
+
 fn attach_currency_metadata(symbols: &mut BTreeMap<String, Symbol>, currencies: &BTreeSet<String>) {
     for symbol in symbols.values_mut() {
         if symbol.kind != SymbolKind::Type {
@@ -26900,6 +26988,7 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
         }
     }
     Some(TableSchema {
+        references: Vec::new(),
         declaration_order,
         fields,
         // Only declaration-backed completeness is exported.  Default
@@ -26963,6 +27052,7 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
         }))
         .collect();
     Some(TableSchema {
+        references: Vec::new(),
         declaration_order,
         fields,
         admission: Some(TableAdmission {

@@ -1,0 +1,9 @@
+pub table Contact(id: Int) {
+    name: Str,
+}
+
+pub table Vehicle(id: Int) {
+    plate: Str,
+    owner: Contact,
+    spare: Contact?,
+}
