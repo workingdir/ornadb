@@ -176,6 +176,14 @@ CREATE TABLE IF NOT EXISTS table_row (
     row_digest BLOB NOT NULL CHECK (length(row_digest) = 32),
     PRIMARY KEY (table_id, row_key)
 );
+-- A row written under a committed table identity is stored under that
+-- identity, so a reader that names the table has to resolve it first
+-- (bead ornadb-jm0d).
+CREATE TABLE IF NOT EXISTS table_identity (
+    table_name TEXT NOT NULL CHECK (length(table_name) > 0),
+    object_id BLOB NOT NULL CHECK (length(object_id) = 16),
+    PRIMARY KEY (table_name, object_id)
+);
 CREATE TABLE IF NOT EXISTS checkpoint (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     generation INTEGER NOT NULL UNIQUE CHECK (generation >= 0),
@@ -7834,12 +7842,39 @@ impl RuntimeState {
         table: &str,
     ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, RuntimeError> {
         validate_table_name(table)?;
+        // A table written under its committed identity stores rows under
+        // `oid:<hex>`, so the name is resolved through the durable identity
+        // mapping first (bead ornadb-jm0d).
+        let mut storage = vec![table.to_owned()];
+        let mut identities = self
+            .connection
+            .query(
+                "SELECT object_id FROM table_identity WHERE table_name = ?1",
+                params![table],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+        while let Some(row) = identities
+            .next()
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?
+        {
+            let bytes: Vec<u8> = row.get(0).map_err(|_| RuntimeError::RecoveryInvalid)?;
+            if let Ok(id) = <[u8; 16]>::try_from(bytes.as_slice()) {
+                storage.push(table_storage_key(table, Some(TableObjectId::new(id))));
+            }
+        }
         let mut rows = self
             .connection
             .query(
                 "SELECT row_key, row_value FROM table_row
-                 WHERE table_id = ?1 ORDER BY row_key",
-                params![table],
+                 WHERE table_id = ?1 OR table_id = ?2 OR table_id = ?3
+                 ORDER BY row_key",
+                params![
+                    storage[0].clone(),
+                    storage.get(1).cloned().unwrap_or_default(),
+                    storage.get(2).cloned().unwrap_or_default()
+                ],
             )
             .await
             .map_err(|_| RuntimeError::StorageUnavailable)?;
@@ -20281,6 +20316,18 @@ async fn apply_table_mutation_tx(
     mutation: &TableMutation,
     base: &mut CommittedTableBase<'_>,
 ) -> Result<(), RuntimeError> {
+    if let Some(identity) = mutation.table_object_id() {
+        // Rows written under a committed identity live under `oid:<hex>`, so
+        // the name is recorded here for readers that address the table by name
+        // (bead ornadb-jm0d).
+        connection
+            .execute(
+                "INSERT OR IGNORE INTO table_identity (table_name, object_id) VALUES (?1, ?2)",
+                params![mutation.table().to_owned(), identity.bytes().to_vec()],
+            )
+            .await
+            .map_err(|_| RuntimeError::StorageUnavailable)?;
+    }
     apply_table_row_tx(connection, mutation, base).await?;
     let storage_table = mutation.storage_table();
     base.override_key(&storage_table, mutation.key());
