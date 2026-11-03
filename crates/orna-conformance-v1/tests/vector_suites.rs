@@ -78,6 +78,7 @@ fn published_vector_suites_run_through_production_or_name_their_gap() {
     );
 
     for (name, cases) in [
+        ("float-vectors.json", 19),
         ("path-vectors.json", 41),
         ("protocol-vectors.json", 13),
         ("snapshot-vectors.json", 4),
@@ -90,10 +91,7 @@ fn published_vector_suites_run_through_production_or_name_their_gap() {
         assert_eq!(result.known_gap, None, "{name}");
     }
 
-    for (name, bead) in [
-        ("float-vectors.json", "ornadb-5il1.188"),
-        ("numeric-vectors.json", "ornadb-5il1.190"),
-    ] {
+    for (name, bead) in [("numeric-vectors.json", "ornadb-5il1.190")] {
         let result = suite(&suites, name);
         assert_eq!(result.status, EvidenceStatus::Skipped, "{name}");
         assert_eq!(result.known_gap.as_deref(), Some(bead), "{name}");
@@ -125,8 +123,8 @@ fn harness_reports_vector_suites_apart_from_adapter_evidence() {
         .iter()
         .find(|suite| suite["suite"] == "float-vectors.json")
         .expect("serialized float suite");
-    assert_eq!(float["status"], "skipped");
-    assert_eq!(float["known_gap"], "ornadb-5il1.188");
+    assert_eq!(float["status"], "passed");
+    assert_eq!(float["known_gap"], serde_json::Value::Null);
 }
 
 /// Each executed suite really runs its cases: one disagreeing published case

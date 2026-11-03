@@ -10,8 +10,9 @@
 
 use orna_protocol_v1::{Envelope, Limits};
 use orna_value_v1::{
-    Snapshot, Value as OvbValue, path_collision_key, path_decode_component,
-    path_decode_key_components, path_encode_component, path_encode_key_components,
+    Snapshot, Value as OvbValue, float_max, float_min, float_ordinary_eq, float_total_cmp,
+    path_collision_key, path_decode_component, path_decode_key_components, path_encode_component,
+    path_encode_key_components,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -75,12 +76,12 @@ fn run_vector_suite(suite: &str, vectors: &Value) -> VectorSuiteEvidence {
             ),
             path_vectors(vectors),
         ),
-        "float-vectors.json" => known_gap(
+        "float-vectors.json" => executed(
             suite,
-            "ornadb-5il1.188",
-            "Float arithmetic is not IEEE-754 binary64: NaN and infinities cannot be produced \
-             from source, so the total-order, equality and aggregate cases cannot run through \
-             the language (W01-01)",
+            "orna-value-v1 binary64 comparators (float_total_cmp, float_ordinary_eq, float_min, \
+             float_max)"
+                .into(),
+            float_vectors(vectors),
         ),
         "numeric-vectors.json" => known_gap(
             suite,
@@ -246,6 +247,151 @@ fn protocol_vectors(vectors: &Value) -> CaseRun {
             Err(error) => format!("the envelope codec failed: {error}"),
         });
     }
+    run
+}
+
+/// `float-vectors.json`: the binary64 total order, ordinary equality, aggregate
+/// and Parquet statistics cases, run through the production comparators in
+/// `orna-value-v1`.
+///
+/// Every case names its values as `f64` bit patterns, so the vectors test the
+/// comparators the language uses rather than a second implementation written
+/// for the test.
+fn float_vectors(vectors: &Value) -> CaseRun {
+    let mut run = CaseRun::default();
+    let bits = |text: &str| u64::from_str_radix(text, 16).ok();
+
+    let Some(ordered) = vectors["ascending_total_order"].as_array() else {
+        run.malformed("ascending_total_order");
+        return run;
+    };
+    for (index, case) in ordered.iter().enumerate() {
+        let name = format!(
+            "ascending_total_order[{index}] {}",
+            case["label"].as_str().unwrap_or("<unnamed>")
+        );
+        let Some(current) = case["bits"].as_str().and_then(bits) else {
+            run.malformed(&name);
+            continue;
+        };
+        let previous = index
+            .checked_sub(1)
+            .and_then(|earlier| ordered[earlier]["bits"].as_str())
+            .and_then(bits);
+        let passed = match previous {
+            None => true,
+            Some(previous) => float_total_cmp(previous, current).is_lt(),
+        };
+        run.check(&name, passed, || {
+            format!("0x{previous:x?} does not sort below 0x{current:016x}")
+        });
+    }
+
+    let Some(equal_cases) = vectors["ordinary_equality"].as_array() else {
+        run.malformed("ordinary_equality");
+        return run;
+    };
+    for (index, case) in equal_cases.iter().enumerate() {
+        let name = format!("ordinary_equality[{index}]");
+        let (Some(left), Some(right), Some(expected)) = (
+            case["left"].as_str().and_then(bits),
+            case["right"].as_str().and_then(bits),
+            case["equal"].as_bool(),
+        ) else {
+            run.malformed(&name);
+            continue;
+        };
+        let actual = float_ordinary_eq(left, right);
+        run.check(&name, actual == expected, || {
+            format!("0x{left:016x} == 0x{right:016x} answered {actual}, published {expected}")
+        });
+    }
+
+    let Some(aggregates) = vectors["aggregate"].as_array() else {
+        run.malformed("aggregate");
+        return run;
+    };
+    for (index, case) in aggregates.iter().enumerate() {
+        let operation = case["operation"].as_str().unwrap_or("<unnamed>");
+        let name = format!("aggregate[{index}] {operation}");
+        let inputs: Option<Vec<u64>> = case["inputs"].as_array().map(|inputs| {
+            inputs
+                .iter()
+                .filter_map(|input| input.as_str())
+                .filter_map(bits)
+                .collect()
+        });
+        let (Some(inputs), Some(expected)) = (inputs, case["result"].as_str().and_then(bits))
+        else {
+            run.malformed(&name);
+            continue;
+        };
+        let actual = match operation {
+            "min" => float_min(&inputs),
+            "max" => float_max(&inputs),
+            _ => None,
+        };
+        run.check(&name, actual == Some(expected), || {
+            format!(
+                "{operation} over {inputs:x?} answered {actual:x?}, published 0x{expected:016x}"
+            )
+        });
+    }
+
+    let Some(statistics) = vectors["parquet_statistics"].as_array() else {
+        run.malformed("parquet_statistics");
+        return run;
+    };
+    for (index, case) in statistics.iter().enumerate() {
+        let name = format!("parquet_statistics[{index}]");
+        let values: Option<Vec<u64>> = case["values"].as_array().map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str())
+                .filter_map(bits)
+                .collect()
+        });
+        let Some(values) = values else {
+            run.malformed(&name);
+            continue;
+        };
+        let nan_count = values
+            .iter()
+            .filter(|bits| f64::from_bits(**bits).is_nan())
+            .count();
+        let expected_nan_count = case["nan_count"].as_u64().map(|count| count as usize);
+        let non_nan: Vec<u64> = values
+            .iter()
+            .copied()
+            .filter(|bits| !f64::from_bits(*bits).is_nan())
+            .collect();
+        let passed = expected_nan_count == Some(nan_count)
+            && case["min_non_nan"]
+                .as_str()
+                .and_then(bits)
+                .map_or(true, |expected| float_min(&non_nan) == Some(expected))
+            && case["max_non_nan"]
+                .as_str()
+                .and_then(bits)
+                .map_or(true, |expected| float_max(&non_nan) == Some(expected))
+            && case["min_total"]
+                .as_str()
+                .and_then(bits)
+                .map_or(true, |expected| float_min(&values) == Some(expected))
+            && case["max_total"]
+                .as_str()
+                .and_then(bits)
+                .map_or(true, |expected| float_max(&values) == Some(expected));
+        run.check(&name, passed, || {
+            format!(
+                "values {values:x?} answered nan_count {nan_count}, min_non_nan {min:x?}, \
+                 max_non_nan {max:x?}",
+                min = float_min(&non_nan),
+                max = float_max(&non_nan),
+            )
+        });
+    }
+
     run
 }
 
