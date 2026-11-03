@@ -28,6 +28,7 @@ import re
 import shlex
 import shutil
 import signal
+import resource
 import subprocess
 import sys
 import threading
@@ -625,7 +626,26 @@ def workflow_run() -> dict | None:
     }
 
 
-def execute(argv: list[str], log_path: Path, timeout_minutes: float | None) -> tuple[int | None, bool, dict, dict]:
+def child_peak_rss_kib() -> int | None:
+    """Peak resident set of the recorder's reaped children, in KiB.
+
+    `ru_maxrss` is a high-water mark across every child this recorder has waited
+    for, so it bounds the command's own peak rather than measuring that command
+    alone: a larger earlier child raises it. Linux reports KiB, so other
+    platforms report nothing rather than a number in different units.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return int(usage.ru_maxrss)
+
+
+def execute(
+    argv: list[str], log_path: Path, timeout_minutes: float | None
+) -> tuple[int | None, bool, dict, dict, dict]:
     """Run argv, stream its human output to the console and the log, and index build messages.
 
     A process the command leaves behind can keep the output pipe open after the
@@ -687,7 +707,7 @@ def execute(argv: list[str], log_path: Path, timeout_minutes: float | None) -> t
             if reader.is_alive():
                 detached = True
                 log.write("gate_evidence: a leftover process still holds the command output; stopped reading\n")
-    return status, timed_out, executables, libraries
+    return status, timed_out, executables, libraries, {"peak_rss_kib": child_peak_rss_kib()}
 
 
 def write_json(path: Path, value: dict) -> None:
@@ -746,6 +766,7 @@ def command_run(arguments: argparse.Namespace) -> int:
         "timed_out": False,
         "timeout_minutes": arguments.timeout_minutes,
         "log": {"file": log_path.name, "sha256": None, "bytes": None},
+        "counters": {"peak_rss_kib": None},
         "totals": {},
         "targets": [],
         "failures": {"new": [], "known": []},
@@ -764,9 +785,12 @@ def command_run(arguments: argparse.Namespace) -> int:
         print(f"ornadb: {arguments.record}: prerequisites unavailable: {', '.join(missing)}", file=sys.stderr)
         exit_code = 1
     else:
-        status, timed_out, executables, libraries = execute(argv, log_path, arguments.timeout_minutes)
+        status, timed_out, executables, libraries, counters = execute(
+            argv, log_path, arguments.timeout_minutes
+        )
         record["exit_status"] = status
         record["timed_out"] = timed_out
+        record["counters"] = counters
         if arguments.check:
             parsed, failures = check_outcome(arguments.check, argv, status, timed_out)
         else:
@@ -1178,6 +1202,7 @@ def command_summarize(arguments: argparse.Namespace) -> int:
             "Each item records only the tests mapped to it; its own limitations list what those tests do not show.",
             "A passing subset never establishes whole-gate or whole-product completion.",
             *(["No reviewer is recorded by an automated run."] if arguments.reviewer is None else []),
+            "Peak RSS is the recorder's high-water mark across its child processes; bytes read and written and network objects are not measured.",
         ],
         "gates": gate_rollup(items),
         "items": items,
