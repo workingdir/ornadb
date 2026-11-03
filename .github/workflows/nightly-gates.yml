@@ -267,7 +267,7 @@ jobs:
           --input-env ORNA_ORP1_MILLION_ROWS
           --input-env ORNA_ORP1_SCALE_ROWS
           -- cargo test --locked -p orna-repository-v1 --test row_store_scale
-          -- --ignored --exact orp1_row_store_one_million_rows --nocapture
+          -- --ignored --exact orp1_row_store_one_million_rows
 
       - name: Upload the evidence record and log
         if: ${{ !cancelled() }}
