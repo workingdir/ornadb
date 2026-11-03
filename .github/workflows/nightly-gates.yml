@@ -26,6 +26,10 @@ on:
         description: Full 40-character commit SHA to test; empty tests the dispatched ref.
         required: false
         type: string
+      reviewer:
+        description: Person accountable for this evidence run; empty records that no reviewer signed it.
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -240,11 +244,20 @@ jobs:
           merge-multiple: true
 
       - name: Summarize gate evidence
-        run: >-
-          python3 scripts/gate_evidence.py summarize --expect-commit "${{ needs.revision.outputs.sha || github.sha }}"
-          --records "$RUNNER_TEMP/gate-evidence"
-          --out "$RUNNER_TEMP/gate-evidence-summary/gate-evidence-summary.json"
-          --markdown "$GITHUB_STEP_SUMMARY"
+        env:
+          REVIEWER: ${{ inputs.reviewer }}
+        run: |
+          set -euo pipefail
+          reviewer=()
+          if [ -n "${REVIEWER:-}" ]; then
+            reviewer=(--reviewer "$REVIEWER")
+          fi
+          python3 scripts/gate_evidence.py summarize \
+            --expect-commit "${{ needs.revision.outputs.sha || github.sha }}" \
+            --records "$RUNNER_TEMP/gate-evidence" \
+            --out "$RUNNER_TEMP/gate-evidence-summary/gate-evidence-summary.json" \
+            --markdown "$GITHUB_STEP_SUMMARY" \
+            "${reviewer[@]}"
 
       - name: Upload the evidence summary
         if: ${{ !cancelled() }}
