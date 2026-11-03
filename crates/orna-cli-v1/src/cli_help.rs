@@ -36,7 +36,7 @@ pub(super) const HELP_LINES: &[&str] = &[
     "  import BUNDLE --dry-run [--limit N] [--quiet] [--metadata-only] [--type MEDIA_TYPE] [--format human|table]",
     "  import exit status: 0 report printed; 1 bundle missing, unverifiable, or flag invalid",
     "  export DEST --at SELECTOR [--at SELECTOR]... [--dependency PATH=DIR]...",
-    "  export ARCHIVE --check                         report what one archive records",
+    "  export ARCHIVE --check                         verify and report what one archive records",
     "  export ARCHIVE --restore DEST [--at COMMIT] [--worktree] reconstruct, verify, then materialise",
     "  export exit status: 0 archive written, verified, or restored; 1 snapshot, object closure, or pinned dependency unavailable",
     "  migrate copy DEST --annotation-defaults N --no-persistent-consumers",

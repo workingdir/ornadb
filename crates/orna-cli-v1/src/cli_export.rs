@@ -10,8 +10,10 @@
 //!   supplies a local dependency repository and may also supply its populated
 //!   descendants. Exporting never moves the user's branch or contacts a remote
 //!   (ORNA-GIT-003, ORNA-GIT-007, ORNA-GIT-008).
-//! - `orna export ARCHIVE --check` reads an archive back and reports exactly
-//!   what it records, without a repository.
+//! - `orna export ARCHIVE --check` reads an archive back, verifies every
+//!   recorded object by reconstructing it in a throwaway directory, and reports
+//!   exactly what it records, without a repository. Reading the manifest alone
+//!   would call a truncated archive a complete copy.
 //! - `orna export ARCHIVE --restore DEST [--at COMMIT] [--worktree]`
 //!   reconstructs the archive, optionally selecting one recorded commit,
 //!   into a directory that holds no object of the source, verifies every
@@ -221,10 +223,20 @@ fn run_restore(
     Ok(())
 }
 
-/// Reads one archive back and reports what it records.
+/// Reads one archive back, verifies it, and reports what it records.
+///
+/// The complete-copy algorithm requires an independent read-only
+/// reconstruction before an archive is called complete (ORNA-GIT-012), so the
+/// check reconstructs into a throwaway directory and discards it. A manifest
+/// read alone reports a truncated archive as a complete copy: every recorded
+/// object still appears in the manifest while the bundle no longer holds them.
 fn report_archive(archive: &Path) -> Result<(), Diagnostic> {
     let manifest =
         read_complete_copy_manifest(archive).map_err(|error| describe_export_failure(&error))?;
+    let scratch = tempfile::TempDir::new()
+        .map_err(|error| describe_export_failure(&CompleteCopyError::Io(error)))?;
+    restore_complete_copy(archive, scratch.path())
+        .map_err(|error| describe_export_failure(&error))?;
     let (objects, dependencies) = manifest.counts();
     println!(
         "complete copy of {} ({} snapshots): {objects} objects, {dependencies} pinned dependencies",

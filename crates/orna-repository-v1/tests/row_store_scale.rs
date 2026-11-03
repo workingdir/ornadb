@@ -2395,6 +2395,10 @@ async fn orp1_production_writer_ten_rows() {
     let index = repository
         .index_generation()
         .expect("read repository index generation");
+    // Publication is measured from here to the completed commit, so the line
+    // reports what the storage writer cost, not what the fixture build cost.
+    let publish_allocs_before = allocations();
+    let publish_started = Instant::now();
     let mut coordinator = RuntimePublicationCoordinator::prepare_allow_noop(
         &repository,
         &state,
@@ -2414,6 +2418,9 @@ async fn orp1_production_writer_ten_rows() {
         .complete(&repository, &state, &freeze)
         .await
         .expect("complete production publication");
+    let publish_us = publish_started.elapsed().as_micros() as u64;
+    let (publish_allocations, publish_bytes) =
+        allocation_delta(publish_allocs_before, allocations());
 
     let head_after = repository
         .head()
@@ -2425,6 +2432,11 @@ async fn orp1_production_writer_ten_rows() {
         "publication advances HEAD"
     );
 
+    // The read side is measured the same way: the row map load, the graph open,
+    // the read scope and the node count are one read of a production-written
+    // graph.
+    let read_allocs_before = allocations();
+    let read_started = Instant::now();
     let format = repository
         .open_format_context()
         .expect("open the format context");
@@ -2458,13 +2470,23 @@ async fn orp1_production_writer_ten_rows() {
     let store_roots = kind_count("StoreRoot");
     assert!(leaves >= 1, "the ordered tree has at least one leaf");
     assert_eq!(store_roots, 1, "exactly one store root is reachable");
+    let read_us = read_started.elapsed().as_micros() as u64;
+    let (read_allocations, read_bytes) = allocation_delta(read_allocs_before, allocations());
     eprintln!(
-        "ORP-1 production_writer rows={} leaves={} store_roots={} blob_references={} head={}",
+        "ORP-1 production_writer rows={} leaves={} store_roots={} blob_references={} head={} \
+         publish_us={} publish_allocations={} publish_bytes={} read_us={} read_allocations={} \
+         read_bytes={}",
         rows.len(),
         leaves,
         store_roots,
         stats.blob_references(),
         head_after.as_str(),
+        publish_us,
+        publish_allocations,
+        publish_bytes,
+        read_us,
+        read_allocations,
+        read_bytes,
     );
 }
 
