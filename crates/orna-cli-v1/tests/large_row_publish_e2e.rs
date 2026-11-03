@@ -651,19 +651,21 @@ fn a_predicate_scan_over_more_than_one_page_evaluates_every_row() {
 }
 
 /// `orna history` resolves an integer-looking key with the spelling that
-/// `orna query --key` uses. The row lookup runs first, so the committed
-/// `Int`-keyed row `7` is found and the walk is reached. A text-only row has
-/// no descriptor tree, so the walk then refuses with `DescriptorNotInRow`;
-/// that exact error proves the lookup resolved the row. A Blob-bearing row
-/// would yield revisions instead, which this fixture does not build.
+/// `orna query --key` uses, and an inline row has a revision history.
+///
+/// The row is keyed by `Int` and carries its value inline, so it has no
+/// descriptor tree. Presence in a snapshot is read from that snapshot's own row
+/// map, which means the walk answers for inline rows too: the commit that
+/// published the row is a revision and the commit before it is not.
 #[test]
-fn history_resolves_an_integer_looking_key_past_the_row_lookup() {
+fn history_resolves_an_integer_looking_key_and_lists_an_inline_row() {
     let directory = TempDir::new().expect("a temporary directory");
     let (root, relation) = committed_table(
         &directory,
         "pub table Tick(id: Int) { body: Str, }\n",
         "Tick",
     );
+    let declared = git(&root, &["rev-parse", "HEAD"]).trim().to_owned();
     assert_success(
         &orna_repl(&root, r#"main.Tick.insert({ id: 7, body: "seven" })"#),
         "REPL integer insert",
@@ -674,14 +676,23 @@ fn history_resolves_an_integer_looking_key_past_the_row_lookup() {
         &root,
         &["history", relation.as_str(), "7", "--format", "json"],
     );
-    let stderr = transcript(&history);
+    assert_success(&history, "history of an inline row");
+    let revisions = json(&history, "history of an inline row");
+    let revisions = revisions.as_array().expect("history prints a list");
     assert!(
-        !history.status.success() && stderr.contains("DescriptorNotInRow"),
-        "the integer spelling resolves to the row, then the walk reports DescriptorNotInRow:\n{stderr}"
+        !revisions.is_empty(),
+        "an inline row has revisions: {revisions:?}"
+    );
+    let published = git(&root, &["rev-parse", "HEAD"]).trim().to_owned();
+    assert!(
+        revisions.iter().any(|revision| revision["commit"] == published.as_str()
+            && revision["present"] == true),
+        "the publishing commit is a revision that holds the row: {revisions:?}"
     );
     assert!(
-        !stderr.contains("Row is not committed"),
-        "the integer spelling must not report the row as uncommitted:\n{stderr}"
+        revisions.iter().any(|revision| revision["commit"] == declared.as_str()
+            && revision["present"] == false),
+        "the commit before the row was written is a revision without it: {revisions:?}"
     );
 }
 
