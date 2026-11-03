@@ -133,6 +133,22 @@ longer the obstacle to the gate.
 Rejected on measurement: batching the spawns while keeping one retry per miss cost 56,671 ms
 against 57,371 ms at 50,000 rows.
 
+Measured in CI on the first run with the new wiring, nightly dispatch `41614410003` on
+`16bf94193`:
+
+| Field | Value |
+|---|---|
+| Record state | passed, `timed_out: false` |
+| Elapsed | 6,737.8 s (112 minutes) against a 330-minute recorder budget |
+| `cold_unindexed_scan` | 6,567,319 ms |
+| Promisor fetches | 13,121 objects, 6,537,223 ms, about 498 ms each |
+| `build_fixture` | 8,212 ms |
+
+So the hosted runner pays 7.5 times the per-object fetch of the maintainer workstation and
+still finishes with a factor of three in hand. The C items moved from not-executed to passed
+in that run's summary, and Gate C stays `not-executed` only because C2, C3 and C4 declare
+limitations.
+
 Record and selector wiring: `#9517` (`d85f4d112`) and `#9518` (`16bf94193`). The job records
 `gate-c-million-rows` with `--timeout-minutes 330` under a 350-minute cap, and C1 to C4 select
 `orp1_row_store_one_million_rows` from it. A locally recorded run evaluates as:
