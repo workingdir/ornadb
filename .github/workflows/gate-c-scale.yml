@@ -71,13 +71,17 @@ jobs:
             local started started_epoch exit_code elapsed passed failed state
             started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             started_epoch=$(date +%s)
+            # The runner's bash runs with -e, so a failing command must not abort
+            # the step before the record that reports it is written.
+            set +e
             # shellcheck disable=SC2086
             $command > "$log" 2>&1
             exit_code=$?
+            set -e
             cat "$log"
             elapsed=$(( $(date +%s) - started_epoch ))
-            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
-            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}')
+            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
             if [ "$exit_code" -ne 0 ]; then
               state=failed
             elif [ "$passed" -eq 0 ]; then
@@ -90,7 +94,7 @@ jobs:
             # Persist them instead of a placeholder string: these are the
             # measured counters the gate reports.
             local phases
-            phases=$(grep -E '^ORP-1 phase ' "$log" 2>/dev/null | sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})')
+            phases=$(sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' "$log" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})' || true)
             jq -n \
               --arg schema "orna-gate-c-evidence/1" \
               --arg gate "C" \
@@ -171,9 +175,9 @@ jobs:
             local exit_code="$1" state="$2"
             local elapsed passed failed phases
             elapsed=$(( $(date +%s) - started_epoch ))
-            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
-            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}')
-            phases=$(grep -E '^ORP-1 phase ' "$log" 2>/dev/null | sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})')
+            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            phases=$(sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' "$log" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})' || true)
             jq -n \
               --arg schema "orna-gate-c-evidence/1" \
               --arg gate "C" \
@@ -204,9 +208,13 @@ jobs:
 
           # Stream the output so the job log shows the phase lines while the run
           # is in progress, and keep the command's own status through the pipe.
+          # The runner's bash runs with -e, so a failing command must not abort the
+          # step before the record that reports it is written.
+          set +e
           # shellcheck disable=SC2086
           $command 2>&1 | tee "$log"
           exit_code=${PIPESTATUS[0]}
+          set -e
           if [ "$exit_code" -ne 0 ]; then
             state=failed
           elif ! grep -qE '^test result:' "$log"; then
