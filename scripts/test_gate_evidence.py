@@ -488,6 +488,48 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(second["failures"]["known"][0]["bead"], "ornadb-demo.1")
             self.assertEqual(second["baseline"][0]["status"], "observed")
 
+    def test_run_records_the_named_reviewer_and_leaves_it_empty_otherwise(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            base = ["run", "--record", "fmt", "--check", "fmt", "--out", str(root), "--baseline", str(baseline)]
+
+            self.assertEqual(self.run_main([*base, "--", sys.executable, "-c", "pass"]), 0)
+            unsigned = json.loads((root / "fmt.record.json").read_text(encoding="utf-8"))
+            self.assertIsNone(unsigned["reviewer"])
+
+            self.assertEqual(self.run_main([*base, "--reviewer", "Kieran", "--", sys.executable, "-c", "pass"]), 0)
+            signed = json.loads((root / "fmt.record.json").read_text(encoding="utf-8"))
+            self.assertEqual(signed["reviewer"], "Kieran")
+
+    def test_summarize_records_the_named_reviewer_and_keeps_the_limitation_without_one(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            records = root / "records"
+            records.mkdir()
+            items = root / "items.toml"
+            items.write_text(
+                '[publication]\nversion = "1.1.0"\nrevision = "final-2026-10-05"\n'
+                'archive_sha256 = "fe4a35dc81c2c2994e0a18d7c7931ea0bbd298ab23248496cbe880f264c5db56"\n'
+                '[records]\nexpected = []\n',
+                encoding="utf-8",
+            )
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            out = root / "summary.json"
+            argv = ["summarize", "--records", str(records), "--out", str(out), "--items", str(items), "--baseline", str(baseline)]
+
+            self.assertEqual(self.run_main(argv), 0)
+            unsigned = json.loads(out.read_text(encoding="utf-8"))
+            self.assertIsNone(unsigned["reviewer"])
+            self.assertIn("No reviewer is recorded by an automated run.", unsigned["limitations"])
+
+            self.assertEqual(self.run_main([*argv, "--reviewer", "Kieran"]), 0)
+            signed = json.loads(out.read_text(encoding="utf-8"))
+            self.assertEqual(signed["reviewer"], "Kieran")
+            self.assertNotIn("No reviewer is recorded by an automated run.", signed["limitations"])
+
     def test_check_records_a_non_test_command_and_missing_prerequisites(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
