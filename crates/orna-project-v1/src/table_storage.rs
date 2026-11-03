@@ -797,6 +797,7 @@ mod tests {
 
     fn media_schema() -> TableSchema {
         TableSchema {
+            references: Vec::new(),
             declaration_order: vec![
                 "id".to_owned(),
                 "title".to_owned(),
