@@ -8315,6 +8315,20 @@ impl Context<'_, '_> {
             ("ovb", _) => return Err(error("ORNA-EVAL-TYPE")),
             _ => return Err(error("ORNA-EVAL-UNSUPPORTED")),
         };
+        // ORNA-FORMAT-004: the witness decides the decoded type. A JSON or Orna
+        // number decodes as an Int or a Decimal on its own, so a `Float` witness
+        // converts it through canonical text: that conversion is correctly
+        // rounded (ORNA-LIT-002), so a numeral out of range yields a signed
+        // infinity instead of an error, and a nonfinite value is admitted only
+        // under a `Float` witness.
+        let decoded = match (&witness, &decoded) {
+            (CodecTypeWitness::Named(name), Value::Int(_) | Value::Decimal(_))
+                if name == "Float" =>
+            {
+                float_value(number_as_f64(&decoded)?)
+            }
+            _ => decoded,
+        };
         if codec_type_matches(&decoded, &witness, &scope.3) {
             Ok(decoded)
         } else {
@@ -16554,6 +16568,21 @@ fn ordered(left: &Value, right: &Value, min: bool) -> Result<Value, EvaluationEr
         Ok(right.clone())
     }
 }
+/// One Int or Decimal as an `f64`, through its canonical text.
+///
+/// The decimal spelling `coefficient` + `e` + `exponent10` is exact, and the
+/// standard library's parser is correctly rounded, which is what ORNA-LIT-002
+/// requires. A magnitude beyond the binary64 range therefore answers a signed
+/// infinity rather than failing.
+fn number_as_f64(value: &Value) -> Result<f64, EvaluationError> {
+    let text = match value {
+        Value::Int(value) => value.to_string(),
+        Value::Decimal(value) => format!("{}e{}", value.coefficient, value.exponent10),
+        _ => return Err(error("ORNA-EVAL-VALUE")),
+    };
+    text.parse::<f64>().map_err(|_| error("ORNA-EVAL-VALUE"))
+}
+
 fn float_value(value: f64) -> Value {
     Value::Float(if value.is_nan() {
         CANONICAL_NAN_BITS
