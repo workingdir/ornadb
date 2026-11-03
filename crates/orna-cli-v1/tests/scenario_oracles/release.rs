@@ -59,8 +59,7 @@ const RUN_ROWS: &str = "rows written by `orna run` are refused at publication, s
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
-const STAGING: &str =
-    "`orna add --row` cannot stage a published row: it reports that the logical row was not found";
+const STAGING: &str = "`orna add --row` cannot stage a published row: format 3 has no row adapter that stages a row into the index store (ORNA-STAGE-001), so the command refuses and stages nothing";
 const OVERFLOW: &str = "a row above the 64 KiB node bound cannot be published: publication cannot prepare the candidate";
 const RUN_CAPTURE: &str = "`orna run` cannot capture a file into a row: the invocation is rejected";
 const READ_ONLY_WORKSPACE: &str = "the recorded blocker that the workspace mount (`orna mount DIR --cwd`) is read-only is spec-false: profiles/vfs-1.md:20 makes --cwd writable unless --read-only; re-scope in ornadb-kfbk";
@@ -2755,8 +2754,12 @@ fn add_row_finds_no_published_row(db: &mut Db) -> Probe {
     db.repl_effect(r#"main.Music.insert({ id: "london", title: "Live in London" })"#)?;
     db.publish()?.ok()?;
     let staged = db.orna(&["add", "--row", "Music", "london"])?;
+    // The gap is that the published row cannot be staged from the index store,
+    // whatever the refusal says. Assert that behaviour rather than the current
+    // wording: a refusal that names the store is still a refusal.
+    let index = db.git_text(&["ls-files"])?;
     ensure!(
-        !staged.succeeded() && staged.output().contains("logical row was not found"),
+        !staged.succeeded() && !index.contains("london"),
         "orna add --row now stages the published row: {}",
         staged.output()
     );
