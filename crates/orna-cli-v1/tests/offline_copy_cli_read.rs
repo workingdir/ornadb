@@ -350,7 +350,7 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
     // that, a restore into an absolute destination cannot find the bundles.
     let absolute_restore: PathBuf = outside.path().join("restored-from-relative");
     let relative_archive = run(
-        &outside.path().to_path_buf(),
+        outside.path(),
         &[
             "export",
             "archive",
