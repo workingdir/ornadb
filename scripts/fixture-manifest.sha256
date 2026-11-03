@@ -5340,6 +5340,7 @@ f6cbd3db6fbd224a2f486a23cab08fecde79b0da1dbb7c21593e44d95b0f2f7a  crates/orna-se
 ad096a8a3a5a39bd16b962be41579425b151c1c65de92b7161464df164042862  crates/orna-semantic-v1/tests/fixtures/table-mutation-patch-computed-field.orna
 6fa5dd6d6a952690f225bdb5f9c2a6f07dc92c2af9daed1515c249da894d645e  crates/orna-semantic-v1/tests/fixtures/table-mutation-patch-primary-key.orna
 eee9f96dff8805a17fe62ff11cf5a76d51298ca9eb612209bf344cceb7ba9df4  crates/orna-semantic-v1/tests/fixtures/table-mutations-declaration.orna
+83643b5485016bbb71e159463516d682d5e89c077d88071ed198913b1a5accf7  crates/orna-semantic-v1/tests/fixtures/table-references.orna
 7eb22b3f53407b65397aadbd72a250c034fc765cc379ed805d38903aedafe381  crates/orna-semantic-v1/tests/fixtures/table-row-auto-note.orna
 98771a074b9bc7e3db0660ea9c92670e29f75741e9b59cfafc2f90ff4d093865  crates/orna-semantic-v1/tests/fixtures/table-row-child.orna
 f96ff9638c3b881a90ca23879290681edb997c0c00c7181e4bdacbb1e04c3b69  crates/orna-semantic-v1/tests/fixtures/table-row-reading.orna
