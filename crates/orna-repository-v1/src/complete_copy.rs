@@ -822,9 +822,21 @@ fn union_objects(members: &[CompleteCopyMember]) -> Vec<CompleteCopyObject> {
 }
 
 /// Reads an archive manifest without reading any bundle.
+/// Resolves one archive path to an absolute path.
+///
+/// Every bundle is handed to `git fetch`, and that command runs with the
+/// reconstruction directory as its working directory. A relative archive path
+/// would therefore be resolved against the reconstruction directory and the
+/// bundle would not be found, so the archive is resolved once here, against the
+/// caller's working directory, and every derived path is absolute.
+fn absolute_archive(archive: &Path) -> Result<PathBuf, CompleteCopyError> {
+    fs::canonicalize(archive).map_err(CompleteCopyError::Io)
+}
+
 pub fn read_complete_copy_manifest(
     archive: &Path,
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
+    let archive = absolute_archive(archive)?;
     let document = fs::read_to_string(archive.join(MANIFEST_FILE))?;
     CompleteCopyManifest::decode(&document)
 }
@@ -843,8 +855,9 @@ pub fn restore_complete_copy(
     destination: &Path,
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
     require_empty(destination)?;
-    let manifest = read_complete_copy_manifest(archive)?;
-    restore_complete_copy_from_manifest(archive, destination, manifest)
+    let archive = absolute_archive(archive)?;
+    let manifest = read_complete_copy_manifest(&archive)?;
+    restore_complete_copy_from_manifest(&archive, destination, manifest)
 }
 
 /// Restores one recorded snapshot member as the copy's primary snapshot.
@@ -854,7 +867,8 @@ pub fn restore_complete_copy_at(
     destination: &Path,
     commit: &str,
 ) -> Result<CompleteCopyManifest, CompleteCopyError> {
-    let mut manifest = read_complete_copy_manifest(archive)?;
+    let archive = absolute_archive(archive)?;
+    let mut manifest = read_complete_copy_manifest(&archive)?;
     let selected_index = manifest
         .members
         .iter()
@@ -866,7 +880,7 @@ pub fn restore_complete_copy_at(
     manifest.snapshot = selected_commit;
     manifest.members.swap(0, selected_index);
     require_empty(destination)?;
-    restore_complete_copy_from_manifest(archive, destination, manifest)
+    restore_complete_copy_from_manifest(&archive, destination, manifest)
 }
 
 fn restore_complete_copy_from_manifest(
