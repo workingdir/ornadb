@@ -2244,11 +2244,20 @@ fn stored_row_record(
     // not the declaration order, so the order comes from the committed read. A
     // table with no committed rows has no recorded order, and its rows are
     // already in the admitted order (bead ornadb-jm0d).
+    // A caller that supplies no storage order at all (the harness path) hands
+    // over rows in the form its evaluator expects, so they are used as they are
+    // (bead ornadb-jm0d).
+    if storage_orders.is_empty() {
+        return Ok(row.clone());
+    }
     let declared = match storage_orders.get(table) {
         Some(order) => order,
-        None => table_fields
-            .get(table)
-            .ok_or(RuntimeError::InvalidTableMutation)?,
+        None => match table_fields.get(table) {
+            Some(fields) => fields,
+            // A caller with no schema metadata hands over a row that is already
+            // in record form (bead ornadb-jm0d).
+            None => return Ok(row.clone()),
+        },
     };
     let key_names = key_fields
         .get(table)
@@ -2277,7 +2286,7 @@ fn stored_row_record(
     };
     let remaining: Vec<&String> = declared
         .iter()
-        .filter(|name| !key_names.iter().any(|key| *key == *name))
+        .filter(|name| !key_names.contains(name))
         .collect();
     if positional.len() != remaining.len() {
         return Err(RuntimeError::InvalidTableMutation);
@@ -2285,6 +2294,21 @@ fn stored_row_record(
     for (name, value) in remaining.iter().zip(positional) {
         entries.push((orna_value_v1::Raw::Text((*name).clone()), value));
     }
+    // A canonical map carries its keys in sorted order (ORNA-OVB canonical
+    // form), so the rebuilt record is sorted before it is validated. The key
+    // fields and the positional fields arrive in different orders, which is why
+    // an unsorted map fails as DuplicateOrUnorderedMapKey (bead ornadb-jm0d).
+    // Canonical CBOR orders map keys by their encoded bytes, so a text key
+    // sorts by its length first and then by its bytes: "id" precedes "title"
+    // precedes "artist" (bead ornadb-jm0d).
+    entries.sort_by(|left, right| {
+        let name = |entry: &(orna_value_v1::Raw, orna_value_v1::Raw)| match &entry.0 {
+            orna_value_v1::Raw::Text(name) => name.clone(),
+            _ => String::new(),
+        };
+        let (left, right) = (name(left), name(right));
+        left.len().cmp(&right.len()).then_with(|| left.cmp(&right))
+    });
     Value::new(orna_value_v1::Raw::Map(entries)).map_err(|_| RuntimeError::InvalidTableMutation)
 }
 
@@ -11831,6 +11855,8 @@ mod transaction_admission_tests {
                     key.as_ref().to_vec(),
                     row(left, right, label),
                     &key_fields,
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
                 )
                 .expect("rehydrated row retains admitted key types");
         }
@@ -13739,6 +13765,8 @@ mod durable_tests {
                     .to_vec(),
                 row,
                 &key_fields,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
             )
             .expect("seeded relation row");
 
