@@ -213,6 +213,102 @@ async fn commit_capture_inner(
         crate::format3::publish_media_row(repository, state, key, ordinal + 0x10).await;
     }
 }
+/// Identity for a fixture ordinal wider than a byte, used by the scale probe
+/// (bead ornadb-w3f9). Each family gets its own leading byte and the ordinal
+/// is carried in the next two, so identities stay unique for any ordinal below
+/// 65536. This is a separate path so every existing fixture identity is
+/// untouched.
+fn wide_identity(ordinal: u16, family: u8) -> [u8; 16] {
+    let mut id = [family; 16];
+    id[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    id[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
+    id
+}
+
+/// Digest-shaped identity for a wide ordinal, same scheme as `wide_identity`.
+fn wide_digest(ordinal: u16, family: u8) -> [u8; 32] {
+    let mut digest = [family; 32];
+    digest[1] = u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal");
+    digest[2] = u8::try_from(ordinal >> 8).expect("high byte of a 16-bit ordinal");
+    digest
+}
+
+/// Admits one capture request with a wide ordinal, for row counts above the
+/// byte identities the older helpers use. Publishes nothing: the caller
+/// publishes the whole frozen range in one publication.
+#[allow(clippy::too_many_arguments)]
+pub async fn commit_capture_pending_wide(
+    repository: &Repository,
+    state: &RuntimeState,
+    writer: WriterLease,
+    bindings: &mut SysHostBindingRegistry,
+    expression: &str,
+    key: &str,
+    ordinal: u16,
+    insert_only: bool,
+    relation_id: [u8; 16],
+) {
+    let request_identity = RequestIdentity {
+        session_id: wide_identity(ordinal, 0xa0),
+        request_id: wide_identity(ordinal, 0xa1),
+    };
+    let fingerprint = wide_digest(ordinal, 0xa2);
+    let (_, admission) = state
+        .reserve_request_with_admission(request_identity, fingerprint)
+        .await
+        .unwrap();
+    state
+        .start_request_with_owner_and_admission(
+            request_identity,
+            fingerprint,
+            writer,
+            admission.expect("new request returns its admission capability"),
+        )
+        .await
+        .unwrap();
+    let context = state.begin_activation().await.unwrap();
+    let value = evaluate_expression_ovb2_with_effects(
+        expression,
+        &BTreeMap::default(),
+        Limits::default(),
+        bindings,
+    )
+    .unwrap();
+    let binding = bindings.accept_captured_blob_for_row(&value).unwrap();
+    let (id, key_bytes, row) = (
+        wide_identity(ordinal, 0xa3),
+        key.as_bytes().to_vec(),
+        Vec::new(),
+    );
+    let mutation = if insert_only {
+        TableMutation::insert(id, "media", key_bytes, row)
+    } else {
+        TableMutation::new(id, "media", key_bytes, Some(row))
+    }
+    .unwrap()
+    .with_table_object_id(TableObjectId::new(relation_id))
+    .with_orp_blob_binding(binding)
+    .unwrap();
+    let committed = state
+        .commit_table_request_activation(
+            writer,
+            request_identity,
+            fingerprint,
+            &context,
+            &[mutation],
+            wide_digest(ordinal, 0xa4),
+            TerminalOutcome::new(vec![ordinal as u8]).unwrap(),
+            &NoFault,
+            orna_runtime_v1::ActivationEffectReport::declare(
+                orna_runtime_v1::DeclaredEffectSet::None,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(committed.request.state, RequestState::Completed);
+    let _ = repository;
+}
+
 /// Source row id for a fixture ordinal. Ordinals below 256 keep the encoding
 /// every existing caller was written against: byte 0 is `1`, every other byte
 /// is the ordinal, so their ids are unchanged. Ordinal bits 8..14 sit above a
