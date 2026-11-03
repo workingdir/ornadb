@@ -5,12 +5,9 @@
 //! no error code. A repeated run and a run after a REPL effect also exit 0 (ornadb-5il1.95).
 //! A run restoring an earlier title after an edit commits that title again (ornadb-5il1.95).
 //!
-//! Not asserted here (inherited on origin/main, orna-1.1.0-gap), each dropped step names
-//! its bead:
-//! - the writable-mount step does not expose run-committed rows: ornadb-5il1.96.
-//! - the REPL effect's commit is not visible to `committed_table_rows`, and a REPL update
-//!   on a run-committed row fails ORNA-EVAL-TABLE-MISSING-ROW: ornadb-5il1.79. The REPL
-//!   step therefore checks only its exit code.
+//! A REPL update on a run-committed row commits and publishes (ornadb-5il1.79, fixed by
+//! ornadb-jm0d), and a writable mount exposes the row a run committed (ornadb-5il1.96,
+//! same fix; asserted in the mount target, which owns the FUSE guard).
 
 use std::{
     io::Write,
@@ -158,6 +155,40 @@ async fn repeated_run_with_identical_content_exits_zero() {
     assert!(
         rows.iter().any(|row| row.contains("Edited by run")),
         "repeated run must keep the committed effect: {rows:?}"
+    );
+}
+
+/// A REPL update on a row a run committed must commit and publish
+/// (ornadb-5il1.79, fixed by ornadb-jm0d): the run's row is published, so the
+/// REPL addresses a committed row rather than a missing one.
+#[tokio::test(flavor = "current_thread")]
+async fn repl_update_on_a_run_committed_row_publishes() {
+    let (directory, _repository, _) = format3::format3_repository_for_table(SOURCE, "music");
+    let root = directory.path();
+
+    assert_success("seed run", &orna(root, &["run", "seed"]));
+    assert_success(
+        "publish the seed",
+        &orna(root, &["publish", "--message", "seed"]),
+    );
+    let edited = run_repl(
+        root,
+        r#"main.music.update("london", { title: "Edited by REPL" })"#,
+    );
+    assert_success("REPL update on the run-committed row", &edited);
+    assert!(
+        !transcript(&edited).contains("ORNA-EVAL-TABLE-MISSING-ROW"),
+        "the run-committed row is addressable: {}",
+        transcript(&edited)
+    );
+    assert_success(
+        "publish the REPL edit",
+        &orna(root, &["publish", "--message", "repl edit"]),
+    );
+    let rows = committed_music_text(root).await;
+    assert!(
+        rows.iter().any(|row| row.contains("Edited by REPL")),
+        "the REPL edit on a run-committed row is published: {rows:?}"
     );
 }
 
