@@ -55,14 +55,32 @@ scan() {
     echo "$total"
 }
 
-if [ ! -f "$RLIB" ]; then
-    echo "FAIL: missing $RLIB; build orna-storage-v1 first" >&2
-    exit 2
-fi
+
+# A build that fails silently leaves the caller with "missing rlib; build
+# orna-storage-v1 first", which names the wrong cause. Nightly run 41614410003
+# failed this check as `command exited 2` with nothing else in the log, because
+# both attempts wrote to /dev/null.
+build() {
+    local log
+    log=$(mktemp)
+    if cargo build --locked --offline "$@" >"$log" 2>&1 || cargo build --locked "$@" >>"$log" 2>&1; then
+        rm -f "$log"
+        return 0
+    fi
+    echo "FAIL: cargo build $* did not succeed; last 40 lines of its output:" >&2
+    tail -n 40 "$log" >&2
+    rm -f "$log"
+    return 1
+}
 
 echo "check retired-row-writers: with compact-writer-fixtures"
-cargo build --locked --offline -p orna-storage-v1 --features compact-writer-fixtures >/dev/null 2>&1 \
-    || cargo build --locked -p orna-storage-v1 --features compact-writer-fixtures >/dev/null 2>&1
+# The library must be built before it can be scanned. The old order checked for
+# the rlib first and exited 2 on a clean runner, so the check never ran at all.
+build -p orna-storage-v1 --features compact-writer-fixtures || exit 2
+if [ ! -f "$RLIB" ]; then
+    echo "FAIL: the guarded build reported success but $RLIB is absent" >&2
+    exit 2
+fi
 if ! present=$(scan | tail -1) || [ "$present" -eq 0 ]; then
     echo "FAIL: the guarded writer symbols are absent even with compact-writer-fixtures, so this check cannot see a compiled writer (found $present)" >&2
     exit 1
@@ -70,8 +88,7 @@ fi
 echo "  total=$present (expected above 0)"
 
 echo "check retired-row-writers: default features"
-cargo build --locked --offline -p orna-storage-v1 >/dev/null 2>&1 \
-    || cargo build --locked -p orna-storage-v1 >/dev/null 2>&1
+build -p orna-storage-v1 || exit 2
 if ! absent=$(scan | tail -1); then
     echo "FAIL: could not scan $RLIB" >&2
     exit 1
