@@ -2409,6 +2409,11 @@ async fn query_predicate_over_annotation_coordinates_reads_no_media_payload() {
         ],
     );
     assert_eq!(bounded_filtered["rows"], 2);
+    // ORNA-ROW-009: the plan separates the work the range implies from the work
+    // the walk did. The relation holds three rows, the bounded range holds two,
+    // and the walk read both of them to answer the predicate exactly.
+    assert_eq!(bounded_filtered["plan"]["estimated_rows"], 3);
+    assert_eq!(bounded_filtered["plan"]["scanned_rows"], 2);
     assert_eq!(bounded_filtered["plan"]["candidates"], 2);
     assert_eq!(bounded_filtered["plan"]["matched"], 1);
     assert_eq!(bounded_filtered["blobs"], 1);
