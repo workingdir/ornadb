@@ -392,7 +392,17 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
         _ => None,
     };
-    let rows = match options.key {
+    // A point lookup reads one row. A bounded range without a predicate reads
+    // one page, because `--limit` bounds it. A bounded range with a predicate
+    // is walked in ordered pages: every candidate in the range must be
+    // evaluated so the counters are exact, but no page is retained after its
+    // rows are evaluated, so the walk costs one page of memory whatever the
+    // range holds (ORNA-ROW-009).
+    let mut rows_read = 0u64;
+    let mut listings: Vec<(TypedKey, usize, orna_value_v1::BlobMetadata)> = Vec::new();
+    let mut candidates = 0usize;
+    let mut matched = 0usize;
+    match options.key {
         Some(key) => {
             let mut found = None;
             for candidate in key_candidates(key, point_key_type)? {
@@ -403,65 +413,94 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                     break;
                 }
             }
-            found.into_iter().collect::<Vec<_>>()
+            let Some(row) = found else {
+                return Err(query_error(
+                    "Row is not committed",
+                    format!("no row with key {:?}", options.key.unwrap_or_default()),
+                ));
+            };
+            rows_read = 1;
+            collect_row_blob_listings(
+                &graph,
+                &scope,
+                &row,
+                &options,
+                &mut listings,
+                &mut candidates,
+                &mut matched,
+            )?;
+        }
+        None if options.has_predicate => {
+            visit_row_pages(
+                MAX_QUERY_LIMIT,
+                options.from.clone(),
+                options.until.clone(),
+                |range| {
+                    graph.range_rows(range, &scope).map_err(|error| {
+                        query_error("Row range could not be read", format!("{error:?}"))
+                    })
+                },
+                |row| row.key().clone(),
+                |row| {
+                    rows_read += 1;
+                    // A decode failure ends the walk with its own diagnostic.
+                    let failed = collect_row_blob_listings(
+                        &graph,
+                        &scope,
+                        &row,
+                        &options,
+                        &mut listings,
+                        &mut candidates,
+                        &mut matched,
+                    )
+                    .is_err();
+                    if failed {
+                        std::ops::ControlFlow::Break(())
+                    } else {
+                        std::ops::ControlFlow::Continue(())
+                    }
+                },
+            )?;
         }
         None => {
-            // Indexed bounds narrow candidates before metadata predicates.
-            // Without a predicate, `--limit` bounds the one page read. With a
-            // predicate, every candidate in the bounded range must be
-            // evaluated, so the range is read in ordered pages of at most
-            // `MAX_QUERY_LIMIT` rows, each resuming after the last key
-            // seen, until a page is short or the upper bound is reached.
-            if options.has_predicate {
-                scan_all_rows(&graph, &scope, options.from.clone(), options.until.clone())?
-            } else {
-                let range =
-                    KeyRange::new(options.from.clone(), options.until.clone(), options.limit)
-                        .map_err(|error| {
-                            query_error("Row range is invalid", format!("{error:?}"))
-                        })?;
-                graph.range_rows(&range, &scope).map_err(|error| {
-                    query_error("Row range could not be read", format!("{error:?}"))
-                })?
-            }
-        }
-    };
-    if options.key.is_some() && rows.is_empty() {
-        return Err(query_error(
-            "Row is not committed",
-            format!("no row with key {:?}", options.key.unwrap_or_default()),
-        ));
-    }
-    // Each field is projected from the row's stored tuple, expanded from the
-    // shared overflow graph when the row or one of its values was too large
-    // to stay inline (store-format-3 section 5). A field that is not a Blob in
-    // canonical shape is not a Blob, so it is skipped rather than reported
-    // with a fabricated summary. A Blob at any index is reported with the
-    // index it actually occupies; naming a field keeps only that index.
-    let mut listings = Vec::new();
-    for row in &rows {
-        let fields = graph.row_blob_fields(row, &scope).map_err(|error| {
-            query_error("Row fields could not be decoded", format!("{error:?}"))
-        })?;
-        for (field, metadata) in fields {
-            if options.field.is_none_or(|wanted| wanted == field) {
-                listings.push((row.key().clone(), field, metadata));
+            let range =
+                KeyRange::new(options.from.clone(), options.until.clone(), options.limit)
+                    .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+            let page = graph.range_rows(&range, &scope).map_err(|error| {
+                query_error("Row range could not be read", format!("{error:?}"))
+            })?;
+            rows_read = u64::try_from(page.len()).unwrap_or(u64::MAX);
+            for row in &page {
+                collect_row_blob_listings(
+                    &graph,
+                    &scope,
+                    row,
+                    &options,
+                    &mut listings,
+                    &mut candidates,
+                    &mut matched,
+                )?;
             }
         }
     }
-    // The predicate is evaluated over the same stored annotation
-    // coordinates the listing already decoded, so narrowing a listing costs no
-    // additional read and never enters a descriptor or a payload chunk. A
-    // candidate that does not match is dropped rather than reported, and the
-    // plan below states which coordinates answered it.
-    let candidates = listings.len();
+    // The predicate and the field filter ran per row inside the walk, so what
+    // is left is the caller's own bound.
     let subject = options
         .field
         .map_or_else(|| "all fields".to_owned(), |field| format!("field {field}"));
-    listings.retain(|(_, _, metadata)| options.predicate.matches(metadata));
-    let matched = listings.len();
     listings.truncate(options.limit);
-    let plan = PredicatePlan::new(&options.predicate, &subject, candidates, matched);
+    let estimated_rows = match options.key {
+        Some(_) => 1,
+        None => row_map.version().row_count().unwrap_or(rows_read),
+    };
+    let plan = PredicatePlan::new(
+        &options.predicate,
+        &subject,
+        estimated_rows,
+        rows_read,
+        candidates,
+        matched,
+    );
     match options.format {
         QueryFormat::Human => {
             for (key, field, metadata) in &listings {
@@ -512,7 +551,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
             println!(
                 "{}",
                 serde_json::json!({
-                    "rows": rows.len(),
+                    "rows": rows_read,
                     "blobs": entries.len(),
                     "media_payload_bytes_read": scope.payload_bytes_read(),
                     "native_objects_read": scope.objects_read(),
@@ -523,28 +562,6 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
     }
     Ok(())
-}
-
-#[allow(clippy::too_many_lines)]
-/// Reads every row in `[from, until)` in ordered pages, so a predicate sees
-/// each candidate rather than only the first page.
-fn scan_all_rows(
-    graph: &NativeGraphContext,
-    scope: &RepositoryReadScope,
-    from: Option<TypedKey>,
-    until: Option<TypedKey>,
-) -> Result<Vec<AdmittedRow>, Diagnostic> {
-    scan_pages(
-        MAX_QUERY_LIMIT,
-        from,
-        until,
-        |range| {
-            graph
-                .range_rows(range, scope)
-                .map_err(|error| query_error("Row range could not be read", format!("{error:?}")))
-        },
-        |row| row.key().clone(),
-    )
 }
 
 /// Pages `[from, until)` in ordered pages of `page_rows` keys. Each page
@@ -581,6 +598,81 @@ fn scan_pages<T>(
     Ok(rows)
 }
 
+/// Projects one row's Blob fields into the listing, applying the field filter
+/// and the annotation predicate at the row the walk just read.
+///
+/// The predicate is evaluated over the annotation the listing already decoded,
+/// so narrowing costs no extra read and never enters a descriptor or a payload
+/// chunk. `candidates` counts the fields the predicate evaluated and `matched`
+/// counts those it accepted, over the whole bounded range; only the first
+/// `--limit` matches are kept, so the listing's memory does not grow with the
+/// range (ORNA-ROW-009).
+fn collect_row_blob_listings(
+    graph: &NativeGraphContext,
+    scope: &RepositoryReadScope,
+    row: &AdmittedRow,
+    options: &QueryOptions<'_>,
+    listings: &mut Vec<(TypedKey, usize, orna_value_v1::BlobMetadata)>,
+    candidates: &mut usize,
+    matched: &mut usize,
+) -> Result<(), Diagnostic> {
+    let fields = graph
+        .row_blob_fields(row, scope)
+        .map_err(|error| query_error("Row fields could not be decoded", format!("{error:?}")))?;
+    for (field, metadata) in fields {
+        if options.field.is_none_or(|wanted| wanted == field) {
+            *candidates += 1;
+            if options.predicate.matches(&metadata) {
+                *matched += 1;
+                if listings.len() < options.limit {
+                    listings.push((row.key().clone(), field, metadata));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Visits `[from, until)` in ordered pages, stopping when `visit` asks it to.
+///
+/// The paging rules are the ones [`scan_pages`] states: each page resumes after
+/// the last key it returned, and the walk ends on a short page or the upper
+/// bound. Unlike [`scan_pages`], no page is retained, so a caller that stops on
+/// its own limit never materialises the rest of the range (ORNA-ROW-009
+/// separates the estimated work of the range from the actual work of the walk).
+fn visit_row_pages<T>(
+    page_rows: usize,
+    from: Option<TypedKey>,
+    until: Option<TypedKey>,
+    mut read_page: impl FnMut(&KeyRange) -> Result<Vec<T>, Diagnostic>,
+    key_of: impl Fn(&T) -> TypedKey,
+    mut visit: impl FnMut(T) -> std::ops::ControlFlow<()>,
+) -> Result<(), Diagnostic> {
+    let base = KeyRange::new(from, until, page_rows)
+        .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+    let mut range = base.clone();
+    loop {
+        let page = read_page(&range)?;
+        let short = page.len() < page_rows;
+        let Some(last) = page.last().map(&key_of) else {
+            break;
+        };
+        for item in page {
+            if visit(item).is_break() {
+                return Ok(());
+            }
+        }
+        if short {
+            break;
+        }
+        range = base
+            .clone()
+            .with_resume_after(last)
+            .map_err(|error| query_error("Row range is invalid", format!("{error:?}")))?;
+    }
+    Ok(())
+}
+
 /// The measured plan of one annotation predicate evaluation.
 ///
 /// This is the plan the query reports so a caller can see which annotation
@@ -591,6 +683,10 @@ fn scan_pages<T>(
 struct PredicatePlan<'a> {
     predicate: &'a BlobMetadataFilter,
     subject: &'a str,
+    /// Rows the row map says the bounded range holds, before any read.
+    estimated_rows: u64,
+    /// Rows the walk actually read, which stops at `--limit` matches.
+    scanned_rows: u64,
     candidates: usize,
     matched: usize,
 }
@@ -599,12 +695,16 @@ impl<'a> PredicatePlan<'a> {
     const fn new(
         predicate: &'a BlobMetadataFilter,
         subject: &'a str,
+        estimated_rows: u64,
+        scanned_rows: u64,
         candidates: usize,
         matched: usize,
     ) -> Self {
         Self {
             predicate,
             subject,
+            estimated_rows,
+            scanned_rows,
             candidates,
             matched,
         }
@@ -625,10 +725,12 @@ impl<'a> PredicatePlan<'a> {
     fn human_line(&self) -> String {
         format!(
             "plan: annotation predicate over {}; coordinates {}; decoded-payload coordinates {}; \
-             candidates {} matched {}; subject {}",
+             estimated rows {} scanned rows {}; candidates {} matched {}; subject {}",
             self.subject,
             self.coordinates().join(","),
             Self::decode_required_coordinates().join(","),
+            self.estimated_rows,
+            self.scanned_rows,
             self.candidates,
             self.matched,
             self.subject,
@@ -641,6 +743,8 @@ impl<'a> PredicatePlan<'a> {
             "subject": self.subject,
             "coordinates": self.coordinates(),
             "decode_required_coordinates": Self::decode_required_coordinates(),
+            "estimated_rows": self.estimated_rows,
+            "scanned_rows": self.scanned_rows,
             "candidates": self.candidates,
             "matched": self.matched,
             "payload_fetch": "none",
