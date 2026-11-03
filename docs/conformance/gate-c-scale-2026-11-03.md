@@ -1,7 +1,13 @@
 # Gate C scale evidence: the one-million-row case (2026-11-03)
 
-Scope: the `gate-c-million` job in `.github/workflows/gate-c-scale.yml` and the ignored
-case `orp1_row_store_one_million_rows` in `crates/orna-repository-v1/tests/row_store_scale.rs`.
+Scope: the `gate-c-million` job and the ignored case `orp1_row_store_one_million_rows` in
+`crates/orna-repository-v1/tests/row_store_scale.rs`.
+
+History note: sections up to "Direction" describe the job while it lived in
+`.github/workflows/gate-c-scale.yml` and wrote its own `orna-gate-c-evidence/1` record. Since
+`d85f4d112` the job runs in `.github/workflows/nightly-gates.yml` and writes an
+`ornadb-gate-evidence/1` record through `scripts/gate_evidence.py`, so the C items can select
+it. See "Resolution" at the end for what changed and what the case costs now.
 
 Every scheduled run of this job from 2026-10-28 to 2026-11-02 was cancelled at the
 350-minute job timeout. No scheduled run has produced a passing record.
@@ -91,3 +97,47 @@ process instead of one spawn per missing object.
 There is no profiler on the maintainer host used for this note (`perf` is absent,
 `strace` and `ltrace` are not installed, `perf_event_paranoid` is 2), so attribution below
 the counts above needs a host with a profiler.
+
+## Resolution (2026-11-03)
+
+The direction above was right about what to cut, and the measurement in this note understated
+the harness half of it.
+
+`query_with_hydration` in the harness answered every promised object by fetching that one
+object, reopening the read scope and rerunning the same page query, about 3.3 times per page.
+Two temporary probes split the cost:
+
+| Measurement | Value |
+|---|---|
+| one `range_rows`, 256 rows, start / middle / end at 200,000 rows | 10 / 14 / 14 ms |
+| 20 `open_read_scope` calls on the partial clone | 0 ms |
+| 20 fresh-scope-plus-hydration pages on the clone | 240 ms each |
+| 20 pages on a shared scope, local repository | 12 ms each |
+
+So the product's page query was flat and cheap; the retry loop around it was the cost.
+
+`#9516` (`e4b8294c0`) hydrates `Fixture::index_data_blobs` through one `git cat-file --batch`
+session before the walk. The per-miss path stays as a fallback.
+
+| Rows | `cold_unindexed_scan` before | after | Test total before | after |
+|---|---|---|---|---|
+| 50,000 | 57,371 ms | 17,373 ms | 63.9 s | 23.8 s |
+| 200,000 | 589,972 ms | 87,597 ms | 608 s | 106 s |
+| 1,000,000 | not reached in 5 h 40 m | 918,763 ms | - | 1,005 s |
+
+The one-million-row case now passes locally in 16.8 minutes, every assertion satisfied. The
+residual is Git's own promisor fetch: 13,121 objects, 869.9 s of the 918.8 s at one million
+rows, about 66 ms each, linear in pages. That is where a further cut would come from; it is no
+longer the obstacle to the gate.
+
+Rejected on measurement: batching the spawns while keeping one retry per miss cost 56,671 ms
+against 57,371 ms at 50,000 rows.
+
+Record and selector wiring: `#9517` (`d85f4d112`) and `#9518` (`16bf94193`). The job records
+`gate-c-million-rows` with `--timeout-minutes 330` under a 350-minute cap, and C1 to C4 select
+`orp1_row_store_one_million_rows` from it. A locally recorded run evaluates as:
+
+```
+gate-c-million-rows: passed; 1 passed, 0 failed; 1,045.61 s
+C1: tests {"passed": 1}, executed_by [{"record": "gate-c-million-rows", ...}]
+```
