@@ -398,3 +398,59 @@ fn json_schema_decode_preserves_null_defaults_and_unknown_field_policy() {
         );
     }
 }
+
+/// ORNA-FORMAT-004: canonical text decoding is type-directed, so the witness
+/// decides the decoded type. A numeral out of the binary64 range parses to a
+/// signed infinity through correctly rounded conversion (ORNA-LIT-002), which a
+/// `Float` witness admits, while `Int` and `Str` refuse it and `Decimal` keeps
+/// the exact value.
+#[test]
+fn a_nonfinite_payload_needs_a_float_witness() {
+    let admitted =
+        eval_pinned(r#"std.encoding.json.decode("1e400", as: Float)"#).unwrap_or_else(|error| {
+            panic!(
+                "a Float witness admits a nonfinite payload: {}",
+                error.code()
+            )
+        });
+    let Raw::Float(bits) = admitted.raw() else {
+        panic!("the decode returns a Float, not {:?}", admitted.raw());
+    };
+    assert!(f64::from_bits(*bits).is_infinite(), "1e400 is infinite");
+    assert!(
+        f64::from_bits(*bits).is_sign_positive(),
+        "1e400 is positive"
+    );
+
+    let negative = eval_pinned(r#"std.encoding.json.decode("-1e400", as: Float)"#)
+        .expect("a negative numeral out of range is a signed infinity");
+    let Raw::Float(bits) = negative.raw() else {
+        panic!("the decode returns a Float, not {:?}", negative.raw());
+    };
+    assert!(
+        f64::from_bits(*bits).is_infinite() && f64::from_bits(*bits).is_sign_negative(),
+        "-1e400 is a negative infinity"
+    );
+
+    let exact = eval_pinned(r#"std.encoding.json.decode("1e400", as: Decimal)"#)
+        .expect("a Decimal witness keeps the exact value");
+    assert!(
+        matches!(exact.raw(), Raw::Tag(60000, _)),
+        "1e400 decodes as a Decimal, not {:?}",
+        exact.raw()
+    );
+
+    for witness in ["Int", "Str"] {
+        let refused = eval_pinned(&format!(
+            r#"std.encoding.json.decode("1e400", as: {witness})"#
+        ));
+        match refused {
+            Ok(value) => panic!("a {witness} witness admitted {:?}", value.raw()),
+            Err(error) => assert_eq!(
+                error.code(),
+                "ORNA-EVAL-VALUE",
+                "a {witness} witness must refuse a nonfinite payload"
+            ),
+        }
+    }
+}
