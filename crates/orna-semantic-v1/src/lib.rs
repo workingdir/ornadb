@@ -2095,11 +2095,36 @@ pub enum AssertionOwner {
     Table(String),
     RefinedType(String),
 }
+/// When an assertion is enforced (`sys.AssertionScope`).
+///
+/// The spec names four values and says which boundary each owner belongs to:
+/// a refined-type assertion runs when a base value is constructed or converted
+/// into the refined type (ORNA-ASSERT-041), a table assertion is always
+/// enforced at activation, and a module assertion is evaluated over the
+/// unpublished candidate database before publication (ORNA-ASSERT-026,
+/// ORNA-ASSERT-027).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum AssertionScope {
+    Activation,
+    ValueConstruction,
+    TransactionCandidate,
+    SnapshotCandidate,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssertionPlan {
     pub owner: AssertionOwner,
     pub dependencies: BTreeSet<String>,
     pub effects: EffectSummary,
+    /// Source span of the assertion expression. `sys.ExpressionRef` is opaque
+    /// and pinned to the snapshot that holds this span, so the span is the
+    /// identity source for `sys.Assertion.expression`.
+    pub expression_span: orna_syntax_v1::SyntaxSpan,
+    /// Position of the assertion among its owner's declarations, which
+    /// `sys.Assertion.source_order` reports.
+    pub source_order: usize,
+    /// When the assertion is enforced, which `sys.Assertion.scope` reports.
+    pub scope: AssertionScope,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct SourceUnitIdentity {
@@ -2735,10 +2760,11 @@ fn analyze_recording_origins(
             })
             .collect::<BTreeMap<_, _>>();
         let mut plans = Vec::new();
-        for item in &tree.items {
+        for (source_order, item) in tree.items.iter().enumerate() {
             origins.enter_item(&result.diagnostics, namespace, &item.span);
             check_item(
                 item,
+                source_order,
                 &mut symbols,
                 &scope,
                 &table_rows,
@@ -5308,6 +5334,7 @@ fn insert_explicit(
 }
 fn check_item(
     item: &Item,
+    source_order: usize,
     symbols: &mut BTreeMap<String, Symbol>,
     scope: &Scope,
     _table_rows: &BTreeMap<String, Type>,
@@ -5372,6 +5399,10 @@ fn check_item(
                 inferred,
                 Some(&scope.table_rows),
                 Some(scope),
+                // A module assertion is evaluated over the unpublished
+                // candidate database before publication (ORNA-ASSERT-027).
+                AssertionScope::SnapshotCandidate,
+                source_order,
                 plans,
                 diagnostics,
             );
@@ -5550,7 +5581,7 @@ fn check_item(
                     validate_implementation_restrictions(implementation, scope, diagnostics);
                 }
             }
-            for member in members {
+            for (source_order, member) in members.iter().enumerate() {
                 match member {
                     orna_syntax_v1::TableMember::Assertion { value, .. } => {
                         let inferred = infer_table_assertion(value, name, &row, scope, diagnostics);
@@ -5560,6 +5591,10 @@ fn check_item(
                             inferred,
                             None,
                             Some(scope),
+                            // A table assertion is always enforced at the
+                            // activation boundary.
+                            AssertionScope::Activation,
+                            source_order,
                             plans,
                             diagnostics,
                         );
@@ -5620,7 +5655,7 @@ fn check_item(
                 scope,
                 diagnostics,
             );
-            for member in refinements {
+            for (source_order, member) in refinements.iter().enumerate() {
                 match member {
                     TypeMember::Assertion { value, .. } => {
                         let inferred = infer_refined_assertion(value, &base, scope, diagnostics);
@@ -5630,6 +5665,11 @@ fn check_item(
                             inferred,
                             None,
                             Some(scope),
+                            // A refined assertion runs whenever a base value
+                            // is constructed or converted into the refined
+                            // type (ORNA-ASSERT-041).
+                            AssertionScope::ValueConstruction,
+                            source_order,
                             plans,
                             diagnostics,
                         );
@@ -26185,12 +26225,15 @@ fn infer_type_argument(expression: &Expr) -> Option<Inferred> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assertion(
     owner: AssertionOwner,
     value: &Expr,
     inferred: Inferred,
     resolved_tables: Option<&BTreeMap<String, Type>>,
     scope: Option<&Scope>,
+    enforcement: AssertionScope,
+    source_order: usize,
     plans: &mut Vec<AssertionPlan>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
@@ -26231,6 +26274,9 @@ fn assertion(
         owner,
         dependencies,
         effects: inferred.effects,
+        expression_span: value.span(),
+        source_order,
+        scope: enforcement,
     });
 }
 

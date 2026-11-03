@@ -1654,19 +1654,23 @@ fn refined_aliases_check_owner_assertions_and_expose_static_constructors() {
             default_parameters: Default::default(),
         }
     );
+    let plans = result.assertions.values().next().expect("plans");
     assert_eq!(
-        result.assertions.values().next().expect("plans"),
-        &vec![
-            orna_semantic_v1::AssertionPlan {
-                owner: orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
-                dependencies: Default::default(),
-                effects: Default::default(),
-            },
-            orna_semantic_v1::AssertionPlan {
-                owner: orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
-                dependencies: Default::default(),
-                effects: Default::default(),
-            },
+        plans
+            .iter()
+            .map(|plan| (&plan.owner, plan.dependencies.clone(), plan.effects.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                &orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
+                Default::default(),
+                Default::default(),
+            ),
+            (
+                &orna_semantic_v1::AssertionOwner::RefinedType("Port".into()),
+                Default::default(),
+                Default::default(),
+            ),
         ]
     );
 }
