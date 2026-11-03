@@ -530,6 +530,40 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(signed["reviewer"], "Kieran")
             self.assertNotIn("No reviewer is recorded by an automated run.", signed["limitations"])
 
+    def test_run_records_the_peak_child_rss(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "baseline.toml"
+            baseline.write_text("", encoding="utf-8")
+            grown = "data = bytearray(200 * 1024 * 1024)\nprint(len(data))"
+            argv = [
+                "run",
+                "--record",
+                "heap",
+                "--check",
+                "heap",
+                "--out",
+                str(root),
+                "--baseline",
+                str(baseline),
+                "--",
+                sys.executable,
+                "-c",
+                "pass",
+            ]
+            self.assertEqual(self.run_main(argv), 0)
+            small = json.loads((root / "heap.record.json").read_text(encoding="utf-8"))
+
+            # A second child that grows a large block raises the high-water mark
+            # the recorder reports, so the counter is measured rather than fixed.
+            argv[argv.index("pass")] = grown
+            self.assertEqual(self.run_main(argv), 0)
+            large = json.loads((root / "heap.record.json").read_text(encoding="utf-8"))
+
+            self.assertIsNotNone(small["counters"]["peak_rss_kib"])
+            self.assertGreater(large["counters"]["peak_rss_kib"], 200 * 1024)
+            self.assertGreaterEqual(large["counters"]["peak_rss_kib"], small["counters"]["peak_rss_kib"])
+
     def test_check_records_a_non_test_command_and_missing_prerequisites(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
