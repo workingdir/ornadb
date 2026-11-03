@@ -202,7 +202,7 @@ select = [
 ]
 counters = ["^ORP-1 "]
 limitations = [
-  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture: orp1_row_store_ten_rows, and now orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line (for example rows=1000000 leaves=12958 branches=163 index_churn=13121, with cold and warm point, range, missing-key and scan timings). orp1_production_writer_ten_rows reports only row, leaf, store-root, blob-reference and head counts, so counters on production-written graphs remain unmeasured (ornadb-5il1.6).",
+  "The traffic, latency, allocation and index counters come from the test-side ORP-1 fixture: orp1_row_store_ten_rows, and now orp1_row_store_one_million_rows, whose record carries the aggregate ORP-1 counter line (for example rows=1000000 leaves=12958 branches=163 index_churn=13121, with cold and warm point, range, missing-key and scan timings). orp1_production_writer_ten_rows now reports latency and allocation counters for a production-written graph as well (publish_us, publish_allocations, publish_bytes, read_us, read_allocations, read_bytes, measured around the publication and around the read), so the traffic, latency and allocation figures are no longer fixture-only at ten rows. What remains unmeasured is a production-written graph at one million rows (ornadb-5il1.6).",
 ]
 
 [[item]]
