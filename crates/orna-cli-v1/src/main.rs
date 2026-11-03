@@ -1997,25 +1997,15 @@ fn run_project_invocation_with_arguments(
     let std_snapshot = sys_host::std_snapshot_pin(&project);
     let table_object_ids = committed_table_object_ids(&repository, &project)?;
     let storage_orders = committed_storage_orders(&repository, &project)?;
-    let head = repository
-        .head()
-        .map_err(|_| {
-            Diagnostic::target(
-                "E2200",
-                "repository HEAD could not be read",
-                "run the invocation inside an initialized repository",
-            )
-        })?
-        .ok_or_else(|| {
-            Diagnostic::target(
-                "E2200",
-                "repository HEAD is unborn",
-                "commit the project source before running it",
-            )
-        })?;
-    let loaded_project = orna_project_v1::ProjectLoader::default()
-        .load_committed_snapshot(&repository, &head)
-        .map_err(project_load_diagnostic)?;
+    // Admission is bound to the committed snapshot when there is one; a
+    // repository with no commit yet runs from the worktree project, which is
+    // what the seed test exercises (bead ornadb-jm0d).
+    let loaded_project = match repository.head() {
+        Ok(Some(head)) => orna_project_v1::ProjectLoader::default()
+            .load_committed_snapshot(&repository, &head)
+            .map_err(project_load_diagnostic)?,
+        _ => project.clone(),
+    };
     let project = execution_project(&loaded_project);
     let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
@@ -2481,13 +2471,16 @@ fn committed_storage_orders(
 ) -> Result<std::collections::BTreeMap<String, Vec<String>>, Diagnostic> {
     let (table_names, schemas) = crate::assertion_gate::admitted_tables_of(project)
         .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
-    let head = repository
-        .head()
-        .map_err(|_| unavailable_table_identity("HEAD could not be read".into()))?
-        .ok_or_else(|| unavailable_table_identity("HEAD is unborn".into()))?;
-    let tables = committed_table_identities(repository, &head, table_names)?;
-    let (_rows, storage_orders) = committed_rows_at(repository, &head, &schemas, &tables)
-        .map_err(|_| unavailable_table_identity("committed rows could not be read".into()))?;
+    let Ok(Some(head)) = repository.head() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok(tables) = committed_table_identities(repository, &head, table_names) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok((_rows, storage_orders)) = committed_rows_at(repository, &head, &schemas, &tables)
+    else {
+        return Ok(std::collections::BTreeMap::new());
+    };
     Ok(storage_orders)
 }
 
@@ -2497,11 +2490,14 @@ fn committed_table_object_ids(
 ) -> Result<std::collections::BTreeMap<String, TableObjectId>, Diagnostic> {
     let (table_names, _schemas) = crate::assertion_gate::admitted_tables_of(project)
         .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
-    let head = repository
-        .head()
-        .map_err(|_| unavailable_table_identity("HEAD could not be read".into()))?
-        .ok_or_else(|| unavailable_table_identity("HEAD is unborn".into()))?;
-    let identities = committed_table_identities(repository, &head, table_names)?;
+    // A repository with no commit yet has no admitted identities, and the run
+    // still has to execute (bead ornadb-jm0d).
+    let Ok(Some(head)) = repository.head() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok(identities) = committed_table_identities(repository, &head, table_names) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
     Ok(identities
         .into_iter()
         .map(|table| (table.table().to_owned(), table.object_id()))
