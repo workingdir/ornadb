@@ -4118,13 +4118,19 @@ impl DurableTransactionalEvaluator {
                 .await;
             }
         };
-        let mutations =
-            match admit_recorded_rows(repository, loaded_project, table_object_ids, mutations) {
-                Ok(mutations) => mutations,
-                Err(()) => {
-                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
-                }
-            };
+        let admitted_tables = admitted.key_fields.keys().cloned().collect::<Vec<String>>();
+        let mutations = match admit_recorded_rows(
+            repository,
+            loaded_project,
+            table_object_ids,
+            &admitted_tables,
+            mutations,
+        ) {
+            Ok(mutations) => mutations,
+            Err(()) => {
+                return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+            }
+        };
         if mutations.is_empty() {
             return terminalize_observed_outcome(
                 state,
@@ -14768,6 +14774,7 @@ fn admit_recorded_rows(
     repository: &Repository,
     project: &LoadedProject,
     table_object_ids: &BTreeMap<String, TableObjectId>,
+    admitted_tables: &[String],
     mutations: Vec<TableMutation>,
 ) -> Result<Vec<TableMutation>, ()> {
     let Ok(Some(head)) = repository.head() else {
@@ -14790,8 +14797,54 @@ fn admit_recorded_rows(
         };
         schemas.insert(table.clone(), (schema, context));
     }
+    // A table declared in a named module is admitted under its qualified name,
+    // while the evaluator records the declaration name, so the recorded table is
+    // resolved to the admitted one before admission and scope validation
+    // (bead ornadb-jm0d).
+    let qualified = |table: &str| -> Option<String> {
+        if admitted_tables.iter().any(|name| name == table) {
+            return Some(table.to_owned());
+        }
+        let suffix = format!(".{table}");
+        let mut matches = admitted_tables
+            .iter()
+            .filter(|candidate| candidate.ends_with(&suffix));
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            return None;
+        }
+        Some(first.clone())
+    };
     let mut admitted = Vec::with_capacity(mutations.len());
     for mutation in mutations {
+        let mutation = match qualified(mutation.table()) {
+            Some(name) if name != mutation.table() => {
+                let Some(value) = mutation.value() else {
+                    admitted.push(mutation);
+                    continue;
+                };
+                let rebuilt = if mutation.is_insert() {
+                    TableMutation::insert(
+                        mutation.id(),
+                        name,
+                        mutation.key().to_vec(),
+                        value.to_vec(),
+                    )
+                } else {
+                    TableMutation::new(
+                        mutation.id(),
+                        name,
+                        mutation.key().to_vec(),
+                        Some(value.to_vec()),
+                    )
+                };
+                let Ok(rebuilt) = rebuilt else {
+                    return Err(());
+                };
+                rebuilt
+            }
+            _ => mutation,
+        };
         let Some((schema, context)) = schemas.get(mutation.table()) else {
             admitted.push(mutation);
             continue;
@@ -14822,11 +14875,47 @@ fn admit_recorded_rows(
             continue;
         };
         let (admitted_row, _bindings, _schema) = row.into_mutation_and_bindings();
+        // The admitted row is named by the schema's declaration name, while the
+        // activation and the commit address the table by its admitted qualified
+        // name, so the table is carried across (bead ornadb-jm0d).
+        let rename = |row: TableMutation, table: &str| -> Result<TableMutation, ()> {
+            if row.table() == table {
+                return Ok(row);
+            }
+            let Some(identity) = row.table_object_id() else {
+                return Err(());
+            };
+            let rebuilt = if row.is_insert() {
+                match row.value() {
+                    Some(value) => TableMutation::insert(
+                        row.id(),
+                        table.to_owned(),
+                        row.key().to_vec(),
+                        value.to_vec(),
+                    ),
+                    None => return Err(()),
+                }
+            } else {
+                TableMutation::new(
+                    row.id(),
+                    table.to_owned(),
+                    row.key().to_vec(),
+                    row.value().map(<[u8]>::to_vec),
+                )
+            };
+            let Ok(rebuilt) = rebuilt else {
+                return Err(());
+            };
+            Ok(rebuilt.with_table_object_id(identity))
+        };
         if mutation.is_insert() {
             // An insert keeps the admitted row: canonical key, descriptor value
             // and insert-only semantics, which publication projects and the
             // runtime accepts for an absent key.
-            admitted.push(admitted_row);
+            let Ok(row) = rename(admitted_row, mutation.table()) else {
+                return Err(());
+            };
+            admitted.push(row);
             continue;
         }
         // A replacement keeps the admitted key and value so publication still
@@ -14839,7 +14928,7 @@ fn admit_recorded_rows(
         };
         let Ok(replacement) = TableMutation::new(
             admitted_row.id(),
-            admitted_row.table().to_owned(),
+            mutation.table().to_owned(),
             admitted_row.key().to_vec(),
             Some(value.to_vec()),
         ) else {
