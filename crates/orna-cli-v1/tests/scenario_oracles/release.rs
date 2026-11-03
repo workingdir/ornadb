@@ -112,12 +112,7 @@ pub fn entries() -> Vec<Entry> {
             STORAGE_METADATA,
             storage_unobservable,
         ),
-        Entry::gap(
-            "FINAL-ROW-009",
-            "ornadb-mmsa.28.17",
-            "`orna query` reports actual object reads but no estimate to compare them with",
-            query_reports_no_estimate,
-        ),
+        Entry::pass("FINAL-ROW-009", query_reports_estimate_and_actual),
         Entry::pass("FINAL-ROW-010", repacking_changes_no_logical_rows),
         Entry::pass("FINAL-ROW-011", repl_enforces_table_assertions),
         Entry::gap(
@@ -2313,21 +2308,36 @@ fn storage_unobservable(db: &mut Db) -> Probe {
     repl_refuses(db, &["sys.Storage"], "ORNA-EVAL-NAME")
 }
 
-fn query_reports_no_estimate(db: &mut Db) -> Probe {
+/// ORNA-ROW-009: the counters distinguish estimated from actual work.
+///
+/// The row map says how many rows the relation holds before any read, and the
+/// walk counts the rows it actually read. A listing over one committed row must
+/// therefore report an estimate of one beside one scanned row, together with the
+/// object reads that produced it.
+fn query_reports_estimate_and_actual(db: &mut Db) -> Check {
     let tables = db.declare("pub table Note(id: Str) { text: Str, }\n")?;
     let relation = relation_of(&tables, "Note")?;
     db.repl_effect(r#"main.Note.insert({ id: "a", text: "one" })"#)?;
     db.publish()?.ok()?;
     let report = db.query_json(&relation, &[])?;
-    let text = report.to_string();
+    let plan = report
+        .get("plan")
+        .ok_or_else(|| Failure::Harness(format!("orna query reported no plan: {report}")))?;
     ensure!(
-        report.get("native_objects_read").is_some() && !text.contains("estimate"),
-        "orna query now reports an estimate: {report}"
+        plan.get("estimated_rows")
+            .and_then(serde_json::Value::as_u64)
+            == Some(1),
+        "estimated rows is not one: {plan}"
     );
-    Ok(format!(
-        "orna query reports native_objects_read {} and no estimate",
-        report["native_objects_read"]
-    ))
+    ensure!(
+        plan.get("scanned_rows").and_then(serde_json::Value::as_u64) == Some(1),
+        "scanned rows is not one: {plan}"
+    );
+    ensure!(
+        report.get("native_objects_read").is_some(),
+        "orna query reported no object count: {report}"
+    );
+    Ok(())
 }
 
 const SCORE_SOURCE: &str = r#"pub table Score(id: Str) {
