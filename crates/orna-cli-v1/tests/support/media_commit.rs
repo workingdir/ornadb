@@ -297,7 +297,10 @@ pub async fn commit_capture_pending_wide(
             &context,
             &[mutation],
             wide_digest(ordinal, 0xa4),
-            TerminalOutcome::new(vec![ordinal as u8]).unwrap(),
+            TerminalOutcome::new(vec![
+                u8::try_from(ordinal & 0x00ff).expect("low byte of a 16-bit ordinal"),
+            ])
+            .unwrap(),
             &NoFault,
             orna_runtime_v1::ActivationEffectReport::declare(
                 orna_runtime_v1::DeclaredEffectSet::None,
