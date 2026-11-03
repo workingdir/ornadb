@@ -72,6 +72,20 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         .expect("CLI process starts")
 }
 
+/// Copies one directory tree into `destination`.
+fn copy_directory(source: &Path, destination: &Path) {
+    std::fs::create_dir_all(destination).expect("create the copy directory");
+    for entry in std::fs::read_dir(source).expect("read the source directory") {
+        let entry = entry.expect("read a directory entry");
+        let target = destination.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_directory(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), &target).expect("copy a file");
+        }
+    }
+}
+
 /// An import expression whose media root points at `root`.
 fn import_expression(fixture: &str, root: &Path) -> String {
     let fixture = std::fs::read_to_string(fixture).unwrap();
@@ -297,6 +311,38 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
     assert!(
         String::from_utf8_lossy(&checked.stdout).contains(&snapshot),
         "check reports the recorded snapshot"
+    );
+
+    // A truncated bundle must fail the check. The manifest still lists every
+    // recorded object, so a check that only reads the manifest would call this
+    // archive complete and leave the loss to be discovered by restore.
+    let damaged: PathBuf = outside.path().join("damaged");
+    copy_directory(&archive, &damaged);
+    let bundle = std::fs::read_dir(damaged.join("snapshots"))
+        .expect("the archive holds a snapshots directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "bundle")
+        })
+        .expect("the archive holds one bundle per snapshot");
+    let bundle_bytes = std::fs::read(&bundle).expect("read the recorded bundle");
+    std::fs::write(&bundle, &bundle_bytes[..bundle_bytes.len() / 4])
+        .expect("truncate the recorded bundle");
+    let rejected = run(
+        unrelated.path(),
+        &["export", damaged.to_str().unwrap(), "--check"],
+    );
+    let rejection = String::from_utf8_lossy(&rejected.stderr);
+    assert_eq!(
+        rejected.status.code(),
+        Some(1),
+        "a truncated archive must fail the check:\n{rejection}"
+    );
+    assert!(
+        rejection.contains("A recorded object failed verification"),
+        "the check names the verification failure:\n{rejection}"
     );
 
     let restored: PathBuf = outside.path().join("restored");
