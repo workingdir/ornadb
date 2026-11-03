@@ -750,7 +750,7 @@ def command_run(arguments: argparse.Namespace) -> int:
         "targets": [],
         "failures": {"new": [], "known": []},
         "baseline": [],
-        "reviewer": None,
+        "reviewer": arguments.reviewer,
     }
     missing = [entry["requirement"] for entry in prerequisites if not entry["available"]]
     started = time.monotonic()
@@ -1173,11 +1173,11 @@ def command_summarize(arguments: argparse.Namespace) -> int:
         "commit": commits[0] if len(commits) == 1 else None,
         "publication": manifest.publication,
         "workflow_run": workflow_run(),
-        "reviewer": None,
+        "reviewer": arguments.reviewer,
         "limitations": [
             "Each item records only the tests mapped to it; its own limitations list what those tests do not show.",
             "A passing subset never establishes whole-gate or whole-product completion.",
-            "No reviewer is recorded by an automated run.",
+            *(["No reviewer is recorded by an automated run."] if arguments.reviewer is None else []),
         ],
         "gates": gate_rollup(items),
         "items": items,
@@ -1397,6 +1397,11 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--require-command", action="append", default=[], help="executable that must be on PATH")
     run.add_argument("--require-path", action="append", default=[], help="path that must exist")
     run.add_argument(
+        "--reviewer",
+        default=None,
+        help="person accountable for this record; absent for an unattended run",
+    )
+    run.add_argument(
         "--check",
         metavar="NAME",
         help="record a non-test command (for example cargo fmt) as one pass/fail check named NAME",
@@ -1410,6 +1415,11 @@ def main(argv: list[str] | None = None) -> int:
     summarize.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
     summarize.add_argument("--baseline", default=str(BASELINE), help="known-failure baseline (TOML)")
     summarize.add_argument("--expect-commit", help="the commit every record must test; a known failure that passed is then a problem")
+    summarize.add_argument(
+        "--reviewer",
+        default=None,
+        help="person accountable for this summary; absent for an unattended run",
+    )
 
     check = commands.add_parser("check", help="validate the baseline and the gate-item manifest")
     check.add_argument("--items", default=str(ITEMS), help="gate-item manifest (TOML)")
