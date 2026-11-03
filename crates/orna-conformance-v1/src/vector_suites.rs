@@ -369,19 +369,19 @@ fn float_vectors(vectors: &Value) -> CaseRun {
             && case["min_non_nan"]
                 .as_str()
                 .and_then(bits)
-                .map_or(true, |expected| float_min(&non_nan) == Some(expected))
+                .is_none_or(|expected| float_min(&non_nan) == Some(expected))
             && case["max_non_nan"]
                 .as_str()
                 .and_then(bits)
-                .map_or(true, |expected| float_max(&non_nan) == Some(expected))
+                .is_none_or(|expected| float_max(&non_nan) == Some(expected))
             && case["min_total"]
                 .as_str()
                 .and_then(bits)
-                .map_or(true, |expected| float_min(&values) == Some(expected))
+                .is_none_or(|expected| float_min(&values) == Some(expected))
             && case["max_total"]
                 .as_str()
                 .and_then(bits)
-                .map_or(true, |expected| float_max(&values) == Some(expected));
+                .is_none_or(|expected| float_max(&values) == Some(expected));
         run.check(&name, passed, || {
             format!(
                 "values {values:x?} answered nan_count {nan_count}, min_non_nan {min:x?}, \

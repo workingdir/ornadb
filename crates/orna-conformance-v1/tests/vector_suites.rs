@@ -91,13 +91,11 @@ fn published_vector_suites_run_through_production_or_name_their_gap() {
         assert_eq!(result.known_gap, None, "{name}");
     }
 
-    for (name, bead) in [("numeric-vectors.json", "ornadb-5il1.190")] {
-        let result = suite(&suites, name);
-        assert_eq!(result.status, EvidenceStatus::Skipped, "{name}");
-        assert_eq!(result.known_gap.as_deref(), Some(bead), "{name}");
-        assert_eq!(result.executed_cases, 0, "{name}");
-        assert!(!result.detail.is_empty(), "{name}");
-    }
+    let result = suite(&suites, "numeric-vectors.json");
+    assert_eq!(result.status, EvidenceStatus::Skipped);
+    assert_eq!(result.known_gap.as_deref(), Some("ornadb-5il1.190"));
+    assert_eq!(result.executed_cases, 0);
+    assert!(!result.detail.is_empty());
 }
 
 #[test]
