@@ -345,6 +345,26 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         "the check names the verification failure:\n{rejection}"
     );
 
+    // A relative archive path is resolved against the caller's directory, not
+    // against the reconstruction directory that `git fetch` runs in. Without
+    // that, a restore into an absolute destination cannot find the bundles.
+    let absolute_restore: PathBuf = outside.path().join("restored-from-relative");
+    let relative_archive = run(
+        &outside.path().to_path_buf(),
+        &[
+            "export",
+            "archive",
+            "--restore",
+            absolute_restore.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(
+        relative_archive.status.code(),
+        Some(0),
+        "a relative archive path restores into an absolute destination:\n{}",
+        String::from_utf8_lossy(&relative_archive.stderr)
+    );
+
     let restored: PathBuf = outside.path().join("restored");
     let restored_path = restored.to_str().unwrap().to_owned();
     let reconstructed = run(
