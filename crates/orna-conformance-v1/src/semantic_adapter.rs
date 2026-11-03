@@ -2202,6 +2202,7 @@ impl TransactionalEvaluator {
         key: Vec<u8>,
         row: Value,
         key_fields: &TableKeys,
+        storage_orders: &BTreeMap<String, Vec<String>>,
         table_fields: &TableFields,
     ) -> Result<(), RuntimeError> {
         let schema = key_fields
@@ -2217,7 +2218,7 @@ impl TransactionalEvaluator {
                 .key_from_canonical_text(&key)
                 .ok_or(RuntimeError::InvalidTableMutation)?,
         };
-        let row = stored_row_record(&table, &row, &key, key_fields, table_fields)?;
+        let row = stored_row_record(&table, &row, &key, key_fields, storage_orders, table_fields)?;
         self.database
             .activate(|activation| activation.insert(table, key, row))
             .map_err(|_| RuntimeError::InvalidTableMutation)
@@ -2236,11 +2237,19 @@ fn stored_row_record(
     row: &Value,
     key: &TransactionKey,
     key_fields: &TableKeys,
+    storage_orders: &BTreeMap<String, Vec<String>>,
     table_fields: &TableFields,
 ) -> Result<Value, RuntimeError> {
-    let declared = table_fields
-        .get(table)
-        .ok_or(RuntimeError::InvalidTableMutation)?;
+    // The stored row is positional in the descriptor's storage order, which is
+    // not the declaration order, so the order comes from the committed read. A
+    // table with no committed rows has no recorded order, and its rows are
+    // already in the admitted order (bead ornadb-jm0d).
+    let declared = match storage_orders.get(table) {
+        Some(order) => order,
+        None => table_fields
+            .get(table)
+            .ok_or(RuntimeError::InvalidTableMutation)?,
+    };
     let key_names = key_fields
         .get(table)
         .ok_or(RuntimeError::InvalidTableMutation)?;
@@ -2491,6 +2500,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &BTreeMap::new(),
                     &admitted.table_fields,
                 )?;
             }
@@ -2692,6 +2702,7 @@ impl DurableTransactionalEvaluator {
                         key.clone(),
                         row,
                         &admitted.key_fields,
+                        &BTreeMap::new(),
                         &admitted.table_fields,
                     )
                     .is_err()
@@ -2865,6 +2876,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &BTreeMap::new(),
                     &admitted.table_fields,
                 ) {
                     return RunningTableRequestDisposition::Fenced(error);
@@ -3099,6 +3111,7 @@ impl DurableTransactionalEvaluator {
         arguments: &Environment,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
+        storage_orders: &BTreeMap<String, Vec<String>>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let state =
             RuntimeState::open(target.repository, target.identity, target.initial_digest).await?;
@@ -3171,6 +3184,7 @@ impl DurableTransactionalEvaluator {
             arguments,
             loaded_project,
             table_object_ids,
+            storage_orders,
         )
         .await
     }
@@ -3922,6 +3936,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &BTreeMap::new(),
                     &admitted.table_fields,
                 )?;
             }
@@ -3988,6 +4003,7 @@ impl DurableTransactionalEvaluator {
         arguments: &Environment,
         loaded_project: &LoadedProject,
         table_object_ids: &BTreeMap<String, TableObjectId>,
+        storage_orders: &BTreeMap<String, Vec<String>>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let tables = admitted
             .key_fields
@@ -4056,6 +4072,7 @@ impl DurableTransactionalEvaluator {
                         key.clone(),
                         row,
                         &admitted.key_fields,
+                        storage_orders,
                         &admitted.table_fields,
                     )
                     .is_err()
@@ -6767,7 +6784,7 @@ impl TableEffectHandler<'_, '_> {
                 self.activation
                     .insert(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, key, Some(row.clone()))?;
+                self.record(table, key, Some(row.clone()), true)?;
                 Ok(Some(row.clone()))
             }
             "upsert" => {
@@ -6786,13 +6803,13 @@ impl TableEffectHandler<'_, '_> {
                     self.activation
                         .update(table.clone(), key.clone(), row.clone())
                         .map_err(|error| transaction_error(table_error_code(error)))?;
-                    self.record(table, key, Some(row.clone()))?;
+                    self.record(table, key, Some(row.clone()), false)?;
                     Ok(Some(row))
                 } else {
                     self.activation
                         .insert(table.clone(), key.clone(), row.clone())
                         .map_err(|error| transaction_error(table_error_code(error)))?;
-                    self.record(table, key, Some(row.clone()))?;
+                    self.record(table, key, Some(row.clone()), true)?;
                     Ok(Some(row.clone()))
                 }
             }
@@ -6811,7 +6828,7 @@ impl TableEffectHandler<'_, '_> {
                 self.activation
                     .update(table.clone(), key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, key, Some(row.clone()))?;
+                self.record(table, key, Some(row.clone()), false)?;
                 Ok(Some(row))
             }
             "delete" => {
@@ -6822,7 +6839,7 @@ impl TableEffectHandler<'_, '_> {
                 self.activation
                     .delete(table.clone(), key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, key, None)?;
+                self.record(table, key, None, false)?;
                 Ok(Some(Value::unit()))
             }
             "rekey" => {
@@ -6848,11 +6865,11 @@ impl TableEffectHandler<'_, '_> {
                 self.activation
                     .delete(table.clone(), old_key.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, old_key, None)?;
+                self.record(table, old_key, None, false)?;
                 self.activation
                     .insert(table.clone(), new_key.clone(), row.clone())
                     .map_err(|error| transaction_error(table_error_code(error)))?;
-                self.record(table, new_key, Some(row.clone()))?;
+                self.record(table, new_key, Some(row.clone()), false)?;
                 Ok(Some(row))
             }
             _ => Ok(None),
@@ -6864,6 +6881,7 @@ impl TableEffectHandler<'_, '_> {
         table: &str,
         key: TransactionKey,
         value: Option<Value>,
+        insert_only: bool,
     ) -> Result<(), EvaluationError> {
         let key = key.into_encoded();
         let encoded = value
@@ -6889,8 +6907,14 @@ impl TableEffectHandler<'_, '_> {
         let id: [u8; 16] = digest.finalize()[..16]
             .try_into()
             .expect("truncated digest has fixed length");
-        let mutation = TableMutation::new(id, table, key, encoded)
-            .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
+        // An insert is recorded as insert-only so the runtime rejects an
+        // occupied key; a replacement is recorded as a generic write, because
+        // the runtime refuses an insert over an existing row (bead ornadb-jm0d).
+        let mutation = match (insert_only, encoded) {
+            (true, Some(value)) => TableMutation::insert(id, table, key, value),
+            (_, value) => TableMutation::new(id, table, key, value),
+        }
+        .map_err(|_| transaction_error("ORNA-EVAL-TABLE-ROW"))?;
         self.mutations.push(mutation);
         Ok(())
     }
@@ -14770,7 +14794,30 @@ fn admit_recorded_rows(
             continue;
         };
         let (admitted_row, _bindings, _schema) = row.into_mutation_and_bindings();
-        admitted.push(admitted_row);
+        if mutation.is_insert() {
+            // An insert keeps the admitted row: canonical key, descriptor value
+            // and insert-only semantics, which publication projects and the
+            // runtime accepts for an absent key.
+            admitted.push(admitted_row);
+            continue;
+        }
+        // A replacement keeps the admitted key and value so publication still
+        // projects them, but records replacement semantics, because the runtime
+        // refuses an insert over an occupied key (bead ornadb-jm0d).
+        let (Some(identity), Some(value)) = (admitted_row.table_object_id(), admitted_row.value())
+        else {
+            admitted.push(mutation);
+            continue;
+        };
+        let Ok(replacement) = TableMutation::new(
+            admitted_row.id(),
+            admitted_row.table().to_owned(),
+            admitted_row.key().to_vec(),
+            Some(value.to_vec()),
+        ) else {
+            return Err(());
+        };
+        admitted.push(replacement.with_table_object_id(identity));
     }
     Ok(admitted)
 }
