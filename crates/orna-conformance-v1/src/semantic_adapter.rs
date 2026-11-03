@@ -1314,6 +1314,17 @@ impl TransactionTableKey {
         Ok(TransactionKey::typed(encoded_table_key(&values)?, values))
     }
 
+    /// Reads one published canonical text key as its single component value.
+    fn key_from_canonical_text(&self, encoded: &[u8]) -> Option<TransactionKey> {
+        if self.types.len() != 1 {
+            return None;
+        }
+        let text = std::str::from_utf8(encoded).ok()?;
+        let value = Value::new(orna_value_v1::Raw::Text(text.to_owned())).ok()?;
+        self.types[0].validate(&value).ok()?;
+        self.key_from_values(std::slice::from_ref(&value)).ok()
+    }
+
     fn key_from_row(&self, row: &Value) -> Result<TransactionKey, EvaluationError> {
         let values = self
             .fields
@@ -1359,6 +1370,10 @@ impl TransactionKey {
 
     fn into_encoded(self) -> Vec<u8> {
         self.encoded
+    }
+
+    fn components(&self) -> Option<&[Value]> {
+        self.components.as_deref()
     }
 }
 
@@ -2187,17 +2202,81 @@ impl TransactionalEvaluator {
         key: Vec<u8>,
         row: Value,
         key_fields: &TableKeys,
+        table_fields: &TableFields,
     ) -> Result<(), RuntimeError> {
         let schema = key_fields
             .get(&table)
             .ok_or(RuntimeError::InvalidTableMutation)?;
-        let key = schema
-            .key_from_encoded(&key)
-            .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        // A published row is stored as its descriptor-ordered field values, so
+        // the row carries no field names and no key field, and its key is the
+        // ORP canonical form rather than the component encoding this evaluator
+        // addresses rows by. Both are rebuilt here (bead ornadb-jm0d).
+        let key = match schema.key_from_encoded(&key) {
+            Ok(key) => key,
+            Err(_) => schema
+                .key_from_canonical_text(&key)
+                .ok_or(RuntimeError::InvalidTableMutation)?,
+        };
+        let row = stored_row_record(&table, &row, &key, key_fields, table_fields)?;
         self.database
             .activate(|activation| activation.insert(table, key, row))
             .map_err(|_| RuntimeError::InvalidTableMutation)
     }
+}
+
+/// Rebuilds one published row as an evaluator record.
+///
+/// A published row is stored as its descriptor-ordered field values, so the
+/// row carries no field names and no key field, and its key is the ORP canonical
+/// form rather than the component encoding this evaluator addresses rows by.
+/// The key components and the declared field order rebuild the record (bead
+/// ornadb-jm0d).
+fn stored_row_record(
+    table: &str,
+    row: &Value,
+    key: &TransactionKey,
+    key_fields: &TableKeys,
+    table_fields: &TableFields,
+) -> Result<Value, RuntimeError> {
+    let declared = table_fields
+        .get(table)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    let key_names = key_fields
+        .get(table)
+        .ok_or(RuntimeError::InvalidTableMutation)?;
+    let key_names: Vec<&String> = key_names.iter().collect();
+    let components = key.components().ok_or(RuntimeError::InvalidTableMutation)?;
+    if components.len() != key_names.len() {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    let mut entries: Vec<(orna_value_v1::Raw, orna_value_v1::Raw)> = Vec::new();
+    for (name, component) in key_names.iter().zip(components) {
+        let value = orna_value_v1::Value::decode(
+            &component
+                .encode()
+                .map_err(|_| RuntimeError::InvalidTableMutation)?,
+        )
+        .map_err(|_| RuntimeError::InvalidTableMutation)?;
+        entries.push((
+            orna_value_v1::Raw::Text((*name).clone()),
+            value.raw().clone(),
+        ));
+    }
+    let positional = match row.raw() {
+        orna_value_v1::Raw::Array(values) => values.clone(),
+        other => vec![other.clone()],
+    };
+    let remaining: Vec<&String> = declared
+        .iter()
+        .filter(|name| !key_names.iter().any(|key| *key == *name))
+        .collect();
+    if positional.len() != remaining.len() {
+        return Err(RuntimeError::InvalidTableMutation);
+    }
+    for (name, value) in remaining.iter().zip(positional) {
+        entries.push((orna_value_v1::Raw::Text((*name).clone()), value));
+    }
+    Value::new(orna_value_v1::Raw::Map(entries)).map_err(|_| RuntimeError::InvalidTableMutation)
 }
 
 /// The durable repository, runtime identity, and writer context for execution.
@@ -2412,6 +2491,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &admitted.table_fields,
                 )?;
             }
         }
@@ -2612,6 +2692,7 @@ impl DurableTransactionalEvaluator {
                         key.clone(),
                         row,
                         &admitted.key_fields,
+                        &admitted.table_fields,
                     )
                     .is_err()
                 {
@@ -2784,6 +2865,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &admitted.table_fields,
                 ) {
                     return RunningTableRequestDisposition::Fenced(error);
                 }
@@ -3840,6 +3922,7 @@ impl DurableTransactionalEvaluator {
                     key.clone(),
                     row,
                     &admitted.key_fields,
+                    &admitted.table_fields,
                 )?;
             }
         }
@@ -3973,6 +4056,7 @@ impl DurableTransactionalEvaluator {
                         key.clone(),
                         row,
                         &admitted.key_fields,
+                        &admitted.table_fields,
                     )
                     .is_err()
                 {
