@@ -9,6 +9,10 @@ name: Nightly gates
 #   conformance-v1-tests.yml gate on every pull request.
 # - The Gate D crash matrix (feature crash-barriers). Gate B's 10 GiB import is
 #   not run here; it lives in cli-gate-b.yml and Gate C scale in gate-c-scale.yml.
+# - The Gate C one-million-row case (row_store_scale, #[ignore], needs
+#   ORNA_ORP1_MILLION_ROWS). It writes its own record, so the C items can select
+#   it here instead of depending on gate-c-scale.yml, which never writes into
+#   this evidence directory (ornadb-5il1.6).
 # - cargo fmt and Clippy, which do not pass on main yet.
 # Every job writes an evidence record with scripts/gate_evidence.py: commit,
 # command, host and tool versions, inputs, exit status, per-test outcomes and
@@ -29,6 +33,13 @@ on:
       reviewer:
         description: Person accountable for this evidence run; empty records that no reviewer signed it.
         required: false
+        type: string
+      scale_rows:
+        description: >-
+          Rows for the Gate C scale case. Leave at 1000000 for gate evidence; a
+          smaller value measures the growth curve and is recorded as a curve run.
+        required: false
+        default: "1000000"
         type: string
 
 permissions:
@@ -225,8 +236,49 @@ jobs:
           path: ${{ runner.temp }}/gate-evidence
           if-no-files-found: error
 
+  gate-c-million:
+    needs: revision
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      # row_store_scale.rs asserts this is set; the case is #[ignore] and runs here.
+      ORNA_ORP1_MILLION_ROWS: "1"
+      ORNA_ORP1_SCALE_ROWS: ${{ inputs.scale_rows || '1000000' }}
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.revision.outputs.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Run the one-million-row Gate C case
+        # The recorder stops the case 20 minutes before the job cap and still
+        # writes its record, so a run that outgrows the cap keeps its evidence.
+        run: >-
+          python3 scripts/gate_evidence.py run
+          --record gate-c-million-rows
+          --title "Gate C: ORP-1 indexed row store at one million rows"
+          --out "$RUNNER_TEMP/gate-evidence"
+          --timeout-minutes 330
+          --input-env ORNA_ORP1_MILLION_ROWS
+          --input-env ORNA_ORP1_SCALE_ROWS
+          -- cargo test --locked -p orna-repository-v1 --test row_store_scale
+          -- --ignored --exact orp1_row_store_one_million_rows --nocapture
+
+      - name: Upload the evidence record and log
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: evidence-gate-c-million-rows
+          path: ${{ runner.temp }}/gate-evidence
+          if-no-files-found: error
+
   evidence:
-    needs: [revision, workspace, gate-d-crash-matrix, claims]
+    needs: [revision, workspace, gate-d-crash-matrix, claims, gate-c-million]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
