@@ -2419,11 +2419,33 @@ impl NativeGraphContext {
             .filter(|dependency| dependency.kind() == NativeObjectKind::Tree)
             .map(|dependency| dependency.oid().clone())
             .collect();
-        if descriptors.is_empty() {
-            return Err(GraphError::DescriptorNotInRow);
-        }
         let snapshots = self.list_revision_snapshots(start, max_commits)?;
         let mut revisions = Vec::with_capacity(snapshots.len());
+        if descriptors.is_empty() {
+            // An inline row has no descriptor tree, so presence cannot be read
+            // from the snapshot's tree listing. It is read from the snapshot's
+            // own row map instead: a revision is a commit whose relation still
+            // holds the key. `sys.history(ObjectRef)` promises revision history
+            // for any object and states no carve-out for rows that carry their
+            // value inline.
+            let relation_id = *row.version().relation_id();
+            for snapshot in snapshots {
+                let present = self.row_present_at(
+                    snapshot.commit().to_hex().as_str(),
+                    relation_id,
+                    row.key(),
+                );
+                revisions.push(RowRevision {
+                    commit: snapshot.commit().clone(),
+                    tree: snapshot.tree().clone(),
+                    author: snapshot.author().to_owned(),
+                    committed_at: snapshot.committed_at(),
+                    migration: snapshot.migration().map(str::to_owned),
+                    present,
+                });
+            }
+            return Ok(revisions);
+        }
         for snapshot in snapshots {
             let tree = snapshot.tree().to_hex();
             self.repository
@@ -2451,6 +2473,34 @@ impl NativeGraphContext {
             });
         }
         Ok(revisions)
+    }
+
+    /// Reports whether one relation still holds `key` at `commit`.
+    ///
+    /// Reads the commit's own row map, so it answers for a row that carries its
+    /// value inline and has no descriptor tree to look for. A commit that is
+    /// not a format-3 snapshot cannot hold the row, so it reports absence
+    /// rather than failing the whole walk: a history that spans the first
+    /// publication of a repository must not stop at the commits before it.
+    fn row_present_at(
+        &self,
+        commit: &str,
+        relation_id: [u8; 16],
+        key: &crate::row_store::TypedKey,
+    ) -> bool {
+        let Ok(format) = self.repository.open_format_context_at_selector(commit) else {
+            return false;
+        };
+        let Ok(row_map) = format.load_row_map(relation_id) else {
+            return false;
+        };
+        let Ok(graph) = format.open_native_graph(&row_map) else {
+            return false;
+        };
+        let Ok(scope) = graph.open_read_scope() else {
+            return false;
+        };
+        graph.lookup_row(key, &scope).is_ok_and(|row| row.is_some())
     }
 
     pub const fn database_id(&self) -> &[u8; 16] {
