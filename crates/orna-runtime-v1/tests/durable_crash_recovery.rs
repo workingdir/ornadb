@@ -25,8 +25,9 @@ use std::{
 
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
-    FaultInjector, FaultPoint, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
-    WriterLease,
+    ActivationEffectReport, FaultInjector, FaultPoint, RecoveryDisposition, RequestIdentity,
+    RequestOwner, RequestState, RuntimeError, RuntimeIdentity, RuntimeState, TableMutation,
+    TerminalOutcome, WriterLease,
 };
 use tempfile::{Builder, TempDir};
 
@@ -34,9 +35,12 @@ use tempfile::{Builder, TempDir};
 const CRASH_SEAM: &str = "ORNA_CRASH_SEAM";
 /// Absolute path of the repository the child must crash inside.
 const CRASH_REPOSITORY: &str = "ORNA_CRASH_REPOSITORY";
+/// Path the child creates for the one external effect it performs.
+const CRASH_EFFECT_RECEIPT: &str = "ORNA_CRASH_EFFECT_RECEIPT";
 
 const COMMIT_BARRIER_TEST: &str = "crash_at_the_row_commit_barrier_keeps_the_committed_row";
 const PRE_COMMIT_TEST: &str = "crash_before_the_row_commit_barrier_acknowledges_nothing";
+const EXTERNAL_EFFECT_TEST: &str = "crash_after_an_external_effect_recovery_reports_uncertainty";
 
 const OWNER: [u8; 16] = [4; 16];
 const REPLACEMENT: [u8; 16] = [9; 16];
@@ -52,6 +56,11 @@ enum Seam {
     /// After `commit()` returned: the row, checkpoint and capture are durable,
     /// so a crash here must leave an acknowledged row behind.
     AfterCommit,
+    /// Inside a request activation's table transaction, after the statement
+    /// runs, with the activation's external effect already performed. Process
+    /// death rolls the transaction back without any durable rollback receipt,
+    /// so recovery cannot claim the external effect was undone.
+    ExternalEffect,
 }
 
 impl Seam {
@@ -59,6 +68,7 @@ impl Seam {
         match self {
             Self::BeforeCommit => "before-commit",
             Self::AfterCommit => "after-commit",
+            Self::ExternalEffect => "external-effect",
         }
     }
 
@@ -66,6 +76,7 @@ impl Seam {
         match value {
             "before-commit" => Some(Self::BeforeCommit),
             "after-commit" => Some(Self::AfterCommit),
+            "external-effect" => Some(Self::ExternalEffect),
             _ => None,
         }
     }
@@ -156,9 +167,42 @@ fn crash_child_body(seam: Seam, repository_path: &Path) {
         let context = state.begin_activation().await.expect("capture activation");
         let mutation = TableMutation::insert([7; 16], "records", vec![1], vec![9])
             .expect("valid typed table mutation");
+        if seam == Seam::ExternalEffect {
+            let (_, capability) = state
+                .reserve_request_with_admission(external_request(), EXTERNAL_FINGERPRINT)
+                .await
+                .expect("reserve the external-effect request");
+            let capability = capability.expect("a fresh reservation issues one capability");
+            state
+                .start_request_with_owner_and_admission(
+                    external_request(),
+                    EXTERNAL_FINGERPRINT,
+                    lease,
+                    capability,
+                )
+                .await
+                .expect("start the external-effect request");
+            perform_external_effect();
+            state
+                .commit_table_request_activation(
+                    lease,
+                    external_request(),
+                    EXTERNAL_FINGERPRINT,
+                    &context,
+                    &[mutation],
+                    [8; 32],
+                    TerminalOutcome::new(vec![20]).expect("valid terminal outcome"),
+                    &AbortAt(FaultPoint::AfterTableWrite),
+                    ActivationEffectReport::ExternalPossible,
+                )
+                .await
+                .expect("the crashing seam never returns");
+            unreachable!("the crash seam must abort the child process");
+        }
         let point = match seam {
             Seam::BeforeCommit => FaultPoint::AfterMutation,
             Seam::AfterCommit => FaultPoint::AfterCommit,
+            Seam::ExternalEffect => unreachable!("handled above"),
         };
         state
             .commit_table_activation(lease, &context, &[mutation], [8; 32], &AbortAt(point))
@@ -168,6 +212,32 @@ fn crash_child_body(seam: Seam, repository_path: &Path) {
     });
 }
 
+/// Performs the one external effect the child is allowed to make. The receipt
+/// is created exclusively, so a second execution fails instead of passing
+/// quietly, and its contents say the action ran once.
+fn perform_external_effect() {
+    use std::io::Write;
+
+    let receipt = PathBuf::from(env::var_os(CRASH_EFFECT_RECEIPT).expect("effect receipt path"));
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&receipt)
+        .expect("perform the external effect once");
+    file.write_all(b"external-effect\n")
+        .expect("record the external effect");
+}
+
+/// The request whose activation reports a possible external effect.
+const fn external_request() -> RequestIdentity {
+    RequestIdentity {
+        session_id: [5; 16],
+        request_id: [6; 16],
+    }
+}
+
+const EXTERNAL_FINGERPRINT: [u8; 32] = [7; 32];
+
 /// Runs this test binary again, crashing the child at `seam`.
 ///
 /// The child dies by SIGABRT on purpose, so the kernel would write a core dump
@@ -175,7 +245,12 @@ fn crash_child_body(seam: Seam, repository_path: &Path) {
 /// `/bin/sh` that disables core dumps for itself and then `exec`s this same
 /// test binary, so the limit survives into the crashing process without unsafe
 /// code or an extra dependency.
-fn run_crashing_child(seam: Seam, repository_path: &Path, test_name: &str) -> ExitStatus {
+fn run_crashing_child(
+    seam: Seam,
+    repository_path: &Path,
+    test_name: &str,
+    effect_receipt: Option<&Path>,
+) -> ExitStatus {
     let binary = env::current_exe().expect("resolve test binary");
     let mut command = if cfg!(target_os = "linux") {
         let mut command = Command::new("/bin/sh");
@@ -191,6 +266,9 @@ fn run_crashing_child(seam: Seam, repository_path: &Path, test_name: &str) -> Ex
         .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
         .env(CRASH_SEAM, OsString::from(seam.tag()))
         .env(CRASH_REPOSITORY, repository_path.as_os_str());
+    if let Some(receipt) = effect_receipt {
+        command.env(CRASH_EFFECT_RECEIPT, receipt.as_os_str());
+    }
     command.status().expect("run crashing child")
 }
 
@@ -212,7 +290,12 @@ fn crash_at_the_row_commit_barrier_keeps_the_committed_row() {
     }
 
     let (directory, repository) = repository();
-    let status = run_crashing_child(Seam::AfterCommit, directory.path(), COMMIT_BARRIER_TEST);
+    let status = run_crashing_child(
+        Seam::AfterCommit,
+        directory.path(),
+        COMMIT_BARRIER_TEST,
+        None,
+    );
     assert_eq!(
         status.signal(),
         Some(libc_sigabrt()),
@@ -275,7 +358,7 @@ fn crash_before_the_row_commit_barrier_acknowledges_nothing() {
     }
 
     let (directory, repository) = repository();
-    let status = run_crashing_child(Seam::BeforeCommit, directory.path(), PRE_COMMIT_TEST);
+    let status = run_crashing_child(Seam::BeforeCommit, directory.path(), PRE_COMMIT_TEST, None);
     assert_eq!(
         status.signal(),
         Some(libc_sigabrt()),
@@ -302,6 +385,138 @@ fn crash_before_the_row_commit_barrier_acknowledges_nothing() {
         );
 
         assert_only_the_lock_holder_fences_the_crashed_owner(&state, &repository).await;
+    });
+}
+
+/// Gate D, ORNA-PUB-009 and REQUEST-1 step 5: an activation that may have made
+/// an external effect, killed inside its table transaction, is recovered as
+/// `orphaned` with `ExternalEffectsUncertain`. No rollback is claimed, no
+/// rollback receipt exists to claim it, the retained payload is the uncertain
+/// one, and a retry of the same identity is served from the ledger instead of
+/// running the external action again.
+#[test]
+fn crash_after_an_external_effect_recovery_reports_uncertainty() {
+    if let Some(seam) = child_seam() {
+        crash_child_body(seam, &child_repository());
+        return;
+    }
+
+    let (directory, repository) = repository();
+    let receipt = directory.path().join("external-effect-receipt");
+    let status = run_crashing_child(
+        Seam::ExternalEffect,
+        directory.path(),
+        EXTERNAL_EFFECT_TEST,
+        Some(&receipt),
+    );
+    assert_eq!(
+        status.signal(),
+        Some(libc_sigabrt()),
+        "the child must die by signal inside the activation transaction"
+    );
+    assert_eq!(
+        fs::read_to_string(&receipt).expect("the child performed its external effect"),
+        "external-effect\n",
+        "the child performs the external effect exactly once, before the abort"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build parent runtime");
+    runtime.block_on(async {
+        let state = RuntimeState::open(&repository, identity(), [3; 32])
+            .await
+            .expect("the crashed activation reopens as valid recovery state");
+        assert_eq!(
+            state.committed_table_row("records", &[1]).await.unwrap(),
+            None,
+            "the activation's table transaction never committed"
+        );
+        let running = state
+            .request_status(external_request(), EXTERNAL_FINGERPRINT)
+            .await
+            .unwrap()
+            .expect("the started request is recorded");
+        assert_eq!(running.state, RequestState::Running);
+        assert_eq!(
+            running.terminal_outcome, None,
+            "no terminal claim survived the crash"
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(external_request(), EXTERNAL_FINGERPRINT)
+                .await
+                .unwrap(),
+            None,
+            "a crash leaves no disposition behind; recovery decides it"
+        );
+
+        let lost = state
+            .current_lease()
+            .await
+            .unwrap()
+            .expect("the crashed owner is still recorded");
+        assert_eq!(lost.owner_id, OWNER);
+        // Explicit takeover leaves the Running requests for recovery to settle
+        // with their own payloads; acquiring the lease would instead fence them
+        // straight into the conservative outcome.
+        let fence = state
+            .recover_abandoned(OWNER, REPLACEMENT)
+            .await
+            .expect("the runtime owner lock holder takes over the crashed owner");
+        let recovered = state
+            .recover_running_request_with_outcomes(
+                external_request(),
+                EXTERNAL_FINGERPRINT,
+                RequestOwner::from(lost),
+                fence,
+                TerminalOutcome::new(vec![21]).expect("rollback payload"),
+                TerminalOutcome::new(vec![22]).expect("uncertain payload"),
+            )
+            .await
+            .expect("recover the running request");
+        assert_eq!(
+            recovered.status.state,
+            RequestState::Orphaned,
+            "recovery marks the request orphaned rather than completed"
+        );
+        assert_eq!(
+            recovered.disposition,
+            RecoveryDisposition::ExternalEffectsUncertain,
+            "a possible external effect is reported as unproven, never as a proven rollback"
+        );
+        assert_eq!(
+            recovered.status.terminal_outcome,
+            Some(TerminalOutcome::new(vec![22]).expect("uncertain payload")),
+            "recovery retains the uncertain payload, not the rollback one"
+        );
+        assert_eq!(
+            state
+                .request_recovery_disposition(external_request(), EXTERNAL_FINGERPRINT)
+                .await
+                .unwrap(),
+            Some(RecoveryDisposition::ExternalEffectsUncertain)
+        );
+
+        let (replay, capability) = state
+            .reserve_request_with_admission(external_request(), EXTERNAL_FINGERPRINT)
+            .await
+            .expect("a retry of the same identity is served from the ledger");
+        assert_eq!(
+            replay.state,
+            RequestState::Orphaned,
+            "the ledger answers the retry with the recovered state"
+        );
+        assert!(
+            capability.is_none(),
+            "a recovered request never issues a new admission capability, so the external action cannot run again"
+        );
+        assert_eq!(
+            fs::read_to_string(&receipt).expect("the receipt survives"),
+            "external-effect\n",
+            "the external action ran exactly once across the crash and the retry"
+        );
     });
 }
 
