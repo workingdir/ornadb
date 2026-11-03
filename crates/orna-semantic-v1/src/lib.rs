@@ -566,6 +566,10 @@ impl Symbol {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TableSchema {
     pub fields: BTreeMap<String, Type>,
+    /// Visible field names in the order the declaration lists them. `fields`
+    /// is a map, so it cannot carry declaration order; `sys.Table.columns`
+    /// needs it (ORNA-SYS table columns, Gate G).
+    pub declaration_order: Vec<String>,
     /// None preserves a shape-only catalogue without inventing declaration rules.
     pub admission: Option<TableAdmission>,
     /// Nested nominal From implementations exported with the target type.
@@ -1996,6 +2000,7 @@ fn fixture_table(name: &str, row: Type) -> (String, Symbol) {
     let mut symbol = fixture_symbol(SymbolKind::Table, Type::Named(name.into()));
     if let Type::Record(fields) = row {
         symbol.table_schema = Some(TableSchema {
+            declaration_order: fields.keys().cloned().collect(),
             fields,
             admission: None,
             conversions: Vec::new(),
@@ -2021,6 +2026,7 @@ fn fixture_nominal_type(name: &str, row: Type) -> (String, Symbol) {
     let (name, mut symbol) = fixture_type(name, Type::Named(name.into()));
     if let Type::Record(fields) = row {
         symbol.table_schema = Some(TableSchema {
+            declaration_order: fields.keys().cloned().collect(),
             fields,
             admission: None,
             conversions: Vec::new(),
@@ -26800,6 +26806,19 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
     else {
         return None;
     };
+    let declaration_order: Vec<String> = members
+        .iter()
+        .filter_map(|member| match member {
+            TypeMember::Field {
+                visibility: true,
+                name,
+                ..
+            } => Some(name.clone()),
+            TypeMember::Field { .. }
+            | TypeMember::Assertion { .. }
+            | TypeMember::Implementation { .. } => None,
+        })
+        .collect();
     let fields = members
         .iter()
         .filter_map(|member| match member {
@@ -26835,6 +26854,7 @@ fn declared_nominal_schema(item: &Item) -> Option<TableSchema> {
         }
     }
     Some(TableSchema {
+        declaration_order,
         fields,
         // Only declaration-backed completeness is exported.  Default
         // expressions and private field types remain in the owning module.
@@ -26882,7 +26902,22 @@ fn declared_table_schema(item: &Item) -> Option<TableSchema> {
             }
         }
     }
+    // Key columns are declared in the table header, ahead of the members, and
+    // the row type carries them as fields, so the declaration order lists them
+    // first. `sys.Table.columns` reports this order.
+    let declaration_order: Vec<String> = keys
+        .iter()
+        .filter_map(|key| match &key.pattern {
+            Pattern::Name(name, _) => Some(name.clone()),
+            _ => None,
+        })
+        .chain(members.iter().filter_map(|member| match member {
+            orna_syntax_v1::TableMember::Field { name, .. } => Some(name.clone()),
+            _ => None,
+        }))
+        .collect();
     Some(TableSchema {
+        declaration_order,
         fields,
         admission: Some(TableAdmission {
             required,
