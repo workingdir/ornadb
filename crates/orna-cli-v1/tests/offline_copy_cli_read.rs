@@ -322,7 +322,10 @@ async fn a_restored_copy_answers_query_history_and_a_payload_read_offline() {
         .expect("the archive holds a snapshots directory")
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .find(|path| path.extension().is_some_and(|extension| extension == "bundle"))
+        .find(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "bundle")
+        })
         .expect("the archive holds one bundle per snapshot");
     let bundle_bytes = std::fs::read(&bundle).expect("read the recorded bundle");
     std::fs::write(&bundle, &bundle_bytes[..bundle_bytes.len() / 4])
