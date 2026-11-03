@@ -797,6 +797,12 @@ mod tests {
 
     fn media_schema() -> TableSchema {
         TableSchema {
+            declaration_order: vec![
+                "id".to_owned(),
+                "title".to_owned(),
+                "content".to_owned(),
+                "cover".to_owned(),
+            ],
             fields: BTreeMap::from([
                 ("id".to_owned(), Type::Text),
                 ("title".to_owned(), Type::Text),
