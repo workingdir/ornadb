@@ -202,19 +202,41 @@ jobs:
               > "$out/$record.evidence.json"
           }
 
+          pipeline=""
           # The runner cancels with SIGTERM before it kills the job, so record the
-          # partial run instead of losing it.
-          trap 'write_record 143 timed-out; exit 143' TERM INT
+          # partial run instead of losing it. The handler stops the pipeline and
+          # then writes the record; `set +e` keeps `wait`'s 143 from aborting the
+          # handler before the record exists.
+          stop_on_cancel() {
+            set +e
+            if [ -n "$pipeline" ]; then
+              # The pipeline runs in its own process group, so the group is
+              # killed: killing only the wrapper leaves cargo and tee running
+              # and `wait` would block until the test finished naturally.
+              kill -TERM -"$pipeline" 2>/dev/null
+              wait "$pipeline" 2>/dev/null
+            fi
+            write_record 143 timed-out
+            exit 143
+          }
+          trap stop_on_cancel TERM INT
 
           # Stream the output so the job log shows the phase lines while the run
           # is in progress, and keep the command's own status through the pipe.
+          # The pipeline runs in the background and is waited on: bash defers a
+          # trapped signal until the foreground pipeline returns, and this one is
+          # killed rather than returning, so a foreground pipeline would never
+          # reach the handler above.
           # The runner's bash runs with -e, so a failing command must not abort the
           # step before the record that reports it is written.
+          export ORNA_GATE_C_COMMAND="$command"
+          export ORNA_GATE_C_LOG="$log"
           set +e
-          # shellcheck disable=SC2086
-          $command 2>&1 | tee "$log"
-          exit_code=${PIPESTATUS[0]}
+          setsid bash -c 'bash -c "$ORNA_GATE_C_COMMAND" 2>&1 | tee "$ORNA_GATE_C_LOG"' &
+          pipeline=$!
           set -e
+          wait "$pipeline"
+          exit_code=$?
           if [ "$exit_code" -ne 0 ]; then
             state=failed
           elif ! grep -qE '^test result:' "$log"; then
