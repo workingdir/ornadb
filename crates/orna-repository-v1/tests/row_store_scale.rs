@@ -33,6 +33,20 @@ static ALLOCATED_BYTES: AtomicU64 = AtomicU64::new(0);
 static HYDRATION_FETCHES: AtomicU64 = AtomicU64::new(0);
 static HYDRATION_NANOS: AtomicU64 = AtomicU64::new(0);
 const MILLION_ROWS_ENV: &str = "ORNA_ORP1_MILLION_ROWS";
+/// Cuts the ignored one-million-row case down for a local measurement of how
+/// each phase grows; the gated CI run never sets it, so it always runs the
+/// full million. Small counts do not hold every scale assertion: below a few
+/// tens of thousands of rows a single fetched page is more than one per cent
+/// of the table, so the incremental-maintenance ratio check fails by design.
+const SCALE_ROWS_ENV: &str = "ORNA_ORP1_SCALE_ROWS";
+
+/// Row count the gated case runs, or the override the measurement uses.
+fn scale_rows() -> u64 {
+    std::env::var(SCALE_ROWS_ENV)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(SCALE_ROWS)
+}
 
 struct Phase {
     label: &'static str,
@@ -1503,7 +1517,7 @@ fn exercise_index_churn(fixture: &Fixture) {
         "the overflowed row's bytes are written as new blobs"
     );
     report_index_churn(fixture.row_count, "overflow_row", overflow_churn);
-    let after_churn = object_inventory(&clone_path);
+    let after_churn = inventory("inventory_after_churn", fixture.row_count, &clone_path);
     assert!(
         fixture
             .media_payload_oids
@@ -1529,8 +1543,8 @@ fn run_case(fixture: &Fixture) {
         "clone must be a blob-filtered partial clone"
     );
 
-    let source_inventory = object_inventory(fixture.root.path());
-    let clone_inventory = object_inventory(&clone_path);
+    let source_inventory = inventory("inventory_source", fixture.row_count, fixture.root.path());
+    let clone_inventory = inventory("inventory_clone", fixture.row_count, &clone_path);
     assert!(
         clone_inventory.blob_count() < source_inventory.blob_count(),
         "partial clone must omit row-node data blobs"
@@ -1570,7 +1584,7 @@ fn run_case(fixture: &Fixture) {
         .open_native_graph(&snapshot)
         .expect("open graph for exact row snapshot");
     let load_elapsed = load_started.elapsed();
-    let after_load = object_inventory(&clone_path);
+    let after_load = inventory("inventory_after_load", fixture.row_count, &clone_path);
     assert!(
         fixture
             .bootstrap_blob_oids
@@ -1609,7 +1623,7 @@ fn run_case(fixture: &Fixture) {
         decode_single_uint_array(point.value().encoded_fields().expect("inline bucket field")),
         bucket_for(point_key)
     );
-    let after_point = object_inventory(&clone_path);
+    let after_point = inventory("inventory_after_point", fixture.row_count, &clone_path);
     let point_metadata = index_data_delta(&fixture.index_data_blobs, &after_load, &after_point);
     let point_tree_delta = tree_object_delta(&after_load, &after_point);
 
@@ -1623,7 +1637,7 @@ fn run_case(fixture: &Fixture) {
     let warm_point_elapsed = warm_point_started.elapsed();
     let warm_point_allocations = allocation_delta(before_warm_point, allocations());
     assert_eq!(warm_point.key(), &TypedKey::UInt(point_key));
-    let after_warm_point = object_inventory(&clone_path);
+    let after_warm_point = inventory("inventory_after_warm_point", fixture.row_count, &clone_path);
     assert_eq!(
         after_point.objects, after_warm_point.objects,
         "warm point query transfers no objects"
@@ -1654,7 +1668,7 @@ fn run_case(fixture: &Fixture) {
             bucket_for(key)
         );
     }
-    let after_range = object_inventory(&clone_path);
+    let after_range = inventory("inventory_after_range", fixture.row_count, &clone_path);
     let range_metadata =
         index_data_delta(&fixture.index_data_blobs, &after_warm_point, &after_range);
     let range_tree_delta = tree_object_delta(&after_warm_point, &after_range);
@@ -1667,7 +1681,7 @@ fn run_case(fixture: &Fixture) {
     assert_eq!(warm_range_rows.len(), range_count);
     let warm_range_elapsed = warm_range_started.elapsed();
     let warm_range_allocations = allocation_delta(before_warm_range, allocations());
-    let after_warm_range = object_inventory(&clone_path);
+    let after_warm_range = inventory("inventory_after_warm_range", fixture.row_count, &clone_path);
     assert_eq!(
         after_range.objects, after_warm_range.objects,
         "warm range query transfers no objects"
@@ -1683,7 +1697,7 @@ fn run_case(fixture: &Fixture) {
     );
     let missing_elapsed = missing_started.elapsed();
     let missing_allocations = allocation_delta(before_missing, allocations());
-    let after_missing = object_inventory(&clone_path);
+    let after_missing = inventory("inventory_after_missing", fixture.row_count, &clone_path);
     let missing_metadata =
         index_data_delta(&fixture.index_data_blobs, &after_range, &after_missing);
     let missing_tree_delta = tree_object_delta(&after_range, &after_missing);
@@ -1697,7 +1711,11 @@ fn run_case(fixture: &Fixture) {
     );
     let warm_missing_elapsed = warm_missing_started.elapsed();
     let warm_missing_allocations = allocation_delta(before_warm_missing, allocations());
-    let after_warm_missing = object_inventory(&clone_path);
+    let after_warm_missing = inventory(
+        "inventory_after_warm_missing",
+        fixture.row_count,
+        &clone_path,
+    );
     assert_eq!(
         after_missing.objects, after_warm_missing.objects,
         "warm missing-key query transfers no objects"
@@ -1713,7 +1731,7 @@ fn run_case(fixture: &Fixture) {
     let scan_allocations = allocation_delta(before_scan, allocations());
     assert_eq!(scanned, fixture.row_count);
     assert_eq!(matches, expected_bucket_count(fixture.row_count));
-    let after_scan = object_inventory(&clone_path);
+    let after_scan = inventory("inventory_after_scan", fixture.row_count, &clone_path);
     assert!(
         fixture
             .index_data_blobs
@@ -1732,7 +1750,7 @@ fn run_case(fixture: &Fixture) {
     );
     let warm_scan_elapsed = warm_scan_started.elapsed();
     let warm_scan_allocations = allocation_delta(before_warm_scan, allocations());
-    let after_warm_scan = object_inventory(&clone_path);
+    let after_warm_scan = inventory("inventory_after_warm_scan", fixture.row_count, &clone_path);
     assert_eq!(
         after_scan.objects, after_warm_scan.objects,
         "warm unindexed scan transfers no objects"
@@ -1904,6 +1922,12 @@ impl ObjectInventory {
             .filter(|object| object.kind == ObjectKind::Tree)
             .count()
     }
+}
+
+/// Enumerate every object and print the phase, because this walk is the
+/// expensive step at scale and the gate needs to see it in the log.
+fn inventory(label: &'static str, rows: u64, repository: &Path) -> ObjectInventory {
+    timed(label, rows, || object_inventory(repository))
 }
 
 fn object_inventory(repository: &Path) -> ObjectInventory {
@@ -2549,17 +2573,14 @@ fn orp1_row_store_one_million_rows() {
         std::env::var_os(MILLION_ROWS_ENV).is_some(),
         "ORP-1 one-million-row case needs {MILLION_ROWS_ENV}=1; refusing to report a skipped run as passed"
     );
-    let million = timed("build_fixture", SCALE_ROWS, || {
-        build_fixture(SCALE_ROWS, Fault::None)
-    });
+    let rows = scale_rows();
+    let million = timed("build_fixture", rows, || build_fixture(rows, Fault::None));
     assert!(million.leaf_pages > 1);
     assert!(million.branch_pages > 0);
-    timed("run_case", SCALE_ROWS, || run_case(&million));
-    timed("media_metadata", SCALE_ROWS, || {
-        exercise_media_metadata(&million)
-    });
-    timed("concurrent_writes", SCALE_ROWS, || {
+    timed("run_case", rows, || run_case(&million));
+    timed("media_metadata", rows, || exercise_media_metadata(&million));
+    timed("concurrent_writes", rows, || {
         exercise_concurrent_writes(&million)
     });
-    timed("index_churn", SCALE_ROWS, || exercise_index_churn(&million));
+    timed("index_churn", rows, || exercise_index_churn(&million));
 }
