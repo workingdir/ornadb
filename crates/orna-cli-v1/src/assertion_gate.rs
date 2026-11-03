@@ -59,7 +59,7 @@ fn unvalidated(cause: &str) -> CandidateAssertionRefusal {
 /// Admits the project's tables: their names and schemas, each analysed under
 /// the production providers. Fails with the cause when the project cannot be
 /// analysed or two admitted tables share a name.
-fn admitted_tables_of(
+pub(crate) fn admitted_tables_of(
     project: &orna_project_v1::LoadedProject,
 ) -> Result<(Vec<String>, BTreeMap<String, orna_semantic_v1::TableSchema>), &'static str> {
     let catalogue = semantic_catalogue(project).map_err(|_| "project has no semantic catalogue")?;
