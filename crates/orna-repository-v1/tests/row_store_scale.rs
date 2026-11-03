@@ -1711,7 +1711,11 @@ fn run_case(fixture: &Fixture) {
     );
     let warm_missing_elapsed = warm_missing_started.elapsed();
     let warm_missing_allocations = allocation_delta(before_warm_missing, allocations());
-    let after_warm_missing = inventory("inventory_after_warm_missing", fixture.row_count, &clone_path);
+    let after_warm_missing = inventory(
+        "inventory_after_warm_missing",
+        fixture.row_count,
+        &clone_path,
+    );
     assert_eq!(
         after_missing.objects, after_warm_missing.objects,
         "warm missing-key query transfers no objects"
