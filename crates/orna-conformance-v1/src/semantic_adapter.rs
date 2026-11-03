@@ -30,6 +30,7 @@ use orna_evaluator_v1::{
 use orna_foundation_v1::{
     Diagnostic, DiagnosticSeverity, OvbRaw, SafeText, Value, compare_primary_keys,
 };
+use orna_project_v1::{LoadedProject, ProjectLoader, ResolvedTableSchema, admit_format3_row};
 use orna_repository_v1::Repository;
 use orna_runtime_v1::{
     ActivationEffectReport, CheckpointResetRequest, DeclaredEffectSet, FaultInjector, FaultPoint,
@@ -40,7 +41,7 @@ use orna_runtime_v1::{
     StreamSourcePoll, StreamStep, StreamTableCandidateValidator, StreamTableDeliveryError,
     StreamTableMutationBatch, StreamValidatedTableDeliveryCommit,
     StreamValidatedTableMutationBatch, TableActivationCandidateValidator, TableActivationError,
-    TableMutation, TerminalOutcome, ValidatedTableActivationCommit,
+    TableMutation, TableObjectId, TerminalOutcome, ValidatedTableActivationCommit,
     ValidatedTableRequestActivationCommit, WriterLease,
 };
 use orna_semantic_v1::{
@@ -3014,6 +3015,8 @@ impl DurableTransactionalEvaluator {
         project: &ProjectUnit,
         root_entry: &str,
         arguments: &Environment,
+        loaded_project: &LoadedProject,
+        table_object_ids: &BTreeMap<String, TableObjectId>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let state =
             RuntimeState::open(target.repository, target.identity, target.initial_digest).await?;
@@ -3084,6 +3087,8 @@ impl DurableTransactionalEvaluator {
             root_entry,
             admitted,
             arguments,
+            loaded_project,
+            table_object_ids,
         )
         .await
     }
@@ -3898,13 +3903,27 @@ impl DurableTransactionalEvaluator {
         entry: &str,
         admitted: AdmittedTransaction,
         arguments: &Environment,
+        loaded_project: &LoadedProject,
+        table_object_ids: &BTreeMap<String, TableObjectId>,
     ) -> Result<StageOutcome<Diagnostic>, RuntimeError> {
         let tables = admitted
             .key_fields
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>();
-        let snapshot = match state.begin_table_activation(&tables).await {
+        let identities = tables
+            .iter()
+            .map(|table| {
+                table_object_ids.get(*table).and_then(|object_id| {
+                    orna_runtime_v1::RuntimeTableIdentity::new((*table).to_owned(), *object_id).ok()
+                })
+            })
+            .collect::<Option<Vec<_>>>();
+        let activated = match identities {
+            Some(identities) => state.begin_admitted_table_activation(&identities).await,
+            None => state.begin_table_activation(&tables).await,
+        };
+        let snapshot = match activated {
             Ok(snapshot) => snapshot,
             Err(_) => {
                 return fail_observed_request_runtime(state, request, fingerprint, lease).await;
@@ -3974,6 +3993,13 @@ impl DurableTransactionalEvaluator {
                 .await;
             }
         };
+        let mutations =
+            match admit_recorded_rows(repository, loaded_project, table_object_ids, mutations) {
+                Ok(mutations) => mutations,
+                Err(()) => {
+                    return fail_observed_request_runtime(state, request, fingerprint, lease).await;
+                }
+            };
         if mutations.is_empty() {
             return terminalize_observed_outcome(
                 state,
@@ -3995,7 +4021,7 @@ impl DurableTransactionalEvaluator {
             &admitted.table_fields,
             &admitted.table_assertions,
             &admitted.module_assertions,
-            Arc::new(BTreeMap::new()),
+            Arc::new(table_object_ids.clone()),
             self.limits,
         );
         let outcome = StageOutcome::Passed;
@@ -14600,4 +14626,67 @@ mod list_stream_tests {
         assert_eq!(descriptor.1, "std.text");
         assert_ne!(descriptor.2, [0; 32]);
     }
+}
+
+fn admit_recorded_rows(
+    repository: &Repository,
+    project: &LoadedProject,
+    table_object_ids: &BTreeMap<String, TableObjectId>,
+    mutations: Vec<TableMutation>,
+) -> Result<Vec<TableMutation>, ()> {
+    let Ok(Some(head)) = repository.head() else {
+        return Ok(mutations);
+    };
+    let Ok(format) = repository.open_pinned_format_context(head.as_str()) else {
+        return Ok(mutations);
+    };
+    let loader = ProjectLoader::default();
+    let mut schemas: BTreeMap<String, (ResolvedTableSchema, orna_value_v1::Format3Context)> =
+        BTreeMap::new();
+    for (table, object_id) in table_object_ids {
+        let Ok(schema) =
+            loader.resolve_committed_source_table_schema(repository, &head, *object_id)
+        else {
+            continue;
+        };
+        let Ok(context) = format.open_value_context(object_id.bytes()) else {
+            continue;
+        };
+        schemas.insert(table.clone(), (schema, context));
+    }
+    let mut admitted = Vec::with_capacity(mutations.len());
+    for mutation in mutations {
+        let Some((schema, context)) = schemas.get(mutation.table()) else {
+            admitted.push(mutation);
+            continue;
+        };
+        let Some(value) = mutation.value() else {
+            admitted.push(match table_object_ids.get(mutation.table()) {
+                Some(identity) => mutation.with_table_object_id(*identity),
+                None => mutation,
+            });
+            continue;
+        };
+        let Ok(decoded) = orna_value_v1::Value::decode(value) else {
+            return Err(());
+        };
+        let Ok(row) = admit_format3_row(
+            project,
+            mutation.key(),
+            decoded.raw(),
+            schema,
+            context,
+            Vec::new(),
+            mutation.id(),
+        ) else {
+            admitted.push(match table_object_ids.get(mutation.table()) {
+                Some(identity) => mutation.with_table_object_id(*identity),
+                None => mutation,
+            });
+            continue;
+        };
+        let (admitted_row, _bindings, _schema) = row.into_mutation_and_bindings();
+        admitted.push(admitted_row);
+    }
+    Ok(admitted)
 }

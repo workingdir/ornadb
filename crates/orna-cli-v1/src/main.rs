@@ -1995,7 +1995,27 @@ fn run_project_invocation_with_arguments(
         )
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
-    let project = execution_project(&project);
+    let table_object_ids = committed_table_object_ids(&repository, &project)?;
+    let head = repository
+        .head()
+        .map_err(|_| {
+            Diagnostic::target(
+                "E2200",
+                "repository HEAD could not be read",
+                "run the invocation inside an initialized repository",
+            )
+        })?
+        .ok_or_else(|| {
+            Diagnostic::target(
+                "E2200",
+                "repository HEAD is unborn",
+                "commit the project source before running it",
+            )
+        })?;
+    let loaded_project = orna_project_v1::ProjectLoader::default()
+        .load_committed_snapshot(&repository, &head)
+        .map_err(project_load_diagnostic)?;
+    let project = execution_project(&loaded_project);
     let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2028,6 +2048,8 @@ fn run_project_invocation_with_arguments(
                     &project,
                     root_entry,
                     arguments,
+                    &loaded_project,
+                    &table_object_ids,
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
@@ -2447,6 +2469,23 @@ struct ReplTransactions {
 /// table that does not, so the caller fails closed with a reason. The REPL and
 /// one-shot `run` both bind tables through this function, so neither resolves a
 /// table by name alone.
+fn committed_table_object_ids(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Result<std::collections::BTreeMap<String, TableObjectId>, Diagnostic> {
+    let (table_names, _schemas) = crate::assertion_gate::admitted_tables_of(project)
+        .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
+    let head = repository
+        .head()
+        .map_err(|_| unavailable_table_identity("HEAD could not be read".into()))?
+        .ok_or_else(|| unavailable_table_identity("HEAD is unborn".into()))?;
+    let identities = committed_table_identities(repository, &head, table_names)?;
+    Ok(identities
+        .into_iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect())
+}
+
 fn committed_table_identities(
     repository: &orna_repository_v1::Repository,
     commit: &orna_repository_v1::GitCommitRef,
