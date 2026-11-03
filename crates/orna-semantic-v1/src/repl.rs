@@ -182,6 +182,7 @@ impl ReplContext {
                     let mut plans = Vec::new();
                     let inferred = check_item(
                         item,
+                        0,
                         &mut symbols,
                         &scope,
                         &scope.table_rows,
