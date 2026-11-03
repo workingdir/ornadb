@@ -2449,10 +2449,7 @@ async fn orp1_production_writer_ten_rows() {
     let row_map = format
         .load_row_map(relation_id)
         .expect("load the relation row map");
-    assert_eq!(
-        row_map.version().row_count(),
-        Some(PRODUCTION_ROWS),
-    );
+    assert_eq!(row_map.version().row_count(), Some(PRODUCTION_ROWS),);
     let rows = format3::committed_store_rows(&repository, relation_id);
     // The fixture reader asks for a key range of 16 rows, so a larger probe
     // reads at most 16 back while the row map above still counts them all.
