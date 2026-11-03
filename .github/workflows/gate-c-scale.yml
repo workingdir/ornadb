@@ -71,13 +71,17 @@ jobs:
             local started started_epoch exit_code elapsed passed failed state
             started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             started_epoch=$(date +%s)
+            # The runner's bash runs with -e, so a failing command must not abort
+            # the step before the record that reports it is written.
+            set +e
             # shellcheck disable=SC2086
             $command > "$log" 2>&1
             exit_code=$?
+            set -e
             cat "$log"
             elapsed=$(( $(date +%s) - started_epoch ))
-            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
-            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}')
+            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
             if [ "$exit_code" -ne 0 ]; then
               state=failed
             elif [ "$passed" -eq 0 ]; then
@@ -85,6 +89,12 @@ jobs:
             else
               state=passed
             fi
+            # The harness prints one stderr line per phase, with the elapsed
+            # milliseconds, promisor fetches and fetched bytes for that phase.
+            # Persist them instead of a placeholder string: these are the
+            # measured counters the gate reports.
+            local phases
+            phases=$(sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' "$log" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})' || true)
             jq -n \
               --arg schema "orna-gate-c-evidence/1" \
               --arg gate "C" \
@@ -103,8 +113,8 @@ jobs:
               --argjson failed "$failed" \
               --arg state "$state" \
               --arg log_sha256 "$(sha256sum "$log" | cut -d' ' -f1)" \
-              --arg objects "not-reported: the harness prints phase timings to stderr only" \
-              '{schema:$schema, gate:$gate, job:$job, record:$record, commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$toolchain, started_utc:$started, elapsed_seconds:$elapsed, exit_code:$exit_code, tests_passed:$passed, tests_failed:$failed, state:$state, objects_read_written:$objects, log_sha256:$log_sha256}' \
+              --argjson phases "${phases:-[]}" \
+              '{schema:$schema, gate:$gate, job:$job, record:$record, commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$toolchain, started_utc:$started, elapsed_seconds:$elapsed, exit_code:$exit_code, tests_passed:$passed, tests_failed:$failed, state:$state, phases:$phases, log_sha256:$log_sha256}' \
               > "$out/$record.evidence.json"
             cat "$out/$record.evidence.json"
             if [ "$state" != passed ]; then
@@ -154,42 +164,65 @@ jobs:
           log="$out/$record.log"
           started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           started_epoch=$(date +%s)
+
+          # The evidence record is written from the log, so a run that is killed
+          # still records what it measured. The one-million-row case has
+          # previously been cancelled at the job timeout with no record at all,
+          # which left the gate with no evidence and no way to see which phase
+          # consumed the budget. `phases` carries the harness's own per-phase
+          # stderr lines, so the next run answers that question in its log.
+          write_record() {
+            local exit_code="$1" state="$2"
+            local elapsed passed failed phases
+            elapsed=$(( $(date +%s) - started_epoch ))
+            passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}' || true)
+            phases=$(sed -nE 's/^ORP-1 phase label=([^ ]+) rows=([0-9]+) ms=([0-9]+) promisor_fetches=([0-9]+) promisor_fetch_ms=([0-9]+)$/\1 \2 \3 \4 \5/p' "$log" 2>/dev/null | jq -R -s -c 'split("\n") | map(select(length > 0) | split(" ") | {label: .[0], rows: (.[1] | tonumber), milliseconds: (.[2] | tonumber), promisor_fetches: (.[3] | tonumber), promisor_fetch_milliseconds: (.[4] | tonumber)})' || true)
+            jq -n \
+              --arg schema "orna-gate-c-evidence/1" \
+              --arg gate "C" \
+              --arg job "gate-c-million" \
+              --arg rows "1000000" \
+              --arg record "$record" \
+              --arg commit "$GITHUB_SHA" \
+              --arg ref "$GITHUB_REF" \
+              --arg event "$GITHUB_EVENT_NAME" \
+              --arg run_id "$GITHUB_RUN_ID" \
+              --arg command "$command" \
+              --arg toolchain "$(rustc --version)" \
+              --arg started "$started" \
+              --argjson elapsed "$elapsed" \
+              --argjson exit_code "$exit_code" \
+              --argjson passed "$passed" \
+              --argjson failed "$failed" \
+              --arg state "$state" \
+              --arg log_sha256 "$(sha256sum "$log" 2>/dev/null | cut -d' ' -f1)" \
+              --argjson phases "${phases:-[]}" \
+              '{schema:$schema, gate:$gate, job:$job, rows:($rows|tonumber), record:$record, commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$toolchain, started_utc:$started, elapsed_seconds:$elapsed, exit_code:$exit_code, tests_passed:$passed, tests_failed:$failed, state:$state, phases:$phases, log_sha256:$log_sha256}' \
+              > "$out/$record.evidence.json"
+          }
+
+          # The runner cancels with SIGTERM before it kills the job, so record the
+          # partial run instead of losing it.
+          trap 'write_record 143 timed-out; exit 143' TERM INT
+
+          # Stream the output so the job log shows the phase lines while the run
+          # is in progress, and keep the command's own status through the pipe.
+          # The runner's bash runs with -e, so a failing command must not abort the
+          # step before the record that reports it is written.
+          set +e
           # shellcheck disable=SC2086
-          $command > "$log" 2>&1
-          exit_code=$?
-          cat "$log"
-          elapsed=$(( $(date +%s) - started_epoch ))
-          passed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. ([0-9]+) passed.*/\1/p' | awk '{s+=$1} END {print s+0}')
-          failed=$(grep -E '^test result:' "$log" | sed -nE 's/^test result: [A-Za-z]+\. [0-9]+ passed; ([0-9]+) failed.*/\1/p' | awk '{s+=$1} END {print s+0}')
+          $command 2>&1 | tee "$log"
+          exit_code=${PIPESTATUS[0]}
+          set -e
           if [ "$exit_code" -ne 0 ]; then
             state=failed
-          elif [ "$passed" -eq 0 ]; then
+          elif ! grep -qE '^test result:' "$log"; then
             state=not-executed
           else
             state=passed
           fi
-          jq -n \
-            --arg schema "orna-gate-c-evidence/1" \
-            --arg gate "C" \
-            --arg job "gate-c-million" \
-            --arg rows "1000000" \
-            --arg record "$record" \
-            --arg commit "$GITHUB_SHA" \
-            --arg ref "$GITHUB_REF" \
-            --arg event "$GITHUB_EVENT_NAME" \
-            --arg run_id "$GITHUB_RUN_ID" \
-            --arg command "$command" \
-            --arg toolchain "$(rustc --version)" \
-            --arg started "$started" \
-            --argjson elapsed "$elapsed" \
-            --argjson exit_code "$exit_code" \
-            --argjson passed "$passed" \
-            --argjson failed "$failed" \
-            --arg state "$state" \
-            --arg log_sha256 "$(sha256sum "$log" | cut -d' ' -f1)" \
-            --arg objects "not-reported: the harness prints phase timings to stderr only" \
-            '{schema:$schema, gate:$gate, job:$job, rows:($rows|tonumber), record:$record, commit:$commit, ref:$ref, event:$event, run_id:$run_id, command:$command, toolchain:$toolchain, started_utc:$started, elapsed_seconds:$elapsed, exit_code:$exit_code, tests_passed:$passed, tests_failed:$failed, state:$state, objects_read_written:$objects, log_sha256:$log_sha256}' \
-            > "$out/$record.evidence.json"
+          write_record "$exit_code" "$state"
           cat "$out/$record.evidence.json"
           test "$state" = passed
 
