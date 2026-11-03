@@ -2271,11 +2271,6 @@ struct AdmittedProductionRows {
     freeze: orna_runtime_v1::PublicationFreeze,
 }
 
-/// Rows admitted by the production-writer probe. Kept at ten so the case is
-/// cheap enough for the scale suite; raise it locally to measure how the
-/// publication cost grows.
-const PRODUCTION_ROWS: u64 = 10;
-
 /// Admits ten rows through a runtime request commit and freezes the admitted
 /// prefix. Publication is left to the caller.
 async fn admit_ten_production_rows() -> AdmittedProductionRows {
@@ -2323,14 +2318,13 @@ async fn admit_ten_production_rows() -> AdmittedProductionRows {
         .head()
         .expect("read repository head")
         .expect("format-3 fixture has a head");
-    for index in 0..PRODUCTION_ROWS {
-        // Each request gets its own wide ordinal so request, mutation and
-        // digest identities never collide across the rows. The wide path is
-        // used because a byte only carries about twenty-five of them, which is
-        // too few to measure how publication cost scales with row count.
-        let ordinal = u16::try_from(index * 6 + 1).expect("ordinal fits two bytes");
-        let key = format!("production-writer-{index:04}");
-        media_commit::commit_capture_pending_wide(
+    for index in 0..10_u64 {
+        // Each request gets its own ordinal band so request, mutation and
+        // digest identities never collide across the ten rows. Ordinal 0 is
+        // excluded: an all-zero session id is an invalid runtime identity.
+        let ordinal = u8::try_from(index * 10 + 1).expect("ordinal fits a byte");
+        let key = format!("production-writer-{index:02}");
+        media_commit::commit_capture_pending(
             &repository,
             &state,
             writer,
@@ -2360,7 +2354,7 @@ async fn admit_ten_production_rows() -> AdmittedProductionRows {
         .expect("read frozen runtime range");
     assert_eq!(
         frozen.len(),
-        usize::try_from(PRODUCTION_ROWS).expect("row count fits a pointer"),
+        10,
         "every admitted row is in the frozen range"
     );
     AdmittedProductionRows {
@@ -2449,18 +2443,12 @@ async fn orp1_production_writer_ten_rows() {
     let row_map = format
         .load_row_map(relation_id)
         .expect("load the relation row map");
-    assert_eq!(
-        row_map.version().row_count(),
-        Some(PRODUCTION_ROWS),
-    );
+    assert_eq!(row_map.version().row_count(), Some(10));
     let rows = format3::committed_store_rows(&repository, relation_id);
-    // The fixture reader asks for a key range of 16 rows, so a larger probe
-    // reads at most 16 back while the row map above still counts them all.
-    let expected_rows = usize::try_from(PRODUCTION_ROWS.min(16)).expect("row count fits a pointer");
     assert_eq!(
         rows.len(),
-        expected_rows,
-        "the store serves the published rows"
+        10,
+        "ten committed rows are readable from the store"
     );
 
     let graph = format
