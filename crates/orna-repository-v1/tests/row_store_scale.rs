@@ -1827,7 +1827,22 @@ fn scan_unindexed_bucket(
     let mut next_key = 0u64;
     let mut scanned = 0u64;
     let mut matches = 0u64;
+    let mut pages = 0u64;
+    let mut heartbeat = Instant::now();
     while next_key < row_count {
+        // The phase line is printed only when the walk ends, so a run that is
+        // cancelled at the job timeout leaves no trace of how far the walk got
+        // or how its cost grew. One line a minute bounds that: the next
+        // cancelled Gate C run shows the rows reached and the pages read, which
+        // is the growth curve the gate needs to size the case.
+        pages += 1;
+        if heartbeat.elapsed() >= Duration::from_secs(60) {
+            eprintln!(
+                "ORP-1 progress label=cold_unindexed_scan pages={pages} rows={scanned} elapsed_s={}",
+                heartbeat.elapsed().as_secs()
+            );
+            heartbeat = Instant::now();
+        }
         let range = KeyRange::new(
             Some(TypedKey::UInt(next_key)),
             Some(TypedKey::UInt(row_count)),
