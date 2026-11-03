@@ -1995,7 +1995,18 @@ fn run_project_invocation_with_arguments(
         )
     })?;
     let std_snapshot = sys_host::std_snapshot_pin(&project);
-    let project = execution_project(&project);
+    let table_object_ids = committed_table_object_ids(&repository, &project)?;
+    let storage_orders = committed_storage_orders(&repository, &project)?;
+    // Admission is bound to the committed snapshot when there is one; a
+    // repository with no commit yet runs from the worktree project, which is
+    // what the seed test exercises (bead ornadb-jm0d).
+    let loaded_project = match repository.head() {
+        Ok(Some(head)) => orna_project_v1::ProjectLoader::default()
+            .load_committed_snapshot(&repository, &head)
+            .map_err(project_load_diagnostic)?,
+        _ => project.clone(),
+    };
+    let project = execution_project(&loaded_project);
     let owner_id = invocation_owner_id();
     let outcome = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -2028,6 +2039,9 @@ fn run_project_invocation_with_arguments(
                     &project,
                     root_entry,
                     arguments,
+                    &loaded_project,
+                    &table_object_ids,
+                    &storage_orders,
                 ),
         )
         .map_err(|error| durable_invocation_failed(&error))?;
@@ -2447,6 +2461,49 @@ struct ReplTransactions {
 /// table that does not, so the caller fails closed with a reason. The REPL and
 /// one-shot `run` both bind tables through this function, so neither resolves a
 /// table by name alone.
+/// The stored field order of every admitted table at HEAD.
+///
+/// A published row is positional in this order, which is not the declaration
+/// order, so the run path rebuilds seeded records from it (bead ornadb-jm0d).
+fn committed_storage_orders(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Result<std::collections::BTreeMap<String, Vec<String>>, Diagnostic> {
+    let (table_names, schemas) = crate::assertion_gate::admitted_tables_of(project)
+        .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
+    let Ok(Some(head)) = repository.head() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok(tables) = committed_table_identities(repository, &head, table_names) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok((_rows, storage_orders)) = committed_rows_at(repository, &head, &schemas, &tables)
+    else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    Ok(storage_orders)
+}
+
+fn committed_table_object_ids(
+    repository: &orna_repository_v1::Repository,
+    project: &orna_project_v1::LoadedProject,
+) -> Result<std::collections::BTreeMap<String, TableObjectId>, Diagnostic> {
+    let (table_names, _schemas) = crate::assertion_gate::admitted_tables_of(project)
+        .map_err(|_| unavailable_table_identity("project tables could not be identified".into()))?;
+    // A repository with no commit yet has no admitted identities, and the run
+    // still has to execute (bead ornadb-jm0d).
+    let Ok(Some(head)) = repository.head() else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    let Ok(identities) = committed_table_identities(repository, &head, table_names) else {
+        return Ok(std::collections::BTreeMap::new());
+    };
+    Ok(identities
+        .into_iter()
+        .map(|table| (table.table().to_owned(), table.object_id()))
+        .collect())
+}
+
 fn committed_table_identities(
     repository: &orna_repository_v1::Repository,
     commit: &orna_repository_v1::GitCommitRef,

@@ -55,7 +55,6 @@ const SERVING_ENTRY: &str = "`orna serve` answers with its own native page and n
 const NO_CLONE: &str =
     "there is no `orna clone`, so no second, partial or mirror clone of a database can be made";
 const NO_UPGRADE: &str = "there is no `orna upgrade`, so no format-1/2 history can be opened through an upgrade candidate";
-const RUN_ROWS: &str = "rows written by `orna run` are refused at publication, so no product path builds a multi-row table";
 const TYPED_KEYS: &str = "the CLI names rows only by text or bytes: an Int-keyed row cannot be found with `orna query --key`";
 const STORAGE_METADATA: &str = "storage metadata and work counters are unobservable: `sys.Storage` does not evaluate in the project REPL";
 const CHECKOUT: &str = "`orna checkout` to a different commit is refused while drafts are pending or a changed path has uncommitted changes: pending drafts are not carried forward (CHECKOUT-3 step 4) and no checkout journal is written";
@@ -86,12 +85,7 @@ pub fn entries() -> Vec<Entry> {
             TYPED_KEYS,
             typed_key_lookup_fails,
         ),
-        Entry::gap(
-            "FINAL-ROW-003",
-            "ornadb-5il1.122",
-            RUN_ROWS,
-            run_rows_are_not_published,
-        ),
+        Entry::pass("FINAL-ROW-003", run_rows_publish),
         Entry::pass("FINAL-ROW-004", blob_rows_hold_references),
         Entry::gap(
             "FINAL-ROW-005",
@@ -99,12 +93,7 @@ pub fn entries() -> Vec<Entry> {
             OVERFLOW,
             large_row_is_not_published,
         ),
-        Entry::gap(
-            "FINAL-ROW-006",
-            "ornadb-5il1.122",
-            RUN_ROWS,
-            run_rows_are_not_published,
-        ),
+        Entry::pass("FINAL-ROW-006", run_rows_publish),
         Entry::gap("FINAL-ROW-007", "ornadb-gov5.21", NO_CLONE, no_clone),
         Entry::gap(
             "FINAL-ROW-008",
@@ -2165,19 +2154,21 @@ pub fn seed() {
 }
 "#;
 
-fn run_rows_are_not_published(db: &mut Db) -> Probe {
-    db.declare(SEED_SOURCE)?;
+fn run_rows_publish(db: &mut Db) -> Check {
+    let tables = db.declare(SEED_SOURCE)?;
+    let relation = relation_of(&tables, "Note")?;
     db.orna(&["run", "main.seed"])?.ok()?;
     let published = db.publish()?;
     ensure!(
-        !published.succeeded(),
-        "rows written by orna run now publish: {}",
+        published.succeeded(),
+        "rows written by orna run must publish: {}",
         published.output()
     );
-    Ok(format!(
-        "orna publish after orna run: {}",
-        published.diagnostic()
-    ))
+    ensure!(
+        db.query_json(&relation, &[])?["rows"] == 2,
+        "the published rows are readable"
+    );
+    Ok(())
 }
 
 fn large_row_is_not_published(db: &mut Db) -> Probe {
