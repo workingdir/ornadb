@@ -212,6 +212,17 @@ the repository from the builder and requires the rebuilt bundle to equal the
 committed one byte for byte, so a builder change without a regenerated bundle
 fails. The pinned digest alone could not catch that.
 
+The builder has two entry points. `write_legacy_format1_fixture` writes the
+shell (marker, identity, source record, compact tables, gitlink);
+`write_legacy_format1_golden_fixture` writes that shell plus the editable table.
+The editable table's source files (`legacy-loose-contacts-main.orna`,
+`legacy-loose-contact-alice-smith.orna`, `legacy-loose-contact-bob-jones.orna`)
+live in this crate's fixture tree, next to the bundle, because a test fixture may
+not be included across crates (`crates/orna-syntax-v1/tests/fixture_audit.rs`),
+and the builder reads them from the directory the caller names. Regenerate with
+`cargo run -p orna-repository-v1 --example build_legacy_fixture --features
+legacy-fixture-writer -- <empty-root> <bundle-path> crates/orna-cli-v1/tests/fixtures`.
+
 Provenance: the fixture is produced by the test encoder (`encoder_version`
 `test-encoder-v1`). It shares the canonical OVB encoder, base64 helper, date-key
 mapping and Parquet page-checksum helper with production. It is NOT an
