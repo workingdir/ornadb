@@ -36,9 +36,15 @@ const COMPACT_DATE_TABLE: &str = "018f0000000071000000000000000003";
 /// The fixture's editable table, addressed by its key-path directory: 1.0.0
 /// keeps its rows at `contacts/Contact/<key component>.orna`.
 const LOOSE_TABLE: &str = "contacts/Contact";
-/// The fixture's committed commits: initial, three compact publications, the
-/// editable rows, and the recorded stdlib gitlink.
-const FIXTURE_COMMITS: usize = 6;
+/// The fixture's commit count is read from the clone rather than pinned here:
+/// the bundle gains a commit whenever a table is added to it, and a pinned
+/// count only reports that the fixture grew.
+fn fixture_commits(root: &Path) -> usize {
+    git(root, &["rev-list", "--count", "HEAD"])
+        .trim()
+        .parse()
+        .expect("the fixture clone reports its commit count")
+}
 /// The commits whose tree carries the editable rows: the row-unit commit and
 /// its child, the gitlink commit.
 const FIXTURE_PRESENT_REVISIONS: usize = 2;
@@ -240,7 +246,7 @@ fn query_and_history_read_format1_rows_at_a_pinned_legacy_commit() {
     assert_success(&history, "orna history");
     let revisions: Vec<serde_json::Value> =
         serde_json::from_slice(&history.stdout).expect("orna history prints JSON");
-    assert_eq!(revisions.len(), FIXTURE_COMMITS, "{revisions:?}");
+    assert_eq!(revisions.len(), fixture_commits(&root), "{revisions:?}");
     assert_eq!(
         revisions
             .iter()
@@ -271,7 +277,7 @@ fn query_and_history_read_format1_rows_at_a_pinned_legacy_commit() {
     assert_success(&counted, "orna history --count");
     assert_eq!(
         String::from_utf8_lossy(&counted.stdout).trim(),
-        FIXTURE_COMMITS.to_string()
+        fixture_commits(&root).to_string()
     );
 
     // A compact row lives inside committed segments, not in one file, so this

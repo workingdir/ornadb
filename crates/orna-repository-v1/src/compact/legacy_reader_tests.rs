@@ -719,6 +719,230 @@ fn compact_ovb_segment_for_schema(
     .unwrap()
 }
 
+/// One declared leaf of a test schema: field identity, role (`0` key, `1` stored
+/// value) and logical type name.
+type TestLeaf = (Uuid, &'static str, u8, &'static str);
+
+/// A schema whose leaves carry different logical types, so one segment can mix a
+/// key column with a `Blob` value column.
+fn compact_schema_with_leaf_types(table: Uuid, leaves: &[TestLeaf]) -> SchemaDescriptor {
+    let mut leaves = leaves.to_vec();
+    leaves.sort_by_key(|(field, _, _, _)| field.as_bytes().to_vec());
+    SchemaDescriptor::new(OvbRaw::Map(vec![
+        (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
+        (
+            OvbRaw::Int(1.into()),
+            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(table.as_bytes().to_vec()))),
+        ),
+        (
+            OvbRaw::Int(2.into()),
+            OvbRaw::Array(
+                leaves
+                    .iter()
+                    .filter(|(_, _, role, _)| *role == 0)
+                    .map(|(field, _, _, _)| {
+                        OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())))
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            OvbRaw::Int(3.into()),
+            OvbRaw::Array(
+                leaves
+                    .into_iter()
+                    .map(|(field, name, role, type_name)| {
+                        OvbRaw::Array(vec![
+                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                            OvbRaw::Text(name.to_owned()),
+                            OvbRaw::Array(vec![
+                                OvbRaw::Int(0.into()),
+                                OvbRaw::Text(type_name.to_owned()),
+                            ]),
+                            OvbRaw::Int(role.into()),
+                            OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
+    ]))
+    .unwrap()
+}
+
+/// The `orna.columns.ovb` array for leaves of mixed logical types, ordered by
+/// physical leaf path as the profile requires.
+fn compact_columns_for_leaves(leaves: &[(Uuid, &str, &str)]) -> Vec<u8> {
+    let mut descriptors = leaves
+        .iter()
+        .map(|(field, type_name, encoding)| {
+            (
+                format!("f_{}", field.simple()),
+                OvbRaw::Array(vec![
+                    OvbRaw::Array(vec![OvbRaw::Tag(
+                        37,
+                        Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+                    )]),
+                    OvbRaw::Array(vec![OvbRaw::Text(format!("f_{}", field.simple()))]),
+                    OvbRaw::Array(vec![
+                        OvbRaw::Int(0.into()),
+                        OvbRaw::Text((*type_name).to_owned()),
+                    ]),
+                    OvbRaw::Text((*encoding).to_owned()),
+                    OvbRaw::Array(Vec::new()),
+                ]),
+            )
+        })
+        .collect::<Vec<_>>();
+    descriptors.sort_by(|left, right| left.0.cmp(&right.0));
+    CanonicalValue::new(OvbRaw::Array(
+        descriptors
+            .into_iter()
+            .map(|(_, descriptor)| descriptor)
+            .collect(),
+    ))
+    .unwrap()
+    .encode()
+    .unwrap()
+}
+
+/// Writes an `Int` key column and an unannotated `BYTE_ARRAY` `Blob` column as
+/// one compact segment file (1.0.0 `23-storage.md:184`).
+#[allow(clippy::too_many_arguments)]
+fn compact_key_blob_parquet(
+    table: Uuid,
+    schema: &SchemaDescriptor,
+    key_field: Uuid,
+    blob_field: Uuid,
+    columns: &[u8],
+    keys: &[i64],
+    blobs: &[&[u8]],
+    blob_annotation: &str,
+) -> Vec<u8> {
+    assert_eq!(keys.len(), blobs.len());
+    let key_path = format!("f_{}", key_field.simple());
+    let blob_path = format!("f_{}", blob_field.simple());
+    let key_first = key_path < blob_path;
+    let message = if key_first {
+        format!(
+            "message schema {{ REQUIRED INT64 {key_path}; REQUIRED BYTE_ARRAY {blob_path}{blob_annotation}; }}"
+        )
+    } else {
+        format!(
+            "message schema {{ REQUIRED BYTE_ARRAY {blob_path}{blob_annotation}; REQUIRED INT64 {key_path}; }}"
+        )
+    };
+    let schema_descriptor = Arc::new(parse_message_type(&message).unwrap());
+    let metadata = vec![
+        KeyValue::new(
+            "orna.profile".to_owned(),
+            Some("compact-storage-v1".to_owned()),
+        ),
+        KeyValue::new("orna.table".to_owned(), Some(table.to_string())),
+        KeyValue::new(
+            "orna.schema.sha256".to_owned(),
+            Some(hex_digest(&schema_fingerprint(schema))),
+        ),
+        KeyValue::new(
+            "orna.schema.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(&schema.encode().unwrap())),
+        ),
+        KeyValue::new(
+            "orna.columns.ovb".to_owned(),
+            Some(orna_value_v1::base64_encode(columns)),
+        ),
+        KeyValue::new(
+            "orna.encoder".to_owned(),
+            Some("test-encoder-v1".to_owned()),
+        ),
+    ];
+    let properties = Arc::new(
+        WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_dictionary_enabled(false)
+            .set_encoding(Encoding::PLAIN)
+            .set_writer_version(WriterVersion::PARQUET_2_0)
+            .set_key_value_metadata(Some(metadata))
+            .build(),
+    );
+    let blobs = blobs
+        .iter()
+        .map(|value| ByteArray::from(*value))
+        .collect::<Vec<_>>();
+    let mut bytes = Vec::new();
+    let mut writer = SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
+    let mut row_group = writer.next_row_group().unwrap();
+    for write_key in [key_first, !key_first] {
+        let mut column = row_group.next_column().unwrap().unwrap();
+        if write_key {
+            column
+                .typed::<Int64Type>()
+                .write_batch(keys, None, None)
+                .unwrap();
+        } else {
+            column
+                .typed::<ByteArrayType>()
+                .write_batch(&blobs, None, None)
+                .unwrap();
+        }
+        column.close().unwrap();
+    }
+    row_group.close().unwrap();
+    writer.close().unwrap();
+
+    let footer_length =
+        u32::from_le_bytes(bytes[bytes.len() - 8..bytes.len() - 4].try_into().unwrap()) as usize;
+    let footer = bytes.len() - 8 - footer_length;
+    assert_eq!(&bytes[footer..footer + 2], &[0x15, 0x04]);
+    bytes[footer + 1] = 0x02;
+    with_page_checksums(bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn compact_key_blob_segment(
+    table: Uuid,
+    ordinal: u64,
+    schema: &SchemaDescriptor,
+    key_field: Uuid,
+    blob_field: Uuid,
+    columns: Vec<u8>,
+    keys: &[i64],
+    blobs: &[&[u8]],
+    blob_annotation: &str,
+) -> CompactSegment {
+    let segment_id = Uuid::from_u64_pair(0x018f_0000_0000_7000, ordinal | 0x8000_0000_0000_0000);
+    let path = ManagedPath::new(format!(
+        ".orna/storage/{table}/data/{}/{segment_id}.parquet",
+        &segment_id.to_string()[..2]
+    ))
+    .unwrap();
+    CompactSegment::new(
+        segment_id,
+        CompactSegmentRole::Data,
+        schema_fingerprint(schema),
+        "test-encoder-v1",
+        path,
+        compact_key_blob_parquet(
+            table,
+            schema,
+            key_field,
+            blob_field,
+            &columns,
+            keys,
+            blobs,
+            blob_annotation,
+        ),
+        encoded_int(u64::try_from(*keys.iter().min().unwrap()).unwrap()),
+        encoded_int(u64::try_from(*keys.iter().max().unwrap()).unwrap()),
+        u64::try_from(keys.len()).unwrap(),
+        columns,
+        true,
+        false,
+    )
+    .unwrap()
+}
+
 /// Builds a compact candidate with the test-only legacy fixture writer.
 fn compact_plan(
     repository: &Repository,
@@ -2800,6 +3024,147 @@ fn legacy_authoritative_read_resolves_key_only_generations_and_deletions_without
         .map(|row| row.key().clone())
         .collect();
     assert_eq!(keys, vec![canonical_int(1), canonical_int(3)]);
+}
+
+/// A format-1 compact table may store a `Blob` column as 1.0.0
+/// `23-storage.md:184` defines it: an unannotated `BYTE_ARRAY` with no
+/// parameters. The decoded row therefore carries the payload bytes alone, with
+/// no media type or suffix; the annotated identity is the migration layer's
+/// ORNA-UPGRADE-004 default, not a read-time invention (ORNA-BLOB-009).
+#[test]
+fn legacy_authoritative_read_decodes_unannotated_blob_column_bytes() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0901);
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0902);
+    let blob = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0903);
+    let schema = compact_schema_with_leaf_types(
+        table,
+        &[(key, "key", 0, "Int"), (blob, "payload", 1, "Blob")],
+    );
+    let columns = compact_columns_for_leaves(&[(key, "Int", "int64"), (blob, "Blob", "blob")]);
+    // Not valid UTF-8, and one empty payload, so a decoder that reads text or
+    // drops empty values fails instead of passing on a benign fixture.
+    let payloads: [&[u8]; 2] = [&[0x00, 0xff, 0x80, b'o', b'r', b'n', b'a'], &[]];
+    let body = compact_key_blob_segment(
+        table,
+        901,
+        &schema,
+        key,
+        blob,
+        columns,
+        &[1, 2],
+        &payloads,
+        "",
+    );
+    let head = repo.head().unwrap().unwrap();
+    let plan = repo
+        .prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&schema)),
+            [90; 16],
+            [90; 32],
+            &[body],
+            "publish legacy blob generation one",
+        )
+        .unwrap();
+    adopt_compact_fixture(&repo, &plan);
+
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+    let tables = repo.read_legacy_authoritative_tables(&head).unwrap();
+    assert_eq!(git_state(&repo, root.path()), before);
+    assert_eq!(tables.len(), 1);
+    assert_eq!(tables[0].table(), table);
+    assert_eq!(tables[0].rows().len(), 2);
+
+    let stored_field = |value: &CanonicalValue, field: &Uuid| -> OvbRaw {
+        let OvbRaw::Tag(60009, record) = value.raw() else {
+            panic!("row value is not a 60009 record");
+        };
+        let OvbRaw::Array(parts) = &**record else {
+            panic!("60009 record is not an array");
+        };
+        let [OvbRaw::Null, OvbRaw::Array(fields)] = parts.as_slice() else {
+            panic!("60009 record is not [null, fields]");
+        };
+        let found = fields
+            .iter()
+            .filter_map(|field| match field {
+                OvbRaw::Array(entry) => Some(entry),
+                _ => None,
+            })
+            .find(|entry| {
+                matches!(entry.as_slice(), [OvbRaw::Tag(37, name), _] if name.as_ref() == &OvbRaw::Bytes(field.as_bytes().to_vec()))
+            })
+            .unwrap_or_else(|| panic!("row value has no field {field}"));
+        let [_, stored] = found.as_slice() else {
+            panic!("field entry is not a name/value pair");
+        };
+        stored.clone()
+    };
+
+    let rows = tables[0].rows();
+    assert_eq!(&rows[0].key().raw().clone(), &OvbRaw::Int(1.into()));
+    assert_eq!(&rows[1].key().raw().clone(), &OvbRaw::Int(2.into()));
+    for (row, payload) in rows.iter().zip(payloads) {
+        // The `Blob` column decodes to the raw byte string: payload only, no
+        // annotation wrapper (no 60110 OVB-2 tag) and no text decoding.
+        assert_eq!(
+            stored_field(row.value(), &blob),
+            OvbRaw::Bytes(payload.to_vec())
+        );
+        // The key column still decodes through its own mapping.
+        assert_eq!(stored_field(row.value(), &key), row.key().raw().clone());
+    }
+}
+
+/// 1.0.0 `23-storage.md:184` says the `Blob` physical representation is an
+/// *unannotated* `BYTE_ARRAY`. A leaf that declares a `Blob` descriptor but
+/// carries a STRING annotation is a different physical mapping, so the segment
+/// must be refused rather than decoded as text or as opaque bytes. The same
+/// `verify_physical_columns` witness guards publication and the legacy read, so
+/// this refuses the segment before any commit exists.
+#[test]
+fn compact_publication_refuses_an_annotated_blob_leaf() {
+    let root = repository();
+    let repo = Repository::discover(root.path()).unwrap();
+    let table = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0a01);
+    let key = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0a02);
+    let blob = Uuid::from_u64_pair(0x018f_0000_0000_7000, 0x8000_0000_0000_0a03);
+    let schema = compact_schema_with_leaf_types(
+        table,
+        &[(key, "key", 0, "Int"), (blob, "payload", 1, "Blob")],
+    );
+    let columns = compact_columns_for_leaves(&[(key, "Int", "int64"), (blob, "Blob", "blob")]);
+    let payloads: [&[u8]; 1] = [b"annotated"];
+    let body = compact_key_blob_segment(
+        table,
+        1001,
+        &schema,
+        key,
+        blob,
+        columns,
+        &[1],
+        &payloads,
+        " (STRING)",
+    );
+    let head = repo.head().unwrap().unwrap();
+    let before = git_state(&repo, root.path());
+    assert!(matches!(
+        repo.prepare_compact_publication(
+            &head,
+            repo.index_generation().unwrap(),
+            CompactManifest::empty(table, schema_fingerprint(&schema)),
+            [100; 16],
+            [100; 32],
+            &[body],
+            "publish annotated legacy blob generation one",
+        ),
+        Err(RepositoryError::InvalidCompactManifest)
+    ));
+    assert_eq!(git_state(&repo, root.path()), before);
 }
 
 #[test]
