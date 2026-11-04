@@ -1,0 +1,3 @@
+use group;
+
+pub fn increase(value: Int): Int = value + 1;
