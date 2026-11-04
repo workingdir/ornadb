@@ -153,13 +153,75 @@ impl CommittedLogEntry {
     }
 }
 
+/// One revision of a legacy (format-1/2) row path, as read by
+/// [`Repository::committed_revision_snapshots`].
+///
+/// A format-1/2 row unit is a committed file, so a revision of that row is a
+/// commit whose tree does or does not carry the file. The record therefore
+/// carries the same coordinates the native row walk reports (ORNA-UPGRADE-002,
+/// ORNA-ROW-013): the commit, its root tree, the author, the commit time and
+/// the migration coordinate a journalled migration commit records.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommittedRevisionSnapshot {
+    commit: GitCommitRef,
+    tree: String,
+    author: String,
+    committed_at: u64,
+    migration: Option<String>,
+}
+
+impl CommittedRevisionSnapshot {
+    /// The immutable Git commit this revision is.
+    pub const fn commit(&self) -> &GitCommitRef {
+        &self.commit
+    }
+
+    /// The commit's root tree object id.
+    pub fn tree(&self) -> &str {
+        &self.tree
+    }
+
+    /// Commit author as `Name <email>`.
+    pub fn author(&self) -> &str {
+        &self.author
+    }
+
+    /// When the commit was created, in seconds since the Unix epoch.
+    pub const fn committed_at(&self) -> u64 {
+        self.committed_at
+    }
+
+    /// The migration coordinate this commit records, when it is a journalled
+    /// format-1/2 to format-3 migration commit rather than an ordinary one.
+    pub fn migration(&self) -> Option<&str> {
+        self.migration.as_deref()
+    }
+}
+
+/// Splits one `git log` record's author-and-trailer field into the author and
+/// the migration coordinate, for [`Repository::committed_revision_snapshots`].
+///
+/// An empty trailer value is reported as no migration rather than as an empty
+/// coordinate, the same distinction the native revision walk keeps.
+fn split_committed_revision_record(record: &str) -> (&str, Option<&str>) {
+    match record.split_once('\t') {
+        Some((author, marker)) if !marker.is_empty() => (author, Some(marker)),
+        Some((author, _)) => (author, None),
+        None => (record, None),
+    }
+}
+
+/// Most commits one [`Repository::committed_revision_snapshots`] walk reads.
+/// It matches the native graph's revision bound, so both history paths refuse
+/// an over-large `--limit` at the same coordinate.
+const MAX_COMMITTED_REVISION_WALK: usize = 4096;
+
 /// One local Git branch and the commit currently named by its ref.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CommittedBranch {
     name: String,
     commit: GitCommitRef,
 }
-
 impl CommittedBranch {
     pub fn name(&self) -> &str {
         &self.name
@@ -2828,6 +2890,131 @@ impl Repository {
             return Err(RepositoryError::GitOperationFailed);
         }
         Ok(entries)
+    }
+
+    /// Lists up to `max_commits` commits reachable from `start`, newest first,
+    /// each paired with its root tree, author and recorded migration
+    /// coordinate.
+    ///
+    /// This is the revision walk a legacy (format-1/2) row reader needs
+    /// (ORNA-UPGRADE-002, ORNA-ROW-013). A format-1/2 commit has no native row
+    /// map, so its rows cannot be walked through the native graph's
+    /// `list_row_revisions`; the walk starts from a commit name (`HEAD` or a
+    /// pinned commit id) and reads commit headers only, so no blob is opened.
+    /// The count and output size are bounded before Git output is accumulated.
+    pub fn committed_revision_snapshots(
+        &self,
+        start: &str,
+        max_commits: usize,
+    ) -> Result<Vec<CommittedRevisionSnapshot>, RepositoryError> {
+        const MAX_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
+
+        if max_commits > MAX_COMMITTED_REVISION_WALK {
+            return Err(RepositoryError::SourceTreeLimit);
+        }
+        if max_commits == 0 {
+            return Ok(Vec::new());
+        }
+
+        let object_id_length = self.native_object_id_length()?;
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args([
+                "log",
+                &format!("--max-count={max_commits}"),
+                "--format=%H %T%x09%ct%x09%an <%ae>%x09%(trailers:key=Orna-Migration,valueonly)",
+                start,
+            ])
+            .stdout(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .map_err(|_| RepositoryError::GitUnavailable)?;
+        let mut output = Vec::new();
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(RepositoryError::GitOperationFailed)?;
+        let read_result = stdout
+            .take((MAX_OUTPUT_BYTES + 1) as u64)
+            .read_to_end(&mut output);
+        if read_result.is_err() || output.len() > MAX_OUTPUT_BYTES {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let status = child
+            .wait()
+            .map_err(|_| RepositoryError::GitOperationFailed)?;
+        if !status.success() {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        let text = std::str::from_utf8(&output).map_err(|_| RepositoryError::GitOperationFailed)?;
+        let mut snapshots = Vec::new();
+        for line in text.lines() {
+            let Some((header, rest)) = line.split_once('\t') else {
+                return Err(RepositoryError::GitOperationFailed);
+            };
+            let Some((committed_at, rest)) = rest.split_once('\t') else {
+                return Err(RepositoryError::GitOperationFailed);
+            };
+            let committed_at = committed_at
+                .parse::<u64>()
+                .map_err(|_| RepositoryError::GitOperationFailed)?;
+            let (author, migration) = split_committed_revision_record(rest);
+            let mut fields = header.split(' ');
+            let (Some(commit), Some(tree), None) = (fields.next(), fields.next(), fields.next())
+            else {
+                return Err(RepositoryError::GitOperationFailed);
+            };
+            snapshots.push(CommittedRevisionSnapshot {
+                commit: GitCommitRef::from_verified_commit(commit.to_owned(), object_id_length)?,
+                tree: tree.to_owned(),
+                author: author.to_owned(),
+                committed_at,
+                migration: migration.map(str::to_owned),
+            });
+        }
+        if snapshots.len() > max_commits {
+            return Err(RepositoryError::GitOperationFailed);
+        }
+        Ok(snapshots)
+    }
+
+    /// Reports whether `path` is a tracked leaf of `commit`'s tree, without
+    /// reading its bytes.
+    ///
+    /// A legacy row unit is a committed file, so its presence in a revision is
+    /// exactly what a legacy row's history reports (ORNA-UPGRADE-002). The
+    /// lookup is one `ls-tree` of that literal path, and the pathspec is not
+    /// interpreted as a pattern, so a key component that spells a glob
+    /// character names only that component.
+    pub fn committed_path_present(
+        &self,
+        commit: &GitCommitRef,
+        path: &str,
+    ) -> Result<bool, RepositoryError> {
+        let mut command = self.command();
+        command
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .args([
+                "--literal-pathspecs",
+                "ls-tree",
+                "-z",
+                "--full-tree",
+                commit.as_str(),
+                "--",
+            ])
+            .arg(path);
+        let output = self.run(command)?.stdout;
+        Ok(output
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .filter_map(|record| {
+                let separator = record.iter().position(|byte| *byte == b'\t')?;
+                Some((&record[..separator], &record[separator + 1..]))
+            })
+            .any(|(metadata, named)| named == path.as_bytes() && !metadata.starts_with(b"040000 ")))
     }
 
     /// Lists local branches in Git's ref order, bounded by `max_branches`.

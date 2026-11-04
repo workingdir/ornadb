@@ -3,6 +3,15 @@
 //! narrowed by an annotation predicate (`--kind`, `--not-kind`, `--suffix`,
 //! `--min-length`, `--max-length`).
 //!
+//! At a format-1/2 pin (`--at`, or a legacy `HEAD`) the rows come from the
+//! versioned legacy reader instead: a compact table's authoritative rows or an
+//! editable table's committed loose row units (ORNA-UPGRADE-001,
+//! ORNA-UPGRADE-002, ORNA-ROW-013). The report names which of the two answered.
+//! The snapshot is admitted through the project loader before either
+//! representation is read, so a format-3 snapshot that tracks a loose row file
+//! is refused with the format admission code (ORNA-REPO-CONTEXT-004) instead of
+//! being answered from the store.
+//!
 //! The query reads through the same repository-owned native graph the row
 //! history walks, so it is measured at the real storage read seam: every row
 //! page, index node and descriptor it touches is charged as an object, and
@@ -18,10 +27,11 @@
 //! as requiring an explicit decode.
 
 use super::cli_history::bare_ref_selector_is_ambiguous;
-use super::{Diagnostic, Endpoint, local_project_path};
+use super::{Diagnostic, Endpoint, cli_legacy, local_project_path};
 use crate::cli_row_key::{
     check_bound_type, check_point_key_type, composite_bound_error, key_candidates,
 };
+use orna_application_v1::read_legacy_table_rows;
 use orna_repository_v1::{
     AdmittedRow, KeyRange, NativeGraphContext, Repository, RepositoryReadScope, TypedKey,
 };
@@ -282,7 +292,6 @@ fn parse_bound_key(value: &str) -> Result<TypedKey, Diagnostic> {
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
-    let relation = parse_relation_id(options.relation)?;
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| query_error("Repository could not be opened", format!("{error:?}")))?;
@@ -291,54 +300,68 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // below come from the commit it named, so a branch that advances during
     // the read never changes the answer, and the workspace `HEAD` is never
     // consulted instead.
-    let format = match options.at {
-        Some(selector) => {
-            // `rev-parse` accepts a bare name that two namespaces both define
-            // and only warns about the choice, so a name that identifies more
-            // than one snapshot is refused rather than silently answered from
-            // whichever one it preferred.
-            if bare_ref_selector_is_ambiguous(
-                path,
-                selector,
-                "run `orna query <relation-hex>` inside an initialized repository",
-            )? {
-                return Err(Diagnostic::target_with_detail(
-                    "E2000",
-                    "Snapshot name is ambiguous",
-                    "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
+    let (commit, format) = if let Some(selector) = options.at {
+        // `rev-parse` accepts a bare name that two namespaces both define
+        // and only warns about the choice, so a name that identifies more
+        // than one snapshot is refused rather than silently answered from
+        // whichever one it preferred.
+        if bare_ref_selector_is_ambiguous(
+            path,
+            selector,
+            "run `orna query <relation-hex>` inside an initialized repository",
+        )? {
+            return Err(Diagnostic::target_with_detail(
+                "E2000",
+                "Snapshot name is ambiguous",
+                "use the full ref name (`refs/heads/NAME`, `refs/tags/NAME`, \
                      `refs/remotes/ORIGIN/NAME`) or the commit id `orna history` lists",
-                    format!("{selector:?} names more than one branch, tag or remote branch"),
-                ));
-            }
-            let commit = repository.resolve_snapshot(selector).map_err(|error| {
+                format!("{selector:?} names more than one branch, tag or remote branch"),
+            ));
+        }
+        let commit = repository.resolve_snapshot(selector).map_err(|error| {
+            query_error(
+                "Snapshot could not be resolved",
+                format!("{selector:?}: {error:?}"),
+            )
+        })?;
+        let format = repository
+            .open_pinned_format_context(commit.as_str())
+            .map_err(|error| {
                 query_error(
-                    "Snapshot could not be resolved",
+                    "Snapshot could not be pinned",
                     format!("{selector:?}: {error:?}"),
                 )
             })?;
-            let format = repository
-                .open_pinned_format_context(commit.as_str())
-                .map_err(|error| {
-                    query_error(
-                        "Snapshot could not be pinned",
-                        format!("{selector:?}: {error:?}"),
-                    )
-                })?;
-            // A format-1/2 pin is a read-only compatibility input: it carries
-            // no native `.orna/store`, so it has no row map to read. Say so
-            // instead of reporting the format-3 store seam's generic failure.
-            if format.is_read_only() {
-                return Err(query_error(
-                    "Snapshot is a legacy format-1/2 input",
-                    "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
-                ));
-            }
-            format
-        }
-        None => repository.open_format_context().map_err(|error| {
+        (Some(commit), format)
+    } else {
+        let commit = repository
+            .head()
+            .map_err(|error| query_error("Snapshot could not be resolved", format!("{error:?}")))?;
+        let format = repository.open_format_context().map_err(|error| {
             query_error("Format context could not be opened", format!("{error:?}"))
-        })?,
+        })?;
+        (commit, format)
     };
+    // The snapshot is admitted before any row is read from either
+    // representation: a format-3 snapshot that tracks a loose row file is the
+    // mixed layout project admission refuses (ORNA-META-001, ORNA-META-002), and
+    // answering it from the store would report rows whose row files the same
+    // snapshot carries.
+    cli_legacy::admit_snapshot(&repository, commit.as_ref())?;
+    // A format-1/2 pin is a read-only compatibility input: it carries no native
+    // `.orna/store`, so it has no row map. Its rows are read through the
+    // versioned legacy reader instead (ORNA-UPGRADE-001, ORNA-UPGRADE-002,
+    // ORNA-ROW-013).
+    if format.is_read_only() {
+        let Some(commit) = commit.as_ref() else {
+            return Err(query_error(
+                "Snapshot could not be admitted",
+                "--at names a read-only compatibility snapshot with no committed project source",
+            ));
+        };
+        return run_legacy(&options, &repository, commit);
+    }
+    let relation = parse_relation_id(options.relation)?;
     let table = format
         .resolve_committed_table_by_relation_id(relation)
         .map_err(|error| {
@@ -562,6 +585,204 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
     }
     Ok(())
+}
+
+/// Answers one `orna query` from a format-1/2 pin through the versioned legacy
+/// reader (ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013).
+///
+/// The table is named the way the 1.0.0 layout names it: a compact table by its
+/// storage table id, an editable table by its key-path directory. `--key`,
+/// `--from`/`--until` and `--limit` bound the answer the same way the format-3
+/// walk bounds it, over the reconstructed key order (ORNA-ROW-002). Nothing here
+/// reads a payload byte: a legacy listing is the annotation the stored value
+/// already carries, so the payload counters stay at zero.
+#[allow(clippy::too_many_lines)]
+fn run_legacy(
+    options: &QueryOptions<'_>,
+    repository: &Repository,
+    commit: &orna_repository_v1::GitCommitRef,
+) -> Result<(), Diagnostic> {
+    const LEGACY_HELP: &str = "name a legacy table by its storage table id (32 hex digits) or by its key-path directory, such as `contacts/Contact`";
+    let address = cli_legacy::legacy_address(options.relation, LEGACY_HELP)?;
+    let table = read_legacy_table_rows(repository, commit, &address)
+        .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?;
+    let mut rows_read = 0u64;
+    let mut listings: Vec<(TypedKey, usize, orna_value_v1::BlobMetadata)> = Vec::new();
+    let mut candidates = 0usize;
+    let mut matched = 0usize;
+    match options.key {
+        Some(key) => {
+            // A legacy row's key is reconstructed from its path text (or, for a
+            // compact row, decoded from its stored key), so the spelling a
+            // listing printed names the row here as well.
+            let spelled = key_candidates(key, None)?;
+            let found = table.rows().iter().find(|row| {
+                spelled.iter().any(|candidate| {
+                    row.key() == candidate
+                        || row.key().component_text() == candidate.component_text()
+                })
+            });
+            let Some(row) = found else {
+                return Err(query_error(
+                    "Row is not committed",
+                    format!("no row with key {key:?}"),
+                ));
+            };
+            rows_read = 1;
+            collect_legacy_listings(row, options, &mut listings, &mut candidates, &mut matched);
+        }
+        None => {
+            for row in table.rows() {
+                if options.from.as_ref().is_some_and(|lower| row.key() < lower)
+                    || options
+                        .until
+                        .as_ref()
+                        .is_some_and(|upper| row.key() >= upper)
+                {
+                    continue;
+                }
+                // `--limit` bounds the rows one answer reads, exactly as it
+                // bounds the format-3 page.
+                if usize::try_from(rows_read).unwrap_or(usize::MAX) >= options.limit {
+                    break;
+                }
+                rows_read += 1;
+                collect_legacy_listings(row, options, &mut listings, &mut candidates, &mut matched);
+            }
+        }
+    }
+    let subject = options
+        .field
+        .map_or_else(|| "all fields".to_owned(), |field| format!("field {field}"));
+    listings.truncate(options.limit);
+    let estimated_rows = u64::try_from(table.rows().len()).unwrap_or(u64::MAX);
+    let plan = PredicatePlan::new(
+        &options.predicate,
+        &subject,
+        estimated_rows,
+        rows_read,
+        candidates,
+        matched,
+    );
+    let source = legacy_source_name(table.source());
+    match options.format {
+        QueryFormat::Human => {
+            for (key, field, metadata) in &listings {
+                println!(
+                    "{} {field} {} {} {} {} descriptor {} {}",
+                    render_key(key),
+                    metadata.media_type(),
+                    metadata.suffix().unwrap_or("-"),
+                    metadata.length(),
+                    hex(&metadata.sha256()),
+                    metadata
+                        .descriptor_oid()
+                        .map_or_else(|| "-".to_owned(), |oid| hex(oid.as_bytes())),
+                    metadata.is_hydrated(),
+                );
+            }
+            println!(
+                "{} blobs; media payload bytes read: 0; native objects read: 0; legacy source: {source}",
+                listings.len()
+            );
+            println!("{}", plan.human_line());
+        }
+        QueryFormat::Json => {
+            let entries: Vec<serde_json::Value> = listings
+                .iter()
+                .map(|(key, field, metadata)| {
+                    serde_json::json!({
+                        "key": render_key(key),
+                        "field": field,
+                        "media_type": metadata.media_type(),
+                        "suffix": metadata.suffix(),
+                        "length": metadata.length(),
+                        "sha256": hex(&metadata.sha256()),
+                        "descriptor": metadata
+                            .descriptor_oid()
+                            .map(|oid| hex(oid.as_bytes())),
+                        "hydrated": metadata.is_hydrated(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::json!({
+                    "rows": rows_read,
+                    "blobs": entries.len(),
+                    "media_payload_bytes_read": 0,
+                    "native_objects_read": 0,
+                    "legacy_source": source,
+                    "plan": plan.to_json(),
+                    "listings": entries,
+                })
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `compact` or `loose-row-unit`: which representation of the 1.0.0 layout
+/// answered this read.
+const fn legacy_source_name(source: orna_application_v1::LegacyRowSource) -> &'static str {
+    match source {
+        orna_application_v1::LegacyRowSource::Compact => "compact",
+        orna_application_v1::LegacyRowSource::LooseRowUnit => "loose-row-unit",
+    }
+}
+
+/// Projects one legacy row's Blob-valued stored fields into the listing.
+///
+/// The predicate, the field filter and the counters are the format-3 walk's
+/// own: a candidate is a Blob field the filter evaluated and a match is one it
+/// accepted. A legacy row carries a Blob only as an annotated content reference
+/// the row already stores, so evaluating the predicate reads no payload.
+fn collect_legacy_listings(
+    row: &orna_application_v1::LegacyRow,
+    options: &QueryOptions<'_>,
+    listings: &mut Vec<(TypedKey, usize, orna_value_v1::BlobMetadata)>,
+    candidates: &mut usize,
+    matched: &mut usize,
+) {
+    for (field, stored) in row.fields().iter().enumerate() {
+        let Some(metadata) = legacy_field_blob_metadata(stored.value()) else {
+            continue;
+        };
+        if options.field.is_none_or(|wanted| wanted == field) {
+            *candidates += 1;
+            if options.predicate.matches(&metadata) {
+                *matched += 1;
+                if listings.len() < options.limit {
+                    listings.push((row.key().clone(), field, metadata));
+                }
+            }
+        }
+    }
+}
+
+/// The Blob annotation of one legacy stored value, when the value carries one.
+///
+/// A Blob field is stored as the ROV-3 annotated content reference, optionally
+/// inside the canonical present `Option` wrapper, which is the shape the
+/// format-3 field projection decodes.
+fn legacy_field_blob_metadata(value: &orna_value_v1::Raw) -> Option<orna_value_v1::BlobMetadata> {
+    let value = match value {
+        orna_value_v1::Raw::Tag(60013, payload) => match payload.as_ref() {
+            orna_value_v1::Raw::Array(parts) => match parts.as_slice() {
+                [orna_value_v1::Raw::Int(flag), value] if *flag == 1.into() => value,
+                _ => return None,
+            },
+            _ => return None,
+        },
+        value => value,
+    };
+    if !matches!(
+        value,
+        orna_value_v1::Raw::Tag(orna_value_v1::ROV3_BLOB_TAG, _)
+    ) {
+        return None;
+    }
+    orna_value_v1::blob_metadata_from_raw(value).ok()
 }
 
 /// Pages `[from, until)` in ordered pages of `page_rows` keys. Each page

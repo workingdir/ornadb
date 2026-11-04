@@ -1442,10 +1442,11 @@ async fn history_at_pins_the_named_snapshot_instead_of_head() {
 }
 
 /// A format-1/2 pin is a read-only compatibility input with no native
-/// `.orna/store`, so `--at` must refuse it with an accurate reason instead of
-/// reporting the format-3 store seam's failure or answering from the workspace.
+/// `.orna/store`. `orna history` reads a legacy loose row's revisions, so a
+/// relation this snapshot does not hold is refused by name instead of being
+/// reported as a format-3 store failure or answered from the workspace.
 #[test]
-fn history_at_refuses_a_legacy_snapshot_it_cannot_walk() {
+fn history_at_refuses_a_legacy_pin_whose_table_is_absent() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     let setup: &[&[&str]] = &[
@@ -1476,8 +1477,8 @@ fn history_at_refuses_a_legacy_snapshot_it_cannot_walk() {
     assert_history_refused(&refused, "history --at naming a format-1 commit");
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("legacy format-1/2"),
-        "the refusal names the pinned format: {stderr}"
+        stderr.contains(relation),
+        "the refusal names the table the snapshot does not hold: {stderr}"
     );
     drop(directory);
 }
@@ -2160,11 +2161,12 @@ async fn query_at_pins_the_named_snapshot_and_reads_no_media_payload() {
 }
 
 /// A format-1/2 pin is a read-only compatibility input with no native
-/// `.orna/store`, so `query --at` must refuse it with an accurate reason
-/// instead of reporting the format-3 store seam's failure or answering from
-/// the workspace.
+/// `.orna/store`. `orna query` reads a legacy compact table through the
+/// versioned legacy reader, so a relation this snapshot does not hold is
+/// refused by name instead of being reported as a format-3 store failure or
+/// answered from the workspace.
 #[test]
-fn query_at_refuses_a_legacy_snapshot_it_cannot_read() {
+fn query_at_refuses_a_legacy_pin_whose_table_is_absent() {
     let directory = TempDir::new().unwrap();
     let root = directory.path();
     let setup: &[&[&str]] = &[
@@ -2196,8 +2198,8 @@ fn query_at_refuses_a_legacy_snapshot_it_cannot_read() {
     assert!(refused.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&refused.stderr);
     assert!(
-        stderr.contains("legacy format-1/2"),
-        "the refusal names the pinned format: {stderr}"
+        stderr.contains(relation),
+        "the refusal names the table the snapshot does not hold: {stderr}"
     );
     drop(directory);
 }
