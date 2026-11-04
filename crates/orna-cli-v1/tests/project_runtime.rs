@@ -1996,7 +1996,11 @@ fn staged_standard_project_with(
     )
     .expect("standard database root");
     for &(name, source) in standard {
-        std::fs::write(module_path.join(name), source).expect("standard source module");
+        let path = module_path.join(name);
+        if let Some(directory) = path.parent() {
+            std::fs::create_dir_all(directory).expect("standard module directory");
+        }
+        std::fs::write(path, source).expect("standard source module");
     }
     commit_directory(&module_path, "standard module snapshot");
     let module_commit = git_output_at(&module_path, &["rev-parse", "HEAD"]);
@@ -2064,6 +2068,35 @@ fn pinned_list_closure() -> [(&'static str, &'static str); 3] {
         (
             "math.orna",
             include_str!("fixtures/captured-standard-math.orna"),
+        ),
+    ]
+}
+
+/// A standard snapshot whose module group nests two directories deep: the
+/// snapshot root imports `math`, `math` imports the `group` module, the group
+/// root imports its own `inner` module, and `inner` imports the group's
+/// `helper` from the directory above it, which imports the root-level `leaf`.
+fn pinned_nested_group_closure() -> [(&'static str, &'static str); 5] {
+    [
+        (
+            "group/helper.orna",
+            include_str!("fixtures/captured-standard-nested-helper.orna"),
+        ),
+        (
+            "group/inner/main.orna",
+            include_str!("fixtures/captured-standard-nested-inner.orna"),
+        ),
+        (
+            "group/main.orna",
+            include_str!("fixtures/captured-standard-nested-group.orna"),
+        ),
+        (
+            "leaf.orna",
+            include_str!("fixtures/captured-standard-nested-leaf.orna"),
+        ),
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-nested-math.orna"),
         ),
     ]
 }
@@ -2160,6 +2193,86 @@ fn binary_check_resolves_a_pinned_standard_collection_closure_through_the_produc
     assert!(check.status.success(), "check stderr: {:?}", check.stderr);
     assert_eq!(check.stdout, b"project valid\n");
     assert!(check.stderr.is_empty());
+}
+
+/// A pinned standard snapshot resolves its module closure at any depth. The
+/// project imports `std.math`; the snapshot root imports `math`; `math` imports
+/// the `group` module; `group`'s root imports `group/inner`; and `inner`
+/// imports `group/helper` from the directory enclosing it, which imports the
+/// snapshot's root-level `leaf`. A binding that resolved only the importing
+/// module's own directory gave up here, and the project then reported its own
+/// `std.math` import as unavailable.
+#[test]
+fn binary_commit_and_check_resolve_a_pinned_standard_group_closure_at_any_depth() {
+    let (directory, module_commit) = staged_standard_project_with(
+        &pinned_nested_group_closure(),
+        &[(
+            "main.orna",
+            include_str!("fixtures/captured-standard-nested-project.orna"),
+        )],
+    );
+
+    let commit = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "commit",
+            "-m",
+            "pin the standard group closure",
+        ])
+        .output()
+        .expect("CLI commit");
+    assert!(
+        commit.status.success(),
+        "commit stderr: {:?}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+    assert!(commit.stderr.is_empty());
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(
+        check.status.success(),
+        "check stderr: {:?}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    assert_eq!(check.stdout, b"project valid\n");
+    assert!(check.stderr.is_empty());
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned standard group closure");
+    assert_eq!(
+        project
+            .standard_profile()
+            .expect("standard profile")
+            .snapshot(),
+        module_commit
+    );
+    assert_eq!(
+        project.standard_attach_failure(),
+        None,
+        "the pinned snapshot must attach"
+    );
+    for module in [
+        "std/math.orna",
+        "std/group/main.orna",
+        "std/group/inner/main.orna",
+        "std/group/helper.orna",
+        "std/leaf.orna",
+    ] {
+        assert!(
+            project.standard_runtime_modules().contains(module),
+            "runtime closure is missing {module}: {:?}",
+            project.standard_runtime_modules()
+        );
+    }
 }
 
 #[test]

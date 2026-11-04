@@ -1,0 +1,3 @@
+use helper.{step};
+
+pub fn origin(): Int = step() + 1;
