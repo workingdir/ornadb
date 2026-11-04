@@ -14,10 +14,13 @@ Keep the native `orna-cli-v1` integration suite as an independent CI gate. Its
 workflow uses per-ref concurrency and does not cancel an in-progress run, so a
 worker ref cannot replace the main ref's pending CLI gate.
 
-Keep generic native `orna serve`, Git transport, and the ordinary removable
-`std.devtools` frontend. The frontend remains table-first and exposes the
-spec-required database views. This does not add a second language execution
-path or a playground-specific route.
+Keep generic native `orna serve` and Git transport. No frontend is shipped
+until the source-hosted devtools lands, and `orna serve` installs no native
+fallback page at `/`: without a serving entry the root answers a JSON
+diagnostic and the Git transport keeps serving. The frontend, when it lands, is
+the ordinary removable `devtools` source application: table-first, exposing the
+spec-required database views, and a second language execution path or
+playground-specific route is still not introduced.
 
 ## Normative boundary
 
