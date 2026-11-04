@@ -1,0 +1,183 @@
+// Behavioural tests for std.query. Each function asserts one contract of the
+// explicitly named finite-collection facade, so a change to the module changes
+// the expected value and the assertion fails. Window operators are only
+// asserted against complete positional windows, which is what they emit.
+
+use query;
+use test;
+
+pub fn chunk_splits_into_a_final_short_group(): Bool =
+    test.should_equal(query.chunk([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]]);
+
+pub fn flatten_concatenates_in_source_order(): Bool =
+    test.should_equal(query.flatten([[1, 2], [3]]), [1, 2, 3]);
+
+pub fn partition_returns_matching_then_remaining(): Bool {
+    let (matching, remaining) = query.partition([1, 2, 3, 4], value => value % 2 == 0);
+    test.should_equal(matching, [2, 4]) && test.should_equal(remaining, [1, 3])
+}
+
+pub fn zip_stops_at_the_shorter_input(): Bool =
+    test.should_equal(query.zip([1, 2, 3], [3, 4]), [(1, 3), (2, 4)]);
+
+pub fn zip_exact_pairs_equal_length_inputs(): Bool =
+    test.should_equal(query.zip_exact([1, 2], [3, 4]), [(1, 3), (2, 4)]);
+
+pub fn unique_keeps_each_first_occurrence(): Bool =
+    test.should_equal(query.unique([3, 1, 3, 2, 1]), [3, 1, 2]);
+
+pub fn group_by_orders_groups_by_key_and_keeps_input_order_inside(): Bool =
+    test.should_equal(
+        query.group_by([1, 2, 3, 4], value => value % 2),
+        [(0, [2, 4]), (1, [1, 3])],
+    );
+
+pub fn pairs_yields_overlapping_adjacent_pairs(): Bool =
+    test.should_equal(query.pairs([1, 2, 3]), [(1, 2), (2, 3)]);
+
+pub fn pairs_of_a_single_value_is_empty(): Bool =
+    test.should_equal(count(query.pairs([1])), 0);
+
+pub fn window_emits_complete_windows_only(): Bool =
+    test.should_equal(query.window([1, 2, 3, 4], 3), [[1, 2, 3], [2, 3, 4]]);
+
+pub fn window_step_skips_positions(): Bool =
+    test.should_equal(query.window([1, 2, 3, 4], 2, 2), [[1, 2], [3, 4]]);
+
+pub fn window_mean_averages_each_complete_window(): Bool =
+    test.should_equal(query.window_mean([2, 4, 6, 8], 2), [Some(3), Some(5), Some(7)]);
+
+pub fn window_percentile_reports_the_lower_position_in_each_complete_window(): Bool =
+    test.should_equal(
+        query.window_percentile([1, 3, 5, 7], 2, 0.5, "lower"),
+        [Some(1), Some(3), Some(5)],
+    );
+
+pub fn window_sum_adds_each_complete_window(): Bool =
+    test.should_equal(query.window_sum([1, 2, 3, 4], 2), [3, 5, 7]);
+
+pub fn window_median_takes_the_middle_of_each_complete_window(): Bool =
+    test.should_equal(query.window_median([2, 4, 6, 8], 2), [Some(3), Some(5), Some(7)]);
+
+pub fn window_min_selects_each_complete_window_smallest(): Bool =
+    test.should_equal(query.window_min([3, 1, 4, 2], 2), [Some(1), Some(1), Some(2)]);
+
+pub fn window_max_selects_each_complete_window_largest(): Bool =
+    test.should_equal(query.window_max([3, 1, 4, 2], 2), [Some(3), Some(4), Some(4)]);
+
+pub fn window_range_subtracts_each_complete_window_minimum(): Bool =
+    test.should_equal(query.window_range([3, 1, 4, 2], 2), [Some(2), Some(3), Some(2)]);
+
+pub fn window_mode_lists_each_complete_window_mode(): Bool =
+    test.should_equal(query.window_mode([1, 1, 2, 2], 2), [[1], [1, 2], [2]]);
+
+pub fn window_variance_is_the_population_variance_of_each_complete_window(): Bool =
+    test.should_equal(
+        query.window_variance([1, 3, 5, 7], 2),
+        [Some(1), Some(1), Some(1)],
+    );
+
+pub fn window_standard_deviation_is_the_root_variance_of_each_complete_window(): Bool =
+    test.should_equal(
+        query.window_standard_deviation([1, 3, 5, 7], 2),
+        [Some(1), Some(1), Some(1)],
+    );
+
+pub fn window_histogram_counts_each_complete_window_per_bin(): Bool =
+    test.should_equal(
+        query.window_histogram([1, 2, 3, 4], 2, [(1, 2), (2, 5)]),
+        [[1, 1], [0, 2], [0, 2]],
+    );
+
+pub fn window_rate_reports_endpoint_change_per_elapsed_time(): Bool =
+    test.should_equal(
+        query.window_rate(
+            [
+                (2024-01-01T00:00:00Z, 10),
+                (2024-01-01T00:00:01Z, 20),
+                (2024-01-01T00:00:02Z, 30),
+            ],
+            3,
+        ),
+        [Some(10)],
+    );
+
+pub fn window_rate_integrate_pairs_each_complete_window_rate_and_integral(): Bool =
+    test.should_equal(
+        query.window_rate_integrate(
+            [
+                (2024-01-01T00:00:00Z, 10),
+                (2024-01-01T00:00:01Z, 20),
+                (2024-01-01T00:00:02Z, 30),
+            ],
+            3,
+        ),
+        [(Some(10), Some(40))],
+    );
+
+pub fn window_derivative_timestamps_each_pair_at_its_right_end(): Bool =
+    test.should_equal(
+        query.window_derivative(
+            [
+                (2024-01-01T00:00:00Z, 10),
+                (2024-01-01T00:00:01Z, 20),
+                (2024-01-01T00:00:02Z, 30),
+            ],
+            3,
+        ),
+        [[(2024-01-01T00:00:01Z, 10), (2024-01-01T00:00:02Z, 10)]],
+    );
+
+pub fn window_integrate_accumulates_each_complete_window_area(): Bool =
+    test.should_equal(
+        query.window_integrate(
+            [
+                (2024-01-01T00:00:00Z, 10),
+                (2024-01-01T00:00:01Z, 20),
+                (2024-01-01T00:00:02Z, 30),
+            ],
+            3,
+        ),
+        [Some(40)],
+    );
+
+pub fn split_when_starts_a_group_before_a_matching_item(): Bool =
+    test.should_equal(
+        query.split_when([1, 2, 3, 4], value => value % 3 == 0),
+        [[1, 2], [3, 4]],
+    );
+
+pub fn rank_shares_tied_positions_and_skips_them(): Bool =
+    test.should_equal(
+        query.rank([10, 20, 20, 30], value => value),
+        [(10, 1), (20, 2), (20, 2), (30, 4)],
+    );
+
+pub fn asof_join_takes_the_latest_eligible_right_row_or_null(): Bool =
+    test.should_equal(
+        query.asof_join([1, 2, 3], [2], value => value, value => value),
+        [(1, null), (2, Some(2)), (3, null)],
+    );
+
+pub fn asof_join_reuses_the_latest_eligible_row_across_its_group(): Bool =
+    test.should_equal(
+        query.asof_join([1, 2, 3], [2], value => value, value => 0),
+        [(1, null), (2, Some(2)), (3, Some(2))],
+    );
+
+pub fn bucket_by_groups_instants_inside_one_calendar_period(): Bool =
+    test.should_equal(
+        count(
+            query.bucket_by(
+                [2024-01-01T00:00:00Z, 2024-01-01T12:00:00Z],
+                1.day,
+                "UTC",
+            ),
+        ),
+        1,
+    );
+
+// No query value is constructible from ordinary source, so the planner hint is
+// pinned by its declared result type: a signature change fails this build.
+pub fn plan_hint_returns_the_structured_plan(source: Query<Int>): sys.Plan =
+    query.plan_hint(source);
