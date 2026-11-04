@@ -1291,6 +1291,9 @@ impl StagedActivation {
 /// The grouped handle that serves the admitted table catalogue.
 const SYS_CATALOGUE_TABLES_SOURCE: &str = "sys.catalog.tables";
 
+/// The grouped handle that serves the admitted column catalogue.
+const SYS_CATALOGUE_COLUMNS_SOURCE: &str = "sys.catalog.columns";
+
 /// Builds a canonical record from named fields.
 ///
 /// OVB orders map keys by their complete encoded form, and
@@ -1314,6 +1317,45 @@ fn catalogue_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
             .map(|(_, key, value)| (OvbRaw::Text(key.to_owned()), value))
             .collect(),
     )
+}
+
+/// `sys.Column` rows for every column of every admitted table.
+///
+/// A column carries its table, its declaration position, its type, whether it
+/// is optional and its key position when it is a key column. Object and
+/// expression references stay null until the engine holds per-column
+/// identities.
+fn catalogue_column_rows(tables: &BTreeMap<String, TableSchema>) -> Vec<CanonicalValue> {
+    let mut rows = Vec::new();
+    for (table, schema) in tables {
+        for (position, column) in schema.declaration_order.iter().enumerate() {
+            let ty = schema.fields.get(column);
+            let optional = matches!(ty, Some(orna_semantic_v1::Type::Optional(_)));
+            let key_position = schema
+                .admission
+                .as_ref()
+                .and_then(|admission| admission.keys.iter().position(|(key, _)| key == column))
+                .map(|index| OvbRaw::Int(index.into()))
+                .unwrap_or(OvbRaw::Null);
+            let record = catalogue_map(vec![
+                ("default_expression", OvbRaw::Null),
+                ("key_position", key_position),
+                ("name", OvbRaw::Text(column.clone())),
+                ("object", OvbRaw::Null),
+                ("optional", OvbRaw::Bool(optional)),
+                ("position", OvbRaw::Int(position.into())),
+                ("reference", OvbRaw::Null),
+                ("table", OvbRaw::Text(table.clone())),
+                (
+                    "type",
+                    ty.map(|ty| OvbRaw::Text(format!("{ty:?}")))
+                        .unwrap_or(OvbRaw::Null),
+                ),
+            ]);
+            rows.push(CanonicalValue::new(record).expect("catalogue column is a canonical record"));
+        }
+    }
+    rows
 }
 
 /// Pages over pre-built catalogue rows, using the row index as the cursor.
@@ -1458,6 +1500,8 @@ pub struct SourceMutationEffectHandler {
     publication_rows: Option<RuntimePublicationMetadataRows>,
     /// `sys.Table` rows served through the `sys.catalog.tables` grouped handle.
     catalogue_tables: Vec<CanonicalValue>,
+    /// `sys.Column` rows served through the `sys.catalog.columns` handle.
+    catalogue_columns: Vec<CanonicalValue>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
@@ -1473,6 +1517,7 @@ impl SourceMutationEffectHandler {
         let next_automatic_ids = automatic_id_counters(&tables);
         Self {
             catalogue_tables: catalogue_table_rows(&tables, &BTreeMap::new()),
+            catalogue_columns: catalogue_column_rows(&tables),
             tables,
             table_object_ids: BTreeMap::new(),
             insert_defaults: BTreeMap::new(),
@@ -2461,6 +2506,14 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 budget,
             )?));
         }
+        if source == SYS_CATALOGUE_COLUMNS_SOURCE {
+            return Ok(Some(catalogue_tables_page(
+                &self.mutations.catalogue_columns,
+                after,
+                limit,
+                budget,
+            )?));
+        }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
         };
@@ -2859,6 +2912,14 @@ impl EffectHandler for SourceMutationEffectHandler {
         if source == SYS_CATALOGUE_TABLES_SOURCE {
             return Ok(Some(catalogue_tables_page(
                 &self.catalogue_tables,
+                after,
+                limit,
+                budget,
+            )?));
+        }
+        if source == SYS_CATALOGUE_COLUMNS_SOURCE {
+            return Ok(Some(catalogue_tables_page(
+                &self.catalogue_columns,
                 after,
                 limit,
                 budget,
@@ -4176,6 +4237,40 @@ mod tests {
         assert!(
             rendered.contains("row_count_exact"),
             "the row carries the exactness flag"
+        );
+    }
+
+    #[test]
+    // Specified: Orna-1.1.0 sys.Column; the handle lists every admitted column.
+    fn catalogue_columns_serve_every_column_in_declaration_order() {
+        let source = "pub table Note(id: Int) {\n    zebra: Str,\n    alpha: Str?,\n}\n\npub fn main(): Int = 1;\n";
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module("notes/main.orna", source, "main")
+            .expect("admit the fixture table");
+        let tables = application_table_schemas(&application);
+        let rows = catalogue_column_rows(&tables);
+        assert_eq!(rows.len(), 3, "one row per column, including the key");
+        let rendered: Vec<String> = rows.iter().map(|row| format!("{row:?}")).collect();
+        let position_of = |name: &str| {
+            rendered
+                .iter()
+                .position(|row| row.contains(&format!("Text(\"{name}\")")))
+                .unwrap_or_else(|| panic!("column {name} is listed"))
+        };
+        assert!(
+            position_of("id") < position_of("zebra") && position_of("zebra") < position_of("alpha"),
+            "columns keep declaration order: {rendered:?}"
+        );
+        let alpha = &rendered[position_of("alpha")];
+        assert!(
+            alpha.contains("optional") && alpha.contains("Bool(true)"),
+            "an optional column reports optional: {alpha}"
+        );
+        assert!(
+            rendered[position_of("id")].contains("key_position"),
+            "a key column reports its key position"
         );
     }
 
