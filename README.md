@@ -74,6 +74,12 @@ input and output with UTF-16 positions. Its tests exercise diagnostics,
 symbols, navigation, completion, hover, and semantic tokens without requiring
 a running database.
 
+The editor packages that launch it live under `editors/` — VS Code, Sublime
+Text, Vim, Neovim, and Emacs — and every one of them starts `orna-lsp` by
+default with a single override. The start contract, the one override per
+editor, and the rule that every file under `editors/` is generated are in the
+[editor tooling guide](docs/editor-tooling.md).
+
 ## Project layout
 
 The workspace contains the Orna 1.1.0 language, value, evaluator, runtime,
