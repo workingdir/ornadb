@@ -51,8 +51,9 @@ It needs no running database, no network, and no filesystem writes.
 ### Editor integrations are small, dependency-light packages
 
 - `editors/vscode/` is a plain-JavaScript extension with no build step.
-  It launches `orna-lsp` (configurable via `orna.lsp.path`), bundles the
-  TextMate grammar, and declares language configuration.
+  It launches `orna-lsp` (configurable via the `orna.lsp.serverCommand`
+  argv list), bundles the TextMate grammar, and declares language
+  configuration.
 - `editors/neovim/` provides filetype detection and native LSP setup;
   tree-sitter parser installation is a separate editor step.
 - `editors/vim/` provides static syntax and filetype detection, with optional

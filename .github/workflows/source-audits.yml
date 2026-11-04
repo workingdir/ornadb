@@ -202,8 +202,16 @@ jobs:
       - name: Check generated editor bytes
         run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
 
-      - name: Check Tree-sitter grammar syntax
-        run: node --check editors/tree-sitter-orna/grammar.js
+      - name: Check generated JavaScript syntax
+        run: |
+          node --check editors/tree-sitter-orna/grammar.js
+          node --check editors/vscode/extension.js
+
+      # Drives the generated extension through its launch contract with the
+      # VS Code API and client library stubbed. The real-library probe
+      # (`--real`) needs `npm install` in editors/vscode and SKIPs without it.
+      - name: Prove the generated VS Code extension launches orna-lsp
+        run: node scripts/check_vscode_extension.js
 
       # The highlighter test runs each generated grammar in its real host and
       # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is

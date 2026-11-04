@@ -114,6 +114,9 @@ fn collect_editor_files(
                 .expect("editor files stay under the repository root")
                 .to_string_lossy()
                 .replace('\\', "/");
+            if editor::editor_build_output(&relative) {
+                continue;
+            }
             files.insert(relative);
         }
     }
