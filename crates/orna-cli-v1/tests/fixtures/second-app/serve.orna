@@ -1,0 +1,28 @@
+// A second ordinary application (ORNA-APP-021, gate G audit item G-14).
+//
+// It declares its own tables and its own root `pub fn serve()`, and imports the
+// same `std.ui` renderer package the devtools application imports. `orna serve`
+// selects this entry exactly as it selects any other: the committed root
+// module's public `serve`. No route and no renderer code names an application.
+use std.ui.{Button, Code, Cols, Details, Field, Input, Table, Text};
+
+pub table Account(id: Str) {
+    name: Str,
+}
+
+pub table Entry(id: Int) {
+    note: Str,
+    amount: Int,
+}
+
+pub fn serve(): UI = Cols([
+    Text("Ledger"),
+    Field("mode", "serve"),
+    Table(sys.catalog.tables),
+    Details([
+        Field("accounts", "two"),
+        Code("pub fn serve(): UI", null)
+    ]),
+    Input("filter", "Filter", null, std.ui.action("ledger.filter", as: Text)),
+    Button("Reload", std.ui.action("ledger.reload", as: Text))
+]);
