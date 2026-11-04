@@ -18,10 +18,15 @@
 //! the record grammar the production reader admits, because that grammar is
 //! what the reader must parse.
 //!
-//! Fixed commit dates make the committed bundle bytes reproducible for a given
-//! git release. The bundle test pins its SHA-256 and rebuilds the repository
-//! from this builder, asserting that the rebuilt bundle equals the committed
-//! one byte for byte, so a builder change without a regenerated bundle fails.
+//! Fixed commit dates, a pinned object format and pinned line-ending
+//! conversion make the committed bundle bytes reproducible for a given git
+//! release. The bundle test pins that artifact's SHA-256 and rebuilds the
+//! repository from this builder, comparing the rebuild with the committed
+//! bundle object by object (`HEAD`, refs, the ordered object graph and every
+//! object's bytes), so a builder change without a regenerated bundle fails. It
+//! does not compare the `git bundle` file bytes: pack encoding depends on the
+//! git release and on the host's defaults, so file-byte equality would test the
+//! runner rather than this builder.
 //!
 //! Two entry points:
 //!
