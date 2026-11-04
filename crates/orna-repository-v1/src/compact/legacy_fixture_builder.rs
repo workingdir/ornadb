@@ -23,6 +23,17 @@
 //! from this builder, asserting that the rebuilt bundle equals the committed
 //! one byte for byte, so a builder change without a regenerated bundle fails.
 //!
+//! Two entry points:
+//!
+//! - `write_legacy_format1_fixture` writes the shell: marker, identity, source
+//!   record, the compact tables and the gitlink.
+//! - `write_legacy_format1_golden_fixture` writes that shell plus the
+//!   editable-placement table, reading the declaring module and its row units
+//!   from a directory the caller names. A test fixture may not be included
+//!   across crates (`crates/orna-syntax-v1/tests/fixture_audit.rs`), so the
+//!   content lives once, in the consuming crate's fixture tree, and this
+//!   builder copies it from that path instead of embedding a second copy.
+//!
 //! Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
 //!
 //! - the format marker `.orna/format.orna`, exactly
@@ -102,18 +113,16 @@ const LOOSE_TABLE_NUMBER: u64 = 4;
 /// (`contacts/Contact/<key component>.orna`, 1.0.0 `07-tables.md:374-380`).
 const LOOSE_NAMESPACE: &str = "contacts";
 const LOOSE_TABLE_NAME: &str = "Contact";
-/// One editable row: the encoded `Str` key component and the row-unit body.
+/// File names the caller's loose-source directory must supply. The content
+/// lives once, in the consuming crate's fixture tree (a test fixture may not be
+/// included across crates); only the names are fixture shape.
+const LOOSE_MODULE_FILE: &str = "legacy-loose-contacts-main.orna";
+/// One editable row: the encoded `Str` key component and the row-unit file.
 /// Row units hold non-key fields only (ORNA-ROW-001); the key is reconstructed
 /// from the path (ORNA-ROW-002).
 const LOOSE_ROWS: [(&str, &str); 2] = [
-    (
-        "alice-smith",
-        include_str!("../../tests/fixtures/legacy-loose-contact-alice-smith.orna"),
-    ),
-    (
-        "bob-jones",
-        include_str!("../../tests/fixtures/legacy-loose-contact-bob-jones.orna"),
-    ),
+    ("alice-smith", "legacy-loose-contact-alice-smith.orna"),
+    ("bob-jones", "legacy-loose-contact-bob-jones.orna"),
 ];
 
 /// One physical segment of a fixture table. A table holds one variant only.
@@ -268,11 +277,33 @@ impl Column {
     }
 }
 
-/// Writes the complete legacy format-1 golden repository into `root`.
+/// Writes the legacy format-1 shell into `root`: the format marker, the database
+/// identity, the source record, the key-only compact tables and the gitlink.
+///
+/// Callers that need the golden repository, including the committed editable
+/// rows, call [`write_legacy_format1_golden_fixture`] instead.
 ///
 /// `root` must be an existing empty directory. The function panics on any
 /// failure: it is a fixture builder, not a repository operation.
 pub fn write_legacy_format1_fixture(root: &Path) {
+    write_repository(root, None);
+}
+
+/// Writes the complete legacy format-1 golden repository into `root`.
+///
+/// `loose_sources` is the directory holding the editable table's declaring
+/// module and row units (`LOOSE_MODULE_FILE` and every `LOOSE_ROWS` file). A
+/// test fixture may not be included across crates, so the content stays in the
+/// consuming crate's fixture tree and this builder copies it from the path the
+/// caller names; there is one copy, not one per crate.
+///
+/// `root` must be an existing empty directory. The function panics on any
+/// failure: it is a fixture builder, not a repository operation.
+pub fn write_legacy_format1_golden_fixture(root: &Path, loose_sources: &Path) {
+    write_repository(root, Some(loose_sources));
+}
+
+fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     git(root, &["init", "-b", "main"]);
     git(root, &["config", "user.name", AUTHOR_NAME]);
     git(root, &["config", "user.email", AUTHOR_EMAIL]);
@@ -298,8 +329,16 @@ pub fn write_legacy_format1_fixture(root: &Path) {
         publish_table(root, table_id(number), field_id(number), number, segments);
     }
 
-    publish_loose_table(root, table_id(LOOSE_TABLE_NUMBER));
+    if let Some(sources) = loose_sources {
+        publish_loose_table(root, table_id(LOOSE_TABLE_NUMBER), sources);
+    }
 
+    record_gitlink(root);
+}
+
+/// Records the gitlink pin as the last commit. The pinned commit is the current
+/// `HEAD`, so the pin is a real commit object in this repository.
+fn record_gitlink(root: &Path) {
     let head = git(root, &["rev-parse", "HEAD"]);
     git(
         root,
@@ -398,7 +437,7 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
 /// `23-storage.md:104`, "A table may also have editable rows under its
 /// ordinary table directory"). No compact key may collide with these keys
 /// (ORNA-STORAGE-013); the compact tables use their own table IDs.
-fn publish_loose_table(root: &Path, table: Uuid) {
+fn publish_loose_table(root: &Path, table: Uuid, sources: &Path) {
     let table_dir = root.join(format!(".orna/storage/{table}"));
     fs::create_dir_all(&table_dir).unwrap();
     fs::write(
@@ -411,14 +450,18 @@ fn publish_loose_table(root: &Path, table: Uuid) {
     fs::create_dir_all(&namespace).unwrap();
     fs::write(
         namespace.join("main.orna"),
-        include_str!("../../tests/fixtures/legacy-loose-contacts-main.orna"),
+        read_loose_source(sources, LOOSE_MODULE_FILE),
     )
     .unwrap();
 
     let rows = namespace.join(LOOSE_TABLE_NAME);
     fs::create_dir_all(&rows).unwrap();
-    for (key, body) in LOOSE_ROWS {
-        fs::write(rows.join(format!("{key}.orna")), body).unwrap();
+    for (key, file) in LOOSE_ROWS {
+        fs::write(
+            rows.join(format!("{key}.orna")),
+            read_loose_source(sources, file),
+        )
+        .unwrap();
     }
 
     git(root, &["add", "--all"]);
@@ -426,6 +469,19 @@ fn publish_loose_table(root: &Path, table: Uuid) {
         root,
         &["commit", "--quiet", "-m", "orna: publish editable rows"],
     );
+}
+
+/// Reads one loose source file from the caller's fixture directory. The path is
+/// named in the panic so a caller that points at the wrong directory sees which
+/// file the golden layout needs.
+fn read_loose_source(sources: &Path, file: &str) -> Vec<u8> {
+    let path = sources.join(file);
+    fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "loose fixture source {} is unreadable: {error}",
+            path.display()
+        )
+    })
 }
 
 /// One shard entry, before it is rendered into `shards/00000000.orna`.

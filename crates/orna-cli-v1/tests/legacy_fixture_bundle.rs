@@ -40,7 +40,8 @@ use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
 const BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
-/// SHA-256 of `BUNDLE`. Regenerate with the `build_legacy_fixture` example and
+/// SHA-256 of `BUNDLE`. Regenerate with the `build_legacy_fixture` example
+/// (`<empty-root> <bundle-path> tests/fixtures`) and
 /// `python3 scripts/check_fixture_manifest.py --update` when the builder changes.
 const BUNDLE_SHA256: &str = "19f36c5aa732ba69ad95cb8d24c0771946cd6326ebed8eb2a9123a6d4a9b1dc1";
 /// The 1.0.0 format marker, including its trailing LF. 1.0.0 `19-repository.md`
@@ -143,9 +144,7 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     // history, mount and export needs both representations in one commit.
     assert_eq!(
         git(&source, &["show", "HEAD:contacts/Contact/alice-smith.orna"]),
-        include_str!(
-            "../../orna-repository-v1/tests/fixtures/legacy-loose-contact-alice-smith.orna"
-        ),
+        include_str!("fixtures/legacy-loose-contact-alice-smith.orna"),
         "loose row unit bytes changed"
     );
 
@@ -295,10 +294,11 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
 /// The pinned SHA-256 above only proves the committed file did not change; it
 /// cannot notice a builder that stopped producing that file. This test closes
 /// that gap: it writes a fresh repository with
-/// `orna_repository_v1::write_legacy_format1_fixture`, bundles it the same way
-/// `examples/build_legacy_fixture.rs` does, and requires the rebuilt bundle to
-/// equal the committed one byte for byte. A builder change therefore needs a
-/// regenerated bundle in the same change.
+/// `orna_repository_v1::write_legacy_format1_golden_fixture` (pointed at this
+/// crate's own fixture tree, which owns the editable-row sources), bundles it
+/// the same way `examples/build_legacy_fixture.rs` does, and requires the
+/// rebuilt bundle to equal the committed one byte for byte. A builder change
+/// therefore needs a regenerated bundle in the same change.
 ///
 /// Bundle bytes are reproducible for a given git release because the builder
 /// pins author and committer dates; a git release that changes pack encoding
@@ -306,11 +306,12 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
 #[test]
 fn builder_regenerates_the_committed_bundle_byte_for_byte() {
     let parent = TempDir::new().unwrap();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE);
 
     let root = parent.path().join("repository");
     std::fs::create_dir(&root).unwrap();
-    orna_repository_v1::write_legacy_format1_fixture(&root);
+    orna_repository_v1::write_legacy_format1_golden_fixture(&root, &fixtures);
 
     // Compare the rebuilt history with the committed one before the bytes, so a
     // mismatch reports which of the two drifted and where.
@@ -345,8 +346,8 @@ fn builder_regenerates_the_committed_bundle_byte_for_byte() {
         committed_bytes.len(),
         "the committed bundle is stale: regenerate it with \
          `cargo run -p orna-repository-v1 --example build_legacy_fixture --features \
-         legacy-fixture-writer -- <empty-root> {}` and repin BUNDLE_SHA256 plus \
-         scripts/fixture-manifest.sha256",
+         legacy-fixture-writer -- <empty-root> {} tests/fixtures` and repin \
+         BUNDLE_SHA256 plus scripts/fixture-manifest.sha256",
         bundle.display()
     );
     assert!(
