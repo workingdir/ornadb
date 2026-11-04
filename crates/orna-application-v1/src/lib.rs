@@ -3728,6 +3728,20 @@ impl ApplicationLiveAdapter {
     /// pins the standard function layer alone, so a page expression that names
     /// only standard functions and literals still resolves while a name the
     /// console declares stays unreachable.
+    ///
+    /// # The shipped consumer has no page transition
+    ///
+    /// `orna serve` never selects a module, so it reaches this branch and pins
+    /// once from the *worktree* [`LoadedProject`]. The page it actually renders
+    /// for `GET /` is a different admission: `cli_serve_app` re-admits the
+    /// committed `HEAD:main.orna` on every request. The two models therefore
+    /// diverge, and nothing reconciles them for the life of this process — an
+    /// uncommitted edit to `main.orna` moves a page watch to a model no `GET /`
+    /// renders, and a commit that changes it leaves them apart until the
+    /// adapter is rebuilt. Serve has no page-model transition today; only a
+    /// host that selected a module with
+    /// [`ApplicationLiveAdapter::with_module`] gets one, per admitted
+    /// generation.
     fn pin_page_environment(&self) -> Result<AdmittedPageModule, LiveError> {
         if self.eval_module.is_some() {
             // A host that selects a complete application module serves only an
@@ -5161,16 +5175,30 @@ mod tests {
             refresh_floor: None,
         };
 
-        // The page's own binding is not part of the console environment.
+        // Reading chosen: the console is a different environment, not an empty
+        // one. It is seeded from the whole project and keeps root functions under
+        // `main.<name>`, so the console reaches the committed module only through
+        // that qualified spelling. What the page environment owns is a separate
+        // name space: no console binding becomes a page name, and the page reads
+        // the module value asserted below.
+        let qualified = LiveApplication::eval(
+            &mut adapter,
+            session,
+            [12; 16],
+            &eval_message("main.page()", [12; 32]),
+        )
+        .expect("the console calls the clone's module by its qualified name");
+        let Message::Result {
+            value: Some(console_value),
+            ..
+        } = qualified.message
+        else {
+            panic!("a successful console call carries its typed value");
+        };
         assert_eq!(
-            LiveApplication::eval(
-                &mut adapter,
-                session,
-                [12; 16],
-                &eval_message("page", [12; 32])
-            ),
-            Err(LiveError::ApplicationRejected),
-            "the console cannot see the page environment"
+            console_value,
+            CanonicalValue::new(OvbRaw::Int(42.into())).unwrap(),
+            "the console reaches the committed module through `main.`"
         );
         // The console's own declaration of the same name.
         LiveApplication::eval(
@@ -5220,6 +5248,22 @@ mod tests {
                 value: Some(value),
                 ..
             } if value == CanonicalValue::new(OvbRaw::Int(7.into())).unwrap()
+        ));
+        // The console's own `page` and the module's `main.page` stay separate:
+        // the rebinding moved neither the module value nor the page below.
+        let qualified_after = LiveApplication::eval(
+            &mut adapter,
+            session,
+            [18; 16],
+            &eval_message("main.page()", [18; 32]),
+        )
+        .expect("the console still calls the committed module by its qualified name");
+        assert!(matches!(
+            qualified_after.message,
+            Message::Result {
+                value: Some(value),
+                ..
+            } if value == CanonicalValue::new(OvbRaw::Int(42.into())).unwrap()
         ));
 
         let refreshed =
@@ -5354,6 +5398,12 @@ mod tests {
         let refreshed =
             LiveApplication::resync(&mut adapter, session, [25; 16], watch, &Message::Resync)
                 .expect("resync evaluates the new page generation");
+        assert_eq!(
+            refreshed.request,
+            Some([25; 16]),
+            "the snapshot names its resync"
+        );
+        assert_eq!(refreshed.watch, Some(watch));
         let Message::Snapshot {
             revision, present, ..
         } = refreshed.message
