@@ -2714,3 +2714,91 @@ fn binary_commit_and_check_type_check_the_shipped_iterator_test_module() {
     assert!(check.status.success(), "check stderr: {:?}", check.stderr);
     assert_eq!(check.stdout, b"project valid\n");
 }
+
+/// The pinned `std.query` closure: `query` imports `collection`, calls into
+/// `stats`, and the snapshot root keeps its own `math` dependency, so every
+/// module the facade needs is present beside the behavioural test module.
+fn pinned_query_contracts_closure() -> [(&'static str, &'static str); 6] {
+    [
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
+        (
+            "collection.orna",
+            include_str!("../../../stdlib/std/collection.orna"),
+        ),
+        ("stats.orna", include_str!("../../../stdlib/std/stats.orna")),
+        ("query.orna", include_str!("../../../stdlib/std/query.orna")),
+        ("test.orna", include_str!("../../../stdlib/std/test.orna")),
+        (
+            "query_contracts.orna",
+            include_str!("fixtures/query-contracts.orna"),
+        ),
+    ]
+}
+
+/// The behavioural tests re-imported at the project root, where the checker
+/// reads function bodies: a module pinned inside the standard dependency is
+/// resolved but never type-checked, so the assertions also run in a module the
+/// project owns. Standard modules are reachable there as `std.query` and
+/// `std.test`, which is the only difference from the pinned copy.
+fn query_assertions_project_source() -> String {
+    include_str!("fixtures/query-contracts.orna")
+        .lines()
+        .filter(|line| !matches!(line.trim(), "use query;" | "use test;"))
+        .map(|line| {
+            if line.trim_start().starts_with("//") {
+                line.to_owned()
+            } else {
+                line.replace("query.", "std.query.")
+                    .replace("test.", "std.test.")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The behavioural tests shipped beside `std.query` type-check against the
+/// standard they test, so a change that breaks a facade contract fails this
+/// build rather than only the module it lives in.
+#[test]
+fn binary_commit_and_check_type_check_the_shipped_query_test_module() {
+    let assertions = query_assertions_project_source();
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_query_contracts_closure(),
+        &[
+            (
+                "main.orna",
+                "use std.query_contracts;\nuse query_assertions;\npub fn probe(): Bool = query_contracts.chunk_splits_into_a_final_short_group()\n    && query_assertions.chunk_splits_into_a_final_short_group();\n",
+            ),
+            ("query_assertions.orna", assertions.as_str()),
+        ],
+    );
+
+    let commit = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "commit",
+            "-m",
+            "pin the query test module",
+        ])
+        .output()
+        .expect("CLI commit");
+    assert!(
+        commit.status.success(),
+        "commit stderr: {:?}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+}
