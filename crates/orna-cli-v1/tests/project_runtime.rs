@@ -2178,7 +2178,9 @@ fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() 
         "the pinned snapshot must attach"
     );
     assert!(
-        project.standard_runtime_modules().contains("std/stats.orna"),
+        project
+            .standard_runtime_modules()
+            .contains("std/stats.orna"),
         "query's own stats import must join the runtime closure: {:?}",
         project.standard_runtime_modules()
     );
