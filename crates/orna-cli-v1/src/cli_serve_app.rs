@@ -51,7 +51,18 @@ impl ServeApp {
         else {
             return Ok(None);
         };
-        let authority = ApplicationAuthority::new(catalogue.clone(), Limits::default());
+        // Admission analyses the entry module alone, so the standard modules
+        // the project pins must reach the authority through the catalogue's
+        // standard declarations; the project's own profile and sources are
+        // used, never the host library (ORNA-APP-005, ORNA-APP-007).
+        let mut authority = ApplicationAuthority::new(catalogue.clone(), Limits::default());
+        if let Some(profile) = project.standard_profile() {
+            authority = authority
+                .with_standard_sources(profile, project.standard_sources().iter().cloned())
+                .unwrap_or_else(|_| {
+                    ApplicationAuthority::new(catalogue.clone(), Limits::default())
+                });
+        }
         match authority.admit_module(
             SERVE_MODULE_PATH,
             project.modules()[index].source.clone(),
