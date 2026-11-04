@@ -283,7 +283,9 @@ impl RunningServer {
             match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok(line) if line.contains(needle) => return line,
                 Ok(_) => {}
-                Err(_) => panic!("the serving process never wrote {needle} to stderr"),
+                Err(error) => {
+                    panic!("the serving process never wrote {needle} to stderr: {error}")
+                }
             }
         }
     }
