@@ -88,11 +88,16 @@ impl ServeApp {
         if !staged.mutations().is_empty() {
             return serve_error("serve.write_refused");
         }
-        Response::new(
-            200,
-            "text/plain; charset=utf-8",
-            crate::repl::inspect(staged.value()).into_bytes(),
-        )
+        // A `std.ui` node tree renders as semantic HTML; every other value
+        // keeps the Inspect text fallback.
+        match crate::ui_render::render_ui_html(staged.value()) {
+            Some(html) => Response::new(200, "text/html; charset=utf-8", html.into_bytes()),
+            None => Response::new(
+                200,
+                "text/plain; charset=utf-8",
+                crate::repl::inspect(staged.value()).into_bytes(),
+            ),
+        }
     }
 
     #[allow(clippy::too_many_lines)]
