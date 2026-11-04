@@ -122,7 +122,13 @@ const RELATION_SCAN_PAGE_ROWS: usize = 1;
 const DEFAULT_STRING_BYTES: usize = 16_384;
 const DEFAULT_INTEGER_DIGITS: usize = 1_024;
 /// Native stack headroom kept before evaluation requests a fresh stack segment.
-const EVALUATOR_STACK_RED_ZONE: usize = 128 * 1024;
+/// A debug build of the evaluator's largest match arm can spend tens of
+/// kilobytes between one guard check and the next, so a small red zone fires
+/// too late: the check passes, the descent continues, and the thread stack runs
+/// out before the segment is requested. At 128 KiB this test needed a 2 MiB
+/// thread stack to survive and overflowed on a runner that gives exactly that
+/// (ornadb-7fso); at 1 MiB it survives on a 1 MiB thread stack.
+const EVALUATOR_STACK_RED_ZONE: usize = 1024 * 1024;
 /// Size of each fresh stack segment used by deep expression evaluation.
 const EVALUATOR_STACK_SEGMENT: usize = 2 * 1024 * 1024;
 
