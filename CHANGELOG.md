@@ -5,6 +5,19 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Strict ORNA-META-001 admission: a format-3 snapshot's tracked `.orna/` holds only `database.orna` and `store`
+  (ornadb-5il1.415, Gate A "unknown/mixed formats fail early"; product change, ORNA-META-001, ORNA-META-002). Any other
+  tracked child — the format-1 `storage` layout, the draft format-2 `blobs` tree, `.orna/packages`, `.orna/checkpoints`, a
+  stray file — is a mixed format and fails admission with `ORNA-REPO-CONTEXT-004` naming `.orna/<entry>`: at `HEAD`, as a
+  historical pin, for a private commit candidate, and at the staged-index gate `orna commit` validates before it creates a
+  commit object. Reading still tolerates only the two entries this build writes (`TRANSITIONAL_FORMAT3_ENTRIES`:
+  `.orna/object-identities.cbor` from the LSP rename and `.orna/migration.json` from a prepared migration copy), each
+  removed by its own work item; the commit gate admits neither, so no reviewed commit adds one. `orna add --row` refuses a
+  loose row file in a format-3 repository with `ORNA-REPO-CONTEXT-004` before the index is touched: rows live only in
+  `.orna/store` (ORNA-REPO-004), so staging `<table>/<key>.orna` would make the next commit mix formats. Tests:
+  `crates/orna-repository-v1/src/format_context.rs` (`format3_snapshot_with_extra_metadata_child_is_rejected`,
+  `format3_snapshot_with_packages_or_checkpoints_is_rejected`) and `crates/orna-cli-v1/tests/walkthrough_music.rs`
+  (`add_row_refuses_loose_row_in_format3_repository`).
 - The project loader now carries the repository's mixed-format diagnosis out of a relabelled snapshot instead of loading
   it as legacy (ornadb-5il1.395, Gate F slice 2; product change, ORNA-META-001, ORNA-META-002, ORNA-UPGRADE-003). A
   legacy `.orna/format.orna` marker beside a format-3 `.orna/store` is the relabel MIGRATION.md forbids ("not safe to
