@@ -27,15 +27,87 @@ pub const SOURCE_SCOPE: &str = "source.orna";
 /// The Orna language publication every generated editor artifact describes.
 pub const LANGUAGE_VERSION: &str = "1.1.0";
 pub const ARTIFACT_MANIFEST_PATH: &str = "editors/generated-artifacts.json";
+
+/// The one language server command every editor surface starts by default.
+///
+/// The server speaks the Language Server Protocol over standard input and
+/// output, so every client launches it without a transport argument. Each
+/// editor has exactly one setting that overrides the command; the override is
+/// always an argv list whose first element is the executable, so an absolute
+/// path is spelled as a one-element list. [`EDITOR_SERVER_COMMANDS`] is the
+/// complete list of surfaces and overrides, and the prose contract lives in
+/// [`LSP_CONTRACT_DOCUMENT`].
+pub const LSP_SERVER_COMMAND: &str = "orna-lsp";
+
+/// The document that states the start contract once for every editor.
+pub const LSP_CONTRACT_DOCUMENT: &str = "docs/editor-tooling.md";
+
+/// One editor surface that starts the language server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorServerCommand {
+    /// Human name of the editor, as the contract document writes it.
+    pub editor: &'static str,
+    /// The generated file that starts the server for this editor.
+    pub artifact: &'static str,
+    /// The editor's single override, spelled as the editor names it.
+    pub override_setting: &'static str,
+}
+
+/// Every editor surface that launches `orna-lsp`, with its one override.
+///
+/// TextMate and Tree-sitter are grammar formats rather than editors: they have
+/// no client to configure, so a TextMate-only or Tree-sitter-only host
+/// receives colouring and no server features.
+pub const EDITOR_SERVER_COMMANDS: &[EditorServerCommand] = &[
+    EditorServerCommand {
+        editor: "VS Code",
+        artifact: "editors/vscode/extension.js",
+        override_setting: "orna.lsp.serverCommand",
+    },
+    EditorServerCommand {
+        editor: "Sublime Text",
+        artifact: "editors/sublime/LSP-orna.sublime-settings",
+        override_setting: "command",
+    },
+    EditorServerCommand {
+        editor: "Vim",
+        artifact: "editors/vim/plugin/orna-lsp.vim",
+        override_setting: "g:orna_lsp_command",
+    },
+    EditorServerCommand {
+        editor: "Neovim",
+        artifact: "editors/neovim/lua/orna/init.lua",
+        override_setting: "options.cmd",
+    },
+    EditorServerCommand {
+        editor: "Emacs",
+        artifact: "editors/emacs/orna-eglot.el",
+        override_setting: "orna-eglot-server-command",
+    },
+];
+
+/// Path components inside `editors/` that are editor build output rather than
+/// governed artifacts: `npm install` in `editors/vscode` writes them, and no
+/// editor surface is configured there.
+pub const EDITOR_BUILD_OUTPUT: &[&str] = &["node_modules", "package-lock.json"];
+
+/// Whether a repository-relative path is editor build output.
+pub fn editor_build_output(relative_path: &str) -> bool {
+    relative_path
+        .split('/')
+        .any(|component| EDITOR_BUILD_OUTPUT.contains(&component))
+}
+
 pub const EDITOR_EMITTERS: &[&str] = &[
-    "TextMate grammar and VSCode extension",
-    "Tree-sitter grammar and package metadata",
+    "TextMate grammar",
+    "VSCode language client extension",
     "VSCode language configuration",
+    "Tree-sitter grammar and package metadata",
     "Vim syntax and filetype detection",
     "Vim LSP registration and omnifunc completion",
     "Neovim native LSP attachment",
     "Emacs major mode and Eglot attachment",
-    "Sublime syntax",
+    "Sublime syntax and LSP client configuration",
     "Semantic-token legend",
 ];
 
@@ -411,7 +483,12 @@ pub fn generated_artifacts() -> Vec<GeneratedArtifact> {
         artifact("editors/neovim/lua/orna/init.lua", render_neovim_lsp()),
         artifact("editors/emacs/orna-eglot.el", render_emacs()),
         artifact("editors/sublime/Orna.sublime-syntax", render_sublime()),
+        artifact(
+            "editors/sublime/LSP-orna.sublime-settings",
+            render_sublime_lsp_settings(),
+        ),
         artifact("editors/vscode/package.json", render_vscode_package()),
+        artifact("editors/vscode/extension.js", render_vscode_extension()),
         artifact(
             "editors/tree-sitter-orna/package.json",
             render_tree_sitter_package(),
@@ -447,15 +524,190 @@ fn render_artifact_manifest(paths: &[&str]) -> String {
     )
 }
 
+/// The VS Code manifest: the grammar and language contributions plus a client
+/// that launches [`LSP_SERVER_COMMAND`]. `engines.vscode` is the floor
+/// `vscode-languageclient` 9 requires.
 fn render_vscode_package() -> String {
     format!(
-        "{{\n  \"name\": \"orna-syntax\",\n  \"displayName\": \"Orna Syntax\",\n  \"description\": \"Generated TextMate syntax support for Orna source files\",\n  \"version\": {},\n  \"engines\": {{ \"vscode\": \"^1.80.0\" }},\n  \"categories\": [\"Programming Languages\"],\n  \"contributes\": {{\n    \"languages\": [{{\n      \"id\": {},\n      \"aliases\": [\"Orna\"],\n      \"extensions\": [\".{}\"],\n      \"configuration\": \"./language-configuration.json\"\n    }}],\n    \"grammars\": [{{\n      \"language\": {},\n      \"scopeName\": {},\n      \"path\": \"./syntaxes/orna.tmLanguage.json\"\n    }}]\n  }}\n}}\n",
-        json_string(LANGUAGE_VERSION),
-        json_string(LANGUAGE_ID),
-        SOURCE_EXTENSION,
-        json_string(LANGUAGE_ID),
-        json_string(SOURCE_SCOPE)
+        "{{\n  \"name\": \"orna-syntax\",\n  \"displayName\": \"Orna\",\n  \"description\": \"Orna language support: the generated TextMate grammar and the {server} client\",\n  \"version\": {version},\n  \"engines\": {{ \"vscode\": \"^1.82.0\" }},\n  \"categories\": [\"Programming Languages\"],\n  \"main\": \"./extension.js\",\n  \"activationEvents\": [\"onLanguage:{language_id}\"],\n  \"dependencies\": {{ \"vscode-languageclient\": \"^9.0.1\" }},\n  \"contributes\": {{\n    \"languages\": [{{\n      \"id\": {language},\n      \"aliases\": [\"Orna\"],\n      \"extensions\": [\".{extension}\"],\n      \"configuration\": \"./language-configuration.json\"\n    }}],\n    \"grammars\": [{{\n      \"language\": {language},\n      \"scopeName\": {scope},\n      \"path\": \"./syntaxes/orna.tmLanguage.json\"\n    }}],\n    \"configuration\": {{\n      \"title\": \"Orna\",\n      \"properties\": {{\n        {setting}: {{\n          \"type\": \"array\",\n          \"items\": {{ \"type\": \"string\" }},\n          \"default\": [{server_json}],\n          \"markdownDescription\": \"Command that starts the Orna language server. The first element is the executable and the rest are its arguments, so an absolute path is a one-element list. Leave it empty to run `{server}`.\"\n        }}\n      }}\n    }}\n  }}\n}}\n",
+        server = LSP_SERVER_COMMAND,
+        server_json = json_string(LSP_SERVER_COMMAND),
+        version = json_string(LANGUAGE_VERSION),
+        language = json_string(LANGUAGE_ID),
+        language_id = LANGUAGE_ID,
+        extension = SOURCE_EXTENSION,
+        scope = json_string(SOURCE_SCOPE),
+        setting = json_string(server_override("editors/vscode/extension.js")),
     )
+}
+
+/// The generated VS Code extension: it starts the language server and holds no
+/// language logic of its own. Diagnostics, hover, navigation, completion,
+/// rename and semantic tokens all come from the server; colouring comes from
+/// the grammar this package contributes. The source is plain JavaScript so the
+/// extension runs from the checked-in tree with no build step, which is why
+/// `package.json` declares `vscode-languageclient` as a runtime dependency
+/// rather than shipping a bundled output file.
+fn render_vscode_extension() -> String {
+    render_template(
+        VSCODE_EXTENSION_TEMPLATE,
+        &[
+            ("__LANGUAGE_ID__", LANGUAGE_ID),
+            ("__SOURCE_EXTENSION__", SOURCE_EXTENSION),
+            ("__SERVER_COMMAND__", LSP_SERVER_COMMAND),
+            (
+                "__SERVER_COMMAND_SETTING__",
+                server_override("editors/vscode/extension.js"),
+            ),
+            ("__CONTRACT_DOCUMENT__", LSP_CONTRACT_DOCUMENT),
+        ],
+    )
+}
+
+/// The extension source. Placeholders (`__NAME__`) are filled by
+/// [`render_vscode_extension`], so the JavaScript keeps single braces.
+const VSCODE_EXTENSION_TEMPLATE: &str = r#""use strict";
+
+// Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+// Server start contract: __CONTRACT_DOCUMENT__ ("One server command").
+//
+// This extension starts `orna-lsp` and contributes no language logic of its
+// own. Diagnostics, hover, navigation, completion, rename and semantic tokens
+// are produced by the server; lexical colouring comes from the TextMate
+// grammar and language configuration that package.json contributes.
+
+const vscode = require("vscode");
+const { LanguageClient } = require("vscode-languageclient/node");
+
+/** The language id shared with the grammar and language contributions. */
+const LANGUAGE_ID = "__LANGUAGE_ID__";
+
+/**
+ * The only setting that overrides the server command. Unset or empty means
+ * `["__SERVER_COMMAND__"]`. The value is an argv list: the first element is the
+ * executable and the remaining elements are its arguments.
+ */
+const SERVER_COMMAND_SETTING = "__SERVER_COMMAND_SETTING__";
+
+/** The command every editor starts by default. */
+const DEFAULT_SERVER_COMMAND = ["__SERVER_COMMAND__"];
+
+/** @type {LanguageClient | undefined} */
+let client;
+
+/** Bumped on every start so a late failure from a replaced client is ignored. */
+let generation = 0;
+
+/** The argv list used to start the server. @returns {string[]} */
+function serverCommand() {
+  const configured = vscode.workspace
+    .getConfiguration()
+    .get(SERVER_COMMAND_SETTING);
+  if (Array.isArray(configured) && configured.length > 0) {
+    return configured.slice();
+  }
+  return DEFAULT_SERVER_COMMAND.slice();
+}
+
+/**
+ * One launch configuration. Omitting `transport` selects stdio, the only
+ * transport this contract permits, and passes the server no extra argument.
+ * @param {string[]} command
+ */
+function launchOptions(command) {
+  const [executable, ...args] = command;
+  return { command: executable, args };
+}
+
+function startClient() {
+  const current = ++generation;
+  client = new LanguageClient(
+    LANGUAGE_ID,
+    "Orna Language Server",
+    {
+      run: launchOptions(serverCommand()),
+      debug: launchOptions(serverCommand()),
+    },
+    {
+      documentSelector: [
+        { scheme: "file", language: LANGUAGE_ID },
+        { scheme: "untitled", language: LANGUAGE_ID },
+      ],
+      synchronize: {
+        fileEvents: vscode.workspace.createFileSystemWatcher(
+          "**/*.__SOURCE_EXTENSION__",
+        ),
+      },
+      // One restart after a crash, not the client's default of five: a server
+      // that cannot start will not start on the fifth attempt either.
+      connectionOptions: { maxRestartCount: 0 },
+    },
+  );
+  return client.start().catch((error) => {
+    if (current !== generation) {
+      return;
+    }
+    // A missing server is not an activation failure: the contributed grammar
+    // keeps colouring `.orna` files. Report the command that did not start so
+    // the user can put it on PATH or set the override.
+    void vscode.window.showErrorMessage(
+      `Orna: the language server did not start: ${String(error)}. ` +
+        `Put \`${serverCommand()[0]}\` on PATH or set \`${SERVER_COMMAND_SETTING}\`.`,
+    );
+  });
+}
+
+/** Stop the current client, if any; safe to call more than once. */
+function stopClient() {
+  const stopped = client;
+  client = undefined;
+  return stopped ? stopped.stop() : Promise.resolve();
+}
+
+/** @param {vscode.ExtensionContext} context */
+function activate(context) {
+  context.subscriptions.push({ dispose: () => void stopClient() });
+  context.subscriptions.push(
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration(SERVER_COMMAND_SETTING)) {
+        return;
+      }
+      void stopClient().then(startClient);
+    }),
+  );
+  startClient();
+}
+
+/** @returns {Promise<void> | undefined} */
+function deactivate() {
+  generation += 1;
+  return stopClient();
+}
+
+module.exports = { activate, deactivate };
+"#;
+
+/// The editor's single server-command override, as the contract table names it.
+fn server_override(artifact: &str) -> &'static str {
+    EDITOR_SERVER_COMMANDS
+        .iter()
+        .find(|entry| entry.artifact == artifact)
+        .expect("every editor client artifact states its override setting")
+        .override_setting
+}
+
+/// Substitute `__NAME__` placeholders in a template that is not a `format!`
+/// string, so embedded JavaScript or JSON keeps single braces.
+fn render_template(template: &str, values: &[(&str, &str)]) -> String {
+    let mut rendered = template.to_string();
+    for (placeholder, value) in values {
+        debug_assert!(
+            template.contains(placeholder),
+            "template has no {placeholder} placeholder"
+        );
+        rendered = rendered.replace(placeholder, value);
+    }
+    rendered
 }
 
 fn render_tree_sitter_package() -> String {
@@ -900,48 +1152,54 @@ fn render_vim_filetype() -> String {
 fn render_vim_lsp() -> String {
     format!(
         r#"" Generated from orna-syntax-v1 language metadata.
-if !exists('g:orna_lsp_command')
-    let g:orna_lsp_command = ['orna-lsp']
+" Server start contract: {contract} ("One server command").
+if !exists('{setting}')
+    let {setting} = ['{server}']
 endif
 function! s:on_lsp_buffer_enabled() abort
-    if &l:filetype ==# '{LANGUAGE_ID}'
+    if &l:filetype ==# '{language}'
         setlocal omnifunc=lsp#complete
     endif
 endfunction
 augroup orna_lsp
     au!
     au User lsp_setup call lsp#register_server({{
-        \ 'name': '{LANGUAGE_ID}',
-        \ 'cmd': {{server_info -> copy(g:orna_lsp_command)}},
-        \ 'allowlist': ['{LANGUAGE_ID}'],
+        \ 'name': '{language}',
+        \ 'cmd': {{server_info -> copy({setting})}},
+        \ 'allowlist': ['{language}'],
         \ }})
     au User lsp_buffer_enabled call <SID>on_lsp_buffer_enabled()
 augroup END
-"#
+"#,
+        contract = LSP_CONTRACT_DOCUMENT,
+        setting = server_override("editors/vim/plugin/orna-lsp.vim"),
+        server = LSP_SERVER_COMMAND,
+        language = LANGUAGE_ID,
     )
 }
 
 fn render_neovim_lsp() -> String {
     format!(
         r#"-- Generated from orna-syntax-v1 language metadata.
+-- Server start contract: {contract} ("One server command").
 local M = {{}}
 
 function M.setup(options)
   options = options or {{}}
-  local command = options.cmd or {{ "orna-lsp" }}
-  vim.filetype.add({{ extension = {{ orna = "orna" }} }})
+  local command = options.cmd or {{ "{server}" }}
+  vim.filetype.add({{ extension = {{ {extension} = "{language}" }} }})
   local group = vim.api.nvim_create_augroup("orna_lsp", {{ clear = true }})
 
   vim.api.nvim_create_autocmd("FileType", {{
     group = group,
-    pattern = "{LANGUAGE_ID}",
+    pattern = "{language}",
     callback = function(event)
       local root_dir = options.root_dir
       if type(root_dir) == "function" then
         root_dir = root_dir(event.buf)
       end
       vim.lsp.start({{
-        name = "{LANGUAGE_ID}",
+        name = "{language}",
         cmd = command,
         root_dir = root_dir or vim.fn.getcwd(),
       }}, {{ bufnr = event.buf }})
@@ -950,7 +1208,11 @@ function M.setup(options)
 end
 
 return M
-"#
+"#,
+        contract = LSP_CONTRACT_DOCUMENT,
+        server = LSP_SERVER_COMMAND,
+        extension = SOURCE_EXTENSION,
+        language = LANGUAGE_ID,
     )
 }
 
@@ -1123,8 +1385,9 @@ fn render_emacs() -> String {
     format!(
         r#";;; orna-eglot.el --- Orna {LANGUAGE_VERSION} lexical highlighting -*- lexical-binding: t; -*-
 ;; Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+;; Server start contract: {contract} ("One server command").
 (require 'eglot)
-(defvar orna-eglot-server-command '("orna-lsp")
+(defvar {setting} '("{server}")
   "Command used by Eglot to start the Orna language server.")
 {EMACS_SUPPORT}(defvar orna-font-lock-keywords
   `(
@@ -1144,10 +1407,13 @@ fn render_emacs() -> String {
 (defun orna-setup-eglot ()
   "Attach Orna buffers to the configured language server with Eglot."
   (add-to-list 'eglot-server-programs
-               (cons '(orna-mode) orna-eglot-server-command))
+               (cons '(orna-mode) {setting}))
   (add-hook 'orna-mode-hook #'eglot-ensure))
 (provide 'orna-eglot)
-"#
+"#,
+        contract = LSP_CONTRACT_DOCUMENT,
+        setting = server_override("editors/emacs/orna-eglot.el"),
+        server = LSP_SERVER_COMMAND,
     )
 }
 
@@ -1278,4 +1544,34 @@ contexts:
 
 fn yaml_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
+}
+
+/// The Sublime Text LSP client configuration. The LSP package reads
+/// `LSP-<name>.sublime-settings` from `Packages/User` and registers the client
+/// it describes, so the file holds a client block and no code. `selector`
+/// matches the scope [`render_sublime`] assigns to `.orna` files.
+fn render_sublime_lsp_settings() -> String {
+    format!(
+        r#"// Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+// Server start contract: {contract} ("One server command").
+//
+// Install as `Packages/User/LSP-orna.sublime-settings` (Preferences > Browse
+// Packages...) with the LSP package installed. `command` is the only override
+// and defaults to `{server}` as a one-element argv list.
+{{
+  "clients": {{
+    "orna-lsp": {{
+      "enabled": true,
+      "command": [{server_json}],
+      "selector": {selector},
+      "schemes": ["file"]
+    }}
+  }}
+}}
+"#,
+        contract = LSP_CONTRACT_DOCUMENT,
+        server = LSP_SERVER_COMMAND,
+        server_json = json_string(LSP_SERVER_COMMAND),
+        selector = json_string(SOURCE_SCOPE),
+    )
 }

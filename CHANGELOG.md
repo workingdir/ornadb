@@ -5,6 +5,32 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Every editor package in `editors/` is now a thin client of the one `orna-lsp`
+  server, and the start contract is stated once (ornadb-editors; editor
+  tooling, ORNA-LEX-007, decision 0119). `editors/vscode/` gains a real
+  language client: generated `extension.js` starts `orna-lsp` through
+  `vscode-languageclient`, `package.json` declares `main`, the
+  `onLanguage:orna` activation event, the client dependency, and the
+  `orna.lsp.serverCommand` setting, and the grammar and language
+  contributions are unchanged. It is plain JavaScript with no build step, so
+  the extension runs from the checked-in tree. `editors/sublime/` gains
+  `LSP-orna.sublime-settings`, the client block the LSP package registers,
+  selecting `source.orna` and launching `orna-lsp`. Vim, Neovim and Emacs
+  keep their one override (`g:orna_lsp_command`, `options.cmd`,
+  `orna-eglot-server-command`) and now cite the same contract. The contract
+  table lives in `docs/editor-tooling.md`, the generator derives the default
+  command from one constant, and the drift gate in
+  `crates/orna-syntax-v1/tests/editor_artifacts.rs` fails for a listed
+  artifact that differs from the emitter, for a file under `editors/` the
+  emitter does not produce, for an editor directory holding no generated
+  artifact, and for a contract row whose editor, override or default command
+  disagrees with the generator. The generated extension's launch contract is
+  driven directly by `scripts/check_vscode_extension.js` (default argv,
+  override, empty override, missing command reported without failing
+  activation, restart on setting change), and its `--real` mode constructs a
+  client with the installed `vscode-languageclient`. Tests:
+  `editor_artifacts` (`every_editor_surface_starts_the_same_server_command`,
+  `vscode_extension_declares_a_generated_language_client`).
 - Linux packaging is one pkgsmith manifest (ornadb-pkg; packaging change). `packaging/linux/pkgsmith.star`
   declares the install artifact for pkgsmith 0.1.1: the uncompressed tar of release 1.0.0 (same file
   name, same two files), plus an rpm and a deb written from the same install prefix.

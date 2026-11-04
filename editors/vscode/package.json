@@ -1,10 +1,13 @@
 {
   "name": "orna-syntax",
-  "displayName": "Orna Syntax",
-  "description": "Generated TextMate syntax support for Orna source files",
+  "displayName": "Orna",
+  "description": "Orna language support: the generated TextMate grammar and the orna-lsp client",
   "version": "1.1.0",
-  "engines": { "vscode": "^1.80.0" },
+  "engines": { "vscode": "^1.82.0" },
   "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:orna"],
+  "dependencies": { "vscode-languageclient": "^9.0.1" },
   "contributes": {
     "languages": [{
       "id": "orna",
@@ -16,6 +19,17 @@
       "language": "orna",
       "scopeName": "source.orna",
       "path": "./syntaxes/orna.tmLanguage.json"
-    }]
+    }],
+    "configuration": {
+      "title": "Orna",
+      "properties": {
+        "orna.lsp.serverCommand": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["orna-lsp"],
+          "markdownDescription": "Command that starts the Orna language server. The first element is the executable and the rest are its arguments, so an absolute path is a one-element list. Leave it empty to run `orna-lsp`."
+        }
+      }
+    }
   }
 }

@@ -1,0 +1,16 @@
+// Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+// Server start contract: docs/editor-tooling.md ("One server command").
+//
+// Install as `Packages/User/LSP-orna.sublime-settings` (Preferences > Browse
+// Packages...) with the LSP package installed. `command` is the only override
+// and defaults to `orna-lsp` as a one-element argv list.
+{
+  "clients": {
+    "orna-lsp": {
+      "enabled": true,
+      "command": ["orna-lsp"],
+      "selector": "source.orna",
+      "schemes": ["file"]
+    }
+  }
+}
