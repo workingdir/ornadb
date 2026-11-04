@@ -2,14 +2,15 @@
   "source": "orna-syntax-v1",
   "languageVersion": "1.1.0",
   "emitters": [
-    "TextMate grammar and VSCode extension",
-    "Tree-sitter grammar and package metadata",
+    "TextMate grammar",
+    "VSCode language client extension",
     "VSCode language configuration",
+    "Tree-sitter grammar and package metadata",
     "Vim syntax and filetype detection",
     "Vim LSP registration and omnifunc completion",
     "Neovim native LSP attachment",
     "Emacs major mode and Eglot attachment",
-    "Sublime syntax",
+    "Sublime syntax and LSP client configuration",
     "Semantic-token legend"
   ],
   "generatedFiles": [
@@ -25,7 +26,9 @@
     "editors/neovim/lua/orna/init.lua",
     "editors/emacs/orna-eglot.el",
     "editors/sublime/Orna.sublime-syntax",
+    "editors/sublime/LSP-orna.sublime-settings",
     "editors/vscode/package.json",
+    "editors/vscode/extension.js",
     "editors/tree-sitter-orna/package.json",
     "editors/tree-sitter-orna/tree-sitter.json",
     "editors/generated-artifacts.json"

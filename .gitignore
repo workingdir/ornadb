@@ -8,3 +8,7 @@
 .beads/proxieddb/
 
 /editors/zed/target/
+
+# VS Code extension runtime dependency install (ornadb-editors)
+/editors/vscode/node_modules/
+/editors/vscode/package-lock.json

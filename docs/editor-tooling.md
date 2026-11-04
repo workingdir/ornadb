@@ -10,17 +10,18 @@ The checked-in editor files are generated from this metadata:
 | Artifact | Purpose |
 |---|---|
 | `editors/textmate/orna.tmLanguage.json` | Generic TextMate fallback grammar |
-| `editors/vscode/syntaxes/orna.tmLanguage.json` | Same generated grammar for VS Code |
-| `editors/vscode/package.json` | `.orna` association and grammar registration |
-| `editors/vscode/language-configuration.json` | Comments, brackets, and quote pairs |
 | `editors/semantic-token-legend.json` | LSP token order and editor mapping |
 | `editors/tree-sitter-orna/grammar.js` | Generated Tree-sitter grammar |
 | `editors/tree-sitter-orna/queries/highlights.scm` | Generated Tree-sitter token captures |
 | `editors/tree-sitter-orna/{tree-sitter.json,package.json}` | Tree-sitter package registration and release metadata |
+| `editors/vscode/extension.js` | Plain-JavaScript `orna-lsp` language client |
+| `editors/vscode/{package.json,language-configuration.json}` | `.orna` association, grammar, language configuration, and client setting |
+| `editors/vscode/syntaxes/orna.tmLanguage.json` | Same generated grammar for VS Code |
 | `editors/neovim/lua/orna/init.lua` | Native `.orna` LSP attachment |
-| `editors/vim/` | Vim syntax, filetype detection, and optional `vim-lsp` completion |
+| `editors/vim/` | Vim syntax, filetype detection, and `vim-lsp` registration |
 | `editors/emacs/orna-eglot.el` | Emacs font-lock mode and Eglot attachment |
 | `editors/sublime/Orna.sublime-syntax` | Sublime Text lexical scopes |
+| `editors/sublime/LSP-orna.sublime-settings` | Sublime Text LSP client settings |
 
 Regenerate the files after changing syntax metadata, and check for drift with:
 
@@ -33,7 +34,13 @@ The check compares every checked-in artifact byte-for-byte with the Rust
 renderer and runs Node's parser check on the generated Tree-sitter grammar.
 Focused tests in `orna-syntax-v1` load `.orna` fixtures from that crate with
 `include_str!`, validate the generated metadata, check for v1-only lexical
-classes, and prove byte stability and complete editor-tree coverage.
+classes, and prove byte stability and complete editor-tree coverage. The
+coverage test fails for a file under `editors/` that the generator does not
+produce, for an editor directory that holds no generated artifact, and for a
+listed artifact whose checked-in bytes differ from the renderer's output, so an
+editor surface cannot be added without joining the emitter. `npm install` in
+`editors/vscode` writes `node_modules` and `package-lock.json`, which the
+coverage test skips as editor build output rather than governed artifacts.
 
 TextMate, Vim, Emacs, and Sublime fallback grammars recognize lexical patterns
 but do not have parser context for distinguishing declared types, functions,
@@ -41,7 +48,65 @@ properties, namespaces, and variables. Configure `orna-lsp` separately to
 receive diagnostics, navigation, completion, and semantic tokens. Static
 editor grammars do not claim parser-equivalent context.
 
+## One server command
+
+`orna-lsp` is the product: one binary that speaks the Language Server Protocol
+over standard input and output and is the only place language behaviour lives.
+Every editor integration is a thin client that launches it — no editor package
+carries its own parser, its own diagnostics, or its own completion logic, and
+the syntax definitions only colour text until the server attaches.
+
+The start contract is therefore one command with one default and one override
+per editor:
+
+| Editor | Generated client | The one override | Default |
+|---|---|---|---|
+| VS Code | `editors/vscode/extension.js` | `orna.lsp.serverCommand` | `["orna-lsp"]` |
+| Sublime Text | `editors/sublime/LSP-orna.sublime-settings` | `command` | `["orna-lsp"]` |
+| Vim | `editors/vim/plugin/orna-lsp.vim` | `g:orna_lsp_command` | `['orna-lsp']` |
+| Neovim | `editors/neovim/lua/orna/init.lua` | `options.cmd` | `{ "orna-lsp" }` |
+| Emacs | `editors/emacs/orna-eglot.el` | `orna-eglot-server-command` | `("orna-lsp")` |
+
+The semantics are identical in every row: the override is an **argv list**
+whose first element is the executable and whose remaining elements are its
+arguments, so a server outside `PATH` is spelled as a one-element list such as
+`["/opt/orna/bin/orna-lsp"]`. An unset or empty override means `orna-lsp`,
+resolved through `PATH`. No client passes a transport argument, because stdio
+is the only transport the server supports. The generator renders the default
+from one constant and the drift gate checks each client's override name and the
+default against the table above, so a client cannot invent a second variable or
+a different command.
+
+When the command is missing — `orna-lsp` is not on `PATH` and no override names
+it — an editor reports the failure and keeps the generated syntax definition
+working; no client silently degrades into a second, editor-local language
+implementation. VS Code shows an error notification naming the command and the
+setting to fix, and leaves the window open: activation succeeds, `.orna` files
+stay highlighted by the contributed grammar, and the server-backed features are
+absent until the extension host is reloaded with a reachable command. A client
+that cannot reach the server is a configuration error, not a reason to fail the
+editor.
+
+
 ## Attach the language server
+
+VS Code loads `editors/vscode` as an extension: the manifest declares
+`extension.js` as its entry point, activates on the `orna` language, and starts
+the server through `vscode-languageclient`. Install the extension directory as a
+development extension (`code --extensionDevelopmentPath=editors/vscode`) after
+`npm install` in that directory, which installs the client library; there is no
+build step, because the entry point is plain JavaScript that runs from the
+tree. Diagnostics appear in the Problems panel, hover, definition, references,
+rename and semantic tokens come from the attached server, and the setting
+`orna.lsp.serverCommand` overrides the command. Changing that setting restarts
+the client; there is no second setting and no editor-local fallback.
+
+Sublime Text uses the [`LSP`](https://lsp.sublimetext.io/) package. Copy the
+generated `LSP-orna.sublime-settings` into `Packages/User` (Preferences >
+Browse Packages...) with the generated syntax definition, and the package
+registers the `orna-lsp` client for `source.orna`; no separate server
+configuration is needed. `command` is the only override, and the client
+attaches to saved files.
 
 Neovim uses its native LSP client. Add `editors/neovim` to `runtimepath` and
 call `require("orna").setup()`; pass `cmd = { "/path/to/orna-lsp" }` when the
