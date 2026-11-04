@@ -2,22 +2,31 @@
 //!
 //! The bundle is produced by `examples/build_legacy_fixture.rs` in
 //! `orna-repository-v1` (feature `legacy-fixture-writer`). The builder writes the
-//! 1.0.0 compact layout with plain files and `git commit`, not through the
+//! 1.0.0 layout with plain files and `git commit`, not through the
 //! production publication path, but it shares the canonical OVB encoder, base64
 //! helper and Parquet page-checksum helper with production (see the builder's
 //! module docs). The bundle bytes are pinned below by SHA-256 so the committed
-//! artifact cannot drift silently.
+//! artifact cannot drift silently, and
+//! `builder_regenerates_the_committed_bundle_byte_for_byte` rebuilds the
+//! repository from the builder and requires the rebuilt bundle to equal the
+//! committed one byte for byte, so a builder change needs a regenerated bundle.
 //!
-//! This test clones the bundle, checks the pinned digest, reads the committed
-//! legacy authoritative tables, verifies the source repository is unchanged by
-//! `orna migrate copy` (UPGRADE-006, `reference/Orna-1.1.0/source/40-upgrade-contract.md`
-//! line 48), and admits the snapshot through that copy path.
+//! This test holds the bundle closed, checks the pinned digest, checks the
+//! committed repository is format 1 (marker bytes, record kinds, no
+//! `.orna/store`), reads the committed legacy authoritative tables, reads the
+//! committed loose rows the legacy read path needs, verifies the source
+//! repository is unchanged by `orna migrate copy` (UPGRADE-006,
+//! `reference/Orna-1.1.0/source/40-upgrade-contract.md` line 48), and admits
+//! the snapshot through that copy path.
 //!
 //! Non-claims (partial slice of bead 5il1.394; see docs/migration-1.0.0.md):
 //! - Not a byte-for-byte 1.0.0 golden: the bundle comes from the test encoder.
-//! - Blob compact encoding is not covered (spec-silent, excluded).
-//! - `state.db` and persistent consumers are not covered (spec-silent).
-//! - The loose-row path codec is not covered (deferred).
+//! - No Blob-bearing row: the format-1 compact decoder admits no `Blob`/`blob`
+//!   column (`PhysicalValueKind` in `compact.rs`) although 1.0.0
+//!   `23-storage.md:184` defines one, so ORNA-UPGRADE-004's annotation default
+//!   still has no fixture value to apply.
+//! - `state.db` and persistent consumers are not covered (runtime-only; a
+//!   persistent consumer with a Blob argument is not modelled).
 //! - Key-bound encoding (hex of canonical key bytes in `min_key`/`max_key`) is
 //!   unverified against the 1.0.0 key-schema text.
 //! - ORNA-UPGRADE-008 fail-closed behaviour is NOT asserted by this test.
@@ -33,7 +42,12 @@ use tempfile::TempDir;
 const BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
 /// SHA-256 of `BUNDLE`. Regenerate with the `build_legacy_fixture` example and
 /// `python3 scripts/check_fixture_manifest.py --update` when the builder changes.
-const BUNDLE_SHA256: &str = "315b989c25e1bdb46f446cc2531b488a08b0a8c076fa5ec9f3bac04639779c7f";
+const BUNDLE_SHA256: &str = "19f36c5aa732ba69ad95cb8d24c0771946cd6326ebed8eb2a9123a6d4a9b1dc1";
+/// The 1.0.0 format marker, including its trailing LF. 1.0.0 `19-repository.md`
+/// keeps it a legacy-format input, and it is the record the relabel guard reads,
+/// so its exact bytes are part of the fixture contract.
+const FORMAT_1_MARKER: &str =
+    "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
@@ -48,6 +62,22 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     String::from_utf8(output.stdout).unwrap()
+}
+
+fn clone_bundle(bundle: &Path, destination: &Path) {
+    let clone = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(bundle)
+        .arg(destination)
+        .output()
+        .unwrap();
+    assert!(
+        clone.status.success(),
+        "git clone bundle: {}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
 }
 
 fn encoded_keys(keys: &[CanonicalValue]) -> Vec<Vec<u8>> {
@@ -76,18 +106,48 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     );
 
     let source = parent.path().join("source");
-    let clone = Command::new("git")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .arg("clone")
-        .arg("--quiet")
-        .arg(&bundle)
-        .arg(&source)
-        .output()
-        .unwrap();
+    clone_bundle(&bundle, &source);
+
+    // The committed repository really is format 1. The marker is the record the
+    // format context and the relabel guard read; the record kinds around it are
+    // the 1.0.0 layout (1.0.0 `23-storage.md:88-106`).
+    assert_eq!(
+        git(&source, &["show", "HEAD:.orna/format.orna"]),
+        FORMAT_1_MARKER,
+        "committed repository is not the 1.0.0 format marker"
+    );
+    let tracked = git(&source, &["ls-tree", "-r", "--name-only", "HEAD"]);
+    let tracked_paths = tracked.lines().collect::<Vec<_>>();
     assert!(
-        clone.status.success(),
-        "git clone bundle: {}",
-        String::from_utf8_lossy(&clone.stderr)
+        !tracked_paths
+            .iter()
+            .any(|path| path.starts_with(".orna/store")),
+        "format-1 fixture must not carry a format-3 store"
+    );
+    for path in [
+        ".orna/database.orna",
+        "main.orna",
+        "ordinary.txt",
+        "vendor/stdlib",
+        "contacts/main.orna",
+        "contacts/Contact/alice-smith.orna",
+        "contacts/Contact/bob-jones.orna",
+    ] {
+        assert!(
+            tracked_paths.contains(&path),
+            "committed repository is missing {path}"
+        );
+    }
+    // Loose rows in the 1.0.0 layout are row units of non-key fields (ORNA-ROW-001)
+    // addressed by the key component reconstructed from the path (ORNA-ROW-002,
+    // key-path-v1 `07-tables.md:295-397`). The legacy read path for query,
+    // history, mount and export needs both representations in one commit.
+    assert_eq!(
+        git(&source, &["show", "HEAD:contacts/Contact/alice-smith.orna"]),
+        include_str!(
+            "../../orna-repository-v1/tests/fixtures/legacy-loose-contact-alice-smith.orna"
+        ),
+        "loose row unit bytes changed"
     );
 
     let repository = Repository::discover(&source).unwrap();
@@ -229,4 +289,70 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
 
     let migrated = Repository::discover(&destination).unwrap();
     assert!(migrated.holds_prepared_migration());
+}
+
+/// The committed bundle must be exactly what the builder produces now.
+///
+/// The pinned SHA-256 above only proves the committed file did not change; it
+/// cannot notice a builder that stopped producing that file. This test closes
+/// that gap: it writes a fresh repository with
+/// `orna_repository_v1::write_legacy_format1_fixture`, bundles it the same way
+/// `examples/build_legacy_fixture.rs` does, and requires the rebuilt bundle to
+/// equal the committed one byte for byte. A builder change therefore needs a
+/// regenerated bundle in the same change.
+///
+/// Bundle bytes are reproducible for a given git release because the builder
+/// pins author and committer dates; a git release that changes pack encoding
+/// fails this test rather than silently redefining the golden bytes.
+#[test]
+fn builder_regenerates_the_committed_bundle_byte_for_byte() {
+    let parent = TempDir::new().unwrap();
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(BUNDLE);
+
+    let root = parent.path().join("repository");
+    std::fs::create_dir(&root).unwrap();
+    orna_repository_v1::write_legacy_format1_fixture(&root);
+
+    // Compare the rebuilt history with the committed one before the bytes, so a
+    // mismatch reports which of the two drifted and where.
+    let committed = parent.path().join("committed");
+    clone_bundle(&bundle, &committed);
+    assert_eq!(
+        git(&root, &["rev-parse", "HEAD"]),
+        git(&committed, &["rev-parse", "HEAD"]),
+        "rebuilt repository HEAD differs from the committed bundle HEAD"
+    );
+    assert_eq!(
+        git(&root, &["rev-list", "--objects", "--all"]),
+        git(&committed, &["rev-list", "--objects", "--all"]),
+        "rebuilt repository object graph differs from the committed bundle"
+    );
+
+    let rebuilt_bundle = parent.path().join("rebuilt.bundle");
+    let status = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(&root)
+        .args(["bundle", "create"])
+        .arg(&rebuilt_bundle)
+        .arg("--all")
+        .status()
+        .expect("spawn git bundle create");
+    assert!(status.success(), "git bundle create failed: {status}");
+
+    let rebuilt = std::fs::read(&rebuilt_bundle).unwrap();
+    let committed_bytes = std::fs::read(&bundle).unwrap();
+    assert_eq!(
+        rebuilt.len(),
+        committed_bytes.len(),
+        "the committed bundle is stale: regenerate it with \
+         `cargo run -p orna-repository-v1 --example build_legacy_fixture --features \
+         legacy-fixture-writer -- <empty-root> {}` and repin BUNDLE_SHA256 plus \
+         scripts/fixture-manifest.sha256",
+        bundle.display()
+    );
+    assert!(
+        rebuilt == committed_bytes,
+        "the committed bundle is stale: rebuild it from the builder and repin \
+         BUNDLE_SHA256 plus scripts/fixture-manifest.sha256"
+    );
 }

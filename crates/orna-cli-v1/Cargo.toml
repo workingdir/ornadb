@@ -53,6 +53,10 @@ bytes = "1.11.1"
 libsql = { version = "0.9.29", default-features = false, features = ["core"] }
 parquet = { version = "59.3.0", default-features = false, features = ["crc", "zstd"] }
 orna-application-v1 = { path = "../orna-application-v1", features = ["test-support"] }
+# The format-1 fixture builder is test-only (`legacy-fixture-writer`);
+# `legacy_fixture_bundle` rebuilds the committed bundle from it, so the test
+# target needs the feature while the `orna` binary does not.
+orna-repository-v1 = { path = "../orna-repository-v1", features = ["legacy-fixture-writer"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { version = "0.18.0", default-features = false }
 libc = "0.2"
