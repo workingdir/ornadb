@@ -1,0 +1,59 @@
+// Behavioural tests for std.iterator. Each function asserts one contract, so a
+// change to the module changes the expected value and the assertion fails. The
+// cursor is persistent, so every test starts from a fresh one.
+
+use iterator;
+use test;
+
+pub fn empty_yields_none(): Bool = test.should_be_none(iterator.first(iterator.empty()));
+
+pub fn from_list_yields_its_elements(): Bool =
+    test.should_equal(iterator.first(iterator.from_list([4, 5])), Some(4));
+
+pub fn iterate_succeeds_its_seed(): Bool =
+    test.should_equal(iterator.nth(iterator.iterate(1, value => value + 1), 2), Some(3));
+
+pub fn map_transforms_each_element(): Bool =
+    test.should_equal(iterator.first(iterator.map(iterator.from_list([1]), value => value * 2)), Some(2));
+
+pub fn filter_keeps_a_matching_element(): Bool =
+    test.should_equal(iterator.first(iterator.filter(iterator.from_list([1, 3, 4]), value => value % 2 == 0)), Some(4));
+
+pub fn chain_continues_into_the_right_side(): Bool =
+    test.should_equal(iterator.nth(iterator.chain(iterator.from_list([1]), iterator.from_list([2])), 1), Some(2));
+
+pub fn take_stops_at_the_count(): Bool =
+    test.should_equal(iterator.nth(iterator.take(iterator.from_list([1, 2, 3]), 2), 1), Some(2));
+
+pub fn drop_skips_the_count(): Bool =
+    test.should_equal(iterator.first(iterator.drop(iterator.from_list([7, 8]), 1)), Some(8));
+
+pub fn last_reads_the_final_position(): Bool =
+    test.should_equal(iterator.last(iterator.from_list([1, 2, 3])), Some(3));
+
+pub fn nth_past_the_end_is_absent(): Bool =
+    test.should_be_none(iterator.nth(iterator.from_list([1]), 4));
+
+pub fn repeat_yields_its_value(): Bool =
+    test.should_equal(iterator.nth(iterator.repeat(9), 3), Some(9));
+
+pub fn zip_with_combines_matching_elements(): Bool =
+    test.should_equal(
+        iterator.first(iterator.zip_with(iterator.from_list([1]), iterator.from_list([10]), (left, right) => left + right)),
+        Some(11),
+    );
+
+pub fn fold_reduces_to_one_value(): Bool =
+    test.should_equal(iterator.fold(iterator.from_list([1, 2, 3]), 0, (total, value) => total + value), 6);
+
+pub fn scan_yields_each_running_total(): Bool =
+    test.should_equal(iterator.nth(iterator.scan(iterator.from_list([1, 2, 3]), 0, (total, value) => total + value), 1), Some(3));
+
+pub fn take_while_stops_at_the_first_failure(): Bool =
+    test.should_be_none(iterator.first(iterator.take_while(iterator.from_list([3, 1]), value => value < 3)));
+
+pub fn enumerate_yields_one_pair_per_element(): Bool =
+    test.should_equal(iterator.fold(iterator.enumerate(iterator.from_list([5, 6])), 0, (total, pair) => total + 1), 2);
+
+pub fn zip_stops_at_the_shorter_side(): Bool =
+    test.should_equal(iterator.fold(iterator.zip(iterator.from_list([1, 2, 3]), iterator.from_list([4, 5])), 0, (total, pair) => total + 1), 2);

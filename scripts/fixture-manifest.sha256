@@ -158,6 +158,7 @@ b42f8ed673740c142be33126aa268fbc57999745475d31c06ec9578a64dc1052  crates/orna-cl
 77356591ab6e9597f4651e8a13eb5b79ea7f74c3628d340f08780c5ccf0777b1  crates/orna-cli-v1/tests/fixtures/init/preserved.orna
 e279a7bfc9c04cf067704ccc6adfdda5b4bf8a958d7f9f1db63065377a7c18ce  crates/orna-cli-v1/tests/fixtures/init/version-1.orna
 79a0a004fac1dbbab00c544a883c81f7e8f66b77c5dd2d0e96d204cb2c2a15ae  crates/orna-cli-v1/tests/fixtures/init/version-2.orna
+edebe27ffe38efc1c684f09ac77b659027e8dce9c3445004059112d2519adee1  crates/orna-cli-v1/tests/fixtures/iterator-contracts.orna
 fca574faa6a1e60824a2099b023b7da5efa2bb1fa9c40a14a13681d93211e5ab  crates/orna-cli-v1/tests/fixtures/legacy-bare-module-state.sqlite3
 092852be93fa4cbea616c1168b707d6bc07c6bbf6dd3d492dd22cd0b643000b8  crates/orna-cli-v1/tests/fixtures/legacy-bare-module.bundle
 315b989c25e1bdb46f446cc2531b488a08b0a8c076fa5ec9f3bac04639779c7f  crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle
