@@ -5,6 +5,24 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Live watches evaluate in a page environment pinned to the admitted application module, never in the session REPL
+  (ornadb-5il1.392; product change, ORNA-APP-017). `ApplicationLiveAdapter::watch_value` previewed every watch through
+  `repl_candidate(session)`, so the page and the console shared one environment: a console `let`, `fn` or `use` could
+  silently change a page snapshot, and a page's name was whatever the console had last bound.
+  `ApplicationAuthority::admit_page_module` now admits a module as a page environment — its own declarations and imports
+  under the bare names its body uses, with no caller binding — and `AdmittedPageModule::evaluate` previews one read-only
+  expression there. Watches and resyncs read that environment, so a console binding cannot move a page. The console is a
+  different environment, not an empty one: it is seeded from the whole project and keeps root functions under
+  `main.<name>`, so a console input reaches the clone's committed module through that qualified spelling (`main.page()`)
+  and never reaches a page binding. A host that selects a module with `ApplicationLiveAdapter::with_module` pins the page
+  to each admitted module generation, which is the only explicit page-model transition; a clone's root `main.orna` is the
+  page module otherwise, and an adapter with neither pins the standard function layer alone. `orna serve` selects no
+  module, so it pins once from the worktree clone and has no page transition: its watched model is not the committed
+  `HEAD:main.orna` that `GET /` renders. Consequently a `watch` of a console scratch binding is refused instead of
+  snapshotting console state. Tests: `crates/orna-application-v1/src/lib.rs`
+  (`page_watches_read_the_admitted_module_not_the_console_repl`,
+  `an_admitted_module_generation_pins_the_page_and_moves_it_on_transition`);
+  `crates/orna-cli-v1/src/cli_serve.rs` (`resync_repeats_the_pinned_page_when_the_console_rebinds_its_name`).
 - A pinned standard snapshot now resolves imports through the importing module's enclosing directories (ornadb-l7lx; product change).
   `resolve_std_snapshot_import` tried the snapshot root and then only the importing module's own directory, so a module group
   nested in a directory could not reach a module of its own group one directory above it. Because the loader then exited through
