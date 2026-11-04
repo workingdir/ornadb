@@ -40,6 +40,7 @@ mod media_range;
 mod repl;
 mod sys_host;
 mod table_schema;
+mod ui_render;
 
 use cli_args::{
     Command, Invocation, Parsed, StatusFormat, parse_cli, requested_color_mode,
