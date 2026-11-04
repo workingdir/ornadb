@@ -5,6 +5,26 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A complete copy states the repository format of every member it carries
+  (ornadb-5il1.400, Gate F slice 9; product change, ORNA-UPGRADE-001,
+  ORNA-UPGRADE-002, ORNA-GIT-003, ORNA-GIT-007). Each `archive` line of
+  `manifest.tsv` gains a format column — `legacy-1`, `legacy-2` or `format-3` —
+  and the header moves to `orna-complete-copy 3`; header-1 and header-2
+  archives are still read and reconstructed exactly, with their members'
+  formats reported as unrecorded because those archives never carried them.
+  `orna export`, `orna export --check` and `orna export --restore` list every
+  member with the format it recorded, and a restore or materialisation refuses
+  a member that no longer reopens as the format its manifest states, so a
+  compatibility member can never be answered through the current reader. One
+  archive can therefore carry a legacy format-1 snapshot beside a migrated
+  format-3 one, restore both into a single copy with no source repository, no
+  origin and no remote available, and answer a row from each through its own
+  original decoder. Tests: `complete_copy_export`
+  (`export_restores_a_legacy_and_a_migrated_snapshot_offline`), `complete_copy`
+  (`complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extractor`,
+  which re-derives each member's format from its own bundle with plain Git), and
+  `complete_copy::tests`
+  (`manifest_names_each_member_format_and_reads_older_headers`).
 - Every editor package in `editors/` is now a thin client of the one `orna-lsp`
   server, and the start contract is stated once (ornadb-editors; editor
   tooling, ORNA-LEX-007, decision 0119). `editors/vscode/` gains a real
