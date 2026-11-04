@@ -1402,10 +1402,17 @@ fn catalogue_table_rows(
 ) -> Vec<CanonicalValue> {
     let mut rows = Vec::new();
     for (name, schema) in tables {
-        let object = match table_object_ids.get(name) {
-            Some(id) => OvbRaw::Bytes(id.bytes().to_vec()),
-            None => OvbRaw::Null,
-        };
+        // The committed table identity is both the catalogue object and the
+        // definition: it is the only rename-stable per-table UUID in committed
+        // metadata (ORNA-OBJECT-002), and ORNA-OBJECT-003 forbids a rename
+        // changing it. Deriving the definition from the qualified name would
+        // break that.
+        let identity = table_object_ids
+            .get(name)
+            .map(|id| OvbRaw::Bytes(id.bytes().to_vec()))
+            .unwrap_or(OvbRaw::Null);
+        let object = identity.clone();
+        let definition = identity;
         let columns = OvbRaw::Array(
             schema
                 .declaration_order
@@ -1467,7 +1474,7 @@ fn catalogue_table_rows(
         let record = catalogue_map(vec![
             ("assertions", OvbRaw::Array(Vec::new())),
             ("columns", columns),
-            ("definition", OvbRaw::Null),
+            ("definition", definition),
             ("key", keys),
             ("name", OvbRaw::Text(name.clone())),
             ("object", object),
