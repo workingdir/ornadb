@@ -1,0 +1,3 @@
+use inner;
+
+pub fn origin(): Int = inner.origin();
