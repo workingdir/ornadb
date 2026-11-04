@@ -50,6 +50,15 @@ const BUNDLE_SHA256: &str = "19f36c5aa732ba69ad95cb8d24c0771946cd6326ebed8eb2a91
 const FORMAT_1_MARKER: &str = "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
+    String::from_utf8(git_bytes(directory, arguments))
+        .expect("git output is UTF-8")
+        .trim()
+        .to_owned()
+}
+
+/// Runs git and returns its raw stdout, so object content can be compared byte
+/// for byte without a trimming round trip masking a difference.
+fn git_bytes(directory: &Path, arguments: &[&str]) -> Vec<u8> {
     let output = Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .current_dir(directory)
@@ -61,7 +70,7 @@ fn git(directory: &Path, arguments: &[&str]) -> String {
         "git {arguments:?}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).unwrap()
+    output.stdout
 }
 
 fn clone_bundle(bundle: &Path, destination: &Path) {
@@ -110,10 +119,11 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
 
     // The committed repository really is format 1. The marker is the record the
     // format context and the relabel guard read; the record kinds around it are
-    // the 1.0.0 layout (1.0.0 `23-storage.md:88-106`).
+    // the 1.0.0 layout (1.0.0 `23-storage.md:88-106`). Compared as raw bytes, so
+    // the record's trailing LF is part of the contract.
     assert_eq!(
-        git(&source, &["show", "HEAD:.orna/format.orna"]),
-        FORMAT_1_MARKER,
+        git_bytes(&source, &["show", "HEAD:.orna/format.orna"]),
+        FORMAT_1_MARKER.as_bytes(),
         "committed repository is not the 1.0.0 format marker"
     );
     let tracked = git(&source, &["ls-tree", "-r", "--name-only", "HEAD"]);
@@ -143,8 +153,8 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     // key-path-v1 `07-tables.md:295-397`). The legacy read path for query,
     // history, mount and export needs both representations in one commit.
     assert_eq!(
-        git(&source, &["show", "HEAD:contacts/Contact/alice-smith.orna"]),
-        include_str!("fixtures/legacy-loose-contact-alice-smith.orna"),
+        git_bytes(&source, &["show", "HEAD:contacts/Contact/alice-smith.orna"]),
+        include_str!("fixtures/legacy-loose-contact-alice-smith.orna").as_bytes(),
         "loose row unit bytes changed"
     );
 
@@ -295,14 +305,33 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
 /// cannot notice a builder that stopped producing that file. This test closes
 /// that gap: it writes a fresh repository with
 /// `orna_repository_v1::write_legacy_format1_golden_fixture` (pointed at this
-/// crate's own fixture tree, which owns the editable-row sources), bundles it
-/// the same way `examples/build_legacy_fixture.rs` does, and requires the
-/// rebuilt bundle to equal the committed one byte for byte. A builder change
-/// therefore needs a regenerated bundle in the same change.
+/// crate's own fixture tree, which owns the editable-row sources) and compares
+/// it with a clone of the committed bundle. A builder change therefore needs a
+/// regenerated bundle in the same change.
 ///
-/// Bundle bytes are reproducible for a given git release because the builder
-/// pins author and committer dates; a git release that changes pack encoding
-/// fails this test rather than silently redefining the golden bytes.
+/// Compared, all environment-independent:
+/// - `HEAD` and every `refs/heads`/`refs/tags` name and target;
+/// - the ordered `rev-list --objects --all` listing, which fixes the whole
+///   commit/tree/blob graph by object id and path;
+/// - every object's content byte for byte, through `git cat-file -p`, so a
+///   rewritten commit message, author/committer date, tree mode, entry name or
+///   blob byte differs here and fails.
+///
+/// NOT compared: the `git bundle` file bytes. `git bundle create` output
+/// depends on the git release (pack version, delta heuristics, zlib), on the
+/// host's default object format and default branch, so file-byte equality
+/// tests the runner rather than the builder: it fails on GitHub's git while the
+/// repository it produced is identical. What that gives up is only the packfile
+/// encoding and the bundle's advertised-ref header; the committed artifact is
+/// still frozen by `BUNDLE_SHA256`, and a bundle re-created by another git is
+/// accepted here exactly when it carries the same graph and the same object
+/// bytes. No builder drift is hidden by this: every object and ref the builder
+/// writes is compared.
+///
+/// Bundle bytes are still reproducible here for a given git release because the
+/// builder pins author/committer dates, the object format and the line-ending
+/// conversion; that is what keeps the checked-in artifact stable, not what this
+/// test asserts.
 #[test]
 fn builder_regenerates_the_committed_bundle_byte_for_byte() {
     let parent = TempDir::new().unwrap();
@@ -313,46 +342,58 @@ fn builder_regenerates_the_committed_bundle_byte_for_byte() {
     std::fs::create_dir(&root).unwrap();
     orna_repository_v1::write_legacy_format1_golden_fixture(&root, &fixtures);
 
-    // Compare the rebuilt history with the committed one before the bytes, so a
-    // mismatch reports which of the two drifted and where.
     let committed = parent.path().join("committed");
     clone_bundle(&bundle, &committed);
+
     assert_eq!(
         git(&root, &["rev-parse", "HEAD"]),
         git(&committed, &["rev-parse", "HEAD"]),
         "rebuilt repository HEAD differs from the committed bundle HEAD"
     );
     assert_eq!(
-        git(&root, &["rev-list", "--objects", "--all"]),
-        git(&committed, &["rev-list", "--objects", "--all"]),
-        "rebuilt repository object graph differs from the committed bundle"
+        git(
+            &root,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+                "refs/tags",
+            ],
+        ),
+        git(
+            &committed,
+            &[
+                "for-each-ref",
+                "--format=%(refname) %(objectname)",
+                "refs/heads",
+                "refs/tags",
+            ],
+        ),
+        "rebuilt repository refs differ from the committed bundle"
     );
 
-    let rebuilt_bundle = parent.path().join("rebuilt.bundle");
-    let status = Command::new("git")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .current_dir(&root)
-        .args(["bundle", "create"])
-        .arg(&rebuilt_bundle)
-        .arg("--all")
-        .status()
-        .expect("spawn git bundle create");
-    assert!(status.success(), "git bundle create failed: {status}");
-
-    let rebuilt = std::fs::read(&rebuilt_bundle).unwrap();
-    let committed_bytes = std::fs::read(&bundle).unwrap();
+    // The ordered listing fixes every commit, tree and blob by id and path.
+    let rebuilt_graph = git_bytes(&root, &["rev-list", "--objects", "--all"]);
+    let committed_graph = git_bytes(&committed, &["rev-list", "--objects", "--all"]);
     assert_eq!(
-        rebuilt.len(),
-        committed_bytes.len(),
-        "the committed bundle is stale: regenerate it with \
-         `cargo run -p orna-repository-v1 --example build_legacy_fixture --features \
-         legacy-fixture-writer -- <empty-root> {} tests/fixtures` and repin \
-         BUNDLE_SHA256 plus scripts/fixture-manifest.sha256",
+        String::from_utf8(rebuilt_graph.clone()).unwrap(),
+        String::from_utf8(committed_graph.clone()).unwrap(),
+        "rebuilt repository object graph differs from the committed bundle: \
+         regenerate it with `cargo run -p orna-repository-v1 --example \
+         build_legacy_fixture --features legacy-fixture-writer -- <empty-root> {} \
+         tests/fixtures` and repin BUNDLE_SHA256 plus scripts/fixture-manifest.sha256",
         bundle.display()
     );
-    assert!(
-        rebuilt == committed_bytes,
-        "the committed bundle is stale: rebuild it from the builder and repin \
-         BUNDLE_SHA256 plus scripts/fixture-manifest.sha256"
-    );
+
+    // Object ids already commit to their content; comparing the content too
+    // names the first object whose bytes differ and covers a hash algorithm the
+    // ids alone would hide behind a differing format.
+    for line in String::from_utf8(rebuilt_graph).unwrap().lines() {
+        let oid = line.split(' ').next().unwrap();
+        assert_eq!(
+            git_bytes(&root, &["cat-file", "-p", oid]),
+            git_bytes(&committed, &["cat-file", "-p", oid]),
+            "object {line} differs between the rebuild and the committed bundle"
+        );
+    }
 }
