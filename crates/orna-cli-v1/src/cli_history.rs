@@ -407,7 +407,25 @@ fn run_legacy(
     const LEGACY_HELP: &str = "name the table of a legacy loose row by its key-path directory, such as `contacts/Contact`, with `--at` naming the format-1/2 snapshot";
     let table_path = match cli_legacy::legacy_address(options.relation, LEGACY_HELP)? {
         orna_application_v1::LegacyTableAddress::TablePath(path) => path,
-        orna_application_v1::LegacyTableAddress::Relation(_) => {
+        orna_application_v1::LegacyTableAddress::Relation(relation) => {
+            // A compact table the snapshot does not hold is reported as a
+            // missing table; one it does hold has no revison list this walk can
+            // follow, because its rows live inside committed segments.
+            if !repository
+                .read_compact_manifest_inventory(commit)
+                .map_err(|error| {
+                    cli_legacy::legacy_read_error(
+                        &orna_application_v1::LegacyReadError::Repository(error),
+                        LEGACY_HELP,
+                    )
+                })?
+                .contains_key(&orna_repository_v1::Uuid::from_bytes(relation))
+            {
+                return Err(cli_legacy::legacy_read_error(
+                    &orna_application_v1::LegacyReadError::UnknownRelation(relation),
+                    LEGACY_HELP,
+                ));
+            }
             return Err(history_error(
                 "Legacy compact rows have no file history",
                 "a compact row is stored inside committed segments, not in a row unit the commit graph can follow; read its value with `orna query`, or migrate the snapshot to format 3 (`orna migrate copy`) and read its history there",
