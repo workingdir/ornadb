@@ -1288,6 +1288,157 @@ impl StagedActivation {
     }
 }
 
+/// The grouped handle that serves the admitted table catalogue.
+const SYS_CATALOGUE_TABLES_SOURCE: &str = "sys.catalog.tables";
+
+/// Builds a canonical record from named fields.
+///
+/// OVB orders map keys by their complete encoded form, and
+/// `CanonicalValue::new` validates that order instead of sorting, so the keys
+/// are sorted by encoded bytes here (see `Value::Record`'s raw conversion).
+fn catalogue_map(fields: Vec<(&str, OvbRaw)>) -> OvbRaw {
+    let mut encoded = fields
+        .into_iter()
+        .map(|(key, value)| {
+            let bytes = CanonicalValue::new(OvbRaw::Text(key.to_owned()))
+                .expect("text key is canonical")
+                .encode()
+                .expect("text key encodes");
+            (bytes, key, value)
+        })
+        .collect::<Vec<_>>();
+    encoded.sort_by(|(left, _, _), (right, _, _)| left.cmp(right));
+    OvbRaw::Map(
+        encoded
+            .into_iter()
+            .map(|(_, key, value)| (OvbRaw::Text(key.to_owned()), value))
+            .collect(),
+    )
+}
+
+/// Pages over pre-built catalogue rows, using the row index as the cursor.
+fn catalogue_tables_page(
+    rows: &[CanonicalValue],
+    after: Option<&[u8]>,
+    limit: usize,
+    budget: &mut StepBudget,
+) -> Result<RelationPage, EvaluationError> {
+    let start = match after {
+        None => 0,
+        Some(cursor) => {
+            let bytes: [u8; 8] = cursor
+                .try_into()
+                .map_err(|_| catalogue_error("ORNA-EVAL-VALUE"))?;
+            usize::try_from(u64::from_be_bytes(bytes))
+                .map_err(|_| catalogue_error("ORNA-EVAL-VALUE"))?
+        }
+    };
+    if start > rows.len() {
+        return Err(catalogue_error("ORNA-EVAL-VALUE"));
+    }
+    let end = start.saturating_add(limit).min(rows.len());
+    budget.debit(u64::try_from(end - start).map_err(|_| catalogue_error("ORNA-EVAL-LIMIT"))?)?;
+    Ok(RelationPage {
+        rows: rows[start..end].to_vec(),
+        next: (end < rows.len()).then(|| (end as u64).to_be_bytes().to_vec()),
+    })
+}
+
+fn catalogue_error(code: &'static str) -> EvaluationError {
+    EvaluationError::redacted(SafeText::new(code).expect("static safe code"))
+}
+
+/// `sys.Table` rows for every admitted table, in name order.
+///
+/// `columns` follow the declaration order, `key` comes from the admission
+/// metadata and `references` from the resolved stored references. `row_count`
+/// stays null and `row_count_exact` false until an exact count is held, which
+/// the spec's nullable `Int` and `Bool` allow.
+fn catalogue_table_rows(
+    tables: &BTreeMap<String, TableSchema>,
+    table_object_ids: &BTreeMap<String, TableObjectId>,
+) -> Vec<CanonicalValue> {
+    let mut rows = Vec::new();
+    for (name, schema) in tables {
+        let object = match table_object_ids.get(name) {
+            Some(id) => OvbRaw::Bytes(id.bytes().to_vec()),
+            None => OvbRaw::Null,
+        };
+        let columns = OvbRaw::Array(
+            schema
+                .declaration_order
+                .iter()
+                .enumerate()
+                .map(|(position, column)| {
+                    let ty = schema
+                        .fields
+                        .get(column)
+                        .map(|ty| OvbRaw::Text(format!("{ty:?}")))
+                        .unwrap_or(OvbRaw::Null);
+                    catalogue_map(vec![
+                        ("name", OvbRaw::Text(column.clone())),
+                        ("position", OvbRaw::Int(position.into())),
+                        ("ty", ty),
+                    ])
+                })
+                .collect(),
+        );
+        let keys = OvbRaw::Array(
+            schema
+                .admission
+                .as_ref()
+                .map(|admission| {
+                    admission
+                        .keys
+                        .iter()
+                        .map(|(key, ty)| {
+                            catalogue_map(vec![
+                                ("name", OvbRaw::Text(key.clone())),
+                                ("ty", OvbRaw::Text(format!("{ty:?}"))),
+                            ])
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        );
+        let references = OvbRaw::Array(
+            schema
+                .references
+                .iter()
+                .map(|reference| {
+                    catalogue_map(vec![
+                        ("from_column", OvbRaw::Text(reference.from_column.clone())),
+                        (
+                            "on_delete",
+                            OvbRaw::Text(format!("{:?}", reference.on_delete)),
+                        ),
+                        (
+                            "on_rekey",
+                            OvbRaw::Text(format!("{:?}", reference.on_rekey)),
+                        ),
+                        ("optional", OvbRaw::Bool(reference.optional)),
+                        ("to_table", OvbRaw::Text(reference.to_table.clone())),
+                    ])
+                })
+                .collect(),
+        );
+        let record = catalogue_map(vec![
+            ("assertions", OvbRaw::Array(Vec::new())),
+            ("columns", columns),
+            ("definition", OvbRaw::Null),
+            ("key", keys),
+            ("name", OvbRaw::Text(name.clone())),
+            ("object", object),
+            ("references", references),
+            ("row_count", OvbRaw::Null),
+            ("row_count_exact", OvbRaw::Bool(false)),
+            ("storage", OvbRaw::Null),
+        ]);
+        rows.push(CanonicalValue::new(record).expect("catalogue row is a canonical record"));
+    }
+    rows
+}
+
 /// Lowers admitted source table effects into validated runtime mutations.
 ///
 /// Every effect argument vector is evaluated exactly once by the evaluator
@@ -1305,6 +1456,8 @@ pub struct SourceMutationEffectHandler {
     mutations: Vec<TableMutation>,
     next_ordinal: u64,
     publication_rows: Option<RuntimePublicationMetadataRows>,
+    /// `sys.Table` rows served through the `sys.catalog.tables` grouped handle.
+    catalogue_tables: Vec<CanonicalValue>,
     captured_rows: Option<BTreeMap<String, BTreeMap<Vec<u8>, CanonicalValue>>>,
     overlay: BTreeMap<String, BTreeMap<Vec<u8>, Option<CanonicalValue>>>,
     source_row_schemas: Vec<SourceRowSchemaProvenance>,
@@ -1319,6 +1472,7 @@ impl SourceMutationEffectHandler {
     pub fn new(tables: BTreeMap<String, TableSchema>) -> Self {
         let next_automatic_ids = automatic_id_counters(&tables);
         Self {
+            catalogue_tables: catalogue_table_rows(&tables, &BTreeMap::new()),
             tables,
             table_object_ids: BTreeMap::new(),
             insert_defaults: BTreeMap::new(),
@@ -2299,6 +2453,14 @@ impl EffectHandler for AsyncSourceMutationEffectHandler {
                 next: None,
             }));
         }
+        if source == SYS_CATALOGUE_TABLES_SOURCE {
+            return Ok(Some(catalogue_tables_page(
+                &self.mutations.catalogue_tables,
+                after,
+                limit,
+                budget,
+            )?));
+        }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
         };
@@ -2693,6 +2855,14 @@ impl EffectHandler for SourceMutationEffectHandler {
             return self
                 .table_relation_page(source, after, limit, budget)
                 .map(Some);
+        }
+        if source == SYS_CATALOGUE_TABLES_SOURCE {
+            return Ok(Some(catalogue_tables_page(
+                &self.catalogue_tables,
+                after,
+                limit,
+                budget,
+            )?));
         }
         let Some(publication_rows) = self.publication_rows.as_ref() else {
             return Ok(None);
@@ -3985,6 +4155,29 @@ fn put_bytes(digest: &mut Sha256, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    // Specified: Orna-1.1.0 sys.Table; the grouped handle lists admitted tables.
+    fn catalogue_tables_serves_one_row_per_admitted_table() {
+        let source = "pub table Note(id: Int) {\n    zebra: Str,\n    alpha: Str,\n}\n\npub fn main(): Int = 1;\n";
+        let authority =
+            ApplicationAuthority::new(Catalogue::authoritative_core(), Limits::default());
+        let application = authority
+            .admit_module("notes/main.orna", source, "main")
+            .expect("admit the fixture table");
+        let tables = application_table_schemas(&application);
+        let rows = catalogue_table_rows(&tables, &BTreeMap::new());
+        assert_eq!(rows.len(), 1, "one row per admitted table");
+        let rendered = format!("{:?}", rows[0]);
+        assert!(rendered.contains("Note"), "the row names its table");
+        let zebra = rendered.find("zebra").expect("zebra column is listed");
+        let alpha = rendered.find("alpha").expect("alpha column is listed");
+        assert!(zebra < alpha, "columns keep declaration order");
+        assert!(
+            rendered.contains("row_count_exact"),
+            "the row carries the exactness flag"
+        );
+    }
 
     #[test]
     fn bound_sys_host_registry_never_declares_controlled_only() {
