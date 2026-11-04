@@ -5,6 +5,19 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- The project loader now carries the repository's mixed-format diagnosis out of a relabelled snapshot instead of loading
+  it as legacy (ornadb-5il1.395, Gate F slice 2; product change, ORNA-META-001, ORNA-META-002, ORNA-UPGRADE-003). A
+  legacy `.orna/format.orna` marker beside a format-3 `.orna/store` is the relabel MIGRATION.md forbids ("not safe to
+  replace a header and claim the old data is already format 3"): no format-1/2 writer produced a store. `Repository`
+  already refused that snapshot as `ORNA-REPO-CONTEXT-004` (`admit_metadata`), but `ProjectLoader` consulted the format
+  context only when the snapshot tracked `database.orna`, so a marker with no `database.orna` beside a store loaded as
+  format 1/2 and its rows were read as legacy. `snapshot_uses_format3_store` now admits every pinned snapshot that tracks
+  either record through `Repository::open_format_context_at_selector` (committed snapshots) or
+  `Repository::open_private_candidate_format_context` (commit candidates) and propagates `MixedFormats`; a snapshot with
+  no format record, and a legacy marker with no store, keep their existing behaviour. Tests:
+  `crates/orna-project-v1/tests/project_loader.rs` (`legacy_marker_beside_a_store_mixes_formats_at_a_snapshot`,
+  `legacy_marker_candidate_writing_a_store_mixes_formats`) — both fails-before (`LoadedProject` returned) and
+  passes-after (`ORNA-REPO-CONTEXT-004` naming `.orna/store`).
 - Live watches evaluate in a page environment pinned to the admitted application module, never in the session REPL
   (ornadb-5il1.392; product change, ORNA-APP-017). `ApplicationLiveAdapter::watch_value` previewed every watch through
   `repl_candidate(session)`, so the page and the console shared one environment: a console `let`, `fn` or `use` could
