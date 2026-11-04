@@ -202,8 +202,10 @@ jobs:
       - name: Check generated editor bytes
         run: cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
 
-      - name: Check Tree-sitter grammar syntax
-        run: node --check editors/tree-sitter-orna/grammar.js
+      - name: Check generated JavaScript syntax
+        run: |
+          node --check editors/tree-sitter-orna/grammar.js
+          node --check editors/vscode/extension.js
 
       # The highlighter test runs each generated grammar in its real host and
       # fails, instead of skipping, when ORNA_REQUIRE_EDITORS=1 and a host is
