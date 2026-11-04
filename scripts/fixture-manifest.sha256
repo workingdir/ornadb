@@ -8,9 +8,7 @@ b62003984a22b50fdffe7ce6de528fa0015ae27d5856c1fdea32b42d13cf3d37  crates/orna-ap
 a489a6e997a718e42981c6196195438d4e03182bd51e146e9a404fb48df348d6  crates/orna-application-v1/tests/fixtures/admin-pause-stream.orna
 c840eed7622257dbae3200dcf955f60aa3267eca3b4de40406a54a35438cd58f  crates/orna-application-v1/tests/fixtures/admin-resume-stream.orna
 5a8b7ae6fa06557170c9c74749a13ba26c56d73506eae2b216f28d7a64cb3f50  crates/orna-application-v1/tests/fixtures/admitted-source-transaction.orna
-8849a668ec965627bde73b922bd5d5a44685cf24893ebc0570c33ef1aac41d5d  crates/orna-application-v1/tests/fixtures/browser-profile-http.orna
 4b00570dec4b92ad1d2f287d053a986d8ac0d0f0c47d497b54a10ee2da5f5915  crates/orna-application-v1/tests/fixtures/browser-profile-renderer.orna
-b1773916da778937d6bcf62a5b55658b61efd780c4996aa6d32b14057d8c2bee  crates/orna-application-v1/tests/fixtures/browser-profile-second-app.orna
 79f70c4233cf4bea06e8ec484ed852b56744fa51a2dce2d18546609394dcbd5c  crates/orna-application-v1/tests/fixtures/core-table-automatic-id-om35q.orna
 17db8a0e70d0a83b9734dc796f10dbc420268d1b456b084a2b7eacc660b029fc  crates/orna-application-v1/tests/fixtures/core-table-delete-existing-om35q.orna
 1e9cd71c6cb2206dd31f685f5c393cd07c65eb8cfb0f633198cb4d6536a29263  crates/orna-application-v1/tests/fixtures/core-table-delete-missing-om35q.orna
@@ -264,6 +262,8 @@ cad1e74f9b1269d55e6e2467f64effdc9567d0dbe4057a541d85ba6d9be6bb93  crates/orna-cl
 a3465472c8c2edfdb23899f9358b0fb02565316461834fb9eca94b1ee65dbc68  crates/orna-cli-v1/tests/fixtures/run/private-main.orna
 11eeeb0ee2d843233211f21864c4ee4a031df5851f993f056631fc393e16f59e  crates/orna-cli-v1/tests/fixtures/run/sys-enum-library.orna
 14ad1faec0c8b09d5e0d8be057b52a1424f8fd34f8463088d921ff624442bcb9  crates/orna-cli-v1/tests/fixtures/run/sys-enum-mismatch-library.orna
+c3339b98236b7a6027c19a7b57ad1ccf861367ae63579745eec1f89d494cf9fe  crates/orna-cli-v1/tests/fixtures/second-app/serve.orna
+7b02b5f971db6d0896f0628176ec39aca3e352af14f7b37be30792a23a3b8908  crates/orna-cli-v1/tests/fixtures/second-app/standard-root.orna
 6680eedf2960d2d93241ff971f30a4d23fc69c020fefa3d84b2701a276f53087  crates/orna-cli-v1/tests/fixtures/secret-surface.orna
 5e73231e4b336b1f4b5644fd068255f48e054b292abfd7957ac34192e0b264fb  crates/orna-cli-v1/tests/fixtures/sensors-deliver.orna
 46568370695b7289cc89502256ffd5987d9dfddaf68bbba23bf9217200687d22  crates/orna-cli-v1/tests/fixtures/serve-no-autoload.orna
