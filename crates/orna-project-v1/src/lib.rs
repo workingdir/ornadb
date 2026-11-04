@@ -14,9 +14,9 @@ use std::{
 };
 
 use orna_repository_v1::{
-    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FormatContextError,
-    GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin, Repository, RepositoryError,
-    RepositoryFormatContext, TypedKey,
+    CommittedTableBinding, CommittedTreeEntry, CommittedTreeEntryKind, FINAL_REPOSITORY_FORMAT,
+    FormatContextError, GitCommitRef, OrpBlobBinding, PrivateCommit, ProtectedContentPin,
+    Repository, RepositoryError, RepositoryFormatContext, TypedKey,
 };
 use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_component};
 use orna_runtime_v1::{TableMutation, TableObjectId};
@@ -1320,12 +1320,11 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
-        let has_format3_database = snapshot.has_database_metadata
-            && repository
+        let has_format3_database = snapshot_uses_format3_store(&snapshot, || {
+            repository
                 .open_format_context_at_selector(commit.as_str())
-                .map_err(ProjectLoadError::FormatContext)?
-                .repository_format_number()
-                == 3;
+                .map(|context| context.repository_format_number())
+        })?;
 
         let mut project = load_reachable_project(
             self.limits,
@@ -1463,11 +1462,11 @@ impl ProjectLoader {
         {
             return Err(ProjectLoadError::StandardSnapshotMismatch);
         }
-        let has_format3_database = snapshot.has_database_metadata
-            && repository
-                .private_candidate_repository_format_number(candidate)
-                .map_err(ProjectLoadError::FormatContext)?
-                == 3;
+        let has_format3_database = snapshot_uses_format3_store(&snapshot, || {
+            repository
+                .open_private_candidate_format_context(candidate)
+                .map(|context| context.repository_format_number())
+        })?;
 
         let mut project = load_reachable_project(
             self.limits,
@@ -2220,6 +2219,43 @@ fn validate_repository_paths(root: &Path, limits: ProjectLimits) -> Result<(), P
     Ok(())
 }
 
+/// Admits one pinned snapshot's repository coordinate and reports whether its
+/// rows are read from the format-3 `.orna/store`.
+///
+/// `admit` is the repository's own admission of that exact snapshot. A snapshot
+/// that records `database.orna` takes the coordinate it records, so an unknown
+/// or malformed record is refused before any source is read, and format 3
+/// selects the store rows. A snapshot that records only a legacy
+/// `format.orna` marker is admitted as that legacy format only while no
+/// format-3 store sits beside it: no format-1/2 writer produced `.orna/store`,
+/// so a marker beside one claims a format its stored data does not have. That
+/// relabel is the repository's mixed-format diagnosis (ORNA-REPO-CONTEXT-004),
+/// carried through here instead of loading the snapshot as legacy
+/// (ORNA-META-001, ORNA-META-002; MIGRATION.md: a rollback selects an old
+/// snapshot and never relabels new bytes as the old format; Gate A,
+/// "unknown/mixed formats fail early"). Every other outcome keeps the loader's
+/// existing behaviour, which is how a legacy snapshot's committed loose rows
+/// are read.
+fn snapshot_uses_format3_store(
+    snapshot: &ValidatedSnapshotTree,
+    admit: impl FnOnce() -> Result<u8, FormatContextError>,
+) -> Result<bool, ProjectLoadError> {
+    if snapshot.has_database_metadata {
+        return admit()
+            .map(|format| format == FINAL_REPOSITORY_FORMAT)
+            .map_err(ProjectLoadError::FormatContext);
+    }
+    if !snapshot.has_legacy_format_metadata {
+        return Ok(false);
+    }
+    match admit() {
+        Err(FormatContextError::MixedFormats { path }) => Err(ProjectLoadError::FormatContext(
+            FormatContextError::MixedFormats { path },
+        )),
+        _ => Ok(false),
+    }
+}
+
 /// Validates the immutable source tree before any reachable source body is
 /// read. The listing excludes only the native store at `.orna/store`. Git emits
 /// only leaf entries, so sibling ownership is reconstructed from every
@@ -2229,6 +2265,7 @@ struct ValidatedSnapshotTree {
     row_paths: BTreeSet<String>,
     has_standard_gitlink: bool,
     has_database_metadata: bool,
+    has_legacy_format_metadata: bool,
 }
 
 fn validate_committed_tree(
@@ -2275,6 +2312,10 @@ fn validate_snapshot_tree(
         entry.path().as_path() == Path::new(".orna/database.orna")
             && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
     });
+    let has_legacy_format_metadata = entries.iter().any(|entry| {
+        entry.path().as_path() == Path::new(".orna/format.orna")
+            && matches!(entry.kind(), CommittedTreeEntryKind::File { .. })
+    });
     let mut source_paths = BTreeSet::new();
     let mut row_paths = BTreeSet::new();
     let mut module_owners = BTreeMap::<Vec<String>, String>::new();
@@ -2296,6 +2337,7 @@ fn validate_snapshot_tree(
         row_paths,
         has_standard_gitlink,
         has_database_metadata,
+        has_legacy_format_metadata,
     })
 }
 
