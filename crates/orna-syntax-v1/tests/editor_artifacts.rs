@@ -176,7 +176,7 @@ fn semantic_legend_and_editor_grammars_have_only_v1_lexical_classes() {
 }
 
 #[test]
-fn lsp_attachment_artifacts_expose_completion_on_all_three_editor_surfaces() {
+fn lsp_attachment_artifacts_expose_completion_on_every_editor_surface() {
     let artifacts = editor::generated_artifacts();
     let content = |path: &str| {
         artifacts
@@ -202,6 +202,139 @@ fn lsp_attachment_artifacts_expose_completion_on_all_three_editor_surfaces() {
     assert!(emacs.contains("orna-eglot-server-command"));
     assert!(emacs.contains("(cons '(orna-mode) orna-eglot-server-command)"));
     assert!(emacs.contains("(add-hook 'orna-mode-hook #'eglot-ensure)"));
+
+    let vscode = content("editors/vscode/extension.js");
+    assert!(vscode.contains("vscode-languageclient"));
+    assert!(vscode.contains("new LanguageClient"));
+    assert!(vscode.contains("documentSelector"));
+
+    let sublime = content("editors/sublime/LSP-orna.sublime-settings");
+    assert!(sublime.contains("\"clients\""));
+    assert!(sublime.contains(editor::SOURCE_SCOPE));
+}
+
+/// The one start contract: every client starts `orna-lsp`, names exactly one
+/// override, and cites the document that states the contract once. The
+/// document's table is checked against the same table the renderers use, so
+/// prose and generated files cannot disagree.
+#[test]
+fn every_editor_surface_starts_the_same_server_command() {
+    let artifacts = editor::generated_artifacts();
+    let content = |path: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing generated artifact {path}"))
+            .contents
+            .as_str()
+    };
+    let root = repository_root();
+    let contract = fs::read_to_string(root.join(editor::LSP_CONTRACT_DOCUMENT))
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", editor::LSP_CONTRACT_DOCUMENT));
+
+    for entry in editor::EDITOR_SERVER_COMMANDS {
+        let client = content(entry.artifact);
+        assert!(
+            client.contains(editor::LSP_SERVER_COMMAND),
+            "{} must default to {}",
+            entry.artifact,
+            editor::LSP_SERVER_COMMAND
+        );
+        assert!(
+            client.contains(entry.override_setting),
+            "{} must name its override {}",
+            entry.artifact,
+            entry.override_setting
+        );
+        assert!(
+            client.contains(editor::LSP_CONTRACT_DOCUMENT),
+            "{} must cite {}",
+            entry.artifact,
+            editor::LSP_CONTRACT_DOCUMENT
+        );
+
+        let rows = contract
+            .lines()
+            .filter(|line| {
+                line.starts_with("| ")
+                    && line.contains(entry.artifact)
+                    && line.contains(entry.override_setting)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows.len(),
+            1,
+            "{} must have exactly one contract row naming {} in {}",
+            entry.artifact,
+            entry.override_setting,
+            editor::LSP_CONTRACT_DOCUMENT
+        );
+        let row = rows[0];
+        assert!(row.contains(entry.editor), "{row}");
+        assert!(row.contains(editor::LSP_SERVER_COMMAND), "{row}");
+    }
+}
+
+/// The VS Code entry point is a real language client: `package.json` declares
+/// `main`, the activation event, and the client dependency, the declared entry
+/// point is a generated artifact, and the extension carries no language logic
+/// of its own (grammar and semantic classification stay in the server and the
+/// contributed grammar).
+#[test]
+fn vscode_extension_declares_a_generated_language_client() {
+    let artifacts = editor::generated_artifacts();
+    let content = |path: &str| {
+        artifacts
+            .iter()
+            .find(|artifact| artifact.path == path)
+            .unwrap_or_else(|| panic!("missing generated artifact {path}"))
+            .contents
+            .as_str()
+    };
+    let package: serde_json::Value = serde_json::from_str(content("editors/vscode/package.json"))
+        .expect("VS Code package.json is JSON");
+
+    assert_eq!(package["main"], "./extension.js");
+    assert_eq!(
+        package["activationEvents"],
+        serde_json::json!(["onLanguage:orna"])
+    );
+    assert_eq!(
+        package["dependencies"]["vscode-languageclient"].as_str(),
+        Some("^9.0.1")
+    );
+    assert!(
+        package["contributes"]["grammars"].is_array(),
+        "the grammar contribution stays"
+    );
+    let server = &package["contributes"]["configuration"]["properties"]["orna.lsp.serverCommand"];
+    assert_eq!(server["default"], serde_json::json!(["orna-lsp"]));
+    assert_eq!(server["items"]["type"], "string");
+
+    let entry = format!(
+        "editors/vscode/{}",
+        package["main"]
+            .as_str()
+            .expect("main is a string")
+            .trim_start_matches("./")
+    );
+    assert!(
+        artifacts.iter().any(|artifact| artifact.path == entry),
+        "{entry} must be generated"
+    );
+
+    let extension = content("editors/vscode/extension.js");
+    for language_logic in ["tmLanguage", "scopeName", "source.orna", "syntaxes/"] {
+        assert!(
+            !extension.contains(language_logic),
+            "the extension must not carry language logic ({language_logic})"
+        );
+    }
+    assert!(extension.contains("vscode-languageclient"));
+    assert!(
+        extension.ends_with("module.exports = { activate, deactivate };\n"),
+        "the extension exports the entry points VS Code loads"
+    );
 }
 
 #[test]
@@ -210,50 +343,107 @@ fn generated_editor_bytes_are_stable_and_cover_the_complete_editor_tree() {
     let second = editor::generated_artifacts();
     assert_eq!(first, second, "emission order and contents must be stable");
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("orna-syntax-v1 is under crates/");
-    let mut actual = BTreeSet::new();
-    collect_editor_files(&root.join("editors"), root, &mut actual);
+    let listed = first
+        .iter()
+        .map(|artifact| artifact.path)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        listed.iter().collect::<BTreeSet<_>>().len(),
+        listed.len(),
+        "every artifact path is emitted once"
+    );
+    for artifact in &first {
+        assert!(!artifact.contents.is_empty(), "{} is empty", artifact.path);
+        assert!(
+            artifact.path.starts_with("editors/"),
+            "{} is not an editor artifact",
+            artifact.path
+        );
+    }
+
+    let root = repository_root();
     let expected = first
         .iter()
         .filter(|artifact| artifact.path.starts_with("editors/"))
         .map(|artifact| artifact.path.to_owned())
         .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected, "every editor file must be generated");
-}
-
-#[test]
-fn checked_in_editor_artifacts_match_the_v1_generator() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("orna-syntax-v1 is under crates/");
-    for artifact in editor::generated_artifacts() {
-        let path = root.join(artifact.path);
-        let contents = std::fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
-        assert_eq!(
-            contents, artifact.contents,
-            "stale artifact: {}",
-            artifact.path
+    let observed = walk_editor_tree(&root.join("editors"), root);
+    assert_eq!(
+        observed.files, expected,
+        "every editor file must be generated; add a file the generator does not \
+         produce to the emitter or remove it"
+    );
+    for directory in &observed.directories {
+        assert!(
+            expected
+                .iter()
+                .any(|path| path.starts_with(&format!("{directory}/"))),
+            "editor directory {directory} holds no generated artifact; an editor \
+             surface must join the emitter before its directory lands"
         );
     }
 }
 
-fn collect_editor_files(directory: &Path, root: &Path, files: &mut BTreeSet<String>) {
+#[test]
+fn checked_in_editor_artifacts_match_the_v1_generator() {
+    let root = repository_root();
+    let mut stale = Vec::new();
+    for artifact in editor::generated_artifacts() {
+        let path = root.join(artifact.path);
+        match std::fs::read_to_string(&path) {
+            Ok(contents) if contents == artifact.contents => {}
+            Ok(_) => stale.push(format!("{} differs from the emitter", artifact.path)),
+            Err(error) => stale.push(format!("{}: {error}", artifact.path)),
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "stale editor artifacts; regenerate with `just editor-artifacts`:\n{}",
+        stale.join("\n")
+    );
+}
+
+/// The repository root: `crates/orna-syntax-v1/tests/editor_artifacts.rs` sits
+/// three levels below it.
+fn repository_root() -> &'static Path {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("orna-syntax-v1 is under crates/")
+}
+
+struct EditorTree {
+    files: BTreeSet<String>,
+    directories: BTreeSet<String>,
+}
+
+/// Every file and directory under `editors/`, skipping editor build output
+/// (`node_modules` and `package-lock.json` from `npm install`).
+fn walk_editor_tree(directory: &Path, root: &Path) -> EditorTree {
+    let mut tree = EditorTree {
+        files: BTreeSet::new(),
+        directories: BTreeSet::new(),
+    };
+    collect_editor_paths(directory, root, &mut tree);
+    tree
+}
+
+fn collect_editor_paths(directory: &Path, root: &Path, tree: &mut EditorTree) {
     for entry in fs::read_dir(directory).expect("editor directory is readable") {
         let path: PathBuf = entry.expect("editor directory entry is readable").path();
+        let relative = path
+            .strip_prefix(root)
+            .expect("editor path is under the repository root")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if editor::editor_build_output(&relative) {
+            continue;
+        }
         if path.is_dir() {
-            collect_editor_files(&path, root, files);
+            tree.directories.insert(relative);
+            collect_editor_paths(&path, root, tree);
         } else if path.is_file() {
-            files.insert(
-                path.strip_prefix(root)
-                    .expect("editor file is under the repository root")
-                    .to_string_lossy()
-                    .replace('\\', "/"),
-            );
+            tree.files.insert(relative);
         }
     }
 }

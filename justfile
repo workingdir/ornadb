@@ -37,6 +37,8 @@ editor-artifacts-check:
     cargo test --locked -p orna-syntax-v1 --test editor_artifacts
     cargo run --locked -p orna-syntax-v1 --example generate_editor_artifacts -- --check
     node --check editors/tree-sitter-orna/grammar.js
+    node --check editors/vscode/extension.js
+    node scripts/check_vscode_extension.js
 
 
 # Verify formatting without changing source files.
