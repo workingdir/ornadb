@@ -65,11 +65,13 @@ pub(super) const HELP_LINES: &[&str] = &[
     "History commands:",
     "  history RELATION KEY [--at SELECTOR] [--limit N] [--since COMMIT] [--format human|json] [--reverse] [--author TEXT] [--count]",
     "  history RELATION --diff FROM TO    what changed between two pinned snapshots, payload-free",
+    "  history at a format-1/2 pin         a loose row's revisions; RELATION is the table's key-path directory (e.g. contacts/Contact)",
     "  history exit codes: 0 listed or counted; 1 any history error (bad flag or value, unknown repository, row, --at selector, or --since commit)",
     "Query commands:",
     "  query RELATION [--key KEY|0xBYTES] [--field N] [--at SELECTOR] [--limit N] [--format human|json]",
     "  query                            Blob metadata of committed rows, payload-free",
     "  query --at SELECTOR              the same listing read from that commit, not HEAD",
+    "  query at a format-1/2 pin        compact rows by table id, loose rows by key-path directory (e.g. contacts/Contact)",
     "  query exit codes: 0 metadata listed; 1 any query error (bad flag or value, unknown repository, relation, or --at selector)",
     "Options: --color auto|always|never, --db ENDPOINT, --debug (show technical detail)",
 ];

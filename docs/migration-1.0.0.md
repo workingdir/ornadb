@@ -263,8 +263,24 @@ reads through `read_legacy_authoritative_tables` and admits through
 `utf8`) and Date (INT32, DATE) segments, committed loose rows and a committed
 gitlink; the marker bytes and the absence of `.orna/store` are asserted.
 
+The same clone is read by the product commands (test `legacy_snapshot_read`,
+bead 5il1.398): `orna query --at HEAD` reports the four Int, three Str and three
+Date rows of the compact tables by their storage table ids, and the two editable
+rows by the key-path directory `contacts/Contact` (the address a legacy snapshot
+gives that table, since it carries no table object id); `orna history
+contacts/Contact alice-smith --at HEAD` lists six revisions with the row present
+in the two whose tree carries its unit. `orna history` refuses a compact table's
+row history, whose value lives inside committed segments rather than in one
+file, and `orna history --diff` still refuses a legacy endpoint.
+
 Open gaps (not proven by this fixture):
 
+- Loose row keys: the legacy reader reconstructs a row unit's key from its path
+  text, which is exact where the component is the canonical text of the key (the
+  fixture's `Str` keys and every unescaped component). A component that needs a
+  key-path-v1 escape (`~xx`) or a long alias (`~key-<digest>`) needs the table's
+  declared key types, so such a unit is refused with a named error rather than
+  decoded. No test covers an escaped or aliased component.
 - Blob rows: absent. 1.0.0 `23-storage.md:184` defines
   `Blob | blob | Unannotated BYTE_ARRAY`, but the format-1 compact decoder
   (`compact.rs`, `PhysicalValueKind`) admits only Int/Bool/Str/Date, so no
