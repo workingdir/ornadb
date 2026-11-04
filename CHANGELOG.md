@@ -5,6 +5,31 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna query` and `orna history` read a format-1/2 pin instead of refusing it (ornadb-5il1.398, Gate F slice 7; product
+  change, ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013). A pin whose format context reports a read-only compatibility
+  input is answered by a versioned legacy reader (`crates/orna-application-v1/src/legacy_store.rs`), added here. `orna query`
+  reads both committed representations of the 1.0.0 layout: a compact table's authoritative rows, addressed by its storage
+  table id (the repository's verified 1.0.0 segment reader), and an editable table's committed loose row units under
+  `<table path>/<key component>.orna`. `orna history` reads a loose row's revisions — the commits whose tree carries its row
+  unit — and refuses a *compact* row's history with a named remedy, because that row lives inside committed segments rather
+  than in one file the commit graph can follow. An editable table is addressed by its key-path directory, not by a storage
+  table id: a legacy snapshot records no table object id (its 1.0.0 metadata holds only the database identity), so the
+  key-path directory is the table's committed address. `--key`, `--from`/`--until`, `--limit`, `--since`, `--author`,
+  `--reverse`, `--count` and both output shapes keep their meaning, and a legacy query report states which representation
+  answered (`legacy_source`: `compact` or `loose-row-unit`). `--diff` still refuses a legacy endpoint: it compares two
+  native row maps. Loose rows are enumerated from the commit's tree, not from a loaded project, because 1.0.0 discovered a
+  module by its path and a row unit's table need not be reachable from the root module. Tests:
+  `crates/orna-cli-v1/tests/legacy_snapshot_read.rs` (`query_and_history_read_format1_rows_at_a_pinned_legacy_commit`),
+  read through the committed `tests/fixtures/legacy-format1.bundle`.
+- `orna query` and `orna history` refuse a snapshot project admission refuses (ornadb-4ivn; product change, ORNA-META-001,
+  ORNA-META-002, ORNA-UPGRADE-003). Both commands opened the format context and read the store without loading the project,
+  so a format-3 snapshot that also tracks a loose row file (ORNA-REPO-004: rows live only in `.orna/store`) was answered from
+  the store while the same snapshot carried the row's file. Each command now admits the pinned snapshot through the project
+  loader's format admission before it reads anything, and reports that admission's own diagnosis —
+  `ORNA-REPO-CONTEXT-004` naming the path that mixes the snapshot — instead of answering. The cost is one project load per
+  command on a format-3 pin: no cheaper boundary decides what project admission admits. A project the loader refuses for a
+  *source* reason (a parse error, an unresolvable import) is not refused here, since neither command reads the source.
+  Tests: same file (`query_and_history_refuse_a_format3_snapshot_tracking_a_loose_row`).
 - Strict ORNA-META-001 admission: a format-3 snapshot's tracked `.orna/` holds only `database.orna` and `store`
   (ornadb-5il1.415, Gate A "unknown/mixed formats fail early"; product change, ORNA-META-001, ORNA-META-002). Any other
   tracked child — the format-1 `storage` layout, the draft format-2 `blobs` tree, `.orna/packages`, `.orna/checkpoints`, a
