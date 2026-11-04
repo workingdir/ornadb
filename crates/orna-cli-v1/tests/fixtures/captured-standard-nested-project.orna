@@ -1,0 +1,3 @@
+use std.math.{increase};
+
+pub fn value(): Int = increase(41);
