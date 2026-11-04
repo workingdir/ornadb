@@ -9,7 +9,7 @@
 use num_bigint::BigInt;
 use orna_evaluator_v1::{
     AdmittedReplSession, EffectHandler, Environment, EvaluationError, Functions, Limits,
-    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError,
+    NominalDefinitions, Ovb2EffectHandler, PureFunction, RelationPage, ReplError, ReplSession,
     StagedReplActivation, StandardLayer, StepBudget, SysHostAttachment, SysHostBindingRegistry,
     SysHostContext, invoke_named, invoke_named_with_effects, invoke_named_with_sys_host_context,
     module_function_alias_key, reference_standard_profile, reference_standard_sources,
@@ -36,12 +36,13 @@ use orna_runtime_v1::{
 };
 pub use orna_security_v1::{RemoteAnalysisDecision, RemoteAnalysisPolicy, RemoteAnalysisRequest};
 use orna_semantic_v1::{
-    Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace, StandardCatalogueError,
-    StandardDependencyProfile, SystemProviders, TableSchema, analyze_with_providers,
+    Analysis, Catalogue, DIAG_AMBIGUOUS, DIAG_IMPORT, ModuleInput, Namespace,
+    StandardCatalogueError, StandardDependencyProfile, SystemProviders, TableSchema,
+    analyze_with_providers,
 };
 use orna_syntax_v1::{
     CaseArm, Declaration, Expr, FieldInitializer, Item, Pattern, Statement, StringSegment,
-    TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
+    SyntaxTree, TableMember, UseTail, Visibility, parse_module_with_file, parse_repl,
 };
 use orna_value_v1::{ContextValue, Format3Context, ValueFormat};
 use sha2::{Digest, Sha256};
@@ -198,6 +199,42 @@ impl AdmittedTableSchema {
     #[must_use]
     pub const fn object_id(&self) -> Option<TableObjectId> {
         self.object_id
+    }
+}
+
+/// The immutable environment one admitted application module gives its page
+/// (ORNA-APP-017).
+///
+/// A page expression resolves the module's own declarations and imports under
+/// the bare names the module body uses, and nothing else. The environment is
+/// pinned when the module is admitted and is never the session REPL, so a
+/// console `let`, `fn` or `use` cannot overwrite a name the page reads, and no
+/// page binding reaches the console.
+#[derive(Clone, Debug)]
+pub struct AdmittedPageModule {
+    /// The pinned module environment. Its binding map is empty: every name a
+    /// page resolves comes from the module's admitted function table.
+    environment: ReplSession,
+}
+
+impl AdmittedPageModule {
+    fn from_functions(limits: Limits, functions: Functions) -> Result<Self, ApplicationError> {
+        // A page expression runs as the module's own body: its declarations are
+        // callable by their bare names, its imports resolve, and the session
+        // REPL contributes nothing.
+        ReplSession::with_module_scope(limits, Environment::new(), functions)
+            .map(|environment| Self { environment })
+            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
+    }
+
+    /// Evaluates one read-only page expression in this pinned environment.
+    ///
+    /// The expression is one bounded input and publishes nothing: a page update
+    /// is the returned value, never a change to the environment it ran in.
+    pub fn evaluate(&self, source: &str) -> Result<CanonicalValue, ApplicationError> {
+        self.environment
+            .preview(source)
+            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))
     }
 }
 
@@ -370,63 +407,8 @@ impl ApplicationAuthority {
         let logical_path = logical_path.into();
         let source = source.into();
         let entry = entry.into();
-        self.limits
-            .check_source(&source)
-            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
-
-        let parsed = parse_module_with_file(&source, logical_path.clone());
-        if !parsed.is_ok() {
-            return Err(ApplicationError::Parse(
-                parsed
-                    .diagnostics
-                    .iter()
-                    .map(|diagnostic| diagnostic.code.to_owned())
-                    .collect(),
-            ));
-        }
-
-        let analysis = analyze_with_providers(
-            &[ModuleInput::new(logical_path.clone(), source.clone())],
-            &self.catalogue,
-            SystemProviders::Production,
-        );
-        if !analysis.is_ok() {
-            return Err(ApplicationError::Semantic(
-                analysis
-                    .diagnostics
-                    .iter()
-                    .map(|diagnostic| diagnostic.code().to_owned())
-                    .collect(),
-            ));
-        }
-
-        let mut functions = Functions::with_standard(Arc::clone(&self.standard_functions));
-        let table_insert_defaults = table_insert_defaults(&parsed.value.items);
-        for item in &parsed.value.items {
-            if let Declaration::Function { signature, body } = &item.declaration {
-                functions.insert(
-                    signature.name.clone(),
-                    PureFunction {
-                        parameters: signature.parameters.clone(),
-                        body: body.clone(),
-                        environment: Environment::new(),
-                    },
-                );
-            }
-        }
-        let exports = StandardExports {
-            public: &self.standard_public,
-            non_function: &self.standard_non_function,
-        };
-        for (alias, target) in
-            standard_import_bindings(&exports, &self.standard_preludes, &parsed.value.items)?
-        {
-            // A user function keeps its own name; the import alias is bound only where it is free.
-            if functions.contains_key(&alias) || !functions.contains_key(&target) {
-                continue;
-            }
-            functions.insert_alias(alias, target);
-        }
+        let (parsed, analysis, functions) = self.admit_module_functions(&logical_path, &source)?;
+        let table_insert_defaults = table_insert_defaults(&parsed.items);
         if functions.get_entry(&entry).is_none() {
             return Err(ApplicationError::MissingEntry(entry));
         }
@@ -462,6 +444,103 @@ impl ApplicationAuthority {
             #[cfg(test)]
             module_header,
         })
+    }
+
+    /// Parses, resolves and type-checks one source module, then binds the
+    /// executable declarations and standard imports that module admits.
+    ///
+    /// Entry admission and the page environment share this boundary, so a page
+    /// resolves exactly the names its own module admits: its declarations and
+    /// its imports, and no caller binding (ORNA-APP-017).
+    fn admit_module_functions(
+        &self,
+        logical_path: &str,
+        source: &str,
+    ) -> Result<(SyntaxTree, Analysis, Functions), ApplicationError> {
+        self.limits
+            .check_source(source)
+            .map_err(|error| ApplicationError::Evaluation(error.code().to_owned()))?;
+
+        let parsed = parse_module_with_file(source, logical_path.to_owned());
+        if !parsed.is_ok() {
+            return Err(ApplicationError::Parse(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code.to_owned())
+                    .collect(),
+            ));
+        }
+
+        let analysis = analyze_with_providers(
+            &[ModuleInput::new(logical_path.to_owned(), source.to_owned())],
+            &self.catalogue,
+            SystemProviders::Production,
+        );
+        if !analysis.is_ok() {
+            return Err(ApplicationError::Semantic(
+                analysis
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.code().to_owned())
+                    .collect(),
+            ));
+        }
+
+        let mut functions = Functions::with_standard(Arc::clone(&self.standard_functions));
+        for item in &parsed.value.items {
+            if let Declaration::Function { signature, body } = &item.declaration {
+                functions.insert(
+                    signature.name.clone(),
+                    PureFunction {
+                        parameters: signature.parameters.clone(),
+                        body: body.clone(),
+                        environment: Environment::new(),
+                    },
+                );
+            }
+        }
+        let exports = StandardExports {
+            public: &self.standard_public,
+            non_function: &self.standard_non_function,
+        };
+        for (alias, target) in
+            standard_import_bindings(&exports, &self.standard_preludes, &parsed.value.items)?
+        {
+            // A user function keeps its own name; the import alias is bound only where it is free.
+            if functions.contains_key(&alias) || !functions.contains_key(&target) {
+                continue;
+            }
+            functions.insert_alias(alias, target);
+        }
+        Ok((parsed.value, analysis, functions))
+    }
+
+    /// Admits one source module as the page environment its watches evaluate
+    /// in (ORNA-APP-017).
+    ///
+    /// The environment binds the module's own declarations and imports and no
+    /// caller binding, so a console `let`, `fn` or `use` in the session REPL
+    /// cannot shadow a name the page uses, and the page's names are not part of
+    /// the console. No entry function is required: the page expression itself
+    /// names what it reads.
+    pub fn admit_page_module(
+        &self,
+        logical_path: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Result<AdmittedPageModule, ApplicationError> {
+        let (_, _, functions) =
+            self.admit_module_functions(&logical_path.into(), &source.into())?;
+        AdmittedPageModule::from_functions(self.limits, functions)
+    }
+
+    /// The page environment of an authority that admits no application module:
+    /// the pinned standard function layer and no binding at all.
+    fn standard_page_module(&self) -> Result<AdmittedPageModule, ApplicationError> {
+        AdmittedPageModule::from_functions(
+            self.limits,
+            Functions::with_standard(Arc::clone(&self.standard_functions)),
+        )
     }
 
     /// Admits a source module using stable table identities read from
@@ -3256,6 +3335,11 @@ pub struct ApplicationLiveAdapter {
     sessions: ReplSessions,
     run_events: Arc<Mutex<BTreeMap<[u8; 16], SessionRunEventLog>>>,
     watches: Watches,
+    /// The page environment every watch of this adapter evaluates in
+    /// (ORNA-APP-017). It is pinned to the admitted application module and
+    /// shared by the sessions because it holds no session state; the console
+    /// REPL in `sessions` is a different environment and never feeds it.
+    page: Arc<Mutex<Option<AdmittedPageModule>>>,
     runtime_identity: Option<([u8; 16], [u8; 16])>,
     repository_capture: Option<RepositoryCaptureCapability>,
 }
@@ -3309,6 +3393,7 @@ impl ApplicationLiveAdapter {
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             run_events: Arc::new(Mutex::new(BTreeMap::new())),
             watches: Arc::new(Mutex::new(BTreeMap::new())),
+            page: Arc::new(Mutex::new(None)),
             runtime_identity: None,
             repository_capture: None,
         }
@@ -3366,6 +3451,10 @@ impl ApplicationLiveAdapter {
     /// constructs the adapter; it is never inferred from the Eval text, so a
     /// console input that declares a function named like an entry stays an
     /// ordinary REPL declaration.
+    ///
+    /// Each successful admission also pins the adapter's page environment to
+    /// that module generation, so this adapter's watches read the selected
+    /// module and the session REPL never becomes the page (ORNA-APP-017).
     #[must_use]
     pub fn with_module(
         mut self,
@@ -3384,13 +3473,19 @@ impl ApplicationLiveAdapter {
         let (Message::Eval { source, .. }, Some(module)) = (message, &self.eval_module) else {
             return Err(LiveError::ApplicationRejected);
         };
-        self.authority
+        let admitted = self
+            .authority
             .admit_module(
                 module.logical_path.clone(),
                 source.clone(),
                 module.entry.clone(),
             )
-            .map_err(LiveError::from)
+            .map_err(LiveError::from)?;
+        // One admitted module generation is one explicit page-model transition:
+        // this is the only thing that moves the page, so a session's scratch
+        // input cannot (ORNA-APP-017).
+        self.pin_page_module(&admitted).map_err(LiveError::from)?;
+        Ok(admitted)
     }
 
     /// Creates a REPL session bound to the database and repository identity the
@@ -3602,14 +3697,91 @@ impl ApplicationLiveAdapter {
         if source == LIVE_RUN_EVENTS_WATCH_SOURCE {
             return self.run_events_present(session);
         }
-        let repl = self.repl_candidate(session)?;
-        let value = repl
-            .preview(source)
-            .map_err(|_| LiveError::ApplicationRejected)?;
+        // A watch is a page subscription, so it evaluates in the page
+        // environment pinned to the admitted application module. The session
+        // REPL is the console's scratch environment: reading it here is what let
+        // a console `let` overwrite a name the page uses (ORNA-APP-017).
+        let value = self.page_environment()?.evaluate(source)?;
         // A generic typed-value node is the universal fallback: rendering
         // specializations may be added without making any value unwatchable.
         PresentNode::from_value(value).map_err(|_| LiveError::ApplicationRejected)
     }
+
+    /// Returns the page environment this adapter's watches evaluate in, pinning
+    /// it on first use.
+    fn page_environment(&self) -> Result<AdmittedPageModule, LiveError> {
+        let mut page = self
+            .page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(pinned) = page.as_ref() {
+            return Ok(pinned.clone());
+        }
+        let pinned = self.pin_page_environment()?;
+        *page = Some(pinned.clone());
+        Ok(pinned)
+    }
+
+    /// Derives the page environment from the admitted application module: the
+    /// module this adapter serves, or the serving clone's root module, which is
+    /// the module `orna serve` admits for the page. An adapter with neither
+    /// pins the standard function layer alone, so a page expression that names
+    /// only standard functions and literals still resolves while a name the
+    /// console declares stays unreachable.
+    fn pin_page_environment(&self) -> Result<AdmittedPageModule, LiveError> {
+        if self.eval_module.is_some() {
+            // A host that selects a complete application module serves only an
+            // admitted generation of it. Before one is admitted there is no
+            // page to subscribe, and the clone's own module is not a substitute.
+            return Err(LiveError::ApplicationRejected);
+        }
+        let module = self
+            .project
+            .as_ref()
+            .and_then(application_module_source)
+            .map(|(logical_path, source)| {
+                self.authority
+                    .admit_page_module(logical_path, source)
+                    .map_err(LiveError::from)
+            });
+        match module {
+            Some(page) => page,
+            None => self
+                .authority
+                .standard_page_module()
+                .map_err(LiveError::from),
+        }
+    }
+
+    /// Pins the page environment of one explicitly admitted application module
+    /// generation. A module admission is the page-model transition: nothing
+    /// else moves the page this adapter serves.
+    fn pin_page_module(&self, application: &AdmittedApplication) -> Result<(), ApplicationError> {
+        let page = application.page_module()?;
+        *self
+            .page
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(page);
+        Ok(())
+    }
+}
+
+/// The source of the module a serving clone's page is built from.
+///
+/// The root module is the project's application module, the one `orna serve`
+/// admits for `GET /`. A project that keeps its sources in one nested module
+/// group has exactly one candidate, so that module is used rather than
+/// silently pinning an empty page.
+fn application_module_source(project: &LoadedProject) -> Option<(String, String)> {
+    let modules = project.modules();
+    let identities = project.identities();
+    let root = identities
+        .iter()
+        .position(|identity| identity.namespace().is_empty());
+    let index = root.or_else(|| (modules.len() == 1).then_some(0))?;
+    let module = modules.get(index)?;
+    let identity = identities.get(index)?;
+    Some((identity.logical_path().to_owned(), module.source.clone()))
 }
 
 fn record_session_run_event(
@@ -4196,6 +4368,17 @@ impl AdmittedApplication {
     #[must_use]
     pub fn table_schemas(&self) -> &BTreeMap<String, AdmittedTableSchema> {
         &self.table_schemas
+    }
+
+    /// Pins the page environment of this admitted module generation
+    /// (ORNA-APP-017).
+    ///
+    /// A host that selected a complete application module owns the page this
+    /// module renders, so each admitted generation is one explicit page-model
+    /// transition: the environment is the module's own declarations and
+    /// imports, and the session REPL plays no part in it.
+    pub fn page_module(&self) -> Result<AdmittedPageModule, ApplicationError> {
+        AdmittedPageModule::from_functions(self.limits, self.functions.clone())
     }
 
     /// Projects complete committed table metadata into the runtime admission
@@ -4917,6 +5100,296 @@ mod tests {
                 snapshot: CanonicalSnapshot::cwd([1; 16], [2; 16], 0.into()).unwrap(),
             }
         );
+    }
+
+    /// G-15 / ORNA-APP-017: a page and its watches evaluate in the environment
+    /// pinned to the admitted application module, never in the session REPL.
+    ///
+    /// The clone's `main.orna` is the admitted application module, so its
+    /// `page` is the page's binding. The console declares its own `page` (99)
+    /// and then rebinds that name with a `let` (7); the page keeps reading 42,
+    /// and the console keeps its own value. Before this change the watch
+    /// evaluated in the session REPL, so the console's declaration was the page.
+    #[test]
+    fn page_watches_read_the_admitted_module_not_the_console_repl() {
+        use orna_repository_v1::Repository;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-page-environment-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        fs::write(root.join("main.orna"), "pub fn page(): Int = 42;\n")
+            .expect("application module fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let mut adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            Catalogue::authoritative_core(),
+            Limits::default(),
+        ))
+        .with_runtime_identity([1; 16], [2; 16])
+        .with_loaded_project(project);
+        let session = [11; 16];
+        let page_message = Message::Watch {
+            source: "page()".to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".to_owned(),
+                supported_kinds: vec!["value".to_owned()],
+            },
+            refresh_floor: None,
+        };
+
+        // The page's own binding is not part of the console environment.
+        assert_eq!(
+            LiveApplication::eval(
+                &mut adapter,
+                session,
+                [12; 16],
+                &eval_message("page", [12; 32])
+            ),
+            Err(LiveError::ApplicationRejected),
+            "the console cannot see the page environment"
+        );
+        // The console's own declaration of the same name.
+        LiveApplication::eval(
+            &mut adapter,
+            session,
+            [13; 16],
+            &eval_message("fn page(): Int = 99;", [13; 32]),
+        )
+        .expect("the console declares its own helper");
+
+        let first = LiveApplication::watch(&mut adapter, session, [14; 16], &page_message)
+            .expect("a page watch evaluates in its pinned module environment");
+        let watch = first.watch.expect("a watch snapshot carries its handle");
+        let Message::Snapshot {
+            revision,
+            present: baseline,
+            snapshot: baseline_snapshot,
+        } = first.message
+        else {
+            panic!("a new watch starts with a complete snapshot");
+        };
+        assert_eq!(revision, 0);
+        assert_eq!(
+            baseline,
+            PresentNode::from_value(CanonicalValue::new(OvbRaw::Int(42.into())).unwrap()).unwrap(),
+            "the page reads the admitted module, not the console's declaration"
+        );
+
+        // Rebinding the same name in the console changes the console only.
+        LiveApplication::eval(
+            &mut adapter,
+            session,
+            [15; 16],
+            &eval_message("let page = 7;", [15; 32]),
+        )
+        .expect("the console rebinds its own name");
+        let console = LiveApplication::eval(
+            &mut adapter,
+            session,
+            [16; 16],
+            &eval_message("page", [16; 32]),
+        )
+        .expect("the console reads its own binding");
+        assert!(matches!(
+            console.message,
+            Message::Result {
+                value: Some(value),
+                ..
+            } if value == CanonicalValue::new(OvbRaw::Int(7.into())).unwrap()
+        ));
+
+        let refreshed =
+            LiveApplication::resync(&mut adapter, session, [17; 16], watch, &Message::Resync)
+                .expect("resync re-evaluates the pinned page environment");
+        assert_eq!(refreshed.watch, Some(watch));
+        let Message::Snapshot {
+            revision: refreshed_revision,
+            present: refreshed_present,
+            snapshot: refreshed_snapshot,
+        } = refreshed.message
+        else {
+            panic!("an explicit resync is answered with a full snapshot");
+        };
+        assert_eq!(
+            refreshed_revision, 0,
+            "an unchanged page keeps its revision"
+        );
+        assert_eq!(
+            refreshed_present, baseline,
+            "the page snapshot is unchanged"
+        );
+        assert_eq!(
+            snapshot_bytes(
+                watch,
+                refreshed_revision,
+                &refreshed_present,
+                &refreshed_snapshot
+            ),
+            snapshot_bytes(watch, revision, &baseline, &baseline_snapshot),
+            "the page snapshot is byte-identical"
+        );
+
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+    }
+
+    /// G-15 / ORNA-APP-017: a host-selected module is the page environment, so
+    /// the page reads that module and not the clone, and re-admitting the
+    /// module is the explicit transition that moves the page.
+    #[test]
+    fn an_admitted_module_generation_pins_the_page_and_moves_it_on_transition() {
+        use orna_repository_v1::Repository;
+        use std::{fs, process::Command};
+
+        let root = std::env::temp_dir().join(format!(
+            "orna-page-generation-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock is after Unix epoch")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("project root is created");
+        // The clone declares a different page, which the selected module must
+        // replace rather than share.
+        fs::write(root.join("main.orna"), "pub fn page(): Int = 1;\n")
+            .expect("application module fixture is written");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .current_dir(&root)
+                .status()
+                .expect("git init starts")
+                .success()
+        );
+        let repository = Repository::discover(&root).expect("test project is a Git worktree");
+        let project = orna_project_v1::ProjectLoader::default()
+            .load_with_standard_profile(&repository, None)
+            .expect("project modules are loaded from the clone");
+        let mut adapter = ApplicationLiveAdapter::new(ApplicationAuthority::new(
+            Catalogue::authoritative_core(),
+            Limits::default(),
+        ))
+        .with_runtime_identity([1; 16], [2; 16])
+        .with_loaded_project(project)
+        .with_module("page.orna", "serve");
+        let session = [21; 16];
+        let page_message = Message::Watch {
+            source: "page()".to_owned(),
+            database: orna_protocol_v1::DatabaseContext {
+                database: [1; 16],
+                snapshot: None,
+            },
+            presentation: orna_protocol_v1::PresentationContext {
+                locale: "en-US".to_owned(),
+                timezone: None,
+                width: None,
+                theme: "terminal/default".to_owned(),
+                supported_kinds: vec!["value".to_owned()],
+            },
+            refresh_floor: None,
+        };
+
+        LiveApplication::eval(
+            &mut adapter,
+            session,
+            [22; 16],
+            &eval_message(
+                "pub fn page(): Int = 42;\npub fn serve(): Int = 1;\n",
+                [22; 32],
+            ),
+        )
+        .expect("the host-selected module is admitted");
+        let first = LiveApplication::watch(&mut adapter, session, [23; 16], &page_message)
+            .expect("the page evaluates in the admitted module");
+        let watch = first.watch.expect("a watch snapshot carries its handle");
+        let Message::Snapshot {
+            revision: 0,
+            present,
+            ..
+        } = first.message
+        else {
+            panic!("a new watch starts with a complete snapshot");
+        };
+        assert_eq!(
+            present,
+            PresentNode::from_value(CanonicalValue::new(OvbRaw::Int(42.into())).unwrap()).unwrap(),
+            "the page reads the selected module, not the clone's module"
+        );
+
+        LiveApplication::eval(
+            &mut adapter,
+            session,
+            [24; 16],
+            &eval_message(
+                "pub fn page(): Int = 43;\npub fn serve(): Int = 1;\n",
+                [24; 32],
+            ),
+        )
+        .expect("the next module generation is admitted");
+        let refreshed =
+            LiveApplication::resync(&mut adapter, session, [25; 16], watch, &Message::Resync)
+                .expect("resync evaluates the new page generation");
+        let Message::Snapshot {
+            revision, present, ..
+        } = refreshed.message
+        else {
+            panic!("an explicit resync is answered with a full snapshot");
+        };
+        assert_eq!(revision, 1, "a new module generation advances the page");
+        assert_eq!(
+            present,
+            PresentNode::from_value(CanonicalValue::new(OvbRaw::Int(43.into())).unwrap()).unwrap()
+        );
+
+        drop(repository);
+        fs::remove_dir_all(root).expect("test project is removed");
+    }
+
+    /// The canonical bytes of one full snapshot, so a page update can be shown
+    /// to be byte-identical and not merely equal.
+    fn snapshot_bytes(
+        watch: [u8; 16],
+        revision: u64,
+        present: &PresentNode,
+        snapshot: &CanonicalSnapshot,
+    ) -> Vec<u8> {
+        Envelope {
+            request: Some([0; 16]),
+            watch: Some(watch),
+            message: Message::Snapshot {
+                revision,
+                present: present.clone(),
+                snapshot: snapshot.clone(),
+            },
+            extensions: BTreeMap::new(),
+        }
+        .encode(orna_protocol_v1::Limits::default())
+        .expect("a snapshot is canonical")
     }
 
     #[test]
