@@ -5420,6 +5420,19 @@ impl Context<'_, '_> {
                 match payload_free_enum_variant(base, name, scope, self.namespace.as_deref()) {
                     Some(variant) => variant,
                     None => {
+                        // A grouped system handle such as `sys.catalog.tables`
+                        // is one relation expression, not a field on a `sys`
+                        // value, so it is recognised before the base resolves.
+                        if let Some(source) = system_relation_source(expression) {
+                            return Ok(Value::Relation(RelationPlan {
+                                source: source.to_owned(),
+                                source_identity: RelationReadScope(0),
+                                source_union: None,
+                                shared_filter_group: None,
+                                source_values: None,
+                                stages: Vec::new(),
+                            }));
+                        }
                         let base = self.evaluate(base, scope, depth + 1)?;
                         self.field_value(base, name, scope)
                     }
@@ -16019,6 +16032,8 @@ fn system_relation_source(expression: &Expr) -> Option<&'static str> {
         "sys.Storage" => Some("sys.Storage"),
         "sys.MaintenanceJob" => Some("sys.MaintenanceJob"),
         "sys.Materialization" => Some("sys.Materialization"),
+        "sys.catalog.tables" => Some("sys.catalog.tables"),
+        "sys.catalog.columns" => Some("sys.catalog.columns"),
         _ => None,
     }
 }
