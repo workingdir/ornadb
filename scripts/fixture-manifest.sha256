@@ -134,6 +134,8 @@ f409c8bda3f248a37dc03aedacf3ba913ebdbea9472ec571aa6714fe0a9ad8f6  crates/orna-cl
 01fb282836bbca8383c60cc52849c8f79714ec27fe6f51fba9b9ba77579e5768  crates/orna-cli-v1/tests/fixtures/catalogue-slash-ogs1.orna
 ec11d4e3265472dbd51abfa94fc85249c9d28b39149b95ca5f162f54388e66c1  crates/orna-cli-v1/tests/fixtures/catalogue-stale-ogt1.orna
 0fec0363fbbd62f9c5e998c280086bb1d1ccaa3f1957faee3d1bba2403c19c80  crates/orna-cli-v1/tests/fixtures/catalogue-unsupported-media-ogx1.orna
+f12924b10facf095d29b77cc9b6f51254bab689f5822b5f2646610fdcf5ee15d  crates/orna-cli-v1/tests/fixtures/devtools/serve.orna
+80ed18fa6b5d9095627554ce6174645c1920b33b543489c6ae2845a93fe06661  crates/orna-cli-v1/tests/fixtures/devtools/standard-root.orna
 be8717c701acad0b1656df530453f1b1535d0906a4e9d0faf3ab7f11a5c02b5f  crates/orna-cli-v1/tests/fixtures/enum-construction/main.orna
 810c5bba7786dd7c81d6543edcf9aa3d5b6c36405750309047e0868a7d4aaada  crates/orna-cli-v1/tests/fixtures/enum-construction/missing-field.orna
 c5f2a3dac8aeb08c9384b9df6e8d367ff556516c3e91a054504fe770be3fa0d4  crates/orna-cli-v1/tests/fixtures/enum-construction/unknown-field.orna
