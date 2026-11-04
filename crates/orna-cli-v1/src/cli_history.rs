@@ -3,6 +3,13 @@
 //! commit-graph walk. Only commit headers and tree listings are read; no blob
 //! payload is opened or hydrated.
 //!
+//! At a format-1/2 pin (`--at`, or a legacy `HEAD`) the same listing comes from
+//! the versioned legacy reader: a loose row's revisions are the commits whose
+//! tree does or does not carry its row unit (ORNA-UPGRADE-001,
+//! ORNA-UPGRADE-002, ORNA-ROW-013), and a compact row, which lives inside
+//! committed segments rather than in one file, has no history this walk can
+//! report.
+//!
 //! `<key>` is one canonical Orna key expression. A row committed from imported
 //! media is keyed by the bytes the capture was given, so the spelling a
 //! `orna query` listing printed resolves to that row here too, whether the
@@ -14,7 +21,7 @@
 //! context, so the comparison is one pair of immutable reads taken from the
 //! local repository alone: no fetch, no remote, and no media payload.
 
-use super::{Diagnostic, Endpoint, cli_row_key, local_project_path};
+use super::{Diagnostic, Endpoint, cli_legacy, cli_row_key, local_project_path};
 
 use orna_repository_v1::{
     AdmittedRow, FormatContextError, GitCommitRef, KeyRange, Repository, RepositoryFormatContext,
@@ -197,11 +204,11 @@ fn parse_options(arguments: &[String]) -> Result<HistoryOptions<'_>, Diagnostic>
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagnostic> {
     let options = parse_options(arguments)?;
-    let relation = parse_relation_id(options.relation)?;
     let path = local_project_path(endpoint)?;
     let repository = Repository::discover(path)
         .map_err(|error| history_error("Repository could not be opened", format!("{error:?}")))?;
     if let Some((from, to)) = options.diff {
+        let relation = parse_relation_id(options.relation)?;
         return run_diff(&repository, path, relation, from, to, options.format);
     }
     // `parse_options` yields a key for every invocation without `--diff`.
@@ -212,26 +219,41 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     // here; the row map, the read and the revision walk all come from the
     // commit it named, so a branch that advances during the read never changes
     // the answer. Without `--at` the walk starts at the current HEAD.
-    let (format, start) = if let Some(selector) = options.at {
+    let (format, start, commit) = if let Some(selector) = options.at {
         // One guard, one resolution: `pin_snapshot` refuses an ambiguous
         // name before it resolves, so `--at` and `--diff` cannot disagree.
-        let (start, format) = pin_snapshot(&repository, path, selector)?;
-        (format, start.as_str().to_owned())
+        let (commit, format) = pin_snapshot(&repository, path, selector)?;
+        let start = commit.as_str().to_owned();
+        (format, start, Some(commit))
     } else {
+        let commit = repository.head().map_err(|error| {
+            history_error("Snapshot could not be resolved", format!("{error:?}"))
+        })?;
         let format = repository.open_format_context().map_err(|error| {
             history_error("Format context could not be opened", format!("{error:?}"))
         })?;
-        (format, "HEAD".to_owned())
+        (format, "HEAD".to_owned(), commit)
     };
-    // A format-1/2 pin is a read-only compatibility input: it carries no
-    // native `.orna/store`, so it has no row map to walk. Say so instead of
-    // reporting the format-3 store seam's generic failure.
+    // The snapshot is admitted before any revision is listed: a format-3
+    // snapshot that tracks a loose row file is the mixed layout project
+    // admission refuses (ORNA-META-001, ORNA-META-002), and a history answered
+    // from the store would describe rows whose row files the same snapshot
+    // carries.
+    cli_legacy::admit_snapshot(&repository, commit.as_ref())?;
+    // A format-1/2 pin is a read-only compatibility input: it carries no native
+    // `.orna/store`, so it has no row map to walk. A loose row's revisions are
+    // its committed units, read through the versioned legacy reader
+    // (ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013).
     if format.is_read_only() {
-        return Err(history_error(
-            "Snapshot is a legacy format-1/2 input",
-            "--at names a read-only compatibility snapshot with no native row store; name a format-3 commit",
-        ));
+        let Some(commit) = commit.as_ref() else {
+            return Err(history_error(
+                "Snapshot could not be admitted",
+                "--at names a read-only compatibility snapshot with no committed project source",
+            ));
+        };
+        return run_legacy(&options, &repository, commit, &start, key);
     }
+    let relation = parse_relation_id(options.relation)?;
     let row_map = format
         .load_row_map(relation)
         .map_err(|error| history_error("Row map could not be loaded", format!("{error:?}")))?;
@@ -269,11 +291,45 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         .list_row_revisions(&row, &start, walk, &scope)
         .map_err(|error| {
             history_error("Revision history could not be listed", format!("{error:?}"))
-        })?;
+        })?
+        .into_iter()
+        .map(|revision| HistoryRevision {
+            commit: revision.commit().to_hex(),
+            tree: revision.tree().to_hex(),
+            present: revision.present(),
+            author: revision.author().to_owned(),
+            committed_at: revision.committed_at(),
+            migration: revision.migration().map(str::to_owned),
+        })
+        .collect::<Vec<_>>();
+    finish(&options, &mut revisions, walk)
+}
+
+/// One revision as either row walk reports it.
+///
+/// The native walk reports a row's presence as the reachability of its
+/// descriptor tree, and the legacy walk as the commit's own row unit; both
+/// become this record so filtering and printing happen once.
+struct HistoryRevision {
+    commit: String,
+    tree: String,
+    present: bool,
+    author: String,
+    committed_at: u64,
+    migration: Option<String>,
+}
+
+/// Applies `--since`, `--author`, `--limit`, `--reverse` and `--count` to a
+/// walk's revisions, then prints them in the requested shape.
+fn finish(
+    options: &HistoryOptions<'_>,
+    revisions: &mut Vec<HistoryRevision>,
+    walk: usize,
+) -> Result<(), Diagnostic> {
     if let Some(since) = options.since {
         let position = revisions
             .iter()
-            .position(|revision| revision.commit().to_hex() == since)
+            .position(|revision| revision.commit == since)
             .ok_or_else(|| {
                 history_error(
                     "--since commit is not in the revision history",
@@ -284,7 +340,7 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
     }
     // `--author` keeps revisions whose `Name <email>` contains the substring.
     if let Some(author) = options.author {
-        revisions.retain(|revision| revision.author().contains(author));
+        revisions.retain(|revision| revision.author.contains(author));
     }
     revisions.truncate(options.limit);
     // Revisions arrive newest first; `--reverse` prints oldest first.
@@ -302,9 +358,9 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 .iter()
                 .map(|revision| {
                     (
-                        revision.commit().to_hex(),
-                        revision.tree().to_hex(),
-                        revision.present(),
+                        revision.commit.clone(),
+                        revision.tree.clone(),
+                        revision.present,
                     )
                 })
                 .collect();
@@ -317,12 +373,12 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
                 .iter()
                 .map(|revision| {
                     revision_json(
-                        &revision.commit().to_hex(),
-                        &revision.tree().to_hex(),
-                        revision.present(),
-                        revision.author(),
-                        revision.committed_at(),
-                        revision.migration(),
+                        &revision.commit,
+                        &revision.tree,
+                        revision.present,
+                        &revision.author,
+                        revision.committed_at,
+                        revision.migration.as_deref(),
                     )
                 })
                 .collect();
@@ -330,6 +386,88 @@ pub(super) fn run(endpoint: &Endpoint, arguments: &[String]) -> Result<(), Diagn
         }
     }
     Ok(())
+}
+
+/// Lists one row's revisions at a format-1/2 pin through the versioned legacy
+/// reader (ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013).
+///
+/// A loose row unit is a committed file, so its revisions are the commits whose
+/// tree does or does not carry that file, which is the same coordinate the
+/// native walk reports for a format-3 row. A compact row has no such file: its
+/// value lives inside committed segments, so it has no revision the commit
+/// graph alone can show, and the command says so instead of reporting an empty
+/// history.
+fn run_legacy(
+    options: &HistoryOptions<'_>,
+    repository: &Repository,
+    commit: &GitCommitRef,
+    start: &str,
+    key: &str,
+) -> Result<(), Diagnostic> {
+    const LEGACY_HELP: &str = "name the table of a legacy loose row by its key-path directory, such as `contacts/Contact`, with `--at` naming the format-1/2 snapshot";
+    let table_path = match cli_legacy::legacy_address(options.relation, LEGACY_HELP)? {
+        orna_application_v1::LegacyTableAddress::TablePath(path) => path,
+        orna_application_v1::LegacyTableAddress::Relation(relation) => {
+            // A compact table the snapshot does not hold is reported as a
+            // missing table; one it does hold has no revison list this walk can
+            // follow, because its rows live inside committed segments.
+            if !repository
+                .read_compact_manifest_inventory(commit)
+                .map_err(|error| {
+                    cli_legacy::legacy_read_error(
+                        &orna_application_v1::LegacyReadError::Repository(error),
+                        LEGACY_HELP,
+                    )
+                })?
+                .contains_key(&orna_repository_v1::Uuid::from_bytes(relation))
+            {
+                return Err(cli_legacy::legacy_read_error(
+                    &orna_application_v1::LegacyReadError::UnknownRelation(relation),
+                    LEGACY_HELP,
+                ));
+            }
+            return Err(history_error(
+                "Legacy compact rows have no file history",
+                "a compact row is stored inside committed segments, not in a row unit the commit graph can follow; read its value with `orna query`, or migrate the snapshot to format 3 (`orna migrate copy`) and read its history there",
+            ));
+        }
+    };
+    let mut row_path = None;
+    for candidate in cli_row_key::key_candidates(key, None)? {
+        row_path =
+            orna_application_v1::legacy_loose_row_path(repository, commit, &table_path, &candidate)
+                .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?;
+        if row_path.is_some() {
+            break;
+        }
+    }
+    let Some(row_path) = row_path else {
+        return Err(history_error(
+            "Row is not committed",
+            format!("no row with key {key:?}"),
+        ));
+    };
+    // `--since` needs the walk far enough to reach its commit, so walk the
+    // full bound and cut afterwards; otherwise walk only what is printed.
+    let walk = if options.since.is_some() || options.author.is_some() {
+        MAX_HISTORY_LIMIT
+    } else {
+        options.limit
+    };
+    let mut revisions =
+        orna_application_v1::read_legacy_row_revisions(repository, start, &row_path, walk)
+            .map_err(|error| cli_legacy::legacy_read_error(&error, LEGACY_HELP))?
+            .into_iter()
+            .map(|revision| HistoryRevision {
+                commit: revision.snapshot().commit().as_str().to_owned(),
+                tree: revision.snapshot().tree().to_owned(),
+                present: revision.present(),
+                author: revision.snapshot().author().to_owned(),
+                committed_at: revision.snapshot().committed_at(),
+                migration: revision.snapshot().migration().map(str::to_owned),
+            })
+            .collect::<Vec<_>>();
+    finish(options, &mut revisions, walk)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -720,15 +858,16 @@ fn run_diff(
     let (from_commit, before_format) = pin_snapshot(repository, directory, from)?;
     let (to_commit, after_format) = pin_snapshot(repository, directory, to)?;
     // A format-1/2 endpoint is a read-only compatibility input with no native
-    // `.orna/store`, so it has no row map to compare. Say so instead of
-    // reporting the format-3 store seam's generic failure, the same refusal
-    // `--at` gives.
+    // `.orna/store`, so it has no row map to compare. The legacy reader answers
+    // one table's rows and one loose row's revisions, not a two-ended row diff,
+    // so `--diff` names that limit instead of reporting the format-3 store
+    // seam's generic failure.
     for (selector, format) in [(from, &before_format), (to, &after_format)] {
         if format.is_read_only() {
             return Err(history_error(
                 "Snapshot is a legacy format-1/2 input",
                 format!(
-                    "{selector:?} names a read-only compatibility snapshot with no native row store; name a format-3 commit"
+                    "{selector:?} names a read-only compatibility snapshot with no native row map; `--diff` compares two format-3 row maps, so read either side with `orna query` or migrate the snapshot to format 3 (`orna migrate copy`)"
                 ),
             ));
         }

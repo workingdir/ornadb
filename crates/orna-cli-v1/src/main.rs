@@ -18,6 +18,7 @@ mod cli_export;
 mod cli_help;
 mod cli_history;
 mod cli_import;
+mod cli_legacy;
 mod cli_mount;
 mod cli_publish;
 mod cli_query;
