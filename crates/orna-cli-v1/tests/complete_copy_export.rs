@@ -8,9 +8,9 @@
 //! than to a private one.
 
 use std::{
-    io::Read,
+    io::{Read, Write},
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 
 use sha2::{Digest, Sha256};
@@ -23,12 +23,11 @@ use format3::*;
 #[path = "support/media_commit.rs"]
 mod media_commit;
 
-/// Runs `orna <arguments>` in `directory` with Git routing isolated, so
-/// the developer's own Git configuration cannot decide the outcome.
-fn run(directory: &Path, arguments: &[&str]) -> Output {
+/// A CLI process with Git routing isolated, so the developer's own Git
+/// configuration cannot decide the outcome.
+fn isolated_cli() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
     command
-        .current_dir(directory)
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null");
     for name in [
@@ -44,9 +43,34 @@ fn run(directory: &Path, arguments: &[&str]) -> Output {
         command.env_remove(name);
     }
     command
+}
+
+/// Runs `orna <arguments>` in `directory`.
+fn run(directory: &Path, arguments: &[&str]) -> Output {
+    isolated_cli()
+        .current_dir(directory)
         .args(arguments)
         .output()
         .expect("CLI process starts")
+}
+
+/// Runs `orna repl` in `directory`, feeding `input` and ending with `:quit`.
+fn repl(directory: &Path, input: &str) -> Output {
+    let mut child = isolated_cli()
+        .current_dir(directory)
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the REPL starts");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(format!("{input}\n:quit\n").as_bytes())
+        .expect("write REPL input");
+    child.wait_with_output().expect("the REPL exits")
 }
 
 fn stdout(output: &Output) -> String {
@@ -1322,6 +1346,342 @@ fn export_restores_a_legacy_and_a_format3_snapshot_offline() {
             .expect("restored member opens offline");
         assert_eq!(context.repository_format(), expected);
     }
+}
+
+/// The commit `selector` names in `directory`.
+fn rev_parse(directory: &Path, selector: &str) -> String {
+    String::from_utf8(git_output(directory, &["rev-parse", selector], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// One `orna query --format json` report, from the copy or from a source.
+fn query_report(directory: &Path, arguments: &[&str]) -> serde_json::Value {
+    let mut words = vec!["query"];
+    words.extend_from_slice(arguments);
+    words.extend_from_slice(&["--format", "json"]);
+    let output = run(directory, &words);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "orna {words:?} failed: {}",
+        stderr(&output)
+    );
+    serde_json::from_slice(&output.stdout).expect("orna query prints JSON")
+}
+
+/// The row count `orna query <relation> --at <commit> --format json` reports.
+fn query_rows(directory: &Path, relation: &str, commit: &str) -> u64 {
+    let report = query_report(directory, &[relation, "--at", commit]);
+    report["rows"].as_u64().expect("orna query counts rows")
+}
+
+/// A relation id's 16 raw bytes.
+fn relation_bytes(relation: &str) -> [u8; 16] {
+    assert_eq!(
+        relation.len(),
+        32,
+        "a relation id is 32 hex digits: {relation:?}"
+    );
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&relation[index * 2..index * 2 + 2], 16)
+            .expect("a relation id is hexadecimal");
+    }
+    bytes
+}
+
+/// Gate F (`implementation/ACCEPTANCE.md:61-68`): one archive carries a legacy
+/// format-1 member beside a migrated format-3 member, the export manifest names
+/// each member's recorded format, and one offline restore of that archive
+/// answers a row from each member.
+///
+/// ORNA-UPGRADE-001 dispatches each member by its recorded format,
+/// ORNA-UPGRADE-002 keeps the legacy rows readable under their original
+/// decoders, and ORNA-GIT-003/ORNA-GIT-007 make the copy self-contained: no
+/// source repository, no origin and no remote is available to the restored copy.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
+    /// The migrated member's source: one table, so one row is committed.
+    const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+    const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
+    /// The committed fixture's compact `Int` table: keys 1..=4.
+    const COMPACT_INT_TABLE: &str = "018f0000000071000000000000000001";
+    /// The fixture's editable table: two committed loose row units.
+    const LOOSE_TABLE: &str = "contacts/Contact";
+
+    let parent = TempDir::new().unwrap();
+
+    // The migrated member is a real format-3 workspace with one published row,
+    // built by the product verbs. Plain Git writes its config so the commits
+    // below have an identity this test controls.
+    let migrated_root = parent.path().join("migrated");
+    let initialized = run(parent.path(), &["init", migrated_root.to_str().unwrap()]);
+    assert_eq!(
+        initialized.status.code(),
+        Some(0),
+        "orna init failed: {}",
+        stderr(&initialized)
+    );
+    std::fs::write(migrated_root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    git(&migrated_root, &["config", "user.name", "Orna Test"]);
+    git(
+        &migrated_root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
+    git(&migrated_root, &["config", "commit.gpgsign", "false"]);
+    git(&migrated_root, &["add", "main.orna", ".orna/database.orna"]);
+    let declared = run(&migrated_root, &["commit", "-m", "Declare Music"]);
+    assert_eq!(
+        declared.status.code(),
+        Some(0),
+        "orna commit failed: {}",
+        stderr(&declared)
+    );
+    let relation = stdout(&declared)
+        .lines()
+        .find_map(|line| line.strip_prefix("admitted table Music as relation "))
+        .unwrap_or_else(|| {
+            panic!(
+                "orna commit names the Music relation: {}",
+                stdout(&declared)
+            )
+        })
+        .to_owned();
+    let inserted = repl(&migrated_root, INSERT_LONDON);
+    assert_eq!(
+        inserted.status.code(),
+        Some(0),
+        "REPL insert failed: {}",
+        stderr(&inserted)
+    );
+    let published = run(&migrated_root, &["publish", "--message", "Add london"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish failed: {}",
+        stderr(&published)
+    );
+    let migrated = rev_parse(&migrated_root, "HEAD");
+    assert_eq!(
+        query_rows(&migrated_root, &relation, &migrated),
+        1,
+        "the migrated member commits its published row"
+    );
+
+    // The legacy member is the committed format-1 bundle, cloned, with the
+    // original remote removed. Its HEAD pins a gitlink with no recorded
+    // `.gitmodules` origin, which a complete copy refuses (ORNA-GIT-007), so its
+    // parent is the self-contained legacy snapshot — and it still carries the
+    // compact tables and the loose row units.
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.path().join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "clone legacy bundle: {}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    git(&source, &["remote", "remove", "origin"]);
+    let legacy = rev_parse(&source, "HEAD~1");
+    // One repository must hold both snapshots for one archive to carry both:
+    // the migrated commit's objects are fetched into the legacy clone.
+    git(
+        &source,
+        &[
+            "fetch",
+            "--quiet",
+            migrated_root.to_str().unwrap(),
+            "HEAD:refs/heads/migrated",
+        ],
+    );
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--at",
+            &legacy,
+            "--at",
+            &migrated,
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of the legacy and migrated members failed: {}",
+        stderr(&exported)
+    );
+
+    // Each member's recorded format is in the manifest, so a reader that only
+    // knows the current format can still see which member is a compatibility
+    // input (ORNA-UPGRADE-001).
+    let document = std::fs::read_to_string(archive.join("manifest.tsv")).unwrap();
+    for (commit, format) in [(&legacy, "legacy-1"), (&migrated, "format-3")] {
+        let line = document
+            .lines()
+            .find(|line| line.starts_with(&format!("archive\t{commit}\t")))
+            .unwrap_or_else(|| panic!("the manifest records {commit}: {document}"));
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "the archive line names the member's format: {line:?}"
+        );
+        assert_eq!(fields[0], "archive");
+        assert_eq!(fields[3], format, "the member's recorded format: {line:?}");
+    }
+    // The archive says so in its header too, so a reader that only knows the
+    // older three-column line refuses it instead of misreading the column.
+    assert_eq!(document.lines().next(), Some("orna-complete-copy 3"));
+
+    // The sources go away before the restore: the copy must answer from the
+    // archive alone (ORNA-GIT-003, ORNA-GIT-007).
+    std::fs::remove_dir_all(&source).unwrap();
+    std::fs::remove_dir_all(&migrated_root).unwrap();
+    assert!(!source.exists(), "the legacy source repository is gone");
+    assert!(
+        !migrated_root.exists(),
+        "the migrated source repository is gone"
+    );
+
+    // One restore carries both members; the primary member is the first
+    // selector's snapshot.
+    let restored = parent.path().join("restored");
+    let reconstructed = run(
+        parent.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+    assert_eq!(
+        rev_parse(&restored, "HEAD"),
+        legacy,
+        "the copy's HEAD is the primary member"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the copy configures no remote"
+    );
+
+    let copy =
+        orna_repository_v1::Repository::discover(&restored).expect("the copy is a repository");
+    let manifest = orna_repository_v1::complete_copy::read_complete_copy_manifest(&archive)
+        .expect("read the verified manifest");
+
+    // A row of the legacy member, read by the versioned legacy reader that
+    // answered this table before the migration (ORNA-UPGRADE-002).
+    let legacy_pin = manifest
+        .pin_member(&copy, &legacy)
+        .expect("pin the legacy member");
+    assert_eq!(legacy_pin.commit().as_str(), legacy);
+    assert_eq!(
+        legacy_pin.format_context().repository_format(),
+        orna_repository_v1::RepositoryFormat::Legacy1
+    );
+    let rows = orna_application_v1::read_legacy_table_rows(
+        &copy,
+        legacy_pin.commit(),
+        &orna_application_v1::LegacyTableAddress::TablePath(LOOSE_TABLE.to_owned()),
+    )
+    .expect("the restored legacy member answers its committed loose rows");
+    assert_eq!(
+        rows.source(),
+        orna_application_v1::LegacyRowSource::LooseRowUnit
+    );
+    assert_eq!(rows.rows().len(), 2, "two committed row units");
+    let alice = rows
+        .rows()
+        .iter()
+        .find(|row| *row.key() == orna_repository_v1::TypedKey::Text("alice-smith".to_owned()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the restored legacy member carries alice-smith: {:?}",
+                rows.rows()
+            )
+        });
+    assert!(
+        alice.fields().iter().any(|field| {
+            field.name() == &orna_application_v1::LegacyFieldName::Declared("name".to_owned())
+                && field.value() == &orna_value_v1::Raw::Text("Alice Smith".to_owned())
+        }),
+        "the legacy row decodes its committed field: {:?}",
+        alice.fields()
+    );
+    assert_eq!(
+        query_rows(&restored, COMPACT_INT_TABLE, &legacy),
+        4,
+        "orna query answers the legacy member offline"
+    );
+
+    // A row of the migrated member, read through the owner-issued member pin so
+    // the row map comes from that member's own format-3 store.
+    let migrated_pin = manifest
+        .pin_member(&copy, &migrated)
+        .expect("pin the migrated member");
+    assert_eq!(migrated_pin.commit().as_str(), migrated);
+    assert_eq!(
+        migrated_pin.format_context().repository_format(),
+        orna_repository_v1::RepositoryFormat::Format3
+    );
+    let relation_id = relation_bytes(&relation);
+    let row_map = migrated_pin
+        .format_context()
+        .load_row_map(relation_id)
+        .expect("load the migrated member's row map");
+    let graph = migrated_pin
+        .format_context()
+        .open_native_graph(&row_map)
+        .expect("open the migrated member's graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    assert!(
+        graph
+            .lookup_row(
+                &orna_repository_v1::TypedKey::Text("london".to_owned()),
+                &scope
+            )
+            .expect("read the migrated member row")
+            .is_some(),
+        "the restored migrated member carries the published london row"
+    );
+    let point = run(
+        &restored,
+        &[
+            "query", &relation, "--key", "london", "--at", &migrated, "--format", "json",
+        ],
+    );
+    assert_eq!(
+        point.status.code(),
+        Some(0),
+        "orna query --key fails: {}",
+        stderr(&point)
+    );
+    let point: serde_json::Value = serde_json::from_slice(&point.stdout).unwrap();
+    assert_eq!(point["rows"].as_u64(), Some(1), "{point}");
 }
 
 /// Clones the committed legacy fixture with its original remote removed.

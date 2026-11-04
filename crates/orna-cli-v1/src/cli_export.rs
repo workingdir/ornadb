@@ -189,9 +189,7 @@ fn run_export(
         manifest.snapshot,
         manifest.members.len()
     );
-    for member in manifest.members.iter().skip(1) {
-        println!("  with {}", member.commit);
-    }
+    report_members(&manifest);
     report_dependencies(&manifest);
     Ok(())
 }
@@ -219,6 +217,7 @@ fn run_restore(
             .map_err(|error| describe_export_failure(&error))?;
         println!("materialised the pinned snapshot and its dependencies");
     }
+    report_members(&manifest);
     report_dependencies(&manifest);
     Ok(())
 }
@@ -243,11 +242,21 @@ fn report_archive(archive: &Path) -> Result<(), Diagnostic> {
         manifest.snapshot,
         manifest.members.len()
     );
-    for member in manifest.members.iter().skip(1) {
-        println!("  with {}", member.commit);
-    }
+    report_members(&manifest);
     report_dependencies(&manifest);
     Ok(())
+}
+
+/// Lists every carried member with the format it recorded.
+///
+/// The format is part of what the copy says it holds: a legacy member is a
+/// read-only compatibility input (ORNA-UPGRADE-001), so naming it here is what
+/// lets a caller know the copy answers it through its original decoder
+/// (ORNA-UPGRADE-002) rather than through the current format.
+fn report_members(manifest: &CompleteCopyManifest) {
+    for member in &manifest.members {
+        println!("  {} ({})", member.commit, member.format_label());
+    }
 }
 
 fn report_dependencies(manifest: &CompleteCopyManifest) {
