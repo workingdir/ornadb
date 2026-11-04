@@ -24,8 +24,12 @@ been published.
   artifact that differs from the emitter, for a file under `editors/` the
   emitter does not produce, for an editor directory holding no generated
   artifact, and for a contract row whose editor, override or default command
-  disagrees with the generator. Tests: `editor_artifacts`
-  (`every_editor_surface_starts_the_same_server_command`,
+  disagrees with the generator. The generated extension's launch contract is
+  driven directly by `scripts/check_vscode_extension.js` (default argv,
+  override, empty override, missing command reported without failing
+  activation, restart on setting change), and its `--real` mode constructs a
+  client with the installed `vscode-languageclient`. Tests:
+  `editor_artifacts` (`every_editor_surface_starts_the_same_server_command`,
   `vscode_extension_declares_a_generated_language_client`).
 - `orna query` and `orna history` read a format-1/2 pin instead of refusing it (ornadb-5il1.398, Gate F slice 7; product
   change, ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013). A pin whose format context reports a read-only compatibility
