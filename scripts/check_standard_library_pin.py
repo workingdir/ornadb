@@ -39,7 +39,6 @@ UNMIRRORED_SOURCES: dict[str, str] = {
     ".orna/database.orna": "pinned database root identity; repository metadata, not a standard unit",
     ".orna/format.orna": "repository format marker; repository metadata, not a standard unit",
     "main.orna": "root module with use declarations and version(); not in the Rust reference bundle",
-    "iterator_tests.orna": "behavioural tests for std.iterator; asserted through the pinned snapshot in project_runtime, not part of the evaluated runtime bundle",
 }
 
 
