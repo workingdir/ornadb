@@ -46,8 +46,7 @@ const BUNDLE_SHA256: &str = "19f36c5aa732ba69ad95cb8d24c0771946cd6326ebed8eb2a91
 /// The 1.0.0 format marker, including its trailing LF. 1.0.0 `19-repository.md`
 /// keeps it a legacy-format input, and it is the record the relabel guard reads,
 /// so its exact bytes are part of the fixture contract.
-const FORMAT_1_MARKER: &str =
-    "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
+const FORMAT_1_MARKER: &str = "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
 
 fn git(directory: &Path, arguments: &[&str]) -> String {
     let output = Command::new("git")
