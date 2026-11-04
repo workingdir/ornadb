@@ -2653,3 +2653,64 @@ async fn binary_sensors_ingest_reopens_typed_rows_and_checkpoint() {
         checkpoint
     );
 }
+/// The pinned `std.iterator` closure with its behavioural tests. The snapshot
+/// root keeps its own `math` dependency, and the project imports
+/// `std.iterator_tests`, which imports `iterator` and `test` by bare name the
+/// way every other standard module does.
+fn pinned_iterator_tests_closure() -> [(&'static str, &'static str); 4] {
+    [
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
+        (
+            "iterator.orna",
+            include_str!("../../../stdlib/std/iterator.orna"),
+        ),
+        ("test.orna", include_str!("../../../stdlib/std/test.orna")),
+        (
+            "iterator_tests.orna",
+            include_str!("../../../stdlib/std/iterator_tests.orna"),
+        ),
+    ]
+}
+
+/// The behavioural tests shipped beside `std.iterator` type-check against the
+/// standard they test, so a change that breaks the module's contract fails the
+/// build rather than only the module it lives in.
+#[test]
+fn binary_commit_and_check_type_check_the_shipped_iterator_test_module() {
+    let (directory, _module_commit) = captured_standard_project_with(
+        &pinned_iterator_tests_closure(),
+        &[(
+            "main.orna",
+            "use std.iterator_tests;\npub fn probe(): Bool = iterator_tests.empty_yields_none();\n",
+        )],
+    );
+
+    let commit = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "--db",
+            directory.path().to_str().expect("UTF-8 path"),
+            "commit",
+            "-m",
+            "pin the iterator test module",
+        ])
+        .output()
+        .expect("CLI commit");
+    assert!(
+        commit.status.success(),
+        "commit stderr: {:?}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
+
+    let check = Command::new(env!("CARGO_BIN_EXE_orna"))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .current_dir(directory.path())
+        .args(["check"])
+        .output()
+        .expect("CLI check");
+    assert!(check.status.success(), "check stderr: {:?}", check.stderr);
+    assert_eq!(check.stdout, b"project valid\n");
+}
