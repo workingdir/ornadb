@@ -1683,16 +1683,12 @@ fn tree_child_node(commit: &GitCommitRef, directory: &str, child: &TreeChild) ->
 fn tree_breadcrumbs(commit: &GitCommitRef, directory: &str) -> Vec<Breadcrumb> {
     let commit_id = commit.as_str();
     let commit_label = &commit_id[..12];
-    let mut breadcrumbs = vec![
-        Breadcrumb {
-            label: "Commits".into(),
-            href: "/".into(),
-        },
-        Breadcrumb {
-            label: commit_label.into(),
-            href: format!("/tree/{commit_id}/"),
-        },
-    ];
+    // The deleted native commit-log page was the old `/` root crumb; this
+    // commit's tree is the browsable root, so no crumb links to `/`.
+    let mut breadcrumbs = vec![Breadcrumb {
+        label: commit_label.into(),
+        href: format!("/tree/{commit_id}/"),
+    }];
     let mut prefix = String::new();
     let parts = directory
         .split('/')
@@ -1864,16 +1860,12 @@ fn blob_page(root: &Path, suffix: &str) -> Response {
 fn file_breadcrumbs(commit: &GitCommitRef, path: &str) -> Vec<Breadcrumb> {
     let commit_id = commit.as_str();
     let commit_label = &commit_id[..12];
-    let mut breadcrumbs = vec![
-        Breadcrumb {
-            label: "Commits".into(),
-            href: "/".into(),
-        },
-        Breadcrumb {
-            label: commit_label.into(),
-            href: format!("/tree/{commit_id}/"),
-        },
-    ];
+    // As in `tree_breadcrumbs`, the commit's tree replaces the deleted native
+    // commit-log page as the breadcrumb root.
+    let mut breadcrumbs = vec![Breadcrumb {
+        label: commit_label.into(),
+        href: format!("/tree/{commit_id}/"),
+    }];
     let mut prefix = String::new();
     let parts = path
         .split('/')
