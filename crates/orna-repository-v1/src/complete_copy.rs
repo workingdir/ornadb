@@ -13,7 +13,9 @@
 //! An archive is a plain directory:
 //!
 //! - `manifest.tsv`: one header line, one `snapshot` line naming the primary
-//!   member, one `archive` line per carried snapshot plus that member's `object`
+//!   member, one `archive` line per carried snapshot — naming that member's
+//!   commit, its bundle and the repository format the export recorded for it
+//!   (`legacy-1`, `legacy-2` or `format-3`) — plus that member's `object`
 //!   lines (kind, object ID, size), and one `dependency` line per recursive
 //!   gitlink (worktree-relative path, pinned commit, origin, bundle, owner).
 //! - `snapshots/<commit>.bundle`: one self-contained Git bundle per carried
@@ -23,7 +25,13 @@
 //!
 //! A header-1 archive — one snapshot, `superproject.bundle`, no `archive` lines,
 //! no owning member on a dependency line — is still read and reconstructed
-//! exactly, so an archive written before this format keeps working.
+//! exactly, and a header-2 archive (one `archive` line per carried member, but
+//! no format column) is still read with each member's format unrecorded, so an
+//! archive written before this format keeps working. Every archive this build
+//! writes records each member's format, because a reader that only knows the
+//! current format must still see which members are compatibility inputs
+//! (ORNA-UPGRADE-001) and keep them readable under their original decoders
+//! (ORNA-UPGRADE-002).
 //!
 //! ## Reconstruction independence
 //!
@@ -61,7 +69,9 @@ use sha1::{Digest as Sha1Digest, Sha1};
 use sha2::{Digest as Sha2Digest, Sha256};
 
 use crate::object_reader::ObjectReader;
-use crate::{GitCommitRef, Repository, RepositoryError, scrub_git_routing_environment};
+use crate::{
+    GitCommitRef, Repository, RepositoryError, RepositoryFormat, scrub_git_routing_environment,
+};
 
 const MANIFEST_FILE: &str = "manifest.tsv";
 const SUPERPROJECT_BUNDLE: &str = "superproject.bundle";
@@ -69,10 +79,18 @@ const DEPENDENCIES_DIR: &str = "dependencies";
 const SNAPSHOTS_DIR: &str = "snapshots";
 /// Prefix of the ref names a reconstructed copy uses for non-primary members.
 const MEMBER_REF_PREFIX: &str = "orna-complete-copy-member-";
-const HEADER: &str = "orna-complete-copy 2";
+const HEADER: &str = "orna-complete-copy 3";
+/// Header of an archive written when members existed but their recorded
+/// formats did not: each member had its own bundle, but the manifest named the
+/// commit and the bundle only. It stays readable, and its members carry no
+/// recorded format. It is never written again.
+const MEMBER_HEADER: &str = "orna-complete-copy 2";
 /// Header of an archive written before members existed: one snapshot, one
 /// closure, one bundle. It stays readable and is never written again.
 const LEGACY_HEADER: &str = "orna-complete-copy 1";
+/// The manifest's spelling for a member whose format an older archive did not
+/// record. No archive this build writes contains it.
+const UNRECORDED_FORMAT: &str = "unrecorded";
 /// Ref name created inside a reconstructed copy. It is an ordinary branch of
 /// that copy and unrelated to anything the source repository publishes.
 const RESTORED_BRANCH: &str = "orna-complete-copy";
@@ -137,8 +155,46 @@ pub struct CompleteCopyMember {
     pub commit: String,
     /// Archive-relative bundle file carrying this member's closure.
     pub bundle: String,
+    /// The repository format this member recorded when it was exported.
+    ///
+    /// `None` only for an archive written before the manifest recorded member
+    /// formats: decoding is repository-free, so an older archive's format is
+    /// still established when the copy is reopened for a read.
+    pub format: Option<RepositoryFormat>,
     /// Every object of this member's closure, ordered by object ID.
     pub objects: Vec<CompleteCopyObject>,
+}
+
+impl CompleteCopyMember {
+    /// The member's recorded format as `manifest.tsv` spells it, or
+    /// `"unrecorded"` for an archive written before the column existed.
+    pub fn format_label(&self) -> &'static str {
+        self.format.map_or(UNRECORDED_FORMAT, format_token)
+    }
+}
+
+/// The `manifest.tsv` spelling of one member's recorded format.
+///
+/// A legacy coordinate names its decoder (`legacy-1` for the 1.0.0 layout,
+/// `legacy-2` for the second), so a reader that only knows the current format
+/// still sees that the member is a read-only compatibility input
+/// (ORNA-UPGRADE-001, ORNA-UPGRADE-002). The current format is `format-3`.
+const fn format_token(format: RepositoryFormat) -> &'static str {
+    match format {
+        RepositoryFormat::Legacy1 => "legacy-1",
+        RepositoryFormat::Legacy2 => "legacy-2",
+        RepositoryFormat::Format3 => "format-3",
+    }
+}
+
+/// The format a manifest token names, or `None` for an unknown token.
+fn parse_format_token(token: &str) -> Option<RepositoryFormat> {
+    Some(match token {
+        "legacy-1" => RepositoryFormat::Legacy1,
+        "legacy-2" => RepositoryFormat::Legacy2,
+        "format-3" => RepositoryFormat::Format3,
+        _ => return None,
+    })
 }
 
 /// One recursively pinned dependency recorded by a gitlink in the snapshot.
@@ -300,10 +356,16 @@ impl CompleteCopyManifest {
     fn decode(manifest: &str) -> Result<Self, CompleteCopyError> {
         let mut lines = manifest.lines();
         let header = lines.next();
-        if header != Some(HEADER) && header != Some(LEGACY_HEADER) {
-            return Err(CompleteCopyError::InvalidArchive("unknown header"));
-        }
-        let legacy = header == Some(LEGACY_HEADER);
+        // Each header number states which fields its lines carry, so a line
+        // that does not belong to the header it follows is refused rather than
+        // decoded into a plausible but different archive.
+        let version = match header {
+            Some(LEGACY_HEADER) => 1_u8,
+            Some(MEMBER_HEADER) => 2,
+            Some(HEADER) => 3,
+            _ => return Err(CompleteCopyError::InvalidArchive("unknown header")),
+        };
+        let legacy = version == 1;
         let mut snapshot = None;
         let mut members: Vec<CompleteCopyMember> = Vec::new();
         let mut objects = Vec::new();
@@ -321,25 +383,28 @@ impl CompleteCopyManifest {
                     }
                     snapshot = Some((*commit).to_owned());
                 }
+                // A header-2 archive recorded each member's commit and bundle
+                // only, so its format column is absent and unknown.
                 ["archive", commit, bundle] => {
-                    if !valid_object_id(commit) || !valid_snapshot_bundle(bundle) {
-                        return Err(CompleteCopyError::InvalidArchive("archive line"));
+                    if version >= 3 {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "archive line without a format",
+                        ));
                     }
-                    if members.len() == MAX_EXPORT_SNAPSHOTS {
-                        return Err(CompleteCopyError::ClosureTooLarge);
+                    current = push_member(&mut members, commit, bundle, None)?;
+                }
+                // A header-3 archive states the format each member recorded, so
+                // a reader sees which members are compatibility inputs without
+                // opening the copy.
+                ["archive", commit, bundle, format] => {
+                    if version < 3 {
+                        return Err(CompleteCopyError::InvalidArchive(
+                            "archive line records a format",
+                        ));
                     }
-                    if members
-                        .iter()
-                        .any(|member| member.commit.eq_ignore_ascii_case(commit))
-                    {
-                        return Err(CompleteCopyError::InvalidArchive("repeated archive line"));
-                    }
-                    members.push(CompleteCopyMember {
-                        commit: (*commit).to_owned(),
-                        bundle: (*bundle).to_owned(),
-                        objects: Vec::new(),
-                    });
-                    current = members.len() - 1;
+                    let format = parse_format_token(format)
+                        .ok_or(CompleteCopyError::InvalidArchive("member format"))?;
+                    current = push_member(&mut members, commit, bundle, Some(format))?;
                 }
                 ["object", kind, oid, size] => {
                     let object = decode_object(kind, oid, size)?;
@@ -426,6 +491,7 @@ impl CompleteCopyManifest {
             members.push(CompleteCopyMember {
                 commit: snapshot.clone(),
                 bundle: SUPERPROJECT_BUNDLE.to_owned(),
+                format: None,
                 objects: objects.clone(),
             });
         } else if members[0].commit != snapshot {
@@ -440,6 +506,37 @@ impl CompleteCopyManifest {
             dependencies,
         })
     }
+}
+
+/// Records one decoded `archive` line and returns its index.
+///
+/// The commit, bundle and format checks live here so a header-2 line and a
+/// header-3 line cannot drift apart as the archive format grows.
+fn push_member(
+    members: &mut Vec<CompleteCopyMember>,
+    commit: &str,
+    bundle: &str,
+    format: Option<RepositoryFormat>,
+) -> Result<usize, CompleteCopyError> {
+    if !valid_object_id(commit) || !valid_snapshot_bundle(bundle) {
+        return Err(CompleteCopyError::InvalidArchive("archive line"));
+    }
+    if members.len() == MAX_EXPORT_SNAPSHOTS {
+        return Err(CompleteCopyError::ClosureTooLarge);
+    }
+    if members
+        .iter()
+        .any(|member| member.commit.eq_ignore_ascii_case(commit))
+    {
+        return Err(CompleteCopyError::InvalidArchive("repeated archive line"));
+    }
+    members.push(CompleteCopyMember {
+        commit: commit.to_owned(),
+        bundle: bundle.to_owned(),
+        format,
+        objects: Vec::new(),
+    });
+    Ok(members.len() - 1)
 }
 
 /// Records one decoded dependency line, bounded by the archive limits.
@@ -666,7 +763,10 @@ pub fn export_complete_copy(
 /// snapshots reconstruct with the original remotes disabled).
 ///
 /// Every member must be an admitted snapshot of the same repository: a
-/// legacy format-1/2 commit or a format-3 commit with complete roots.
+/// legacy format-1/2 commit or a format-3 commit with complete roots. Each
+/// member's recorded format is written into the manifest, so a reader sees
+/// which members are compatibility inputs without reopening the copy
+/// (ORNA-UPGRADE-001).
 /// A gitlink whose pinned commit is not reachable from the primary member is
 /// resolved from the member that does pin it, so a snapshot that predates a
 /// dependency bump can still be exported with its own dependency commit.
@@ -710,6 +810,7 @@ pub fn export_complete_copy_of(
             bundle: snapshot_bundle(&name),
             snapshot: commit,
             name,
+            format: format.repository_format(),
         });
     }
 
@@ -734,7 +835,15 @@ pub fn export_complete_copy_of(
     let mut document = format!("{HEADER}\n");
     document.push_str(&format!("snapshot\t{}\n", members[0].commit));
     for member in &members {
-        document.push_str(&format!("archive\t{}\t{}\n", member.commit, member.bundle));
+        // The format column states which reader answers this member, so a copy
+        // opened by a later build never has to guess it from a tree it has not
+        // reconstructed yet (ORNA-UPGRADE-001).
+        document.push_str(&format!(
+            "archive\t{}\t{}\t{}\n",
+            member.commit,
+            member.bundle,
+            member.format_label()
+        ));
         for object in &member.objects {
             document.push_str(&format!(
                 "object\t{}\t{}\t{}\n",
@@ -793,12 +902,14 @@ pub fn export_complete_copy_of(
     })
 }
 
-/// One snapshot being exported: its resolved commit, recorded closure, and the
-/// bundle that will carry that closure.
+/// One snapshot being exported: its resolved commit, the format the export
+/// admitted it as, its recorded closure, and the bundle that will carry that
+/// closure.
 struct ExportedMember {
     snapshot: GitCommitRef,
     name: String,
     bundle: String,
+    format: RepositoryFormat,
     objects: Vec<CompleteCopyObject>,
 }
 
@@ -807,6 +918,7 @@ impl ExportedMember {
         CompleteCopyMember {
             commit: self.name,
             bundle: self.bundle,
+            format: Some(self.format),
             objects: self.objects,
         }
     }
@@ -925,7 +1037,7 @@ fn restore_complete_copy_from_manifest(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_admitted_snapshot(restored, &member.commit)?;
+        verify_admitted_snapshot(restored, member)?;
     }
 
     for dependency in &manifest.dependencies {
@@ -989,7 +1101,7 @@ pub fn materialize_complete_copy(
             &member.objects,
             &format!("snapshot {}", member.commit),
         )?;
-        verify_admitted_snapshot(copy, &member.commit)?;
+        verify_admitted_snapshot(copy, member)?;
     }
     checkout(copy, &manifest.snapshot)?;
     for dependency in &manifest.dependencies {
@@ -1510,9 +1622,14 @@ fn verify_recorded_closure(
 /// Re-admits a copied snapshot from its own object database. Generic Git
 /// closure checks alone do not prove that the reconstructed commit still opens
 /// as the repository the exporter promised: a format-3 member must present its
-/// schema and store roots, and a legacy member must still admit its recorded
-/// format record.
-fn verify_admitted_snapshot(directory: &Path, commit: &str) -> Result<(), CompleteCopyError> {
+/// schema and store roots, a legacy member must still admit its recorded format
+/// record, and a member whose manifest names a format must reopen as that exact
+/// format rather than a different reader's snapshot.
+fn verify_admitted_snapshot(
+    directory: &Path,
+    member: &CompleteCopyMember,
+) -> Result<(), CompleteCopyError> {
+    let commit = &member.commit;
     let snapshot_scope = format!("snapshot {commit}");
     let repository =
         Repository::discover(directory).map_err(|_| CompleteCopyError::IntegrityMismatch {
@@ -1529,6 +1646,17 @@ fn verify_admitted_snapshot(directory: &Path, commit: &str) -> Result<(), Comple
             scope: format!("{snapshot_scope}: format metadata"),
         }
     })?;
+    // ORNA-UPGRADE-001: the manifest states which reader answers this member, so
+    // a copy that now reports another format is refused instead of being read
+    // through the wrong decoder.
+    if member
+        .format
+        .is_some_and(|recorded| recorded != format.repository_format())
+    {
+        return Err(CompleteCopyError::IntegrityMismatch {
+            scope: format!("{snapshot_scope}: recorded format"),
+        });
+    }
     if !snapshot_roots_admitted(&format) {
         return Err(CompleteCopyError::IntegrityMismatch {
             scope: format!("{snapshot_scope}: format roots"),
@@ -1892,8 +2020,8 @@ fn git_output_stdin(
 #[cfg(test)]
 mod tests {
     use super::{
-        CompleteCopyError, CompleteCopyManifest, parse_gitmodules, valid_dependency_bundle,
-        valid_object_id, valid_snapshot_bundle,
+        CompleteCopyError, CompleteCopyManifest, CompleteCopyMember, RepositoryFormat,
+        parse_gitmodules, valid_dependency_bundle, valid_object_id, valid_snapshot_bundle,
     };
 
     #[test]
@@ -2085,8 +2213,65 @@ mod tests {
             )
             .is_err()
         );
+        // A header-3 archive states each member's format, and a header-2
+        // archive may not carry one: the header and its columns agree.
+        assert!(CompleteCopyManifest::decode(
+            "orna-complete-copy 3\nsnapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n"
+        )
+        .is_err());
+        assert!(CompleteCopyManifest::decode(
+            "orna-complete-copy 2\nsnapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\tformat-3\n"
+        )
+        .is_err());
+        // A format token names a reader this build knows.
+        assert!(CompleteCopyManifest::decode(
+            "orna-complete-copy 3\nsnapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\tformat-9\n"
+        )
+        .is_err());
         assert!(!valid_object_id("0123456789"));
         assert!(valid_object_id("0123456789012345678901234567890123456789"));
+    }
+
+    #[test]
+    fn manifest_names_each_member_format_and_reads_older_headers() {
+        // A header-3 archive states the format each member recorded, so a
+        // reader sees the legacy members without reopening the copy.
+        let document = "orna-complete-copy 3\n\
+             snapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\tformat-3\n\
+             object\tcommit\t0123456789012345678901234567890123456789\t120\n\
+             archive\tabcdef0123456789abcdef0123456789abcdef01\tsnapshots/abcdef0123456789abcdef0123456789abcdef01.bundle\tlegacy-1\n\
+             object\tcommit\tabcdef0123456789abcdef0123456789abcdef01\t121\n\
+             archive\tfedcba9876543210fedcba9876543210fedcba98\tsnapshots/fedcba9876543210fedcba9876543210fedcba98.bundle\tlegacy-2\n\
+             object\tcommit\tfedcba9876543210fedcba9876543210fedcba98\t122\n";
+        let decoded = CompleteCopyManifest::decode(document).unwrap();
+        assert_eq!(
+            decoded
+                .members
+                .iter()
+                .map(CompleteCopyMember::format_label)
+                .collect::<Vec<_>>(),
+            vec!["format-3", "legacy-1", "legacy-2"]
+        );
+        assert_eq!(
+            decoded
+                .member("abcdef0123456789abcdef0123456789abcdef01")
+                .unwrap()
+                .format,
+            Some(RepositoryFormat::Legacy1)
+        );
+
+        // A header-2 archive recorded no format, so its members report the
+        // column's absence rather than a format they never carried.
+        let older = "orna-complete-copy 2\n\
+             snapshot\t0123456789012345678901234567890123456789\n\
+             archive\t0123456789012345678901234567890123456789\tsnapshots/0123456789012345678901234567890123456789.bundle\n";
+        let decoded = CompleteCopyManifest::decode(older).unwrap();
+        assert_eq!(decoded.members[0].format, None);
+        assert_eq!(decoded.members[0].format_label(), "unrecorded");
     }
 
     #[test]
