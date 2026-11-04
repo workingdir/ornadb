@@ -4335,12 +4335,14 @@ mod tests {
 
     /// 30-protocol message registry, type 2 ("Host replies with the latest
     /// full snapshot"; "explicit resync receives a snapshot with its
-    /// originating request ID"), ORNA-LIVE-004, A13-live-serving-08: after
-    /// the watched value changes, an explicit resync is answered with the
-    /// complete current tree at the next revision. Before, it was answered
-    /// with a request-less delta against a base the resyncing client had lost.
+    /// originating request ID"), ORNA-LIVE-004, A13-live-serving-08, and
+    /// ORNA-APP-017: an explicit resync is answered with the complete current
+    /// tree under its own request ID, and the console's scratch bindings are
+    /// not part of the page a watch evaluates. The page is pinned to the
+    /// admitted application module, so rebinding the console's own `x` leaves
+    /// the snapshot at revision 0, while the console still reads `x`.
     #[test]
-    fn resync_after_a_value_change_returns_a_snapshot_with_its_request_id() {
+    fn resync_repeats_the_pinned_page_when_the_console_rebinds_its_name() {
         let directory = tempfile::tempdir().expect("temporary clone");
         git_succeeds(
             directory.path(),
@@ -4353,7 +4355,7 @@ mod tests {
             &eval_over_socket(&mut socket, &session, [95; 16], "let x = 41;"),
             &CanonicalValue::unit(),
         );
-        let watched = watch_over_socket(&mut socket, &session, [96; 16], "x + 1");
+        let watched = watch_over_socket(&mut socket, &session, [96; 16], "1 + 1");
         assert_eq!(watched.request, Some([96; 16]));
         let watch = watched.watch.expect("a watch snapshot carries its handle");
         let Message::Snapshot {
@@ -4366,12 +4368,16 @@ mod tests {
         };
         assert_eq!(
             present,
-            orna_protocol_v1::PresentNode::from_value(int_value(42)).expect("watched tree")
+            orna_protocol_v1::PresentNode::from_value(int_value(2)).expect("watched tree")
         );
 
         assert_success_value(
             &eval_over_socket(&mut socket, &session, [97; 16], "let x = 1;"),
             &CanonicalValue::unit(),
+        );
+        assert_success_value(
+            &eval_over_socket(&mut socket, &session, [99; 16], "x"),
+            &int_value(1),
         );
         let refreshed = resync_over_socket(&mut socket, &session, [98; 16], watch);
         assert_eq!(
@@ -4386,7 +4392,10 @@ mod tests {
         else {
             panic!("an explicit resync is answered with a full snapshot");
         };
-        assert_eq!(revision, 1, "the changed tree advances the watch revision");
+        assert_eq!(
+            revision, 0,
+            "a console binding does not move the page revision"
+        );
         assert_eq!(
             present,
             orna_protocol_v1::PresentNode::from_value(int_value(2)).expect("refreshed tree")
