@@ -1,0 +1,4 @@
+{
+    name: "Alice Smith",
+    emails: ["alice@example.com"],
+}

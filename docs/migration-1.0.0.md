@@ -206,25 +206,74 @@ Fixture: `crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle`, built by the
 `build_legacy_fixture` example in `orna-repository-v1` (feature
 `legacy-fixture-writer`). Its SHA-256 is pinned by `BUNDLE_SHA256` in
 `crates/orna-cli-v1/tests/legacy_fixture_bundle.rs` and the bundle is listed in
-`scripts/fixture-manifest.sha256`.
+`scripts/fixture-manifest.sha256`. The `legacy_fixture_bundle` target also has a
+`builder_regenerates_the_committed_bundle_byte_for_byte` test, which rebuilds
+the repository from the builder and compares it with a clone of the committed
+bundle: `HEAD`, every `refs/heads`/`refs/tags` entry, the ordered
+`rev-list --objects --all` graph, and every object's content byte for byte. A
+builder change therefore needs a regenerated bundle, and the pinned digest alone
+could not catch that. The `git bundle` file bytes are deliberately not compared:
+they depend on the git release (pack version, delta heuristics, zlib) and on the
+host's default object format and branch, so file-byte equality would test the
+runner rather than the builder. The builder pins the object format
+(`sha1`), line-ending conversion and commit dates, so the checked-in artifact
+stays stable for a given git release.
+
+The builder has two entry points. `write_legacy_format1_fixture` writes the
+shell (marker, identity, source record, compact tables, gitlink);
+`write_legacy_format1_golden_fixture` writes that shell plus the editable table.
+The editable table's source files (`legacy-loose-contacts-main.orna`,
+`legacy-loose-contact-alice-smith.orna`, `legacy-loose-contact-bob-jones.orna`)
+live in this crate's fixture tree, next to the bundle, because a test fixture may
+not be included across crates (`crates/orna-syntax-v1/tests/fixture_audit.rs`),
+and the builder reads them from the directory the caller names. Regenerate with
+`cargo run -p orna-repository-v1 --example build_legacy_fixture --features
+legacy-fixture-writer -- <empty-root> <bundle-path> crates/orna-cli-v1/tests/fixtures`.
 
 Provenance: the fixture is produced by the test encoder (`encoder_version`
 `test-encoder-v1`). It shares the canonical OVB encoder, base64 helper, date-key
 mapping and Parquet page-checksum helper with production. It is NOT an
 independent 1.0.0 golden repository.
 
+Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
+
+- `.orna/format.orna`, exactly
+  `{repository_format: 1, storage_profile: "compact-storage-v1"}` — the 1.0.0
+  format marker (1.0.0 `19-repository.md`; ORNA-UPGRADE-001 dispatches readers
+  by it, ORNA-META-002 keeps a separate `format.orna` a legacy-format input);
+- `.orna/database.orna` (database identity record) and `main.orna` (source
+  record);
+- key-only compact tables for Int (INT64), Str (BYTE_ARRAY STRING, `utf8`) and
+  Date (INT32 DATE): placement record, manifest, shard and Parquet segments
+  with the page-checksum profile (1.0.0 `23-storage.md:88-106,158-218`);
+- one editable-placement table (`contacts.Contact`) whose rows are loose row
+  units under `contacts/Contact/<key component>.orna`, holding non-key fields
+  only (1.0.0 `23-storage.md:13,104`; `07-tables.md:295-397` key-path-v1;
+  ORNA-ROW-001..005). Committed loose rows are what the legacy read path for
+  query, history, mount and export needs (bead 5il1.398);
+- a committed gitlink `vendor/stdlib`, which a complete copy must refuse while
+  it has no recorded origin (ORNA-GIT-007);
+- no `.orna/store`, so the legacy marker never sits beside a format-3 store in
+  this snapshot (the relabel guard must report that pairing as `MixedFormats`,
+  bead 5il1.395).
+
 What it proves (focused test `legacy_fixture_bundle`): a clone of the bundle
 reads through `read_legacy_authoritative_tables` and admits through
 `migrate copy`, covering key-only compact Int (INT64), Str (BYTE_ARRAY, STRING,
-`utf8`) and Date (INT32, DATE) segments plus a committed gitlink.
+`utf8`) and Date (INT32, DATE) segments, committed loose rows and a committed
+gitlink; the marker bytes and the absence of `.orna/store` are asserted.
 
 Open gaps (not proven by this fixture):
 
-- Blob compact encoding: excluded (spec-silent, conservative).
-- `state.db` and persistent consumers: not covered; spec-silent.
-- ORNA-UPGRADE-008 fail-closed behaviour for Blob-containing persistent-consumer
-  arguments: NOT asserted by any test.
-- Loose-row path codec: deferred.
+- Blob rows: absent. 1.0.0 `23-storage.md:184` defines
+  `Blob | blob | Unannotated BYTE_ARRAY`, but the format-1 compact decoder
+  (`compact.rs`, `PhysicalValueKind`) admits only Int/Bool/Str/Date, so no
+  legacy Blob value can be decoded and ORNA-UPGRADE-004's annotation default
+  still has no fixture value to apply. Recorded as a separate defect.
+- `state.db` and persistent consumers: not covered (runtime-only
+  `.git/orna` state, no defined in-bundle form). ORNA-UPGRADE-008 fail-closed
+  behaviour for Blob-containing persistent-consumer arguments is NOT asserted
+  by any test.
 - Key-bound encoding: manifest and shard `min_key`/`max_key` hold the OVB-1
   canonical encoding of the typed key value (Int, Str or Date), written as hex
   text. The reader (`compact.rs`, `decode_hex` then `CanonicalValue::decode`)
