@@ -22,8 +22,8 @@ use orna_runtime_v1::vfs::{VfsComponent, project_key_component, unproject_compon
 use orna_runtime_v1::{TableMutation, TableObjectId};
 use orna_semantic_v1::{
     Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput,
-    StandardCatalogueError, StandardDependencyProfile, SymbolKind, analyze, analyze_with_catalogue,
-    lower_data_expression, lower_row_unit_with_key_spelling,
+    StandardCatalogueError, StandardDependencyProfile, StandardProfileError, SymbolKind, analyze,
+    analyze_with_catalogue, lower_data_expression, lower_row_unit_with_key_spelling,
 };
 use orna_syntax_v1::{
     Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
@@ -313,6 +313,7 @@ pub struct LoadedProject {
     standard_runtime_modules: BTreeSet<String>,
     standard_imports: bool,
     standard_modules: BTreeSet<String>,
+    standard_attach_failure: Option<String>,
     source_commit: Option<GitCommitRef>,
 }
 
@@ -375,6 +376,17 @@ impl LoadedProject {
     /// Returns the logical standard modules requested by reachable source.
     pub fn standard_modules(&self) -> &BTreeSet<String> {
         &self.standard_modules
+    }
+
+    /// Why the project's pinned `stdlib/std` snapshot was not attached, when a
+    /// reachable import requested one and attachment gave up.
+    ///
+    /// Attachment is best effort, so a project whose pin cannot be resolved
+    /// still loads and then reports its own unresolved `std` import. Without
+    /// this reason that report cannot be told apart from an import the project
+    /// never pinned, and a binding that gave up looks like a bad import.
+    pub fn standard_attach_failure(&self) -> Option<&str> {
+        self.standard_attach_failure.as_deref()
     }
 
     /// Derives the semantic catalogue for this project's explicitly pinned
@@ -1515,7 +1527,11 @@ impl ProjectLoader {
         else {
             return Ok(project);
         };
-        self.load_attached_standard_commit(repository, &module_commit, &mut project);
+        if let Err(reason) =
+            self.load_attached_standard_commit(repository, &module_commit, &mut project)
+        {
+            project.standard_attach_failure = Some(reason.to_string());
+        }
         Ok(project)
     }
 
@@ -1533,7 +1549,11 @@ impl ProjectLoader {
         else {
             return Ok(project);
         };
-        self.load_attached_standard_commit(repository, &module_commit, &mut project);
+        if let Err(reason) =
+            self.load_attached_standard_commit(repository, &module_commit, &mut project)
+        {
+            project.standard_attach_failure = Some(reason.to_string());
+        }
         Ok(project)
     }
 
@@ -1542,45 +1562,38 @@ impl ProjectLoader {
         owner: &Repository,
         module_commit: &GitCommitRef,
         project: &mut LoadedProject,
-    ) {
+    ) -> Result<(), StandardAttachError> {
         let module_path = owner.worktree().join("stdlib/std");
-        let Ok(metadata) = fs::symlink_metadata(&module_path) else {
-            return;
-        };
+        let metadata =
+            fs::symlink_metadata(&module_path).map_err(|_| StandardAttachError::PathUnavailable)?;
         if !metadata.is_dir() {
-            return;
+            return Err(StandardAttachError::PathNotDirectory);
         }
-        let Ok(module_root) = fs::canonicalize(&module_path) else {
-            return;
-        };
-        let Ok(module_repository) = Repository::discover(&module_path) else {
-            return;
-        };
+        let module_root =
+            fs::canonicalize(&module_path).map_err(|_| StandardAttachError::PathUnresolvable)?;
+        let module_repository = Repository::discover(&module_path)
+            .map_err(|_| StandardAttachError::RepositoryUnavailable)?;
         if module_repository.worktree() != module_root {
-            return;
+            return Err(StandardAttachError::RepositoryMismatch);
         }
-        let Ok(module_commit) = module_repository.resolve_snapshot(module_commit.as_str()) else {
-            return;
-        };
-        let Ok(snapshot) = validate_committed_tree(&module_repository, &module_commit, self.limits)
-        else {
-            return;
-        };
+        let module_commit = module_repository
+            .resolve_snapshot(module_commit.as_str())
+            .map_err(|_| StandardAttachError::SnapshotUnresolvable)?;
+        let snapshot = validate_committed_tree(&module_repository, &module_commit, self.limits)
+            .map_err(StandardAttachError::TreeInvalid)?;
         let available = snapshot
             .source_paths
             .iter()
             .map(|path| format!("std/{path}"))
             .collect::<BTreeSet<_>>();
-        let Some(requested) = project
+        let requested = project
             .standard_modules
             .iter()
             .map(|module| {
                 canonical_standard_module(module, |candidate| available.contains(candidate))
             })
             .collect::<Option<BTreeSet<String>>>()
-        else {
-            return;
-        };
+            .ok_or(StandardAttachError::RequestedModuleUnavailable)?;
         let mut roots = requested
             .iter()
             .map(|module| module["std/".len()..].to_owned())
@@ -1588,11 +1601,9 @@ impl ProjectLoader {
         if available.contains("std/main.orna") {
             roots.push(String::from("main.orna"));
         }
-        let Ok(module_project) =
-            self.load_committed_project(&module_repository, &module_commit, None, roots, true)
-        else {
-            return;
-        };
+        let module_project = self
+            .load_committed_project(&module_repository, &module_commit, None, roots, true)
+            .map_err(StandardAttachError::ClosureUnloaded)?;
         let sources = module_project
             .modules()
             .iter()
@@ -1611,18 +1622,85 @@ impl ProjectLoader {
             .iter()
             .all(|logical_path| loaded.contains(logical_path.as_str()))
         {
-            return;
+            return Err(StandardAttachError::ClosureIncomplete);
         }
-        let Ok(profile) = StandardDependencyProfile::from_sources(
+        let profile = StandardDependencyProfile::from_sources(
             module_commit.as_str().to_owned(),
             sources.clone(),
-        ) else {
-            return;
-        };
+        )
+        .map_err(StandardAttachError::ProfileInvalid)?;
         project.standard_runtime_modules = standard_runtime_closure(&requested, &sources);
         project.standard_modules = requested;
         project.standard_profile = Some(profile);
         project.standard_sources = sources;
+        Ok(())
+    }
+}
+
+/// Why a pinned standard snapshot could not be attached to a project.
+///
+/// Attachment is best effort: a project still loads without the snapshot and
+/// then reports its own unresolved `std` import, so the reason is a diagnostic
+/// rather than a load failure. Naming every exit keeps that policy honest: a
+/// binding that gave up is distinguishable from a genuinely bad import.
+#[derive(Debug)]
+enum StandardAttachError {
+    /// `stdlib/std` is not checked out.
+    PathUnavailable,
+    /// `stdlib/std` is not a directory checkout.
+    PathNotDirectory,
+    /// The checkout path does not canonicalise.
+    PathUnresolvable,
+    /// `stdlib/std` is not a repository of its own.
+    RepositoryUnavailable,
+    /// `stdlib/std` resolves to a different worktree than its path.
+    RepositoryMismatch,
+    /// The pinned commit is unknown to the module repository.
+    SnapshotUnresolvable,
+    /// The pinned tree is not a valid source tree.
+    TreeInvalid(ProjectLoadError),
+    /// A project-requested module names no file in the pinned tree.
+    RequestedModuleUnavailable,
+    /// The pinned closure did not load.
+    ClosureUnloaded(ProjectLoadError),
+    /// The pinned closure does not contain a requested module.
+    ClosureIncomplete,
+    /// The loaded sources do not form a verifiable standard profile.
+    ProfileInvalid(StandardProfileError),
+}
+
+impl fmt::Display for StandardAttachError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PathUnavailable => formatter.write_str("stdlib/std is not checked out"),
+            Self::PathNotDirectory => formatter.write_str("stdlib/std is not a directory checkout"),
+            Self::PathUnresolvable => {
+                formatter.write_str("stdlib/std does not resolve to a canonical path")
+            }
+            Self::RepositoryUnavailable => {
+                formatter.write_str("stdlib/std is not a repository of its own")
+            }
+            Self::RepositoryMismatch => {
+                formatter.write_str("stdlib/std resolves to a different worktree")
+            }
+            Self::SnapshotUnresolvable => {
+                formatter.write_str("the pinned standard commit is unknown to stdlib/std")
+            }
+            Self::TreeInvalid(error) => write!(formatter, "the pinned tree is invalid: {error}"),
+            Self::RequestedModuleUnavailable => {
+                formatter.write_str("a requested standard module names no file in the pinned tree")
+            }
+            Self::ClosureUnloaded(error) => {
+                write!(formatter, "the pinned module closure did not load: {error}")
+            }
+            Self::ClosureIncomplete => {
+                formatter.write_str("the pinned module closure omits a requested module")
+            }
+            Self::ProfileInvalid(error) => write!(
+                formatter,
+                "the pinned sources do not form a verifiable profile: {error:?}"
+            ),
+        }
     }
 }
 
@@ -1903,6 +1981,7 @@ fn load_reachable_project(
         standard_runtime_modules: BTreeSet::new(),
         standard_imports,
         standard_modules,
+        standard_attach_failure: None,
         source_commit: None,
     })
 }
@@ -1940,16 +2019,20 @@ fn standard_runtime_closure(
                 continue;
             }
             let joined = segments.join("/");
+            // Mirrors `resolve_std_snapshot_import`: a bare import names a
+            // snapshot-root module unless an enclosing directory of the
+            // importing module supplies it, innermost directory first.
             let bases = if segments[0] == "std" {
                 vec![joined]
             } else {
-                let importer_directory = logical_path
-                    .rsplit_once('/')
-                    .map_or("std", |(directory, _)| directory);
-                vec![
-                    format!("std/{joined}"),
-                    format!("{importer_directory}/{joined}"),
-                ]
+                let module_path = logical_path.strip_prefix("std/").unwrap_or(&logical_path);
+                let mut bases = vec![format!("std/{joined}")];
+                bases.extend(
+                    enclosing_directories(module_path)
+                        .into_iter()
+                        .map(|directory| format!("std/{directory}/{joined}")),
+                );
+                bases
             };
             for base in bases {
                 let file = format!("{base}.orna");
@@ -2340,7 +2423,15 @@ fn resolve_committed_import(
     if segments.iter().any(|segment| !valid_component(segment)) {
         return Err(ProjectLoadError::UnsupportedImport);
     }
-    let base = segments.join("/");
+    resolve_import_base(source_paths, &segments.join("/"))
+}
+
+/// Maps one import base (`a/b`, no extension) onto the module file that exists:
+/// the file itself or its directory `main.orna`, never both.
+fn resolve_import_base(
+    source_paths: &BTreeSet<String>,
+    base: &str,
+) -> Result<String, ProjectLoadError> {
     let file = format!("{base}.orna");
     let directory = format!("{base}/main.orna");
     match (
@@ -2350,27 +2441,47 @@ fn resolve_committed_import(
         (false, false) => Err(ProjectLoadError::ImportUnavailable),
         (true, true) => Err(ProjectLoadError::AmbiguousImport),
         (true, false) => Ok(file),
-
         (false, true) => Ok(directory),
     }
 }
 
+/// Every directory enclosing one module path inside the standard snapshot,
+/// innermost first. A module that sits directly at the snapshot root encloses
+/// none.
+fn enclosing_directories(module_path: &str) -> Vec<String> {
+    let components = module_path.split('/').collect::<Vec<_>>();
+    (1..components.len())
+        .rev()
+        .map(|directories| components[..directories].join("/"))
+        .collect()
+}
+
+/// Resolves one import inside the pinned standard snapshot, which is a single
+/// module group: its modules import each other by bare name. The snapshot root
+/// is tried first, then every enclosing directory of the importing module from
+/// the innermost outwards, so a group keeps resolving its own modules however
+/// deeply the group is nested.
 fn resolve_std_snapshot_import(
     source_paths: &BTreeSet<String>,
     importer: &str,
     segments: &[&str],
 ) -> Result<String, ProjectLoadError> {
-    match resolve_committed_import(source_paths, segments) {
-        Err(ProjectLoadError::ImportUnavailable) => {
-            let Some((directory, _)) = importer.rsplit_once('/') else {
-                return Err(ProjectLoadError::ImportUnavailable);
-            };
-            let mut sibling = directory.split('/').collect::<Vec<_>>();
-            sibling.extend_from_slice(segments);
-            resolve_committed_import(source_paths, &sibling)
-        }
-        result => result,
+    if segments.iter().any(|segment| !valid_component(segment)) {
+        return Err(ProjectLoadError::UnsupportedImport);
     }
+    let joined = segments.join("/");
+    for directory in std::iter::once(String::new()).chain(enclosing_directories(importer)) {
+        let base = if directory.is_empty() {
+            joined.clone()
+        } else {
+            format!("{directory}/{joined}")
+        };
+        match resolve_import_base(source_paths, &base) {
+            Err(ProjectLoadError::ImportUnavailable) => continue,
+            resolved => return resolved,
+        }
+    }
+    Err(ProjectLoadError::ImportUnavailable)
 }
 
 /// Maps a requested `std/<path>.orna` onto the module file that exists:
