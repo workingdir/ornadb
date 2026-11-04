@@ -214,10 +214,7 @@ mod tests {
                 "contract",
                 ordered(vec![("name", OvbRaw::Text(format!("std.ui.{kind}")))]),
             ),
-            (
-                "properties",
-                ordered(properties.into_iter().collect()),
-            ),
+            ("properties", ordered(properties.into_iter().collect())),
             ("slots", ordered(vec![("content", OvbRaw::Array(children))])),
             ("actions", OvbRaw::Map(Vec::new())),
         ])
