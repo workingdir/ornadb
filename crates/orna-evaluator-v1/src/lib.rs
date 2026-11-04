@@ -972,6 +972,12 @@ impl Functions {
         self.iter().map(|(_, function)| function)
     }
 
+    /// Iterates the admitted module's own function names. The shared standard
+    /// layer is excluded, so a caller can bind exactly what this module owns.
+    pub fn local_keys(&self) -> impl Iterator<Item = &String> {
+        self.local.keys()
+    }
+
     /// Iterates the admitted module's own function bodies for mutation. The
     /// shared standard layer is immutable and is never yielded.
     pub fn local_values_mut(&mut self) -> impl Iterator<Item = &mut PureFunction> {
