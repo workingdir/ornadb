@@ -5,6 +5,28 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Every `std.query` window operator now reaches `std.stats` through a real
+  import edge (ornadb-3wqk; product change, Section 9).
+  `stdlib/std/query.orna` computed all eleven `window_*` statistics through
+  `std.stats.*` while importing only `std.collection`, and a qualified name is
+  not a module-graph edge: the pinned runtime closure is built from `use`
+  declarations, so `stats` joined it only when some other module — in
+  practice the standard root `std/main.orna` — imported it. A project pinned
+  to a snapshot whose root imports only `math` therefore failed every window
+  operator with `ORNA-EVAL-UNSUPPORTED`. Fourteen other standard modules had
+  the same shape, a `std.<module>.<name>` call with no matching import, and
+  now record the edge: `bytes` (`bits`, `collection`), `map`
+  (`encoding.ovb`), `concurrent/result` (`concurrent`, `result`),
+  `error/combinators` (`error`), `parse/utilities` (`parse`),
+  `time/utilities` (`time`), `lazy`, `lazy/adapters`, `iterator/adapters`,
+  `iterator/consumers` and `stream/adapters` (`iterator`, `stream`), and
+  `io/reader`, `io/writer`, `io/buffer` (`fs`, `reader`, `writer`, `stream`,
+  `collection`). Host-served spellings (`std.text.*`,
+  `std.encoding.base64.encode`) and self-references need no edge and are
+  unchanged. Tests: `project_runtime`
+  (`binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import`
+  pins a snapshot whose root imports only `math` and evaluates
+  `std.query.window_sum([2, 4], 2)` to `[6]`).
 - A complete copy states the repository format of every member it carries
   (ornadb-5il1.400, Gate F slice 9; product change, ORNA-UPGRADE-001,
   ORNA-UPGRADE-002, ORNA-GIT-003, ORNA-GIT-007). Each `archive` line of
