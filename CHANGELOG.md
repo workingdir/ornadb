@@ -5,6 +5,16 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A pinned standard snapshot now resolves imports through the importing module's enclosing directories (ornadb-l7lx; product change).
+  `resolve_std_snapshot_import` tried the snapshot root and then only the importing module's own directory, so a module group
+  nested in a directory could not reach a module of its own group one directory above it. Because the loader then exited through
+  one of its silent returns, the project reported `ORNA-S010-IMPORT: imported module is unavailable` and the real reason was lost.
+  Resolution is now the snapshot root first, then every enclosing directory innermost first; the root still wins when it supplies
+  the name, candidate order is preserved, and ambiguity within one base is still fatal. `standard_runtime_closure` applies the
+  same rule for both bare and `std.`-prefixed imports. Attach failures are recorded on `LoadedProject::standard_attach_failure`
+  instead of being discarded.
+  Tests: `crates/orna-cli-v1/tests/project_runtime.rs`
+  (`binary_commit_and_check_resolve_a_pinned_standard_group_closure_at_any_depth`).
 - The workspace is now formatted with default `cargo fmt` (ornadb-5il1.224; no product behaviour change). `cargo fmt --all -- --check`
   was red in at least 253 files on `d35b7c0c3`; it now passes for every crate. The reformat is layout only, apart from
   two kinds of adjustment the new layout forces on the clippy gate: five expression statements
