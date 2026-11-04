@@ -246,6 +246,11 @@ Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
 - key-only compact tables for Int (INT64), Str (BYTE_ARRAY STRING, `utf8`) and
   Date (INT32 DATE): placement record, manifest, shard and Parquet segments
   with the page-checksum profile (1.0.0 `23-storage.md:88-106,158-218`);
+- one Int-keyed compact table whose stored value column is an unannotated
+  `BYTE_ARRAY` `Blob` with no parameters (1.0.0 `23-storage.md:184`). Its two
+  payloads are deliberately not valid UTF-8 and include an empty one, so a
+  decoder that reads text or drops empty values fails. A `Blob` primary key is
+  inadmissible (ORNA-BLOB-003), so the key column stays Int;
 - one editable-placement table (`contacts.Contact`) whose rows are loose row
   units under `contacts/Contact/<key component>.orna`, holding non-key fields
   only (1.0.0 `23-storage.md:13,104`; `07-tables.md:295-397` key-path-v1;
@@ -260,16 +265,18 @@ Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
 What it proves (focused test `legacy_fixture_bundle`): a clone of the bundle
 reads through `read_legacy_authoritative_tables` and admits through
 `migrate copy`, covering key-only compact Int (INT64), Str (BYTE_ARRAY, STRING,
-`utf8`) and Date (INT32, DATE) segments, committed loose rows and a committed
-gitlink; the marker bytes and the absence of `.orna/store` are asserted.
+`utf8`) and Date (INT32, DATE) segments plus an unannotated `BYTE_ARRAY` `Blob`
+value column, committed loose rows and a committed gitlink; the marker bytes and
+the absence of `.orna/store` are asserted. The decoded `Blob` field carries the
+payload bytes alone: no media type, no suffix, and no OVB-2 annotated wrapper.
 
 Open gaps (not proven by this fixture):
 
-- Blob rows: absent. 1.0.0 `23-storage.md:184` defines
-  `Blob | blob | Unannotated BYTE_ARRAY`, but the format-1 compact decoder
-  (`compact.rs`, `PhysicalValueKind`) admits only Int/Bool/Str/Date, so no
-  legacy Blob value can be decoded and ORNA-UPGRADE-004's annotation default
-  still has no fixture value to apply. Recorded as a separate defect.
+- Blob annotation: the ORNA-UPGRADE-004 octet-stream default is not applied by
+  the format-1 decoder and is not asserted from this fixture. It belongs to the
+  migration layer (`MigrationAnnotationDefaults`, whose `payload_inspected`
+  stays `false`), so the metadata-only transition can be reported once
+  (ORNA-UPGRADE-005) instead of being hidden inside a legacy read.
 - `state.db` and persistent consumers: not covered (runtime-only
   `.git/orna` state, no defined in-bundle form). ORNA-UPGRADE-008 fail-closed
   behaviour for Blob-containing persistent-consumer arguments is NOT asserted
