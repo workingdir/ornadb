@@ -147,9 +147,13 @@ fn committed_project_carries_verified_source_snapshot_identity() {
 const FORMAT3_DATABASE: &str =
     "{\n    repository_format: 3,\n    database_id: \"00000000-0000-4000-8000-000000000001\",\n}\n";
 
-/// Asserts the mixed-format refusal of one loose row path
+/// The record OrnaDB 1.0's `orna init` wrote into `.orna/format.orna`, byte for
+/// byte.
+const LEGACY_FORMAT_ONE: &str = "{repository_format: 1, storage_profile: \"compact-storage-v1\"}\n";
+
+/// Asserts the mixed-format refusal of one repository-relative path
 /// (ORNA-REPO-CONTEXT-004), with the path in the message.
-fn assert_loose_row_refused(error: ProjectLoadError, path: &str) {
+fn assert_mixed_formats_refused(error: ProjectLoadError, path: &str) {
     let ProjectLoadError::FormatContext(refusal) = &error else {
         panic!("{path}: {error:?}");
     };
@@ -199,7 +203,7 @@ fn format3_committed_snapshot_with_a_loose_row_mixes_formats() {
     let error = ProjectLoader::default()
         .load_committed_snapshot(&repository, &mixed)
         .expect_err("a committed loose row mixes formats");
-    assert_loose_row_refused(error, "Music/london.orna");
+    assert_mixed_formats_refused(error, "Music/london.orna");
 }
 
 /// ORNA-REPO-004, ORNA-UPGRADE-003, Gate A: a format-3 commit
@@ -242,7 +246,99 @@ fn format3_candidate_writing_a_loose_row_mixes_formats() {
     let error = ProjectLoader::default()
         .load_private_candidate(&repository, &added_row)
         .expect_err("a written loose row mixes formats");
-    assert_loose_row_refused(error, path);
+    assert_mixed_formats_refused(error, path);
+}
+
+/// ORNA-META-001, ORNA-META-002, ORNA-UPGRADE-003, Gate A ("unknown/mixed
+/// formats fail early"), MIGRATION.md: a legacy `format.orna` marker beside a
+/// format-3 `.orna/store` is a mixed snapshot, not a legacy one. No format-1/2
+/// writer produced a store, so a marker next to one claims a format its stored
+/// data does not have. The repository refuses that snapshot as
+/// ORNA-REPO-CONTEXT-004, and the project loader must carry the same diagnosis
+/// instead of loading it as legacy: the marker alone still loads, and adding
+/// the store is what refuses the snapshot.
+#[test]
+fn legacy_marker_beside_a_store_mixes_formats_at_a_snapshot() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (".orna/format.orna", LEGACY_FORMAT_ONE),
+    ]);
+    commit_all(&directory);
+    let legacy = repository.head().unwrap().unwrap();
+    let project = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &legacy)
+        .expect("a legacy marker without a store loads as its recorded format");
+    assert_eq!(project.modules().len(), 1);
+    assert_eq!(
+        repository
+            .open_format_context_at_selector(legacy.as_str())
+            .expect("the repository admits the legacy marker alone")
+            .repository_format_number(),
+        1
+    );
+
+    fs::create_dir_all(directory.path().join(".orna/store")).unwrap();
+    fs::write(
+        directory.path().join(".orna/store/data"),
+        "format-3 row graph",
+    )
+    .unwrap();
+    commit_all(&directory);
+    let relabelled = repository.head().unwrap().unwrap();
+    assert_eq!(
+        repository
+            .open_format_context_at_selector(relabelled.as_str())
+            .unwrap_err(),
+        FormatContextError::MixedFormats {
+            path: ".orna/store".to_owned()
+        },
+        "the repository refuses the relabelled snapshot"
+    );
+    let error = ProjectLoader::default()
+        .load_committed_snapshot(&repository, &relabelled)
+        .expect_err("a legacy marker beside .orna/store mixes formats");
+    assert_mixed_formats_refused(error, ".orna/store");
+}
+
+/// ORNA-META-001, ORNA-META-002, Gate A ("unknown/mixed formats fail early"):
+/// a commit candidate that keeps a legacy `format.orna` marker and adds the
+/// format-3 `.orna/store` would publish the relabel MIGRATION.md forbids, so
+/// loading it fails with ORNA-REPO-CONTEXT-004 naming the store. A candidate
+/// that only changes source keeps the legacy marker and loads.
+#[test]
+fn legacy_marker_candidate_writing_a_store_mixes_formats() {
+    let (directory, repository) = repository(&[
+        ("main.orna", "pub table Music(id: Str) { title: Str, }\n"),
+        (".orna/format.orna", LEGACY_FORMAT_ONE),
+    ]);
+    commit_all(&directory);
+    let commit = repository.head().unwrap().unwrap();
+    let candidate = |path: &str, bytes: &str| {
+        repository
+            .build_private_commit(
+                &commit,
+                &[ManagedFileChange::new(
+                    ManagedPath::new(path).unwrap(),
+                    Some(bytes.as_bytes().to_vec()),
+                )],
+                "legacy candidate",
+            )
+            .unwrap()
+    };
+
+    let source_change = candidate(
+        "main.orna",
+        "pub table Music(id: Str) { title: Str, }\npub fn answer(): Int = 42;\n",
+    );
+    ProjectLoader::default()
+        .load_private_candidate(&repository, &source_change)
+        .expect("a candidate that keeps the legacy marker loads");
+
+    let relabel = candidate(".orna/store/data", "format-3 row graph");
+    let error = ProjectLoader::default()
+        .load_private_candidate(&repository, &relabel)
+        .expect_err("a candidate that adds a store to a legacy marker mixes formats");
+    assert_mixed_formats_refused(error, ".orna/store");
 }
 
 /// A legacy `key-path-v1` spelling (`~ff`, `~xx`) names a loose-row file, not a
@@ -264,7 +360,7 @@ fn format3_legacy_key_path_spelling_row_is_refused() {
     let error = ProjectLoader::default()
         .load_committed_snapshot(&repository, &mixed)
         .expect_err("a legacy key-path-v1 row mixes formats");
-    assert_loose_row_refused(error, "Music/~ff.orna");
+    assert_mixed_formats_refused(error, "Music/~ff.orna");
 }
 
 /// The loose-row refusal recognises only row files: an unreached
@@ -326,7 +422,7 @@ fn format3_modules_beside_a_table_are_not_loose_rows() {
     let error = ProjectLoader::default()
         .load_private_candidate(&repository, &row_file)
         .expect_err("an unreached file under the table is a loose row");
-    assert_loose_row_refused(error, "sensors/london.orna");
+    assert_mixed_formats_refused(error, "sensors/london.orna");
 }
 
 #[test]
