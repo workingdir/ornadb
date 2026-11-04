@@ -31,6 +31,31 @@ been published.
   client with the installed `vscode-languageclient`. Tests:
   `editor_artifacts` (`every_editor_surface_starts_the_same_server_command`,
   `vscode_extension_declares_a_generated_language_client`).
+- Linux packaging is one pkgsmith manifest (ornadb-pkg; packaging change). `packaging/linux/pkgsmith.star`
+  declares the install artifact for pkgsmith 0.1.1: the uncompressed tar of release 1.0.0 (same file
+  name, same two files), plus an rpm and a deb written from the same install prefix.
+  `packaging/linux/package.py` keeps the two things pkgsmith deliberately does not do — the
+  reproducible release build (`--remap-path-prefix`, no build id, no incremental compilation, every
+  timestamp from `SOURCE_DATE_EPOCH`) and the format-1 distribution manifest that binds the executable
+  to its build inputs — then stages `usr/bin/orna` and `usr/share/orna/distribution-manifest.toml`
+  into `target/linux-package/prefix` and runs `pkgsmith build`. The inventory is still exactly those
+  two root-owned files on every format, and no format carries a lifecycle script: `pkgsmith.star`
+  gives no `scripts`, and the deb control archive is checked to hold only `control` and `md5sums`.
+  The rpm's declared requirements are exactly `glibc` and `libgcc`, and the deb's `Depends` exactly
+  `libc6, libgcc-s1`, because those are the two libraries the dynamic binary links; the tar still
+  declares nothing.
+  `package.sh build` now verifies what it wrote instead of a single archive: the pkgsmith plan must
+  declare exactly the three formats, the tar inventory and manifest binding are checked, the rpm's file
+  digests and `rpm -K` must match the same bytes, the deb's data archive must be byte-identical to the
+  tar payload, modes and root ownership must match, and every member must carry one timestamp.
+  `package.sh verify` re-checks a `dist/` directory, reading the epoch that build recorded in
+  `dist/.source-date-epoch`; `package.sh install` is unchanged and still installs only the tar, with the
+  same no-follow and no-partial-overwrite rules. The tar header dialect moves from POSIX ustar to
+  pkgsmith's GNU-style header; the members, modes, owners and timestamps do not change. Tests:
+  `packaging/linux/test_package.py` (`linux package tests passed`) builds the whole package set twice
+  and compares every byte, then refuses a tampered tar, a deb with a changed payload or an added
+  `postinst`, an rpm with a changed payload byte, a package set with a format missing, and an install
+  into a foreign, partial, wrong-mode or symlinked root.
 - `orna query` and `orna history` read a format-1/2 pin instead of refusing it (ornadb-5il1.398, Gate F slice 7; product
   change, ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013). A pin whose format context reports a read-only compatibility
   input is answered by a versioned legacy reader (`crates/orna-application-v1/src/legacy_store.rs`), added here. `orna query`
