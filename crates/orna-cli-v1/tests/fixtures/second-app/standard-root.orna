@@ -1,0 +1,8 @@
+// The standard snapshot root this application's project pins. It ships the
+// `ui` module the application imports, and it imports only what the snapshot
+// contains, so the parent project binds the pinned standard profile. The root
+// is this fixture tree's own stand-in for `stdlib/std`; nothing here reads the
+// devtools application's fixture tree.
+use ui;
+
+pub fn version(): Str = "1.0.0";
