@@ -116,11 +116,16 @@ pub(super) fn legacy_address(
 }
 
 /// The command's own refusal for a legacy read that could not answer.
+///
+/// The error's own message is the title: it names the table or row unit the
+/// snapshot does not hold, and an attached detail renders only with `--debug`.
 pub(super) fn legacy_read_error(error: &LegacyReadError, help: &'static str) -> Diagnostic {
-    Diagnostic::target_with_detail(
-        "E2000",
-        "Legacy snapshot could not be read",
+    Diagnostic {
+        code: "E2000",
+        title: Cow::Owned(error.to_string()),
         help,
-        error.to_string(),
-    )
+        exit: Exit::Target,
+        detail: None,
+        body: None,
+    }
 }
