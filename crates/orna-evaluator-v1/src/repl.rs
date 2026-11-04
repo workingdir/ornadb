@@ -124,6 +124,26 @@ impl ReplSession {
         })
     }
 
+    /// Starts a bounded session over one module's own function scope.
+    ///
+    /// Every function the table owns is callable by its bare name, exactly as a
+    /// declaration in that module's body is, and the environment stays exactly
+    /// what the caller supplied. Nothing outside the module is reachable: no
+    /// other session's declarations, imports or bindings take part, so this is a
+    /// pinned module environment rather than a REPL.
+    pub fn with_module_scope(
+        limits: Limits,
+        environment: Environment,
+        functions: Functions,
+    ) -> Result<Self, EvaluationError> {
+        let names = functions.local_keys().cloned().collect::<Vec<_>>();
+        let mut session = Self::with_bindings(limits, environment, functions)?;
+        for name in names {
+            session.aliases.insert(name.clone(), name);
+        }
+        Ok(session)
+    }
+
     /// Attaches the activation facts `sys.rt.info()` reports to pure
     /// submissions. Without a context, `sys.rt.info()` reports
     /// `sys.version.incompatible`.
