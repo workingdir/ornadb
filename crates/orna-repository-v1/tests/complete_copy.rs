@@ -543,10 +543,16 @@ fn complete_copy_reconstructs_both_snapshots_offline_with_an_independent_extract
     fs::rename(&dependency, root.path().join("dependency-disabled")).expect("disable dependency");
     fs::remove_dir_all(&project).expect("remove the source repository");
 
-    // Each member is extractable from its own bundle alone.
+    // Each member is extractable from its own bundle alone, and the format the
+    // manifest states for it is the format the bundle's member records.
     for member in &recorded.members {
         let scratch = extractor::scratch(&member.commit[..8]);
         extractor::extract_member(&archive, member, &scratch);
+        assert_eq!(
+            member.format.as_deref(),
+            Some(extractor::committed_format(&scratch, &member.commit)),
+            "the manifest states the format the bundle's member records"
+        );
         let blobs = extractor::verify_blobs(&scratch, member);
         assert_eq!(
             blobs,
