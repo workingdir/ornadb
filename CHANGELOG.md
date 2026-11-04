@@ -30,6 +30,22 @@ been published.
   command on a format-3 pin: no cheaper boundary decides what project admission admits. A project the loader refuses for a
   *source* reason (a parse error, an unresolvable import) is not refused here, since neither command reads the source.
   Tests: same file (`query_and_history_refuse_a_format3_snapshot_tracking_a_loose_row`).
+- The format-1 compact decoder reads the `Blob` column 1.0.0 `23-storage.md:184` defines — an unannotated `BYTE_ARRAY`
+  with parameters `[]` — instead of failing the whole segment with `InvalidCompactManifest` (ornadb-8tos; product change,
+  ORNA-UPGRADE-002, ORNA-BLOB-009, ORNA-COMPACT-012). `PhysicalValueKind` gains `Blob`, admitted only when the recorded
+  logical type node is `[0, "Blob"]`, the encoding kind is `blob`, the physical type is `BYTE_ARRAY`, and the column
+  carries no logical annotation and no converted type; a `STRING`, `DATE` or `OVB` mapping on a `Blob` leaf, or a `Blob`
+  leaf under another type name, is still rejected. The decoded logical value is the payload byte string alone
+  (`OvbRaw::Bytes`): no media type, no suffix and no OVB-2 wrapper, because ORNA-BLOB-009 keeps the legacy bytes-only
+  semantics and ORNA-UPGRADE-004's octet-stream default is applied explicitly by the migration layer
+  (`MigrationAnnotationDefaults`, `payload_inspected == false`), where ORNA-UPGRADE-005's reported transition belongs. The
+  golden format-1 bundle gains an Int-keyed table whose stored value column is that `Blob` column, with one payload that
+  is not valid UTF-8 and one empty payload; `BUNDLE_SHA256` and `scripts/fixture-manifest.sha256` are repinned. Tests:
+  `crates/orna-repository-v1/src/compact/legacy_reader_tests.rs`
+  (`legacy_authoritative_read_decodes_unannotated_blob_column_bytes`, fails before with `InvalidCompactManifest` and passes
+  after; `compact_publication_refuses_an_annotated_blob_leaf`) and `crates/orna-cli-v1/tests/legacy_fixture_bundle.rs`
+  (`committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy`,
+  `builder_regenerates_the_committed_bundle_byte_for_byte`).
 - Strict ORNA-META-001 admission: a format-3 snapshot's tracked `.orna/` holds only `database.orna` and `store`
   (ornadb-5il1.415, Gate A "unknown/mixed formats fail early"; product change, ORNA-META-001, ORNA-META-002). Any other
   tracked child — the format-1 `storage` layout, the draft format-2 `blobs` tree, `.orna/packages`, `.orna/checkpoints`, a
