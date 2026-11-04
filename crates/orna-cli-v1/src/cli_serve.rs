@@ -17,6 +17,7 @@
 mod cli_serve_app;
 
 use super::*;
+use crate::media_range::{MediaMethod, media_reply};
 use orna_application_v1::ApplicationLiveAdapter;
 use orna_live_v1::{
     LiveHost, LiveSessionAuthority, LiveTransport, SessionMetadata, SystemCredentialIssuer,
@@ -200,7 +201,9 @@ impl LoopbackAuthority {
         if !self.permits_host(host) {
             return Some(forbidden_response(request, "host_denied"));
         }
-        if request.method == "GET" && !is_websocket_route(request) {
+        // `HEAD` is a safe method: it carries the same headers as `GET` and no
+        // body, so it is not a cross-origin write.
+        if matches!(request.method.as_str(), "GET" | "HEAD") && !is_websocket_route(request) {
             return None;
         }
         let admitted = match request_header(request, "origin") {
@@ -1493,6 +1496,13 @@ struct Breadcrumb {
 }
 
 fn git_listing_route(root: &Path, request: &Request) -> Option<Response> {
+    // The content route answers HEAD as well as GET, so it is matched before
+    // the page routes that only render documents.
+    if let Some(suffix) = request.path.strip_prefix("/content/")
+        && matches!(request.method.as_str(), "GET" | "HEAD")
+    {
+        return Some(content_route(root, request, suffix));
+    }
     if request.method != "GET" {
         return None;
     }
@@ -1702,6 +1712,103 @@ fn tree_breadcrumbs(commit: &GitCommitRef, directory: &str) -> Vec<Breadcrumb> {
         }
     }
     breadcrumbs
+}
+
+/// Serves a stored Blob's exact bytes with explicit byte-range support
+/// (ORNA-APP-014). A `HEAD` carries the same headers and no body, an
+/// unsatisfiable range answers `416`, and a payload that is not an allowlisted
+/// media type is served as an attachment with `nosniff` and a sandbox policy so
+/// a stored document cannot run script in the serving origin.
+fn content_route(root: &Path, request: &Request, suffix: &str) -> Response {
+    let Some((object_id, encoded_path)) = suffix.split_once('/') else {
+        return not_found_response();
+    };
+    let Ok(repository) = Repository::discover(root) else {
+        return unavailable_response();
+    };
+    let Some(commit) = resolve_listing_commit(&repository, object_id) else {
+        return not_found_response();
+    };
+    let Ok(decoded_path) = percent_decode(encoded_path) else {
+        return bad_request_response();
+    };
+    let Ok(path) = ManagedPath::new(&decoded_path) else {
+        return bad_request_response();
+    };
+    let Ok(bytes) = repository.read_committed_file(&commit, path.as_path(), MAX_LISTING_FILE_BYTES)
+    else {
+        return not_found_response();
+    };
+    let length = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    let method = if request.method == "HEAD" {
+        MediaMethod::Head
+    } else {
+        MediaMethod::Get
+    };
+    let range = request
+        .headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+        .map(|(_, value)| value.as_str());
+    let reply = media_reply(method, range, length, |start, end| {
+        let start = usize::try_from(start).map_err(|_| ())?;
+        let end = usize::try_from(end).map_err(|_| ())?;
+        bytes.get(start..=end).map(<[u8]>::to_vec).ok_or(())
+    });
+    let Ok(reply) = reply else {
+        return bad_request_response();
+    };
+    let media_type = content_media_type(path.as_path());
+    let mut response = Response::new(reply.plan.status, media_type, reply.body);
+    response
+        .headers
+        .push(("accept-ranges".into(), "bytes".into()));
+    response.headers.push((
+        "content-length".into(),
+        reply.plan.content_length.to_string(),
+    ));
+    if let Some(content_range) = &reply.plan.content_range {
+        response
+            .headers
+            .push(("content-range".into(), content_range.clone()));
+    }
+    if !is_allowlisted_media(media_type) {
+        response
+            .headers
+            .push(("content-disposition".into(), "attachment".into()));
+        response
+            .headers
+            .push(("x-content-type-options".into(), "nosniff".into()));
+        response
+            .headers
+            .push(("content-security-policy".into(), "sandbox".into()));
+    }
+    response
+}
+
+/// The media type served for a stored Blob path.
+fn content_media_type(path: &Path) -> &'static str {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("ogg") => "audio/ogg",
+        Some("txt" | "orna") => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Types a browser may render inline; everything else is an attachment.
+fn is_allowlisted_media(media_type: &str) -> bool {
+    media_type.starts_with("image/") || media_type.starts_with("audio/")
 }
 
 fn blob_page(root: &Path, suffix: &str) -> Response {
@@ -2174,7 +2281,7 @@ fn read_request_head(
         .next()
         .ok_or_else(|| io::Error::other("bad request"))?;
     if parts.next().is_some()
-        || !matches!(method.as_str(), "GET" | "POST" | "DELETE")
+        || !matches!(method.as_str(), "GET" | "HEAD" | "POST" | "DELETE")
         || version != "HTTP/1.1"
         || !target.starts_with('/')
         || target.starts_with("//")
