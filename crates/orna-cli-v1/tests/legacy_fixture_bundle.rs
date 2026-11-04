@@ -8,8 +8,10 @@
 //! module docs). The bundle bytes are pinned below by SHA-256 so the committed
 //! artifact cannot drift silently, and
 //! `builder_regenerates_the_committed_bundle_byte_for_byte` rebuilds the
-//! repository from the builder and requires the rebuilt bundle to equal the
-//! committed one byte for byte, so a builder change needs a regenerated bundle.
+//! repository from the builder and compares it with the committed bundle object
+//! by object, so a builder change needs a regenerated bundle. It does not
+//! compare the `git bundle` file bytes: those depend on the git release and on
+//! the host's defaults, so file-byte equality would test the runner.
 //!
 //! This test holds the bundle closed, checks the pinned digest, checks the
 //! committed repository is format 1 (marker bytes, record kinds, no
