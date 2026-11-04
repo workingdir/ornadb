@@ -905,13 +905,23 @@ fn verify_physical_columns(
             && encoding == "date"
             && column.physical_type() == Type::INT32
             && column.logical_type_ref() == Some(&parquet::basic::LogicalType::Date);
+        // 1.0.0 `23-storage.md:184`: `Blob | blob | Unannotated BYTE_ARRAY;
+        // parameters []`. The column carries the payload bytes only; the
+        // annotated value identity is a format-3 concern (ORNA-BLOB-009 keeps
+        // the legacy bytes-only semantics, and ORNA-UPGRADE-004's explicit
+        // octet-stream default belongs to the migration layer, not here).
+        let blob_mapping = type_name == "Blob"
+            && encoding == "blob"
+            && column.physical_type() == Type::BYTE_ARRAY
+            && column.logical_type_ref().is_none();
         if type_code.to_string() != "0"
             || !(int_mapping
                 || bool_mapping
                 || ovb_int_mapping
                 || ovb_bool_mapping
                 || string_mapping
-                || date_mapping)
+                || date_mapping
+                || blob_mapping)
             || !matches!(&fields[4], OvbRaw::Array(parameters) if
             if ovb_kind.is_some() {
                 parameters == &[OvbRaw::Int(1.into())]
@@ -919,7 +929,8 @@ fn verify_physical_columns(
                 parameters.is_empty()
             })
             || (!(string_mapping || date_mapping) && column.logical_type_ref().is_some())
-            || (ovb_kind.is_some() && column.converted_type() != ConvertedType::NONE)
+            || ((ovb_kind.is_some() || blob_mapping)
+                && column.converted_type() != ConvertedType::NONE)
             || column.max_def_level() != expected.max_def_level
             || column.max_rep_level() != expected.max_rep_level
         {
@@ -945,6 +956,8 @@ fn verify_physical_columns(
                     PhysicalValueKind::Str
                 } else if date_mapping {
                     PhysicalValueKind::Date
+                } else if blob_mapping {
+                    PhysicalValueKind::Blob
                 } else {
                     return Err(RepositoryError::InvalidCompactManifest);
                 },
@@ -980,6 +993,9 @@ enum PhysicalValueKind {
     Bool,
     Str,
     Date,
+    /// 1.0.0 `23-storage.md:184`: unannotated `BYTE_ARRAY`, decoded as the raw
+    /// payload bytes of the row's `Blob` field.
+    Blob,
     Ovb(OvbFallbackKind),
 }
 
@@ -1186,6 +1202,23 @@ fn decode_projection_column(
                 return Err(RepositoryError::InvalidCompactManifest);
             };
             read_values!(column, i32, |value: &i32| { compact_date_value(*value) })
+        }
+        PhysicalValueKind::Blob => {
+            let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
+                return Err(RepositoryError::InvalidCompactManifest);
+            };
+            // 1.0.0 `23-storage.md:184` stores the payload as an unannotated
+            // BYTE_ARRAY, so the decoded logical value is the raw byte string
+            // alone. No media type or suffix is invented here: the annotated
+            // identity is a format-3 value, and the migration layer applies the
+            // ORNA-UPGRADE-004 default explicitly (ORNA-BLOB-009).
+            read_values!(
+                column,
+                parquet::data_type::ByteArray,
+                |value: &parquet::data_type::ByteArray| {
+                    Ok(OvbRaw::Bytes(value.data().to_vec()))
+                }
+            )
         }
         PhysicalValueKind::Ovb(fallback) => {
             let ColumnReader::ByteArrayColumnReader(mut column) = reader else {
