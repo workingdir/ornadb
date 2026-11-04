@@ -72,6 +72,9 @@ pub(crate) struct TypeDescriptor {
 /// catalogue.
 pub(crate) const SYS_CATALOGUE_TABLES: &str = "sys.catalog.tables";
 
+/// The grouped handle over `sys.Column` rows.
+pub(crate) const SYS_CATALOGUE_COLUMNS: &str = "sys.catalog.columns";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RelationDescriptor {
     pub name: String,
@@ -780,7 +783,7 @@ impl SystemApi {
         }
         // The admitted table catalogue is served by the evaluator, so its
         // grouped handle reads as its relation type.
-        if name == SYS_CATALOGUE_TABLES
+        if matches!(name.as_str(), SYS_CATALOGUE_TABLES | SYS_CATALOGUE_COLUMNS)
             && let Some(relation) = self.relation(&name)
         {
             return PathResolution::ReadOnly(&relation.relation_type);
