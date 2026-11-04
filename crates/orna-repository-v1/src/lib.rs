@@ -54,8 +54,6 @@ pub(crate) mod test_support;
 mod transport;
 
 pub use blob_store::ContentIdentity;
-#[cfg(feature = "legacy-fixture-writer")]
-pub use compact::write_legacy_format1_fixture;
 pub use compact::{
     COMPACT_MANIFEST_SHARD_LIMIT, COMPACT_MAX_UNCOMPRESSED_PAGE_BYTES, CompactCommittedRow,
     CompactCommittedSegmentProjection, CompactManifest, CompactManifestEntry,
@@ -64,6 +62,8 @@ pub use compact::{
 };
 #[cfg(any(test, feature = "legacy-fixture-writer"))]
 pub use compact::{CompactPublicationPlan, CompactSegment};
+#[cfg(feature = "legacy-fixture-writer")]
+pub use compact::{write_legacy_format1_fixture, write_legacy_format1_golden_fixture};
 pub use crash_barrier::publication_crash_barrier;
 pub use init::format_context::{
     CaptureCapabilityError, CommittedTableBinding, FINAL_REPOSITORY_FORMAT, FinalFormatCapability,
