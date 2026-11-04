@@ -31,7 +31,8 @@ just editor-artifacts-check
 ```
 
 The check compares every checked-in artifact byte-for-byte with the Rust
-renderer and runs Node's parser check on the generated Tree-sitter grammar.
+renderer and syntax-checks the generated JavaScript — the Tree-sitter grammar
+and the VS Code extension — with `node --check`.
 Focused tests in `orna-syntax-v1` load `.orna` fixtures from that crate with
 `include_str!`, validate the generated metadata, check for v1-only lexical
 classes, and prove byte stability and complete editor-tree coverage. The
@@ -42,11 +43,13 @@ editor surface cannot be added without joining the emitter. `npm install` in
 `editors/vscode` writes `node_modules` and `package-lock.json`, which the
 coverage test skips as editor build output rather than governed artifacts.
 
-TextMate, Vim, Emacs, and Sublime fallback grammars recognize lexical patterns
-but do not have parser context for distinguishing declared types, functions,
-properties, namespaces, and variables. Configure `orna-lsp` separately to
-receive diagnostics, navigation, completion, and semantic tokens. Static
-editor grammars do not claim parser-equivalent context.
+TextMate, Vim, Emacs, and Sublime grammars recognize lexical patterns but do
+not have parser context for distinguishing declared types, functions,
+properties, namespaces, and variables. Every generated client launches
+`orna-lsp` (see below), so those hosts receive diagnostics, navigation,
+completion, and semantic tokens from the server; a host that runs only the
+grammar receives colouring and no server features. Static editor grammars do
+not claim parser-equivalent context.
 
 ## One server command
 
@@ -82,10 +85,10 @@ it — an editor reports the failure and keeps the generated syntax definition
 working; no client silently degrades into a second, editor-local language
 implementation. VS Code shows an error notification naming the command and the
 setting to fix, and leaves the window open: activation succeeds, `.orna` files
-stay highlighted by the contributed grammar, and the server-backed features are
-absent until the extension host is reloaded with a reachable command. A client
-that cannot reach the server is a configuration error, not a reason to fail the
-editor.
+stay highlighted by the contributed grammar, and the server-backed features
+return when the setting is corrected (which restarts the client) or `orna-lsp`
+is put on `PATH` and the window is reloaded. A client that cannot reach the
+server is a configuration error, not a reason to fail the editor.
 
 
 ## Attach the language server
