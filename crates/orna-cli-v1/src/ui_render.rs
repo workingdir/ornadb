@@ -59,50 +59,7 @@ fn render_node(raw: &OvbRaw, out: &mut String, depth: usize) -> Option<()> {
             }
             out.push_str("</dl>");
         }
-        "table" => {
-            // A table node keeps its rows in the `rows` property (the
-            // evaluator materialises a relation there), so the rows are
-            // rendered from the property rather than from child nodes.
-            let rows = field(properties, "rows")
-                .and_then(value_list)
-                .unwrap_or(&[]);
-            let columns = table_columns(properties, rows);
-            out.push_str("<table>");
-            if !columns.is_empty() {
-                out.push_str("<thead><tr>");
-                for column in &columns {
-                    out.push_str("<th>");
-                    push_escaped(column, out);
-                    out.push_str("</th>");
-                }
-                out.push_str("</tr></thead>");
-            }
-            out.push_str("<tbody>");
-            for row in rows {
-                out.push_str("<tr>");
-                if columns.is_empty() {
-                    out.push_str("<td>");
-                    if let Some(text) = scalar_text(row) {
-                        push_escaped(&text, out);
-                    }
-                    out.push_str("</td>");
-                } else {
-                    let entries = as_map(row).unwrap_or(&[]);
-                    for column in &columns {
-                        out.push_str("<td>");
-                        if let Some(text) = field(entries, column).and_then(scalar_text) {
-                            push_escaped(&text, out);
-                        }
-                        out.push_str("</td>");
-                    }
-                }
-                out.push_str("</tr>");
-            }
-            for child in children {
-                render_node(child, out, depth + 1)?;
-            }
-            out.push_str("</tbody></table>");
-        }
+        "table" => render_table_node(properties, children, out, depth)?,
         "code" => {
             out.push_str("<pre><code>");
             push_value(properties, "source", out)?;
@@ -150,6 +107,58 @@ fn properties_field_name(node: &[(OvbRaw, OvbRaw)]) -> Option<String> {
 fn push_value(properties: &[(OvbRaw, OvbRaw)], name: &str, out: &mut String) -> Option<()> {
     let value = field(properties, name).and_then(value_text)?;
     push_escaped(&value, out);
+    Some(())
+}
+
+/// Renders a table node. Its records live in the `rows` property (the
+/// evaluator materialises a relation there), so they are rendered from the
+/// property rather than from child nodes; any child nodes still render after
+/// the rows.
+fn render_table_node(
+    properties: &[(OvbRaw, OvbRaw)],
+    children: &[OvbRaw],
+    out: &mut String,
+    depth: usize,
+) -> Option<()> {
+    let rows = field(properties, "rows")
+        .and_then(value_list)
+        .unwrap_or(&[]);
+    let columns = table_columns(properties, rows);
+    out.push_str("<table>");
+    if !columns.is_empty() {
+        out.push_str("<thead><tr>");
+        for column in &columns {
+            out.push_str("<th>");
+            push_escaped(column, out);
+            out.push_str("</th>");
+        }
+        out.push_str("</tr></thead>");
+    }
+    out.push_str("<tbody>");
+    for row in rows {
+        out.push_str("<tr>");
+        if columns.is_empty() {
+            out.push_str("<td>");
+            if let Some(text) = scalar_text(row) {
+                push_escaped(&text, out);
+            }
+            out.push_str("</td>");
+        } else {
+            let entries = as_map(row).unwrap_or(&[]);
+            for column in &columns {
+                out.push_str("<td>");
+                if let Some(text) = field(entries, column).and_then(scalar_text) {
+                    push_escaped(&text, out);
+                }
+                out.push_str("</td>");
+            }
+        }
+        out.push_str("</tr>");
+    }
+    for child in children {
+        render_node(child, out, depth + 1)?;
+    }
+    out.push_str("</tbody></table>");
     Some(())
 }
 
