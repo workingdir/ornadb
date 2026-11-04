@@ -5,6 +5,28 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Every editor package in `editors/` is now a thin client of the one `orna-lsp`
+  server, and the start contract is stated once (ornadb-editors; editor
+  tooling, ORNA-LEX-007, decision 0119). `editors/vscode/` gains a real
+  language client: generated `extension.js` starts `orna-lsp` through
+  `vscode-languageclient`, `package.json` declares `main`, the
+  `onLanguage:orna` activation event, the client dependency, and the
+  `orna.lsp.serverCommand` setting, and the grammar and language
+  contributions are unchanged. It is plain JavaScript with no build step, so
+  the extension runs from the checked-in tree. `editors/sublime/` gains
+  `LSP-orna.sublime-settings`, the client block the LSP package registers,
+  selecting `source.orna` and launching `orna-lsp`. Vim, Neovim and Emacs
+  keep their one override (`g:orna_lsp_command`, `options.cmd`,
+  `orna-eglot-server-command`) and now cite the same contract. The contract
+  table lives in `docs/editor-tooling.md`, the generator derives the default
+  command from one constant, and the drift gate in
+  `crates/orna-syntax-v1/tests/editor_artifacts.rs` fails for a listed
+  artifact that differs from the emitter, for a file under `editors/` the
+  emitter does not produce, for an editor directory holding no generated
+  artifact, and for a contract row whose editor, override or default command
+  disagrees with the generator. Tests: `editor_artifacts`
+  (`every_editor_surface_starts_the_same_server_command`,
+  `vscode_extension_declares_a_generated_language_client`).
 - `orna query` and `orna history` read a format-1/2 pin instead of refusing it (ornadb-5il1.398, Gate F slice 7; product
   change, ORNA-UPGRADE-001, ORNA-UPGRADE-002, ORNA-ROW-013). A pin whose format context reports a read-only compatibility
   input is answered by a versioned legacy reader (`crates/orna-application-v1/src/legacy_store.rs`), added here. `orna query`
