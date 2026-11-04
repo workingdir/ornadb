@@ -4,11 +4,12 @@ use std::{
     process::{Command, Output, Stdio},
 };
 
-use orna_foundation_v1::{OvbRaw, Value};
+use orna_foundation_v1::{CanonicalValue, OvbRaw, Value};
 use orna_repository_v1::{Repository, inspect_metadata};
 use orna_runtime_v1::{
     CheckpointKey, Component, ConsumerIdentity, Mutation, NoFault, RuntimeIdentity, RuntimeState,
 };
+use orna_value_v1::Raw;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 
@@ -2140,6 +2141,62 @@ fn binary_checks_and_runs_an_import_from_the_pinned_standard_git_module() {
     assert!(run.status.success(), "run stderr: {:?}", run.stderr);
     assert_eq!(run.stdout, b"invocation completed\n");
     assert!(run.stderr.is_empty());
+}
+
+#[test]
+fn binary_repl_evaluates_a_pinned_query_window_operator_from_its_stats_import() {
+    let standard_sources = orna_evaluator_v1::reference_standard_sources()
+        .into_iter()
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let standard = [
+        (
+            "collection.orna",
+            standard_sources["std/collection.orna"].as_str(),
+        ),
+        ("query.orna", standard_sources["std/query.orna"].as_str()),
+        ("stats.orna", standard_sources["std/stats.orna"].as_str()),
+        (
+            "math.orna",
+            include_str!("fixtures/captured-standard-math.orna"),
+        ),
+    ];
+    let (directory, _module_commit) = captured_standard_project_with(
+        &standard,
+        &[(
+            "main.orna",
+            "use std.query;\npub fn answer(): [Int] = std.query.window_sum([2, 4], 2);\n",
+        )],
+    );
+
+    let repository = Repository::discover(directory.path()).expect("project repository");
+    let project = orna_project_v1::ProjectLoader::default()
+        .load(&repository)
+        .expect("load pinned snapshot");
+    assert_eq!(
+        project.standard_attach_failure(),
+        None,
+        "the pinned snapshot must attach"
+    );
+    assert!(
+        project.standard_runtime_modules().contains("std/stats.orna"),
+        "query's own stats import must join the runtime closure: {:?}",
+        project.standard_runtime_modules()
+    );
+
+    let mut session = orna_evaluator_v1::AdmittedReplSession::from_loaded_project(
+        &project,
+        project.standard_sources().iter().cloned(),
+        orna_evaluator_v1::Limits::default(),
+    )
+    .expect("admitted repl session");
+    assert_eq!(session.submit("use std.query;\n"), Ok(None));
+    assert_eq!(
+        session.submit("std.query.window_sum([2, 4], 2)"),
+        Ok(Some(
+            CanonicalValue::new(Raw::Array(vec![Raw::Int(6.into())]))
+                .expect("expected value is canonical")
+        ))
+    );
 }
 
 #[test]
