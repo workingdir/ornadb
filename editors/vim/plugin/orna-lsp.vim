@@ -1,4 +1,5 @@
 " Generated from orna-syntax-v1 language metadata.
+" Server start contract: docs/editor-tooling.md ("One server command").
 if !exists('g:orna_lsp_command')
     let g:orna_lsp_command = ['orna-lsp']
 endif
