@@ -2020,20 +2020,22 @@ fn standard_runtime_closure(
             }
             let joined = segments.join("/");
             // Mirrors `resolve_std_snapshot_import`: a bare import names a
-            // snapshot-root module unless an enclosing directory of the
-            // importing module supplies it, innermost directory first.
-            let bases = if segments[0] == "std" {
-                vec![joined]
+            // snapshot-root module, and only when the root does not supply it
+            // does the innermost enclosing directory of the importing module
+            // win instead.
+            let module_path = logical_path.strip_prefix("std/").unwrap_or(&logical_path);
+            let (root_base, name) = if segments[0] == "std" {
+                (joined.clone(), segments[1..].join("/"))
             } else {
-                let module_path = logical_path.strip_prefix("std/").unwrap_or(&logical_path);
-                let mut bases = vec![format!("std/{joined}")];
-                bases.extend(
-                    enclosing_directories(module_path)
-                        .into_iter()
-                        .map(|directory| format!("std/{directory}/{joined}")),
-                );
-                bases
+                (format!("std/{joined}"), joined.clone())
             };
+            let mut bases = vec![root_base];
+            bases.extend(
+                enclosing_directories(module_path)
+                    .into_iter()
+                    .map(|directory| format!("std/{directory}/{name}")),
+            );
+            let bases = bases;
             for base in bases {
                 let file = format!("{base}.orna");
                 let directory = format!("{base}/main.orna");
