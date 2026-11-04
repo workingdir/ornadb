@@ -58,7 +58,14 @@ pub struct SystemProviderLink {
 }
 
 /// Links whose dispatch site is in a crate that depends on this one.
-const DECLARED_LINKS: [SystemProviderLink; 17] = [
+const DECLARED_LINKS: [SystemProviderLink; 18] = [
+    // `orna-application-v1` serves the admitted table catalogue through the
+    // evaluator's relation scan: it builds one `sys.Table` record per admitted
+    // table from the admitted schema.
+    SystemProviderLink {
+        member: SystemSurfaceMember::Relation("sys.catalog.tables"),
+        host: SystemProviderHost::Evaluator,
+    },
     // `orna-evaluator-v1`: `Evaluator::call` serves the `sys.Materialization`
     // rows natively from the decisions the activation recorded (ORNA-QUERY-006,
     // ORNA-CALL-004); the relation reaches no host relation source.
