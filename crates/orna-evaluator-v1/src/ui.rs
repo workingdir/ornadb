@@ -156,7 +156,26 @@ impl Context<'_, '_> {
             }
         }
 
-        let properties = properties
+        // A relation-valued property (a table node's rows) is materialised to a
+        // list of records first: `canonical()` refuses a relation, and a node
+        // must stay renderer-neutral data (ORNA-APP-003).
+        let mut materialized = Vec::with_capacity(properties.len());
+        for (name, value) in properties {
+            let value = match value {
+                Value::Relation(plan) => {
+                    let mut rows = Vec::new();
+                    self.for_each_relation_value(plan, 1, |context, row| {
+                        rows.push(row);
+                        context.items(rows.len())?;
+                        Ok(true)
+                    })?;
+                    Value::list(rows)
+                }
+                other => other.clone(),
+            };
+            materialized.push((name.clone(), value));
+        }
+        let properties = materialized
             .iter()
             .map(|(name, value)| {
                 self.string(name.clone())?;
