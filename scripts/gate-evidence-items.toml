@@ -71,9 +71,12 @@ limitations = ["Real 1.0 records are rejected as malformed rather than read (orn
 gate = "A"
 id = "A4"
 title = "Old commits decode under old rules"
-select = [{ record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" }]
+select = [
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "builder_regenerates_the_committed_bundle_byte_for_byte" },
+]
 limitations = [
-  "Key-only rows from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; stored columns and row values beyond the key-only record shape are not asserted; Blob compact encoding is excluded (ornadb-5il1.192, ornadb-5il1.191).",
+  "Key-only compact rows and 1.0.0 loose row units from a bundle built by the in-repo test encoder, not a 1.0.0 golden; key-bound min_key/max_key encoding is unresolved against the 1.0.0 key-schema text; stored columns and row values beyond the key-only record shape are not asserted; Blob rows are absent because the format-1 compact decoder admits no blob column (ornadb-5il1.192, ornadb-5il1.191).",
 ]
 
 [[item]]
@@ -427,10 +430,11 @@ id = "F2"
 title = "Preserve old commit decoding and byte identity; report annotation defaults as a new semantic coordinate"
 select = [
   { record = "workspace-cli", package = "orna-cli-v1", target = "test:migration_copy_cli" },
+  { record = "workspace-cli", package = "orna-cli-v1", target = "test:legacy_fixture_bundle", test = "committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy" },
   { record = "workspace-rest", package = "orna-repository-v1", target = "test:migration_copy", test = "populated_format2_dirty_workspace_is_preserved_in_copy" },
 ]
 limitations = [
-  "Byte identity only: old commits are not decoded, and the user supplies the annotation-default count (ornadb-5il1.184, ornadb-5il1.192).",
+  "A library call decodes a format-1 compact commit and its loose rows from the committed bundle, but no user command does, the user still supplies the annotation-default count, and no legacy Blob row exists to derive it from because the format-1 compact decoder admits no blob column (ornadb-5il1.184, ornadb-5il1.192, ornadb-5il1.398).",
 ]
 
 [[item]]

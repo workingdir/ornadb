@@ -19,11 +19,41 @@
 //! what the reader must parse.
 //!
 //! Fixed commit dates make the committed bundle bytes reproducible for a given
-//! git release; the bundle test pins its SHA-256.
+//! git release. The bundle test pins its SHA-256 and rebuilds the repository
+//! from this builder, asserting that the rebuilt bundle equals the committed
+//! one byte for byte, so a builder change without a regenerated bundle fails.
 //!
-//! The fixture covers key-only compact tables for `Int` (INT64), `Str`
-//! (BYTE_ARRAY STRING, `utf8`) and `Date` (INT32 DATE), each with a committed
-//! Parquet page-checksum profile, plus a committed gitlink.
+//! Members (Gate F, `implementation/ACCEPTANCE.md:61-68`):
+//!
+//! - the format marker `.orna/format.orna`, exactly
+//!   `{repository_format: 1, storage_profile: "compact-storage-v1"}`; 1.0.0
+//!   `19-repository.md` defines it as a legacy-format input while
+//!   ORNA-META-002 keeps `database.orna` for the new format, so both records
+//!   are present and 1.0.0 `40-upgrade-contract.md` ORNA-UPGRADE-001 still
+//!   dispatches the reader by the recorded format;
+//! - the database identity record `.orna/database.orna`;
+//! - a source record `main.orna`;
+//! - key-only compact tables for `Int` (INT64), `Str` (BYTE_ARRAY STRING,
+//!   `utf8`) and `Date` (INT32 DATE), each with a committed placement record,
+//!   manifest, shard, Parquet segment and page-checksum profile
+//!   (1.0.0 `23-storage.md` lines 88-106, 158-218);
+//! - one editable-placement table whose rows are loose row units under the
+//!   table namespace (1.0.0 `23-storage.md:13` ORNA-STORAGE-003 and :104, and
+//!   `07-tables.md` lines 295-397 key-path-v1 plus ORNA-ROW-001..005). The key
+//!   components stay inside the readable `key-path-v1` set, so the same path
+//!   text is canonical for both the 1.0.0 and the current VFS spelling. Gate F
+//!   needs committed loose rows because the legacy read path (query, history,
+//!   mount, export) must decode both representations of one format-1 commit;
+//! - a committed gitlink `vendor/stdlib` (a dependency pin, not a submodule
+//!   clone: ORNA-GIT-003 needs the gitlink record, not the checked-out work).
+//!
+//! Deliberately absent: `.orna/store`, so a legacy marker and a format-3 store
+//! never appear in one snapshot (the relabel guard in `format_context.rs` must
+//! report that pairing as `MixedFormats`); and any Blob-bearing row, because
+//! the format-1 compact decoder in `compact.rs` admits only Int/Bool/Str/Date
+//! (`PhysicalValueKind`) although 1.0.0 `23-storage.md:184` defines
+//! `Blob | blob | Unannotated BYTE_ARRAY`, so no legacy Blob value can be
+//! decoded yet and ORNA-UPGRADE-004's annotation default has no fixture value.
 //!
 //! Known remaining gap (not fixed in this slice): the manifest `min_key`/`max_key`
 //! and shard entry bounds are written as hex text of the canonical key bytes, exactly
@@ -64,6 +94,27 @@ const GENERATION: u64 = 1;
 const NEXT_GENERATION: u64 = 2;
 const SHARD_NUMBER: u64 = 0;
 const SHARD_FILE: &str = "shards/00000000.orna";
+const PLACEMENT_COMPACT: &str = "compact";
+const PLACEMENT_EDITABLE: &str = "editable";
+/// The editable-placement table added after the compact tables.
+const LOOSE_TABLE_NUMBER: u64 = 4;
+/// Table namespace and name, which the loose row path repeats
+/// (`contacts/Contact/<key component>.orna`, 1.0.0 `07-tables.md:374-380`).
+const LOOSE_NAMESPACE: &str = "contacts";
+const LOOSE_TABLE_NAME: &str = "Contact";
+/// One editable row: the encoded `Str` key component and the row-unit body.
+/// Row units hold non-key fields only (ORNA-ROW-001); the key is reconstructed
+/// from the path (ORNA-ROW-002).
+const LOOSE_ROWS: [(&str, &str); 2] = [
+    (
+        "alice-smith",
+        include_str!("../../tests/fixtures/legacy-loose-contact-alice-smith.orna"),
+    ),
+    (
+        "bob-jones",
+        include_str!("../../tests/fixtures/legacy-loose-contact-bob-jones.orna"),
+    ),
+];
 
 /// One physical segment of a fixture table. A table holds one variant only.
 enum Column {
@@ -247,6 +298,8 @@ pub fn write_legacy_format1_fixture(root: &Path) {
         publish_table(root, table_id(number), field_id(number), number, segments);
     }
 
+    publish_loose_table(root, table_id(LOOSE_TABLE_NUMBER));
+
     let head = git(root, &["rev-parse", "HEAD"]);
     git(
         root,
@@ -277,7 +330,11 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
     let table_root = format!(".orna/storage/{table}");
     let table_dir = root.join(&table_root);
     fs::create_dir_all(table_dir.join("shards")).unwrap();
-    fs::write(table_dir.join("policy.orna"), policy_record(table)).unwrap();
+    fs::write(
+        table_dir.join("policy.orna"),
+        policy_record(table, PLACEMENT_COMPACT),
+    )
+    .unwrap();
 
     let mut entries = Vec::new();
     let mut all_keys = Vec::new();
@@ -332,6 +389,45 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
     );
 }
 
+/// Writes one editable-placement table as one commit: the declaring source
+/// module, the committed placement record and one loose row unit per key.
+///
+/// The table root holds only `policy.orna`, which the compact inventory reads
+/// as "no compact state" (`compact.rs` `read_compact_manifest_inventory`), so
+/// the same commit carries both a table root and loose rows (1.0.0
+/// `23-storage.md:104`, "A table may also have editable rows under its
+/// ordinary table directory"). No compact key may collide with these keys
+/// (ORNA-STORAGE-013); the compact tables use their own table IDs.
+fn publish_loose_table(root: &Path, table: Uuid) {
+    let table_dir = root.join(format!(".orna/storage/{table}"));
+    fs::create_dir_all(&table_dir).unwrap();
+    fs::write(
+        table_dir.join("policy.orna"),
+        policy_record(table, PLACEMENT_EDITABLE),
+    )
+    .unwrap();
+
+    let namespace = root.join(LOOSE_NAMESPACE);
+    fs::create_dir_all(&namespace).unwrap();
+    fs::write(
+        namespace.join("main.orna"),
+        include_str!("../../tests/fixtures/legacy-loose-contacts-main.orna"),
+    )
+    .unwrap();
+
+    let rows = namespace.join(LOOSE_TABLE_NAME);
+    fs::create_dir_all(&rows).unwrap();
+    for (key, body) in LOOSE_ROWS {
+        fs::write(rows.join(format!("{key}.orna")), body).unwrap();
+    }
+
+    git(root, &["add", "--all"]);
+    git(
+        root,
+        &["commit", "--quiet", "-m", "orna: publish editable rows"],
+    );
+}
+
 /// One shard entry, before it is rendered into `shards/00000000.orna`.
 struct EntryRecord {
     segment_id: Uuid,
@@ -345,10 +441,16 @@ struct EntryRecord {
     columns: Vec<u8>,
 }
 
-/// `policy.orna` content is spec-silent in 1.0.0 (`23-storage.md` names the
-/// file in the layout tree only); this minimal record is a fixture choice.
-fn policy_record(table: Uuid) -> String {
-    format!("{{profile: \"{PROFILE}\", table: \"{table}\"}}\n")
+/// One table's committed placement record.
+///
+/// ORNA-STORAGE-007 (`23-storage.md:69`) requires every table to commit one of
+/// `automatic`, `editable` or `compact`; the layout tree at `23-storage.md:93-100`
+/// names `policy.orna` but the record shape is spec-silent there, so this
+/// minimal record is a fixture choice. The reader ignores the file's contents
+/// and treats a root holding only `policy.orna` as a table with no compact
+/// state (`compact.rs` `read_compact_manifest_inventory`).
+fn policy_record(table: Uuid, placement: &str) -> String {
+    format!("{{placement: \"{placement}\", table: \"{table}\"}}\n")
 }
 
 fn shard_record(schema: &[u8; 32], entries: &[EntryRecord]) -> String {
