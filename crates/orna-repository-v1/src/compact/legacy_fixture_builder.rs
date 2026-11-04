@@ -304,10 +304,15 @@ pub fn write_legacy_format1_golden_fixture(root: &Path, loose_sources: &Path) {
 }
 
 fn write_repository(root: &Path, loose_sources: Option<&Path>) {
-    git(root, &["init", "-b", "main"]);
+    // Pin everything a host could otherwise decide: the object format (a
+    // runner may default `init.defaultObjectFormat` to sha256), the line-ending
+    // conversion that decides stored blob bytes, and signing.
+    git(root, &["init", "--object-format=sha1", "-b", "main"]);
     git(root, &["config", "user.name", AUTHOR_NAME]);
     git(root, &["config", "user.email", AUTHOR_EMAIL]);
     git(root, &["config", "commit.gpgsign", "false"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    git(root, &["config", "core.eol", "lf"]);
     fs::write(
         root.join("main.orna"),
         include_str!("../../tests/fixtures/git-repository-main.orna"),

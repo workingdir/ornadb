@@ -208,9 +208,16 @@ Fixture: `crates/orna-cli-v1/tests/fixtures/legacy-format1.bundle`, built by the
 `crates/orna-cli-v1/tests/legacy_fixture_bundle.rs` and the bundle is listed in
 `scripts/fixture-manifest.sha256`. The `legacy_fixture_bundle` target also has a
 `builder_regenerates_the_committed_bundle_byte_for_byte` test, which rebuilds
-the repository from the builder and requires the rebuilt bundle to equal the
-committed one byte for byte, so a builder change without a regenerated bundle
-fails. The pinned digest alone could not catch that.
+the repository from the builder and compares it with a clone of the committed
+bundle: `HEAD`, every `refs/heads`/`refs/tags` entry, the ordered
+`rev-list --objects --all` graph, and every object's content byte for byte. A
+builder change therefore needs a regenerated bundle, and the pinned digest alone
+could not catch that. The `git bundle` file bytes are deliberately not compared:
+they depend on the git release (pack version, delta heuristics, zlib) and on the
+host's default object format and branch, so file-byte equality would test the
+runner rather than the builder. The builder pins the object format
+(`sha1`), line-ending conversion and commit dates, so the checked-in artifact
+stays stable for a given git release.
 
 The builder has two entry points. `write_legacy_format1_fixture` writes the
 shell (marker, identity, source record, compact tables, gitlink);
