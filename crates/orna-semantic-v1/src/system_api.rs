@@ -68,6 +68,10 @@ pub(crate) struct TypeDescriptor {
     pub invariants: Vec<String>,
 }
 
+/// The grouped handle over `sys.Table` rows, served from the admitted table
+/// catalogue.
+pub(crate) const SYS_CATALOGUE_TABLES: &str = "sys.catalog.tables";
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RelationDescriptor {
     pub name: String,
@@ -81,6 +85,8 @@ pub(crate) struct RelationDescriptor {
     pub invariants: Vec<String>,
     pub fields: BTreeMap<String, SystemType>,
     pub reference_type: SystemType,
+    /// The relation's own type: `Relation<T>` over the row type.
+    pub relation_type: SystemType,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -516,6 +522,10 @@ impl SystemApi {
                     key_fields: relation.key_fields,
                     invariants: relation.invariants,
                     fields: fields.clone(),
+                    relation_type: SystemType::Applied {
+                        base: "Relation".into(),
+                        arguments: vec![reference_type.clone()],
+                    },
                     reference_type,
                 },
             )?;
@@ -767,6 +777,13 @@ impl SystemApi {
         }
         if let Some(singleton) = self.singletons.get(&name) {
             return PathResolution::ReadOnly(&singleton.ty);
+        }
+        // The admitted table catalogue is served by the evaluator, so its
+        // grouped handle reads as its relation type.
+        if name == SYS_CATALOGUE_TABLES
+            && let Some(relation) = self.relation(&name)
+        {
+            return PathResolution::ReadOnly(&relation.relation_type);
         }
         if self.functions.contains_key(&name)
             || self.relation(&name).is_some()
