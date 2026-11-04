@@ -23,10 +23,11 @@
 //!
 //! Non-claims (partial slice of bead 5il1.394; see docs/migration-1.0.0.md):
 //! - Not a byte-for-byte 1.0.0 golden: the bundle comes from the test encoder.
-//! - No Blob-bearing row: the format-1 compact decoder admits no `Blob`/`blob`
-//!   column (`PhysicalValueKind` in `compact.rs`) although 1.0.0
-//!   `23-storage.md:184` defines one, so ORNA-UPGRADE-004's annotation default
-//!   still has no fixture value to apply.
+//! - The `Blob` table proves the decoder reads an unannotated `BYTE_ARRAY`
+//!   (1.0.0 `23-storage.md:184`) as payload bytes only. The ORNA-UPGRADE-004
+//!   octet-stream default is applied by the migration layer
+//!   (`MigrationAnnotationDefaults`), not by this reader, so no annotated value
+//!   identity is asserted from a legacy read.
 //! - `state.db` and persistent consumers are not covered (runtime-only; a
 //!   persistent consumer with a Blob argument is not modelled).
 //! - Key-bound encoding (hex of canonical key bytes in `min_key`/`max_key`) is
@@ -45,7 +46,7 @@ const BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
 /// SHA-256 of `BUNDLE`. Regenerate with the `build_legacy_fixture` example
 /// (`<empty-root> <bundle-path> tests/fixtures`) and
 /// `python3 scripts/check_fixture_manifest.py --update` when the builder changes.
-const BUNDLE_SHA256: &str = "19f36c5aa732ba69ad95cb8d24c0771946cd6326ebed8eb2a9123a6d4a9b1dc1";
+const BUNDLE_SHA256: &str = "227ef80cfafde552886f835d4c261552672e3de98751938c541d95d6bb3a0338";
 /// The 1.0.0 format marker, including its trailing LF. 1.0.0 `19-repository.md`
 /// keeps it a legacy-format input, and it is the record the relabel guard reads,
 /// so its exact bytes are part of the fixture contract.
@@ -165,13 +166,14 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
     let tables = repository.read_legacy_authoritative_tables(&head).unwrap();
 
     // Table 1 is Int (two segments, four rows); table 2 is Str (three rows);
-    // table 3 is Date (three rows, including the negative day -1).
+    // table 3 is Date (three rows, including the negative day -1); table 5 is
+    // the Int-keyed `Blob` table (two rows).
     let mut row_counts = tables
         .iter()
         .map(|table| table.rows().len())
         .collect::<Vec<_>>();
     row_counts.sort_unstable();
-    assert_eq!(row_counts, vec![3, 3, 4]);
+    assert_eq!(row_counts, vec![2, 3, 3, 4]);
 
     let key_sets = tables
         .iter()
@@ -189,11 +191,18 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
             .map(|value: i64| CanonicalValue::new(OvbRaw::Int(value.into())).unwrap())
             .collect::<Vec<_>>(),
     );
+    let blob_table_keys = encoded_keys(
+        &[1, 2].map(|value: i64| CanonicalValue::new(OvbRaw::Int(value.into())).unwrap()),
+    );
     let str_keys = encoded_keys(
         &["alpha", "beta", "gamma"]
             .map(|value| CanonicalValue::new(OvbRaw::Text(value.to_owned())).unwrap()),
     );
     assert!(key_sets.contains(&int_keys), "Int keys 1..=4 not found");
+    assert!(
+        key_sets.contains(&blob_table_keys),
+        "Blob table Int keys 1..=2 not found"
+    );
     assert!(
         key_sets.contains(&str_keys),
         "Str keys alpha/beta/gamma not found"
@@ -227,12 +236,23 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
         }
     }
 
-    // Key-only live rows: each decoded value is the 60009 record the reader builds
-    // for a key-only segment, `[null, [[field, key]]]`. The single field is named
-    // by a 16-byte UUID tagged 37 and repeats the row key. The fixture stores no
-    // other column, so no stored value is asserted here.
+    // Each decoded row value is the 60009 record the reader builds,
+    // `[null, [[field, value], ...]]`. Every field is named by a 16-byte UUID
+    // tagged 37; the key field repeats the row key. Three tables store only that
+    // key column. The `Blob` table also stores one value column: 1.0.0
+    // `23-storage.md:184` maps `Blob` to an unannotated BYTE_ARRAY, so the field
+    // holds the payload bytes alone. No media type or suffix appears, because
+    // ORNA-BLOB-009 keeps the legacy bytes-only value and the ORNA-UPGRADE-004
+    // octet-stream default belongs to the migration layer.
+    let expected_blobs: [&[u8]; 2] = [
+        b"\x00\xff\x80orna",
+        // The second payload is empty: a zero-length Blob is still a present value.
+        b"",
+    ];
+    let mut blob_tables = 0usize;
     for table in &tables {
         let mut field_names = std::collections::BTreeSet::new();
+        let mut blobs = Vec::new();
         for row in table.rows() {
             let OvbRaw::Tag(60009, record) = row.value().raw() else {
                 panic!("row value is not a 60009 record");
@@ -243,24 +263,45 @@ fn committed_legacy_format1_bundle_reads_and_admits_through_migrate_copy() {
             let [OvbRaw::Null, OvbRaw::Array(fields)] = parts.as_slice() else {
                 panic!("60009 record is not [null, fields]");
             };
-            let [OvbRaw::Array(field)] = fields.as_slice() else {
-                panic!("key-only row must carry exactly one field");
-            };
-            let [OvbRaw::Tag(37, field_name), stored] = field.as_slice() else {
-                panic!("key-only field is not a tagged name and a value");
-            };
-            let OvbRaw::Bytes(name_bytes) = &**field_name else {
-                panic!("key-only field name is not bytes");
-            };
-            assert_eq!(name_bytes.len(), 16, "field name is a 16-byte UUID");
-            assert!(
-                stored == row.key().raw(),
-                "key-only field repeats the row key"
-            );
-            field_names.insert(name_bytes.clone());
+            let mut key_field = None;
+            for field in fields {
+                let OvbRaw::Array(field) = field else {
+                    panic!("row field is not an array");
+                };
+                let [OvbRaw::Tag(37, field_name), stored] = field.as_slice() else {
+                    panic!("row field is not a tagged name and a value");
+                };
+                let OvbRaw::Bytes(name_bytes) = &**field_name else {
+                    panic!("row field name is not bytes");
+                };
+                assert_eq!(name_bytes.len(), 16, "field name is a 16-byte UUID");
+                if stored == row.key().raw() {
+                    assert!(key_field.is_none(), "one key field per row");
+                    key_field = Some(name_bytes.clone());
+                } else {
+                    let OvbRaw::Bytes(payload) = stored else {
+                        panic!("stored value is not a Blob payload");
+                    };
+                    blobs.push(payload.clone());
+                }
+            }
+            let key_field = key_field.expect("each row carries its key field");
+            field_names.insert(key_field);
         }
         assert_eq!(field_names.len(), 1, "each table names one key field");
+        if !blobs.is_empty() {
+            blob_tables += 1;
+            assert_eq!(
+                blobs,
+                expected_blobs
+                    .iter()
+                    .map(|payload| payload.to_vec())
+                    .collect::<Vec<_>>(),
+                "legacy Blob payloads must survive decoding byte for byte"
+            );
+        }
     }
+    assert_eq!(blob_tables, 1, "exactly one table stores a Blob column");
 
     let source_head_before = git(&source, &["rev-parse", "HEAD"]);
     let source_status_before = git(&source, &["status", "--porcelain"]);
