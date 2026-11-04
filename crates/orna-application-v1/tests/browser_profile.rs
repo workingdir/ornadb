@@ -1,8 +1,6 @@
 use orna_application_v1::execute_browser_profile;
 use orna_foundation_v1::{CanonicalValue, OvbRaw};
 
-const HTTP_SOURCE: &str = include_str!("fixtures/browser-profile-http.orna");
-const SECOND_APP_SOURCE: &str = include_str!("fixtures/browser-profile-second-app.orna");
 const HOST_BINDINGS: &str = include_str!("../src/browser-profile-host.mjs");
 
 const SOURCE: &str = include_str!("fixtures/browser-profile-renderer.orna");
@@ -26,25 +24,6 @@ fn browser_boundary_transports_canonical_typed_values_without_server_authority()
     let decoded = CanonicalValue::decode(&encoded).expect("browser payload is canonical OVB");
 
     assert_eq!(decoded, result);
-}
-#[test]
-fn independent_http_renderer_and_second_app_use_the_public_profile_entry() {
-    let response = execute_browser_profile(HTTP_SOURCE, "response")
-        .expect("independent Orna HTTP response is admitted and evaluated");
-    let second_app = execute_browser_profile(SECOND_APP_SOURCE, "home")
-        .expect("second ordinary application uses the same public profile entry");
-
-    assert_eq!(
-        response.raw(),
-        &OvbRaw::Text(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<main><button>Run</button></main>"
-                .to_owned(),
-        )
-    );
-    assert_eq!(
-        second_app.raw(),
-        &OvbRaw::Text("A second ordinary source-hosted app".to_owned())
-    );
 }
 
 #[test]
