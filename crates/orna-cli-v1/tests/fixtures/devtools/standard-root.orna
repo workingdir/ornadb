@@ -1,0 +1,3 @@
+use ui;
+
+pub fn version(): Str = "1.0.0";
