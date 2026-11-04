@@ -50,8 +50,10 @@
 //! - the database identity record `.orna/database.orna`;
 //! - a source record `main.orna`;
 //! - key-only compact tables for `Int` (INT64), `Str` (BYTE_ARRAY STRING,
-//!   `utf8`) and `Date` (INT32 DATE), each with a committed placement record,
-//!   manifest, shard, Parquet segment and page-checksum profile
+//!   `utf8`) and `Date` (INT32 DATE), plus one `Int`-keyed table whose stored
+//!   value column is an unannotated `BYTE_ARRAY` `Blob` (1.0.0
+//!   `23-storage.md:184`), each with a committed placement record, manifest,
+//!   shard, Parquet segment and page-checksum profile
 //!   (1.0.0 `23-storage.md` lines 88-106, 158-218);
 //! - one editable-placement table whose rows are loose row units under the
 //!   table namespace (1.0.0 `23-storage.md:13` ORNA-STORAGE-003 and :104, and
@@ -65,11 +67,14 @@
 //!
 //! Deliberately absent: `.orna/store`, so a legacy marker and a format-3 store
 //! never appear in one snapshot (the relabel guard in `format_context.rs` must
-//! report that pairing as `MixedFormats`); and any Blob-bearing row, because
-//! the format-1 compact decoder in `compact.rs` admits only Int/Bool/Str/Date
-//! (`PhysicalValueKind`) although 1.0.0 `23-storage.md:184` defines
-//! `Blob | blob | Unannotated BYTE_ARRAY`, so no legacy Blob value can be
-//! decoded yet and ORNA-UPGRADE-004's annotation default has no fixture value.
+//! report that pairing as `MixedFormats`).
+//!
+//! The `Blob` value column is written as 1.0.0 `23-storage.md:184` defines it:
+//! an unannotated `BYTE_ARRAY` with no parameters, carrying payload bytes only.
+//! The reader decodes it to the raw byte string with no media type or suffix,
+//! because ORNA-BLOB-009 keeps legacy bytes-only semantics and ORNA-UPGRADE-004's
+//! octet-stream default is applied explicitly by the migration layer
+//! (`MigrationAnnotationDefaults`), not at the format-1 decode seam.
 //!
 //! Known remaining gap (not fixed in this slice): the manifest `min_key`/`max_key`
 //! and shard entry bounds are written as hex text of the canonical key bytes, exactly
@@ -114,6 +119,14 @@ const PLACEMENT_COMPACT: &str = "compact";
 const PLACEMENT_EDITABLE: &str = "editable";
 /// The editable-placement table added after the compact tables.
 const LOOSE_TABLE_NUMBER: u64 = 4;
+/// The compact table whose stored value column is an unannotated `BYTE_ARRAY`
+/// `Blob` (1.0.0 `23-storage.md:184`). It is keyed by `Int` because a `Blob`
+/// primary key is inadmissible (ORNA-BLOB-003).
+const BLOB_TABLE_NUMBER: u64 = 5;
+/// One payload per row of the `Blob` table, written unannotated: the bytes are
+/// the whole stored value. They are deliberately not valid UTF-8 and include an
+/// empty payload, so a decoder that decodes text or drops empty values fails.
+const BLOB_PAYLOADS: [&[u8]; 2] = [&[0x00, 0xff, 0x80, b'o', b'r', b'n', b'a'], &[]];
 /// Table namespace and name, which the loose row path repeats
 /// (`contacts/Contact/<key component>.orna`, 1.0.0 `07-tables.md:374-380`).
 const LOOSE_NAMESPACE: &str = "contacts";
@@ -130,11 +143,45 @@ const LOOSE_ROWS: [(&str, &str); 2] = [
     ("bob-jones", "legacy-loose-contact-bob-jones.orna"),
 ];
 
-/// One physical segment of a fixture table. A table holds one variant only.
+/// One physical segment of a fixture table. A table holds one key variant only.
 enum Column {
     Int(Vec<i64>),
     Date(Vec<i32>),
     Str(Vec<&'static str>),
+}
+
+/// One fixture segment: its key column and, when the table stores a `Blob`
+/// value column, the payload of every row (1.0.0 `23-storage.md:184`).
+struct Segment {
+    key: Column,
+    blob: Option<Vec<&'static [u8]>>,
+}
+
+impl Segment {
+    const fn keys(key: Column) -> Self {
+        Self { key, blob: None }
+    }
+
+    fn with_blob(key: Column, blob: Vec<&'static [u8]>) -> Self {
+        let rows = match &key {
+            Column::Int(values) => values.len(),
+            Column::Date(values) => values.len(),
+            Column::Str(values) => values.len(),
+        };
+        assert_eq!(
+            blob.len(),
+            rows,
+            "a Blob value column carries one payload per row"
+        );
+        Self {
+            key,
+            blob: Some(blob),
+        }
+    }
+
+    fn blob_values(&self) -> Option<&[&'static [u8]]> {
+        self.blob.as_deref()
+    }
 }
 
 /// Typed primary key of one row. Ordering is the value ordering of the key
@@ -199,13 +246,42 @@ impl Column {
         &self,
         table: Uuid,
         schema: &SchemaDescriptor,
-        field: Uuid,
+        key_field: Uuid,
+        blob_field: Option<Uuid>,
+        blob_values: Option<&[&'static [u8]]>,
         columns: &[u8],
     ) -> Vec<u8> {
-        let (physical, annotation) = self.physical();
+        // The compact profile orders the physical descriptor array by physical
+        // leaf path (1.0.0 `23-storage.md:175`), and verification requires the
+        // Parquet column order to agree, so declare and write the leaves in
+        // ascending path order.
+        let key_path = format!("f_{}", key_field.simple());
+        let mut leaves = vec![Leaf {
+            path: key_path,
+            physical: self.physical().0,
+            annotation: self.physical().1,
+            values: LeafValues::Key(self),
+        }];
+        if let (Some(field), Some(values)) = (blob_field, blob_values) {
+            leaves.push(Leaf {
+                path: format!("f_{}", field.simple()),
+                // 1.0.0 `23-storage.md:184`: unannotated BYTE_ARRAY.
+                physical: "BYTE_ARRAY",
+                annotation: "",
+                values: LeafValues::Blob(values),
+            });
+        }
+        leaves.sort_by(|left, right| left.path.cmp(&right.path));
         let message = format!(
-            "message schema {{ REQUIRED {physical} f_{}{annotation}; }}",
-            field.simple()
+            "message schema {{ {} }}",
+            leaves
+                .iter()
+                .map(|leaf| format!(
+                    "REQUIRED {} {}{};",
+                    leaf.physical, leaf.path, leaf.annotation
+                ))
+                .collect::<Vec<_>>()
+                .join(" ")
         );
         let schema_descriptor =
             Arc::new(parse_message_type(&message).expect("fixture message type"));
@@ -241,32 +317,44 @@ impl Column {
         let mut writer =
             SerializedFileWriter::new(&mut bytes, schema_descriptor, properties).unwrap();
         let mut row_group = writer.next_row_group().unwrap();
-        let mut column = row_group.next_column().unwrap().unwrap();
-        match self {
-            Self::Int(values) => {
-                column
-                    .typed::<Int64Type>()
-                    .write_batch(values.as_slice(), None, None)
-                    .unwrap();
+        for leaf in &leaves {
+            let mut column = row_group.next_column().unwrap().unwrap();
+            match leaf.values {
+                LeafValues::Key(Self::Int(values)) => {
+                    column
+                        .typed::<Int64Type>()
+                        .write_batch(values.as_slice(), None, None)
+                        .unwrap();
+                }
+                LeafValues::Key(Self::Date(values)) => {
+                    column
+                        .typed::<Int32Type>()
+                        .write_batch(values.as_slice(), None, None)
+                        .unwrap();
+                }
+                LeafValues::Key(Self::Str(values)) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(value.as_bytes()))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
+                LeafValues::Blob(values) => {
+                    let values = values
+                        .iter()
+                        .map(|value| ByteArray::from(*value))
+                        .collect::<Vec<_>>();
+                    column
+                        .typed::<ByteArrayType>()
+                        .write_batch(&values, None, None)
+                        .unwrap();
+                }
             }
-            Self::Date(values) => {
-                column
-                    .typed::<Int32Type>()
-                    .write_batch(values.as_slice(), None, None)
-                    .unwrap();
-            }
-            Self::Str(values) => {
-                let values = values
-                    .iter()
-                    .map(|value| ByteArray::from(value.as_bytes()))
-                    .collect::<Vec<_>>();
-                column
-                    .typed::<ByteArrayType>()
-                    .write_batch(&values, None, None)
-                    .unwrap();
-            }
+            column.close().unwrap();
         }
-        column.close().unwrap();
         row_group.close().unwrap();
         writer.close().unwrap();
 
@@ -280,6 +368,19 @@ impl Column {
         bytes[footer + 1] = 0x02;
         with_page_checksums(bytes)
     }
+}
+
+/// One declared Parquet leaf of a fixture segment.
+struct Leaf<'a> {
+    path: String,
+    physical: &'static str,
+    annotation: &'static str,
+    values: LeafValues<'a>,
+}
+
+enum LeafValues<'a> {
+    Key(&'a Column),
+    Blob(&'a [&'static [u8]]),
 }
 
 /// Writes the legacy format-1 shell into `root`: the format marker, the database
@@ -334,9 +435,15 @@ fn write_repository(root: &Path, loose_sources: Option<&Path>) {
     git(root, &["add", "."]);
     git(root, &["commit", "-m", "initial"]);
 
-    for (ordinal, segments) in fixture_tables().iter().enumerate() {
-        let number = u64::try_from(ordinal + 1).expect("table number");
-        publish_table(root, table_id(number), field_id(number), number, segments);
+    for (number, segments) in fixture_tables() {
+        publish_table(
+            root,
+            table_id(number),
+            field_id(number),
+            value_field_id(number),
+            number,
+            &segments,
+        );
     }
 
     if let Some(sources) = loose_sources {
@@ -362,19 +469,53 @@ fn record_gitlink(root: &Path) {
     git(root, &["commit", "-m", "orna: record stdlib gitlink"]);
 }
 
-/// Three tables: two `Int` segments, one `Str` segment, one `Date` segment.
-fn fixture_tables() -> Vec<Vec<Column>> {
+/// Four tables: two `Int` segments, one `Str` segment, one `Date` segment, and
+/// one `Int`-keyed table whose stored value column is an unannotated `BYTE_ARRAY`
+/// `Blob` (1.0.0 `23-storage.md:184`). Numbers are explicit because the editable
+/// table takes `LOOSE_TABLE_NUMBER`.
+fn fixture_tables() -> Vec<(u64, Vec<Segment>)> {
     vec![
-        vec![Column::Int(vec![1, 2]), Column::Int(vec![3, 4])],
-        vec![Column::Str(vec!["alpha", "beta", "gamma"])],
-        vec![Column::Date(vec![-1, 0, 1])],
+        (
+            1,
+            vec![
+                Segment::keys(Column::Int(vec![1, 2])),
+                Segment::keys(Column::Int(vec![3, 4])),
+            ],
+        ),
+        (
+            2,
+            vec![Segment::keys(Column::Str(vec!["alpha", "beta", "gamma"]))],
+        ),
+        (3, vec![Segment::keys(Column::Date(vec![-1, 0, 1]))]),
+        (
+            BLOB_TABLE_NUMBER,
+            vec![Segment::with_blob(
+                Column::Int(vec![1, 2]),
+                vec![BLOB_PAYLOADS[0], BLOB_PAYLOADS[1]],
+            )],
+        ),
     ]
 }
 
 /// Writes one table's committed 1.0.0 compact layout as one commit.
-fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &[Column]) {
-    let type_name = segments[0].type_name();
-    let schema = table_schema(table, field, type_name);
+fn publish_table(
+    root: &Path,
+    table: Uuid,
+    field: Uuid,
+    value_field: Uuid,
+    number: u64,
+    segments: &[Segment],
+) {
+    let type_name = segments[0].key.type_name();
+    let has_blob = segments[0].blob.is_some();
+    assert!(
+        segments
+            .iter()
+            .all(|segment| segment.blob.is_some() == has_blob),
+        "one table declares one set of value columns"
+    );
+    let blob_field = has_blob.then_some(value_field);
+    let schema = table_schema(table, field, type_name, blob_field);
     let schema_digest = schema_fingerprint(&schema);
     let table_root = format!(".orna/storage/{table}");
     let table_dir = root.join(&table_root);
@@ -387,7 +528,7 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
 
     let mut entries = Vec::new();
     let mut all_keys = Vec::new();
-    for (index, column) in segments.iter().enumerate() {
+    for (index, segment) in segments.iter().enumerate() {
         let ordinal = (number << 16) | u64::try_from(index + 1).expect("segment number");
         let segment_id = Uuid::from_u64_pair(SEGMENT_NAMESPACE, ordinal | 0x8000_0000_0000_0000);
         let relative = format!(
@@ -396,10 +537,17 @@ fn publish_table(root: &Path, table: Uuid, field: Uuid, number: u64, segments: &
         );
         let file = root.join(&relative);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
-        let columns = columns_for(field, type_name, column.encoding());
-        let bytes = column.parquet(table, &schema, field, &columns);
+        let columns = segments_columns(field, type_name, segment.key.encoding(), blob_field);
+        let bytes = segment.key.parquet(
+            table,
+            &schema,
+            field,
+            blob_field,
+            segment.blob_values(),
+            &columns,
+        );
         fs::write(&file, &bytes).unwrap();
-        let keys = column.keys();
+        let keys = segment.key.keys();
         entries.push(EntryRecord {
             segment_id,
             relative_path: relative.clone(),
@@ -568,7 +716,34 @@ fn field_id(number: u64) -> Uuid {
     Uuid::from_u64_pair(FIELD_NAMESPACE, number)
 }
 
-fn table_schema(table: Uuid, field: Uuid, type_name: &str) -> SchemaDescriptor {
+/// The stable identity of a table's stored `Blob` value column, distinct from
+/// its key column.
+fn value_field_id(number: u64) -> Uuid {
+    Uuid::from_u64_pair(FIELD_NAMESPACE, number | 0x8000_0000_0000_0000)
+}
+
+/// The declared leaves of one fixture table, each with its stable field
+/// identity, logical type name and role (`0` key, `1` stored value).
+fn declared_fields(
+    key_field: Uuid,
+    key_type: &str,
+    blob_field: Option<Uuid>,
+) -> Vec<(Uuid, &str, u8)> {
+    let mut declared = vec![(key_field, key_type, 0u8)];
+    if let Some(field) = blob_field {
+        declared.push((field, "Blob", 1));
+    }
+    declared.sort_by_key(|(field, _, _)| field.as_bytes().to_vec());
+    declared
+}
+
+fn table_schema(
+    table: Uuid,
+    key_field: Uuid,
+    key_type: &str,
+    blob_field: Option<Uuid>,
+) -> SchemaDescriptor {
+    let declared = declared_fields(key_field, key_type, blob_field);
     SchemaDescriptor::new(OvbRaw::Map(vec![
         (OvbRaw::Int(0.into()), OvbRaw::Int(1.into())),
         (
@@ -579,29 +754,39 @@ fn table_schema(table: Uuid, field: Uuid, type_name: &str) -> SchemaDescriptor {
             OvbRaw::Int(2.into()),
             OvbRaw::Array(vec![OvbRaw::Tag(
                 37,
-                Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
+                Box::new(OvbRaw::Bytes(key_field.as_bytes().to_vec())),
             )]),
         ),
         (
             OvbRaw::Int(3.into()),
-            OvbRaw::Array(vec![OvbRaw::Array(vec![
-                OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
-                OvbRaw::Text(format!("f_{}", field.simple())),
-                OvbRaw::Array(vec![
-                    OvbRaw::Int(0.into()),
-                    OvbRaw::Text(type_name.to_owned()),
-                ]),
-                OvbRaw::Int(0.into()),
-                OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
-            ])]),
+            OvbRaw::Array(
+                declared
+                    .into_iter()
+                    .map(|(field, type_name, role)| {
+                        OvbRaw::Array(vec![
+                            OvbRaw::Tag(37, Box::new(OvbRaw::Bytes(field.as_bytes().to_vec()))),
+                            OvbRaw::Text(format!("f_{}", field.simple())),
+                            OvbRaw::Array(vec![
+                                OvbRaw::Int(0.into()),
+                                OvbRaw::Text(type_name.to_owned()),
+                            ]),
+                            OvbRaw::Int(role.into()),
+                            OvbRaw::Array(vec![OvbRaw::Int(0.into())]),
+                        ])
+                    })
+                    .collect(),
+            ),
         ),
         (OvbRaw::Int(4.into()), OvbRaw::Array(Vec::new())),
     ]))
     .expect("table schema")
 }
 
-fn columns_for(field: Uuid, type_name: &str, encoding: &str) -> Vec<u8> {
-    CanonicalValue::new(OvbRaw::Array(vec![OvbRaw::Array(vec![
+/// One entry of the `orna.columns.ovb` physical descriptor array:
+/// `[field_id_path, physical_path, logical_type_node, encoding_kind, parameters]`
+/// (1.0.0 `23-storage.md:175`).
+fn column_descriptor(field: Uuid, type_name: &str, encoding: &str) -> OvbRaw {
+    OvbRaw::Array(vec![
         OvbRaw::Array(vec![OvbRaw::Tag(
             37,
             Box::new(OvbRaw::Bytes(field.as_bytes().to_vec())),
@@ -613,7 +798,35 @@ fn columns_for(field: Uuid, type_name: &str, encoding: &str) -> Vec<u8> {
         ]),
         OvbRaw::Text(encoding.to_owned()),
         OvbRaw::Array(Vec::new()),
-    ])]))
+    ])
+}
+
+/// The `orna.columns.ovb` descriptor array for one table. Entries are ordered by
+/// physical leaf path, which is what the profile requires and what the reader
+/// checks against the Parquet column order.
+fn segments_columns(
+    key_field: Uuid,
+    key_type: &str,
+    encoding: &str,
+    blob_field: Option<Uuid>,
+) -> Vec<u8> {
+    let mut descriptors = vec![(
+        format!("f_{}", key_field.simple()),
+        column_descriptor(key_field, key_type, encoding),
+    )];
+    if let Some(field) = blob_field {
+        descriptors.push((
+            format!("f_{}", field.simple()),
+            column_descriptor(field, "Blob", "blob"),
+        ));
+    }
+    descriptors.sort_by(|left, right| left.0.cmp(&right.0));
+    CanonicalValue::new(OvbRaw::Array(
+        descriptors
+            .into_iter()
+            .map(|(_, descriptor)| descriptor)
+            .collect(),
+    ))
     .expect("columns")
     .encode()
     .expect("columns encoding")
