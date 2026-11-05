@@ -22,8 +22,9 @@ use orna_runtime::vfs::{VfsComponent, project_key_component, unproject_component
 use orna_runtime::{TableMutation, TableObjectId};
 use orna_semantic::{
     Analysis, Catalogue, ModuleInput, Namespace, RowKeySpelling, RowUnitInput,
-    StandardCatalogueError, StandardDependencyProfile, StandardProfileError, SymbolKind, analyze,
-    analyze_with_catalogue, lower_data_expression, lower_row_unit_with_key_spelling,
+    StandardBodyDiagnostic, StandardCatalogueError, StandardDependencyProfile,
+    StandardProfileError, SymbolKind, SystemProviders, analyze, analyze_with_catalogue,
+    check_standard_sources, lower_data_expression, lower_row_unit_with_key_spelling,
 };
 use orna_syntax::{
     Declaration, Expr, FieldInitializer, TableMember, parse_module, parse_module_with_file,
@@ -1529,6 +1530,9 @@ impl ProjectLoader {
         if let Err(reason) =
             self.load_attached_standard_commit(repository, &module_commit, &mut project)
         {
+            if let Some(error) = reason.body_load_error() {
+                return Err(error);
+            }
             project.standard_attach_failure = Some(reason.to_string());
         }
         Ok(project)
@@ -1551,6 +1555,9 @@ impl ProjectLoader {
         if let Err(reason) =
             self.load_attached_standard_commit(repository, &module_commit, &mut project)
         {
+            if let Some(error) = reason.body_load_error() {
+                return Err(error);
+            }
             project.standard_attach_failure = Some(reason.to_string());
         }
         Ok(project)
@@ -1628,6 +1635,26 @@ impl ProjectLoader {
             sources.clone(),
         )
         .map_err(StandardAttachError::ProfileInvalid)?;
+        // A catalogue derives declarations only: `std` is a reserved root for
+        // ordinary analysis, so a pinned standard body would otherwise never
+        // reach the checker (ORNA-MODULE-003). Every body in the captured
+        // closure is checked here, against a catalogue built from these same
+        // bytes, so a body naming a standard declaration resolves while each
+        // body itself is proven.
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&profile, sources.iter().cloned())
+            .map_err(StandardAttachError::CatalogueInvalid)?;
+        // Typedness is decided against the declared `sys` surface: whether a
+        // linked host provider exists is an execution concern, not a source
+        // contract, and the checker reports it separately.
+        let bodies = check_standard_sources(
+            &catalogue,
+            sources.iter().cloned(),
+            SystemProviders::DeclaredSurface,
+        );
+        if let Some(diagnostic) = bodies.first().cloned() {
+            return Err(StandardAttachError::InvalidBody(diagnostic));
+        }
         project.standard_runtime_modules = standard_runtime_closure(&requested, &sources);
         project.standard_modules = requested;
         project.standard_profile = Some(profile);
@@ -1666,6 +1693,29 @@ enum StandardAttachError {
     ClosureIncomplete,
     /// The loaded sources do not form a verifiable standard profile.
     ProfileInvalid(StandardProfileError),
+    /// The pinned sources do not form a verifiable catalogue.
+    CatalogueInvalid(StandardCatalogueError),
+    /// A pinned standard module body failed type checking.
+    InvalidBody(StandardBodyDiagnostic),
+}
+
+impl StandardAttachError {
+    /// A pinned body the checker decided is wrong is a source-contract
+    /// violation, not an unavailable dependency, so the load fails with it.
+    /// Every other reason stays a diagnostic: the project still loads and then
+    /// reports its own unresolved `std` import.
+    fn body_load_error(&self) -> Option<ProjectLoadError> {
+        let Self::InvalidBody(diagnostic) = self else {
+            return None;
+        };
+        Some(ProjectLoadError::InvalidStandardBody {
+            logical_path: diagnostic.logical_path.clone(),
+            line: diagnostic.line,
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+            notes: diagnostic.notes.clone(),
+        })
+    }
 }
 
 impl fmt::Display for StandardAttachError {
@@ -1698,6 +1748,19 @@ impl fmt::Display for StandardAttachError {
             Self::ProfileInvalid(error) => write!(
                 formatter,
                 "the pinned sources do not form a verifiable profile: {error:?}"
+            ),
+            Self::CatalogueInvalid(error) => write!(
+                formatter,
+                "the pinned sources do not form a verifiable catalogue: {error:?}"
+            ),
+            Self::InvalidBody(diagnostic) => write!(
+                formatter,
+                "pinned standard module {}:{} does not type check: {}: {} {}",
+                diagnostic.logical_path,
+                diagnostic.line,
+                diagnostic.code,
+                diagnostic.message,
+                diagnostic.notes.join("; ")
             ),
         }
     }
@@ -2081,6 +2144,13 @@ pub enum ProjectLoadError {
     DuplicateModuleNamespace,
     ReservedNamespace,
     StandardSnapshotMismatch,
+    InvalidStandardBody {
+        logical_path: String,
+        line: usize,
+        code: String,
+        message: String,
+        notes: Vec<String>,
+    },
     InvalidTableSchema,
     InvalidSourceRow,
 }
@@ -2114,6 +2184,14 @@ impl fmt::Display for ProjectLoadError {
             Self::ReservedNamespace => "repository source module shadows a reserved namespace",
             Self::StandardSnapshotMismatch => {
                 "standard dependency profile does not match the committed std submodule pin"
+            }
+            Self::InvalidStandardBody {
+                logical_path, line, ..
+            } => {
+                return write!(
+                    formatter,
+                    "pinned standard module body at {logical_path}:{line} does not type check"
+                );
             }
             Self::InvalidTableSchema => {
                 "committed table schema could not be resolved from source and identity metadata"
