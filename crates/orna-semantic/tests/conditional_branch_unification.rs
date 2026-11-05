@@ -138,6 +138,64 @@ pub fn unannotated(value: Int) =
 }
 
 #[test]
+fn else_if_chains_share_the_declared_target() {
+    // `else if` is a nested conditional in the alternate position
+    // (`parser.rs`), not a block, so the declared type has to reach it through
+    // the same branch inference.
+    let analysis = analysis(
+        r#"
+pub fn bucket(value: Int): Int? =
+    if value < -10 {
+        null
+    } else if value < 0 {
+        null
+    } else {
+        Some(value)
+    };
+
+pub fn unannotated(value: Int) =
+    if value < -10 { null } else if value < 0 { null } else { Some(value) };
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        Vec::<(&str, &str)>::new(),
+        "{:?}",
+        analysis.diagnostics
+    );
+    assert_eq!(
+        result_type(&analysis, "unannotated"),
+        &Type::Optional(Box::new(Type::Int))
+    );
+}
+
+#[test]
+fn a_mismatching_else_if_branch_is_named_against_the_declared_type() {
+    let analysis = analysis(
+        r#"
+pub fn bucket(value: Int): Int? =
+    if value < -10 {
+        null
+    } else if value < 0 {
+        "negative"
+    } else {
+        Some(value)
+    };
+"#,
+    );
+
+    assert_eq!(
+        diagnostics(&analysis),
+        vec![(DIAG_TYPE, "static types are incompatible")]
+    );
+    assert_eq!(
+        notes(&analysis),
+        vec![String::from("expected Optional<Int>, found Text")]
+    );
+}
+
+#[test]
 fn declared_non_optional_return_names_the_declared_type_first() {
     let analysis =
         analysis("pub fn half(value: Int): Int = if value < 0 { null } else { value };\n");
@@ -179,7 +237,10 @@ fn branches_that_share_a_type_report_one_mismatch_against_the_declared_type() {
         diagnostics(&analysis),
         vec![(DIAG_TYPE, "static types are incompatible")]
     );
-    assert_eq!(notes(&analysis), vec![String::from("expected Int, found Text")]);
+    assert_eq!(
+        notes(&analysis),
+        vec![String::from("expected Int, found Text")]
+    );
 }
 
 #[test]
