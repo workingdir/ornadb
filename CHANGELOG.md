@@ -1195,6 +1195,12 @@ been published.
   `vehicle/corsa.orna`, is no longer rejected with `ORNA-S002-NAMESPACE`. The
   conformance fixture catalogue is an explicit harness opt-in only, through
   `TransactionalEvaluator::with_fixture_catalogue`.
+- `case` arm bodies now join with the same rule as `if` branches (ORNA-CASE-004,
+  ORNA-CFLOW-003; ornadb-wax4). An `Int` arm followed by an `Int?` arm now
+  unifies to `Int?`, as the reverse order already did, and a declared `Int?`
+  result accepts `Int` and `null` arms. Both previously failed with
+  `ORNA-S021-TYPE`. A genuinely incompatible pair still reports exactly one
+  diagnostic.
 
 ## 1.0.0 — release inventory (publication pending)
 
