@@ -70,10 +70,11 @@ jobs:
 
       # The 10 GiB Gate B streaming test takes about an hour on its own (3611 s of a
       # 69 minute job in run 39996328261) and runs in cli-gate-b.yml instead.
-      # publication_crash_matrix needs the crash-barriers feature. Its job below runs it with
-      # that feature, so this step skips it and names that job (--covered-by).
+      # publication_crash_matrix and migration_kill_matrix need the crash-barriers
+      # feature. Their jobs below run them with that feature, so this step skips
+      # them and names those jobs (--covered-by).
       - name: Test the orna-cli integration suite
-        run: python3 scripts/gate_evidence.py test -p orna-cli --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --exclude-target test:vfs_media_reader --covered-by test:publication_crash_matrix=publication-crash-matrix
+        run: python3 scripts/gate_evidence.py test -p orna-cli --timeout-minutes 40 --skip-test gate_b_streams_large_network_payload_with_bounded_rss_and_zero_read_metadata --exclude-target test:vfs_media_reader --covered-by test:publication_crash_matrix=publication-crash-matrix --covered-by test:migration_kill_matrix=migration-kill-matrix
 
       # Gate E media reader: the crate-wide step above excludes this suite, and the record below runs it once
       # under its own diagnostic record (command, kernel, FUSE, mpv and editor versions), uploaded as an artifact.
@@ -178,3 +179,20 @@ jobs:
       - name: Test the publication crash matrix
         shell: bash
         run: python3 scripts/gate_evidence.py test -p orna-cli --target test:publication_crash_matrix --features crash-barriers --timeout-minutes 30
+
+  # Gate F: SIGKILL at each migration boundary. Needs the crash-barriers test feature.
+  migration-kill-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@1.95.0
+
+      - name: Test the migration kill matrix
+        shell: bash
+        run: python3 scripts/gate_evidence.py test -p orna-cli --target test:migration_kill_matrix --features crash-barriers --timeout-minutes 30
