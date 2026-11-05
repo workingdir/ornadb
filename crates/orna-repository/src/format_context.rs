@@ -1858,7 +1858,7 @@ pub(crate) fn canonical_database_bytes(database_id: &DatabaseId) -> Vec<u8> {
     .into_bytes()
 }
 
-pub(super) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
+pub(crate) fn parse_canonical_database(bytes: &[u8]) -> Result<DatabaseId, ()> {
     match parse_database_record(bytes).map_err(|_| ())? {
         DatabaseRecord::Format3(database_id) => Ok(database_id),
         DatabaseRecord::LegacySidecar(_) => Err(()),

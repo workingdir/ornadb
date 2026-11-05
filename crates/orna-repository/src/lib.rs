@@ -3100,7 +3100,7 @@ impl Repository {
         changes: &[ManagedFileChange],
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(expected_head, changes, None, message)
+        self.build_private_commit_inner(expected_head, changes, None, message, None)
     }
 
     /// Builds a private format-3 candidate from a validated native store root.
@@ -3113,7 +3113,33 @@ impl Repository {
         store_root: &NativeOid,
         message: &str,
     ) -> Result<PrivateCommit, RepositoryError> {
-        self.build_private_commit_inner(expected_head, &[], Some((graph, store_root)), message)
+        self.build_private_commit_inner(
+            expected_head,
+            &[],
+            Some((graph, store_root)),
+            message,
+            None,
+        )
+    }
+
+    /// Builds a private commit whose author and committer time is `timestamp`
+    /// (seconds since the Unix epoch, recorded at `+0000`) instead of the wall
+    /// clock.
+    ///
+    /// A caller that must reproduce the *same* commit object from the same
+    /// inputs cannot use the current time: two runs a second apart would record
+    /// different objects for an identical tree, parent and message. Naming the
+    /// time explicitly makes the object a function of its content alone.
+    /// Nothing else about the commit changes; the identity still comes from the
+    /// repository's configured or pinned author and committer.
+    pub fn build_private_commit_at(
+        &self,
+        expected_head: &GitCommitRef,
+        changes: &[ManagedFileChange],
+        message: &str,
+        timestamp: i64,
+    ) -> Result<PrivateCommit, RepositoryError> {
+        self.build_private_commit_inner(expected_head, changes, None, message, Some(timestamp))
     }
 
     fn build_private_commit_inner(
@@ -3122,6 +3148,7 @@ impl Repository {
         changes: &[ManagedFileChange],
         store_projection: Option<(&NativeGraphContext, &NativeOid)>,
         message: &str,
+        commit_time: Option<i64>,
     ) -> Result<PrivateCommit, RepositoryError> {
         if changes.is_empty() && store_projection.is_none() {
             return Err(RepositoryError::NoManagedPaths);
@@ -3218,15 +3245,21 @@ impl Repository {
                 self.index_tree_from_native_oid(trim_output(&self.run(write_tree)?.stdout))?;
 
             let mut commit_tree = self.command();
-            commit_tree
-                .args([
-                    "commit-tree",
-                    tree.as_str(),
-                    "-p",
-                    expected_head.as_str(),
-                    "-m",
-                ])
-                .arg(message);
+            commit_tree.args([
+                "commit-tree",
+                tree.as_str(),
+                "-p",
+                expected_head.as_str(),
+                "-m",
+            ]);
+            if let Some(timestamp) = commit_time {
+                // One offset for both identities keeps the object independent
+                // of the host's time zone as well as its clock.
+                let date = format!("@{timestamp} +0000");
+                commit_tree.env("GIT_AUTHOR_DATE", &date);
+                commit_tree.env("GIT_COMMITTER_DATE", &date);
+            }
+            commit_tree.arg(message);
             let commit =
                 self.snapshot_from_native_oid(trim_output(&self.run(commit_tree)?.stdout))?;
             if self.head()?.as_ref() != Some(expected_head) {
