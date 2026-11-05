@@ -2,8 +2,9 @@
 //!
 //! `S` is the repository owner's opaque row-map snapshot (in production,
 //! `orna_repository::row_store::RowMapSnapshot`). Keeping that value in a
-//! [`SnapshotPin`] binds each open handle and readdir cursor to one immutable
-//! row-map version without giving this module a second row authority.
+//! [`SnapshotPin`](crate::vfs::SnapshotPin) binds each open handle and readdir
+//! cursor to one immutable row-map version without giving this module a second
+//! row authority.
 
 use std::{
     any::Any,

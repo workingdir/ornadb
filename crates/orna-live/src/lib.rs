@@ -3312,7 +3312,7 @@ impl LiveHost {
     /// # Errors
     ///
     /// Returns attachment, security, serving, and response validation errors
-    /// as produced by the frame pipeline; see [`Self::complete`].
+    /// as produced by the frame pipeline; see `Self::complete`.
     pub async fn dispatch_frame(
         &mut self,
         attachment: [u8; 16],
@@ -6573,7 +6573,7 @@ impl LiveTransport {
     /// # Errors
     ///
     /// Returns frame-limit errors as [`Error::Limit`], malformed-frame errors,
-    /// or errors from [`Self::prepare_application_frame`] and the close path.
+    /// or errors from [`LiveHost::prepare_application_frame`] and the close path.
     pub async fn prepare_websocket_application(
         &mut self,
         socket: &mut WebSocketState,
