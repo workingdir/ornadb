@@ -202,3 +202,47 @@ fn composite_key_components_project_as_nested_directories() {
         );
     }
 }
+
+/// profiles/vfs-1.md:35-45 against tests/path-vectors.json ORNA-PATH-001..012
+/// (bead ornadb-5il1.245.1): an empty key component is `~empty` on the mount
+/// and `~ff` in a repository key path. This row is stored and published with
+/// an empty first key component, so the two spellings are shown for one stored
+/// key rather than one per surface in isolation.
+#[test]
+fn empty_key_component_projects_as_tilde_empty() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let directory = TempDir::new().expect("a temporary directory");
+    let root = committed_stock(&directory);
+    insert_and_publish(&root, "", "widget", 7);
+
+    let mount_parent = TempDir::new().expect("a mount parent");
+    let mountpoint = mount_parent.path().join("stock");
+    let mut mounted = spawn_mount_process(&root, &mountpoint);
+    let stock = mountpoint.join("Stock");
+    let row = stock.join("~empty/widget/data.orna");
+    mounted.await_path(&row);
+
+    assert_eq!(
+        sorted_names(&stock),
+        vec!["~empty".to_owned()],
+        "the empty component has one mount spelling"
+    );
+    let view = fs::read_to_string(&row).expect("read the empty-component row");
+    assert!(
+        view.lines().any(|line| line.trim() == "quantity: 7,"),
+        "the empty component's row is reachable through ~empty: {view}"
+    );
+
+    // The same stored key on the repository key-path surface: `~ff`, lowercase
+    // escapes, per tests/path-vectors.json.
+    assert_eq!(
+        orna_storage::LoosePath::for_key("Stock", &[String::new(), "widget".to_owned()])
+            .expect("the empty component is a valid key path")
+            .as_managed_path()
+            .as_path(),
+        std::path::Path::new("Stock/~ff/widget.orna"),
+        "the repository key path spells the empty component ~ff"
+    );
+}
