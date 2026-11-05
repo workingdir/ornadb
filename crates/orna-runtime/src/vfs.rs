@@ -2280,6 +2280,20 @@ impl VfsNameNamespace {
 /// basenames that would otherwise alias. A name over the component bound
 /// becomes the deterministic `~key-` alias of its canonical OVB-1 encoding
 /// instead of being dropped or merged (VFS-016).
+///
+/// # Two surfaces, two documents
+///
+/// The mount names rows by `profiles/vfs-1.md:35-45`: `%HH` with uppercase
+/// hex, a literal `%` and `~` always escaped, and `~empty` for the empty key.
+/// A repository *key path* (`tests/path-vectors.json`, ORNA-PATH-001 through
+/// 012) names the same rows by `~hh` with lowercase hex and `~ff` for the empty
+/// component. Those are separate surfaces and neither is the other's alias: in
+/// a mount component `~hh` is a literal `~` followed by hex digits, because the
+/// mount escapes every literal `~`, so a key `~2e` is `%7E2e` and a key `~ff`
+/// is `%7Eff`. Accepting `~hh` here would give one canonical key two host
+/// spellings, the aliasing profiles/vfs-1.md:40-43 forbids for `~empty`.
+/// Work ADR 0122 and `crates/orna-cli/tests/vfs_key_escape_spellings.rs`
+/// record and exercise the split.
 pub fn project_component(text: &str) -> String {
     project_namespaced(text, VfsNameNamespace::Key, || str_component_digest(text))
 }
@@ -2562,6 +2576,10 @@ pub fn split_vfs_relative(path: &str) -> Result<Vec<&str>, VfsPathError> {
 /// Decodes one projected component back to its canonical text, refusing any
 /// spelling that is not exactly what the projection would produce. Aliases
 /// therefore cannot target a different row or field.
+///
+/// `~empty` is the mount's one empty-key spelling; the repository key path's
+/// `~ff` and every other `~hh` spelling are refused (see
+/// [`project_component`] and work ADR 0122).
 pub fn unproject_component(component: &str) -> Result<VfsComponent, VfsPathError> {
     if let Some(hex) = component.strip_prefix("~key-") {
         if hex.len() == 64

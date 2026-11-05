@@ -376,6 +376,8 @@ select = [
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "reserved_key_components_escape_first_byte" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "reserved_spelling_beyond_vfs_1_text_is_conservative" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_composite_key_mount", test = "composite_key_components_project_as_nested_directories" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_composite_key_mount", test = "empty_key_component_projects_as_tilde_empty" },
+  { record = "workspace-cli", package = "orna-cli", target = "test:vfs_key_escape_spellings", test = "escape_looking_keys_stay_literal_on_the_mount_and_keep_tilde_spellings_repository_side" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "profile_nested_collection_directories_follow_the_module_path" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "nested_record_and_list_fields_project_as_pinned_directories" },
   { record = "workspace-cli", package = "orna-cli", target = "test:vfs_projection_features", test = "long_key_over_200_encoded_bytes_projects_as_sha256_key_alias" },
