@@ -5,6 +5,27 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- A project's pinned `stdlib/std` snapshot now has its function bodies checked
+  when the snapshot is attached, instead of being admitted on declarations
+  alone (ORNA-MODULE-003). `orna check` and `orna commit` refuse a pinned
+  module whose body is type-incorrect with `E2101`, naming the standard
+  module, the body's line, the checker's code and both sides of the mismatch
+  (`ORNA-S021-TYPE: static types are incompatible: expected Int, found Text
+  (std/math.orna:2)`). The loader admits the pinned bundle through a new
+  standard-source admission mode in `orna-semantic`, because `std` is a
+  reserved root for ordinary source and the catalogue path
+  (`Catalogue::from_standard_sources`) derives declarations only. Body
+  checking is deliberately limited to what the semantic slice decides: an
+  item is judged only when its own span carries no
+  `ORNA-S010-IMPORT`/`ORNA-S012-UNRESOLVED`/`ORNA-S020-ANNOTATION`/
+  `ORNA-S022-UNSUPPORTED` diagnostic and a mismatch names both sides in
+  closed primitive or `List`/`Relation`/`Range` labels. The shipped reference
+  library needs that boundary: analysed in full, it produces 1431 diagnostics
+  the slice cannot decide (unsupported forms, relative `use` paths inside the
+  pinned tree, `case` on parameter enums, conditional branches it types
+  against the first branch, and identity comparisons that report
+  `expected std.DURATION, found std.DURATION`). Rejecting those would refuse
+  snapshots that are valid today.
 - Every workspace crate drops the `-v1` name suffix that only distinguished it
   from superseded pre-`v1` code. The 21 affected crates are renamed on disk,
   in `Cargo.toml` package and dependency keys, in Rust module paths

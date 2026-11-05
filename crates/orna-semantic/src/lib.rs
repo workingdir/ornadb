@@ -8,6 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::Range;
 use std::rc::Rc;
 
 use num_bigint::BigInt;
@@ -2569,6 +2570,246 @@ pub fn analyze_with_providers(
     analyze_retaining_context_with_providers(inputs, catalogue, false, providers).0
 }
 
+/// One type error in the body of a pinned standard dependency's source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StandardBodyDiagnostic {
+    /// Logical path, under the reserved `std/` root, of the module whose body
+    /// raised the diagnostic.
+    pub logical_path: String,
+    /// One-based line of the top-level declaration whose body raised it.
+    pub line: usize,
+    /// Published semantic diagnostic code, such as `ORNA-S021-TYPE`.
+    pub code: String,
+    /// The diagnostic message; it never carries source text.
+    pub message: String,
+    /// The diagnostic's notes, such as `expected Int, found Text`.
+    pub notes: Vec<String>,
+}
+
+/// The result of type-checking one pinned standard dependency's own modules.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct StandardSourceCheck {
+    /// Diagnostics in analysis order, each attributed to its module and item.
+    pub diagnostics: Vec<StandardBodyDiagnostic>,
+}
+
+impl StandardSourceCheck {
+    pub fn is_ok(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+
+    pub fn first(&self) -> Option<&StandardBodyDiagnostic> {
+        self.diagnostics.first()
+    }
+}
+
+/// Diagnostic codes that say the semantic slice did not decide an item.
+///
+/// They force the admission to fall back to the pinned declaration for that
+/// item: a type diagnostic raised beside them can be a consequence of the
+/// missing analysis rather than evidence about the source.
+const UNDECIDED_ITEM_CODES: [&str; 4] = [
+    DIAG_IMPORT,
+    DIAG_UNRESOLVED,
+    DIAG_ANNOTATION,
+    DIAG_UNSUPPORTED,
+];
+
+/// A diagnostic paired with the byte range of the item that carries it.
+type ItemDiagnosticSpan<'a> = (&'a Diagnostic, Range<usize>);
+
+/// Type-checks the bodies of one pinned standard dependency's own modules.
+///
+/// [`Catalogue::from_standard_sources`] parses the bundle and derives its
+/// declarations, but a catalogue cannot check bodies: `std` is a reserved
+/// root for project source, so a standard module never reaches ordinary
+/// analysis. ORNA-MODULE-003 requires loaded source to resolve, infer and
+/// type-check, so a caller holding the exact pinned bundle calls this after
+/// building `catalogue` from the same `sources`.
+///
+/// `catalogue` MUST describe those same sources. Its declarations then stand
+/// for every standard module an analysed body imports, while each module's
+/// own body is checked here. Nothing is executed and no source bytes are
+/// retained.
+///
+/// # What is decided
+///
+/// The checker is a semantic slice, not the whole language, and the reference
+/// standard library uses forms it does not model: relative `use` paths inside
+/// the pinned tree, `case` on a parameter-valued enum, refinement bodies and
+/// generic evidence. Its output over the shipped bundle therefore contains
+/// diagnostics that do not describe source errors. Admission reports only an
+/// item the slice *decided*:
+///
+/// * the item's own span carries no `ORNA-S010-IMPORT`,
+///   `ORNA-S012-UNRESOLVED`, `ORNA-S020-ANNOTATION` or
+///   `ORNA-S022-UNSUPPORTED` diagnostic, and
+/// * a type-mismatch diagnostic ([`DIAG_TYPE`] or [`DIAG_TYPE_MISMATCH`])
+///   names both sides in closed labels that differ.
+///
+/// A closed label is a primitive or a `List`/`Relation`/`Range` of closed
+/// labels. Named, optional, generic and unknown labels stay undecided: the
+/// checker compares some spellings by identity, and an identity comparison is
+/// not evidence of a source error. Everything else keeps today's behaviour,
+/// so the pinned bundle is admitted on its verified declarations.
+pub fn check_standard_sources(
+    catalogue: &Catalogue,
+    sources: impl IntoIterator<Item = (String, String)>,
+    providers: SystemProviders,
+) -> StandardSourceCheck {
+    let sources = sources.into_iter().collect::<Vec<_>>();
+    let profile = catalogue.standard_dependency_profile.as_ref();
+    let inputs = sources
+        .iter()
+        .map(|(logical_path, source)| {
+            let mut diagnostics = Vec::new();
+            let namespace = namespace_for_path(logical_path, &mut diagnostics);
+            let prelude_exports = match (namespace.as_ref(), profile) {
+                (Some(namespace), Some(profile))
+                    if namespace.0.first().map(String::as_str) == Some("std")
+                        && namespace.0.len() == 1 =>
+                {
+                    profile.prelude_exports.clone()
+                }
+                (_, Some(profile)) => profile
+                    .module_prelude_exports
+                    .get(logical_path)
+                    .cloned()
+                    .unwrap_or_default(),
+                (_, None) => BTreeSet::new(),
+            };
+            ModuleInput {
+                logical_path: logical_path.clone(),
+                source: source.clone(),
+                prelude_exports,
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut recorder = located::OriginRecorder::enabled();
+    let (analysis, _) = analyze_recording_origins(
+        &inputs,
+        catalogue,
+        false,
+        providers,
+        SourceAdmission::StandardBundle,
+        &mut recorder,
+    );
+    let origins = recorder.align(&analysis.diagnostics);
+    let item_spans = sources
+        .iter()
+        .map(|(logical_path, source)| {
+            let parsed = parse_module_with_file(source, logical_path);
+            let spans = parsed
+                .value
+                .items
+                .iter()
+                .map(|item| item.span.start..item.span.end)
+                .collect::<Vec<_>>();
+            (logical_path.clone(), spans)
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut by_item: BTreeMap<(String, usize), Vec<ItemDiagnosticSpan<'_>>> = BTreeMap::new();
+    for (diagnostic, origin) in analysis.diagnostics.iter().zip(origins) {
+        let (Some(logical_path), Some(primary)) = (origin.logical_path, origin.primary) else {
+            continue;
+        };
+        let Some(spans) = item_spans.get(&logical_path) else {
+            continue;
+        };
+        let Some(index) = spans
+            .iter()
+            .position(|span| span.start <= primary.start && primary.end <= span.end)
+        else {
+            continue;
+        };
+        by_item
+            .entry((logical_path, index))
+            .or_default()
+            .push((diagnostic, primary));
+    }
+    let mut diagnostics = Vec::new();
+    for ((logical_path, _), item) in by_item {
+        if item
+            .iter()
+            .any(|(diagnostic, _)| UNDECIDED_ITEM_CODES.contains(&diagnostic.code()))
+        {
+            continue;
+        }
+        let Some(source) = sources
+            .iter()
+            .find(|(path, _)| path == &logical_path)
+            .map(|(_, source)| source)
+        else {
+            continue;
+        };
+        for (diagnostic, span) in item {
+            if !decided_type_mismatch(diagnostic) {
+                continue;
+            }
+            diagnostics.push(StandardBodyDiagnostic {
+                logical_path: logical_path.clone(),
+                line: span_line(source, &span),
+                code: diagnostic.code().to_owned(),
+                message: diagnostic.message().to_owned(),
+                notes: diagnostic
+                    .notes()
+                    .iter()
+                    .map(|note| note.as_str().to_owned())
+                    .collect(),
+            });
+        }
+    }
+    StandardSourceCheck { diagnostics }
+}
+
+/// One-based line of a byte offset in `source`.
+fn span_line(source: &str, span: &Range<usize>) -> usize {
+    source.get(..span.start).map_or(1, |prefix| {
+        prefix.bytes().filter(|byte| *byte == b'\n').count() + 1
+    })
+}
+
+/// Whether `diagnostic` compares two different, closed, fully-known type
+/// labels. Only then is the comparison evidence about the source rather than
+/// about the slice's inference.
+fn decided_type_mismatch(diagnostic: &Diagnostic) -> bool {
+    if !matches!(diagnostic.code(), DIAG_TYPE | DIAG_TYPE_MISMATCH) {
+        return false;
+    }
+    let Some(note) = diagnostic.notes().first() else {
+        return false;
+    };
+    let Some(sides) = note.as_str().strip_prefix("expected ") else {
+        return false;
+    };
+    let Some((expected, actual)) = sides.split_once(", found ") else {
+        return false;
+    };
+    expected != actual && closed_type_label(expected) && closed_type_label(actual)
+}
+
+/// Whether a diagnostic's type label is closed: a primitive, or a container of
+/// closed labels. Named, optional, generic and unknown labels are open.
+fn closed_type_label(label: &str) -> bool {
+    let label = label.trim();
+    if matches!(
+        label,
+        "Int" | "Text" | "Bool" | "Float" | "Decimal" | "Date" | "Instant" | "Unit" | "Null"
+    ) {
+        return true;
+    }
+    for container in ["List", "Relation", "Range"] {
+        if let Some(inner) = label
+            .strip_prefix(container)
+            .and_then(|rest| rest.strip_prefix('<'))
+            .and_then(|rest| rest.strip_suffix('>'))
+        {
+            return closed_type_label(inner);
+        }
+    }
+    false
+}
+
 /// Semantic payload derivation describes declarations rather than admitting
 /// a program for evaluation, so it checks the declared `sys` surface only.
 fn analyze_retaining_context(
@@ -2591,7 +2832,26 @@ fn analyze_retaining_context_with_providers(
     providers: SystemProviders,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut origins = located::OriginRecorder::disabled();
-    analyze_recording_origins(inputs, catalogue, retain_context, providers, &mut origins)
+    analyze_recording_origins(
+        inputs,
+        catalogue,
+        retain_context,
+        providers,
+        SourceAdmission::Project,
+        &mut origins,
+    )
+}
+
+/// Which source modules one analysis admits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceAdmission {
+    /// Ordinary project source. `sys` and `std` are reserved roots, and a
+    /// namespace already present in the catalogue may not be redefined.
+    Project,
+    /// One pinned standard dependency's own modules. The bundle is the text
+    /// that defines the `std` root, so each admitted module replaces the
+    /// catalogue entry built from those same bytes; `sys` stays reserved.
+    StandardBundle,
 }
 
 fn analyze_recording_origins(
@@ -2599,6 +2859,7 @@ fn analyze_recording_origins(
     catalogue: &Catalogue,
     retain_context: bool,
     providers: SystemProviders,
+    admission: SourceAdmission,
     origins: &mut located::OriginRecorder,
 ) -> (Analysis, Vec<(Namespace, SyntaxTree, Scope)>) {
     let mut contexts = Vec::new();
@@ -2616,7 +2877,11 @@ fn analyze_recording_origins(
         else {
             continue;
         };
-        if matches!(namespace.0.first().map(String::as_str), Some("sys" | "std")) {
+        let root = namespace.0.first().map(String::as_str);
+        // A pinned standard bundle defines the `std` root itself; every other
+        // admission keeps both reserved roots closed to source.
+        let standard_module = admission == SourceAdmission::StandardBundle && root == Some("std");
+        if !standard_module && matches!(root, Some("sys" | "std")) {
             result.diagnostics.push(diag(
                 DIAG_RESERVED,
                 "reserved namespace cannot be defined by source",
@@ -2640,7 +2905,7 @@ fn analyze_recording_origins(
                 ));
             }
         }
-        if result.modules.contains_key(&namespace) {
+        if result.modules.contains_key(&namespace) && !standard_module {
             result
                 .diagnostics
                 .push(diag(DIAG_NAMESPACE, "duplicate module namespace"));
@@ -28177,6 +28442,63 @@ fn diag(code: &'static str, message: impl Into<String>) -> Diagnostic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Builds the catalogue and checks the bodies of one synthetic pinned
+    /// standard bundle.
+    fn check_bundle(sources: Vec<(String, String)>) -> StandardSourceCheck {
+        let profile = StandardDependencyProfile::from_sources("std-probe", sources.clone())
+            .expect("probe profile");
+        let catalogue = Catalogue::authoritative_core()
+            .with_standard_sources(&profile, sources.clone())
+            .expect("probe catalogue");
+        check_standard_sources(&catalogue, sources, SystemProviders::DeclaredSurface)
+    }
+
+    #[test]
+    fn pinned_standard_body_with_a_decided_mismatch_is_reported() {
+        let check = check_bundle(vec![(
+            String::from("std/probe.orna"),
+            String::from("\npub fn broken(): Int = \"text\";\n"),
+        )]);
+        let diagnostic = check
+            .diagnostics
+            .first()
+            .expect("the broken pinned body is decided");
+        assert_eq!(diagnostic.logical_path, "std/probe.orna");
+        assert_eq!(diagnostic.line, 2);
+        assert_eq!(diagnostic.code, DIAG_TYPE);
+        assert!(
+            diagnostic
+                .notes
+                .iter()
+                .any(|note| note == "expected Int, found Text"),
+            "{:?}",
+            diagnostic.notes
+        );
+    }
+
+    #[test]
+    fn pinned_standard_body_the_slice_cannot_decide_stays_admitted() {
+        // The conditional below is valid Orna, but this slice types the second
+        // branch against the first branch's `null`, so the mismatch it reports
+        // is not evidence about the pinned source.
+        let check = check_bundle(vec![(
+            String::from("std/probe.orna"),
+            String::from(
+                "pub fn half(value: Int): Int? =\n    if value < 0 { null } else { Some(value) };\n",
+            ),
+        )]);
+        assert!(check.is_ok(), "{:?}", check.diagnostics);
+    }
+
+    #[test]
+    fn pinned_standard_body_with_an_unresolved_name_stays_admitted() {
+        let check = check_bundle(vec![(
+            String::from("std/probe.orna"),
+            String::from("pub fn broken(): Int = missing_name;\n"),
+        )]);
+        assert!(check.is_ok(), "{:?}", check.diagnostics);
+    }
 
     #[test]
     fn compiled_unit_analysis_retains_exact_source_basis_scale_and_provenance() {
