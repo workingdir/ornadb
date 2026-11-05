@@ -5,6 +5,13 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- Fixed broken rustdoc intra-doc links that failed `RUSTDOCFLAGS="-D warnings"
+  cargo doc` (private items linked from public docs in `orna-sys`,
+  `orna-conformance`, `orna-repository`, `orna-runtime`, `orna-live`) and the
+  dead `crates/orna-client/src/lib.rs` reference in
+  `docs/decisions/0091-client-vm-trust-and-sandbox.md`, which failed
+  `scripts/check_doc_links.py` (ornadb-llsc). The rustdoc gate still fails in
+  `orna-storage`; see the pull request.
 - `orna migrate copy` is idempotent and reproducible for a populated format-1
   workspace (ornadb-5il1.397, Gate F; UPGRADE-3 items 3-7 and
   ORNA-UPGRADE-002/004/005/006). Re-running it against the same destination now
