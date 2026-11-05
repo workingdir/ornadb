@@ -18,7 +18,7 @@
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
-    os::unix::fs::PermissionsExt,
+    os::unix::fs::{MetadataExt, PermissionsExt},
     path::PathBuf,
     process::Command,
     time::Duration,
@@ -35,8 +35,9 @@ mod media_commit;
 #[path = "support/editor_mount.rs"]
 mod editor_mount;
 use editor_mount::{
-    EditorMount, assert_errno, await_draft_guard, fresh_view, open_rw, require_fuse_or_skip,
-    retained_drafts, start_editor_mount, start_editor_mount_with_source, start_mount_process,
+    EditorMount, assert_errno, await_draft_guard, fresh_view, open_rw,
+    repository_with_music_rows_and_modules, require_fuse_or_skip, retained_drafts,
+    spawn_mount_process, start_editor_mount, start_editor_mount_with_source, start_mount_process,
     wait_for_mount,
 };
 
@@ -217,6 +218,71 @@ async fn read_handle_opened_before_temp_rename_keeps_old_bytes() {
     drop(old_handle);
 }
 
+/// ACCEPTANCE Gate E ("Open reads remain on old content after replacement") and
+/// profiles/vfs-1.md:126-127 ("per-open versions"): every open pins the version
+/// it captured. Three opens taken across two successive rename-over replacements
+/// each read the bytes and size of their own version, and no handle observes
+/// another version's content.
+#[tokio::test]
+async fn three_opens_across_two_replacements_each_keep_their_own_version() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let fixture = start_editor_mount(false).await;
+
+    let first_version = fresh_view(&fixture);
+    let mut first = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut first), first_version);
+
+    let temp = write_temporary_sibling(&fixture, ".data.orna.second", &music_row("Second version"));
+    std::fs::rename(&temp, &fixture.data_path).expect("the first replacement is admitted");
+    let second_version = fresh_view(&fixture);
+    let mut second = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut second), second_version);
+
+    let temp = write_temporary_sibling(
+        &fixture,
+        ".data.orna.third",
+        &music_row("Third version with a distinctly longer title"),
+    );
+    std::fs::rename(&temp, &fixture.data_path).expect("the second replacement is admitted");
+    let third_version = fresh_view(&fixture);
+    let mut third = File::open(&fixture.data_path).unwrap();
+    assert_eq!(read_from_start(&mut third), third_version);
+
+    assert_ne!(
+        first_version, second_version,
+        "the first replacement changed the row"
+    );
+    assert_ne!(
+        second_version, third_version,
+        "the second replacement changed the row"
+    );
+
+    for (name, handle, version) in [
+        ("first", &mut first, &first_version),
+        ("second", &mut second, &second_version),
+        ("third", &mut third, &third_version),
+    ] {
+        assert_eq!(
+            read_from_start(handle),
+            *version,
+            "the {name} open keeps its own version"
+        );
+        assert_eq!(
+            handle.metadata().unwrap().len(),
+            version.len() as u64,
+            "fstat on the {name} open reports its own version's size"
+        );
+    }
+
+    let inodes = [&first, &second, &third].map(|handle| handle.metadata().unwrap().ino());
+    assert!(
+        inodes[0] != inodes[1] && inodes[1] != inodes[2] && inodes[0] != inodes[2],
+        "each version is published under its own inode: {inodes:?}"
+    );
+}
+
 /// F2 finding (ornadb-5il1.466): a read handle opened before an owner-routed
 /// `orna edit`, then a temp created after that edit. 41-vfs.md:67-68: the temp's
 /// creation captures the row's current baseline, so its rename must succeed. The
@@ -372,6 +438,104 @@ async fn repeated_observer_reads_never_show_private_draft_and_read_handles_pin_g
         "a read handle opened before acceptance keeps its captured generation"
     );
     drop(writer);
+    drop(pinned);
+}
+
+/// profiles/vfs-1.md:129-130: "Inode numbers identify retained objects/handle
+/// generations, not a truncated row hash allowed to collide. No cross-generation
+/// kernel page-cache sharing of incompatible contents."
+///
+/// The row document itself opens with `FOPEN_DIRECT_IO` (`EDITABLE_OPEN_FLAGS` in
+/// `fuse_mount.rs`), so it never consults the kernel page cache. A projected Str
+/// over the 64 KiB bound is a `NodeKind::Text` sibling, and a read-only open of it
+/// replies with `FopenFlags::empty()`: those pages *are* cached by the kernel. The
+/// replacement must therefore be published under a fresh inode (the superseded one
+/// is retired with the generation it captured), or a same-length replacement would
+/// be answered from the cached pages of the generation it replaced.
+#[tokio::test]
+async fn read_only_text_opens_share_no_cached_pages_across_generations() {
+    if !require_fuse_or_skip() {
+        return;
+    }
+    let first = "a".repeat(70 * 1024);
+    let document = format!("{{ title: \"{first}\", artist: \"Kieran\", }}\n");
+    let (repository_directory, _repository, _relation_id) = repository_with_music_rows_and_modules(
+        "pub table Music(id: Str) { title: Str, artist: Str, }\n",
+        &[],
+        &[("london", document.as_str())],
+    )
+    .await;
+    let mount_parent = TempDir::new().unwrap();
+    let mountpoint = mount_parent.path().join("library");
+    let mut mounted = spawn_mount_process(repository_directory.path(), &mountpoint);
+    let title = mountpoint.join("Music/london/title.txt");
+    mounted.await_path(&title);
+
+    let first_bytes = std::fs::read(&title).expect("read the projected Str");
+    assert_eq!(first_bytes, first.as_bytes(), "the .txt is the full Str");
+    let first_inode = std::fs::metadata(&title).unwrap().ino();
+
+    // Populate the kernel page cache for the first generation through read-only
+    // opens, and pin a read-only handle to it.
+    let mut pinned = File::open(&title).expect("open the projected Str read-only");
+    for _ in 0..3 {
+        assert_eq!(
+            std::fs::read(&title).expect("repeat the read-only open"),
+            first_bytes,
+            "repeated cached reads of one generation are stable"
+        );
+    }
+    assert_eq!(
+        pinned.metadata().unwrap().ino(),
+        first_inode,
+        "the pinned handle and the path name the same generation"
+    );
+
+    // Replace the Str with different bytes of exactly the same length through a
+    // temp-and-rename save: only the content changes, so a shared cached page of
+    // the superseded generation would be served for the new one.
+    let replacement = "b".repeat(70 * 1024);
+    let scratch = title.with_file_name(".title.txt.replacement");
+    std::fs::write(&scratch, replacement.as_bytes()).expect("write the replacement scratch");
+    std::fs::rename(&scratch, &title).expect("admit the replacement");
+
+    let fresh_bytes = std::fs::read(&title).expect("read-only open after the replacement");
+    let fresh_inode = std::fs::metadata(&title).unwrap().ino();
+    assert_eq!(
+        fresh_bytes.len(),
+        first_bytes.len(),
+        "the replacement keeps the .txt byte length, so only the content differs"
+    );
+    assert_eq!(
+        fresh_bytes,
+        replacement.as_bytes(),
+        "a read-only open reads the replacement, never the superseded generation's cached pages"
+    );
+    assert_ne!(
+        fresh_inode, first_inode,
+        "the replacement is published under a fresh inode; a reused one would share the cached pages"
+    );
+
+    // Repeated cached reads stay on the replacement.
+    for _ in 0..3 {
+        assert_eq!(
+            std::fs::read(&title).expect("repeat the read-only open"),
+            replacement.as_bytes(),
+            "repeated cached reads of the replacement are stable"
+        );
+    }
+
+    // The handle opened before the replacement keeps the generation it captured.
+    assert_eq!(
+        read_from_start(&mut pinned).into_bytes(),
+        first_bytes,
+        "the pinned handle never reads the replacement through the shared cache"
+    );
+    assert_eq!(
+        pinned.metadata().unwrap().len(),
+        first_bytes.len() as u64,
+        "the pinned handle reports its own generation's size"
+    );
     drop(pinned);
 }
 
