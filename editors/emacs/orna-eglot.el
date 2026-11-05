@@ -1,5 +1,5 @@
 ;;; orna-eglot.el --- Orna 1.1.0 lexical highlighting -*- lexical-binding: t; -*-
-;; Generated from orna-syntax-v1; edit crates/orna-syntax-v1/src/editor.rs instead.
+;; Generated from orna-syntax; edit crates/orna-syntax/src/editor.rs instead.
 ;; Server start contract: docs/editor-tooling.md ("One server command").
 (require 'eglot)
 (defvar orna-eglot-server-command '("orna-lsp")

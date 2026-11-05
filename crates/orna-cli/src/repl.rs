@@ -1,0 +1,1549 @@
+use std::fmt::Write as _;
+use std::io::{self, BufRead, Write};
+
+use orna_conformance::AdmittedReplSession;
+use orna_evaluator::{ReplDetail, ReplError};
+use orna_foundation::{CanonicalValue, canonical_uuid_text};
+use orna_live::live_presentation::{LivePresentationUpdate, ResyncRequest, WatchPresentation};
+use orna_value::Raw;
+
+const MAX_INPUT_BYTES: usize = 65_536;
+const MAX_INSPECT_DEPTH: usize = 4;
+const MAX_INSPECT_ITEMS: usize = 16;
+const MAX_INSPECT_TEXT: usize = 256;
+const REPL_HELP: &str = "commands: :help [name], :at CWD|HEAD|ref, :watch expression, :quit";
+
+type ReplSubmissionHandler<'a> =
+    dyn FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure> + 'a;
+
+#[derive(Clone, Copy)]
+pub(super) enum AnsiColor {
+    Green,
+    Yellow,
+    Red,
+    Cyan,
+    Dim,
+}
+
+impl AnsiColor {
+    const fn sequence(self) -> &'static [u8] {
+        match self {
+            Self::Green => b"\x1b[32m",
+            Self::Yellow => b"\x1b[33m",
+            Self::Red => b"\x1b[31m",
+            Self::Cyan => b"\x1b[36m",
+            Self::Dim => b"\x1b[2m",
+        }
+    }
+}
+
+pub(super) fn write_styled<W: io::Write>(
+    writer: &mut W,
+    color: AnsiColor,
+    text: &[u8],
+    enabled: bool,
+) -> io::Result<()> {
+    if enabled {
+        writer.write_all(color.sequence())?;
+    }
+    writer.write_all(text)?;
+    if enabled {
+        writer.write_all(b"\x1b[0m")?;
+    }
+    Ok(())
+}
+
+pub(super) fn write_styled_display<W: io::Write, T: std::fmt::Display>(
+    writer: &mut W,
+    color: AnsiColor,
+    value: T,
+    enabled: bool,
+) -> io::Result<()> {
+    if enabled {
+        writer.write_all(color.sequence())?;
+    }
+    write!(writer, "{value}")?;
+    if enabled {
+        writer.write_all(b"\x1b[0m")?;
+    }
+    Ok(())
+}
+
+enum ReadSubmission {
+    Eof,
+    TooLong,
+    InvalidUtf8,
+    Source(String),
+}
+
+/// A repository-neutral selector for a replacement REPL snapshot context.
+///
+/// `Ref` deliberately retains only the user-supplied reference spelling. The
+/// adapter that implements [`SnapshotSessionLoader`] is responsible for
+/// resolving it read-only and for constructing a fully admitted replacement
+/// session from that immutable snapshot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SnapshotTarget {
+    Cwd,
+    Head,
+    Ref(String),
+}
+
+/// Prepares a complete replacement session for a read-only `:at` selection.
+///
+/// The loader must not mutate repository HEAD, the index, the worktree, or
+/// refs. It must return an *owned*, fully admitted session only after source
+/// loading and admission succeed. `run_with_snapshot_loader` leaves the
+/// current session unchanged for malformed selectors and loader errors, then
+/// replaces the whole session on success; the replacement therefore cannot
+/// retain the previous snapshot's REPL overlay, `$_`, or `$?`.
+///
+/// The CLI integration adapter belongs in `main.rs`: it should map `Cwd` to
+/// the current project loader and `Head`/`Ref` to read-only committed snapshot
+/// resolution and `ProjectLoader::load_committed_snapshot`.
+pub trait SnapshotSessionLoader {
+    type Error;
+
+    fn load_snapshot(&self, target: SnapshotTarget) -> Result<AdmittedReplSession, Self::Error>;
+}
+
+/// A host-owned subscription source yielding complete encoded live frames.
+/// The host sends the Watch request and supplies its negotiated presentation;
+/// the REPL neither opens a connection nor encodes protocol messages.
+pub trait WatchFrameSource {
+    type Error;
+
+    fn start_watch(&mut self, source: &str) -> Result<WatchPresentation, Self::Error>;
+    fn next_frame(&mut self, watch: [u8; 16]) -> Result<Option<Vec<u8>>, Self::Error>;
+    fn request_resync(&mut self, request: ResyncRequest) -> Result<(), Self::Error>;
+    fn close_watch(&mut self, watch: [u8; 16]) -> Result<(), Self::Error>;
+}
+
+/// Observable state for the currently subscribed REPL watch.
+#[derive(Default)]
+pub struct WatchCommandState {
+    presentation: Option<WatchPresentation>,
+}
+
+impl WatchCommandState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn published_revision(&self) -> Option<u64> {
+        self.presentation
+            .as_ref()?
+            .published()
+            .map(orna_live::live_presentation::PublishedPresentation::revision)
+    }
+
+    pub fn watch(&self) -> Option<[u8; 16]> {
+        self.presentation.as_ref().map(WatchPresentation::watch)
+    }
+
+    pub fn awaiting_snapshot(&self) -> bool {
+        self.presentation
+            .as_ref()
+            .is_some_and(WatchPresentation::awaiting_snapshot)
+    }
+
+    /// Remains available until the host has successfully sent the resync.
+    pub fn take_resync_request(&self) -> Option<ResyncRequest> {
+        self.presentation.as_ref()?.take_resync_request()
+    }
+
+    pub fn acknowledge_resync_request(&mut self, request: ResyncRequest) {
+        if let Some(presentation) = &mut self.presentation {
+            presentation.acknowledge_resync_request(request);
+        }
+    }
+
+    pub fn begin_resubscription(&mut self) {
+        if let Some(presentation) = &mut self.presentation {
+            presentation.begin_resubscription();
+        }
+    }
+
+    /// Retain the authoritative presentation when the same watch is
+    /// re-subscribed, including its complete-snapshot barrier.
+    fn install(&mut self, presentation: WatchPresentation) -> Option<[u8; 16]> {
+        if self
+            .presentation
+            .as_ref()
+            .is_some_and(|current| current.watch() == presentation.watch())
+        {
+            return None;
+        }
+        self.presentation
+            .replace(presentation)
+            .map(|previous| previous.watch())
+    }
+
+    fn close(&mut self) -> Option<[u8; 16]> {
+        self.presentation
+            .take()
+            .map(|presentation| presentation.watch())
+    }
+}
+
+struct WatchBinding<'a, S: ?Sized> {
+    source: &'a mut S,
+    state: &'a mut WatchCommandState,
+}
+
+fn repl_error_documentation(code: &str) -> (&'static str, &'static str) {
+    match code {
+        "ORNA-REPL-INPUT-LIMIT" => (
+            "submission is longer than the REPL input limit",
+            "shorten the submission and enter it again",
+        ),
+        "ORNA-REPL-INPUT-UTF8" => (
+            "submission is not valid UTF-8 text",
+            "re-enter the submission using valid UTF-8",
+        ),
+        "ORNA-REPL-COMMAND" => (
+            "command is unknown or unavailable in this REPL",
+            "enter `:help` to see the supported commands",
+        ),
+        "ORNA-REPL-AT" => (
+            "requested project snapshot could not be loaded",
+            "choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`",
+        ),
+        "ORNA-REPL-EFFECT" => (
+            "REPL preview cannot perform an effect",
+            "evaluate a pure expression or invoke the operation through its admitted runtime entry point",
+        ),
+        "ORNA-REPL-WATCH-FRAME" => (
+            "live update could not be read",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-REPL-WATCH-SOURCE" => (
+            "live update source is unavailable",
+            "start the watch again with `:watch expression`",
+        ),
+        "ORNA-S010-IMPORT" => (
+            "imported module is unavailable",
+            "use a captured standard dependency or remove the import",
+        ),
+        "ORNA-S012-UNRESOLVED" => (
+            "name could not be resolved",
+            "declare the name or add the matching `use` import before using it",
+        ),
+        "ORNA-S021-TYPE" => (
+            "expression has the wrong type",
+            "change the expression or its declared type so the value and requirement agree",
+        ),
+        _ => (
+            "expression could not be evaluated",
+            "review the expression and try again",
+        ),
+    }
+}
+
+/// A failed submission: the stable code, plus the evaluator's located detail
+/// (message, source span, notes and remedies) when the evaluator has one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ReplFailure {
+    pub(crate) code: String,
+    pub(crate) detail: Option<ReplDetail>,
+}
+
+impl ReplFailure {
+    pub(crate) fn code(code: &str) -> Self {
+        Self {
+            code: code.to_owned(),
+            detail: None,
+        }
+    }
+}
+
+impl From<String> for ReplFailure {
+    fn from(code: String) -> Self {
+        Self { code, detail: None }
+    }
+}
+
+impl From<ReplError> for ReplFailure {
+    fn from(error: ReplError) -> Self {
+        Self {
+            code: error.code().to_owned(),
+            detail: error.detail().cloned(),
+        }
+    }
+}
+
+/// Byte ranges of string literal source, quotes included. Interpolated
+/// strings contribute their whole region, so interpolation code between the
+/// quotes is covered too. Returns `None` when the source does not lex, so no
+/// line can be shown without knowing whether it holds literal text.
+fn string_literal_ranges(source: &str) -> Option<Vec<std::ops::Range<usize>>> {
+    let tokens = orna_syntax::lex(source).ok()?;
+    let mut ranges = Vec::new();
+    let mut open = None;
+    for token in &tokens {
+        match token.kind {
+            orna_syntax::TokenKind::String => ranges.push(token.span.start..token.span.end),
+            orna_syntax::TokenKind::StringStart => open = Some(token.span.start),
+            orna_syntax::TokenKind::StringEnd => {
+                if let Some(start) = open.take() {
+                    ranges.push(start..token.span.end);
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(ranges)
+}
+
+/// Locates a span as `line N, column M`, then the source line with carets
+/// under the span. A line overlapping string literal source is withheld,
+/// because submitted text may be sensitive; the location and carets remain.
+/// Returns `None` when the span is not on character boundaries of `source`.
+fn render_span(source: &str, span: &std::ops::Range<usize>) -> Option<String> {
+    let start = span.start;
+    if start > source.len() || !source.is_char_boundary(start) {
+        return None;
+    }
+    let line_start = source[..start].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[start..]
+        .find('\n')
+        .map_or(source.len(), |index| start + index);
+    let line_number = source[..start].matches('\n').count() + 1;
+    let column = source[line_start..start].chars().count() + 1;
+    let end = span.end.clamp(start, line_end);
+    let width = source
+        .get(start..end)
+        .map_or(1, |text| text.chars().count().max(1));
+    let gutter = line_number.to_string();
+    let pad = " ".repeat(gutter.len());
+    let withheld = match string_literal_ranges(source) {
+        None => Some("<source withheld: submission does not tokenize>"),
+        Some(ranges)
+            if ranges
+                .iter()
+                .any(|range| range.start < line_end && range.end > line_start) =>
+        {
+            Some("<source withheld: line contains a string literal>")
+        }
+        Some(_) => None,
+    };
+    let line = withheld.unwrap_or(&source[line_start..line_end]);
+    Some(format!(
+        "  --> line {line_number}, column {column}\n{pad} |\n{gutter} | {line}\n{pad} | {}{}",
+        " ".repeat(column - 1),
+        "^".repeat(width),
+    ))
+}
+
+/// Renders a failed submission for the person who typed it. The message
+/// leads, followed by the location, notes and remedies. A failure without
+/// located detail uses the fixed text for its code.
+pub(crate) fn render_repl_failure(failure: &ReplFailure, source: &str) -> String {
+    let Some(detail) = &failure.detail else {
+        let (title, help) = repl_error_documentation(&failure.code);
+        return format!("error[{}]: {title}\nhelp: {help}", failure.code);
+    };
+    let mut text = format!("error[{}]: {}", detail.code, detail.message);
+    if let Some(span) = &detail.span
+        && let Some(location) = render_span(source, span)
+    {
+        text.push('\n');
+        text.push_str(&location);
+    }
+    for note in &detail.notes {
+        let _ = write!(text, "\nnote: {note}");
+    }
+    if detail.help.is_empty() {
+        let (_, help) = repl_error_documentation(&failure.code);
+        let _ = write!(text, "\nhelp: {help}");
+    }
+    for help in &detail.help {
+        let _ = write!(text, "\nhelp: {help}");
+    }
+    text
+}
+
+/// Writes rendered error text with the header line in red and the rest plain.
+pub(crate) fn write_rendered_error<W: Write>(
+    writer: &mut W,
+    text: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let (header, rest) = text.split_once('\n').unwrap_or((text, ""));
+    write_styled(writer, AnsiColor::Red, header.as_bytes(), color_enabled)?;
+    if !rest.is_empty() {
+        writer.write_all(b"\n")?;
+        writer.write_all(rest.as_bytes())?;
+    }
+    writer.write_all(b"\n")
+}
+
+fn write_repl_failure<W: Write>(
+    writer: &mut W,
+    failure: &ReplFailure,
+    source: &str,
+    color_enabled: bool,
+) -> io::Result<()> {
+    write_rendered_error(writer, &render_repl_failure(failure, source), color_enabled)
+}
+
+fn write_repl_error<W: Write>(writer: &mut W, code: &str, color_enabled: bool) -> io::Result<()> {
+    write_repl_failure(writer, &ReplFailure::code(code), "", color_enabled)
+}
+
+fn write_repl_value<W: Write>(
+    writer: &mut W,
+    value: &CanonicalValue,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let rendered = inspect(value);
+    let (result, ty) = rendered
+        .rsplit_once(" : ")
+        .unwrap_or((rendered.as_str(), ""));
+    write_styled(writer, AnsiColor::Green, result.as_bytes(), color_enabled)?;
+    if !ty.is_empty() {
+        writer.write_all(b" : ")?;
+        write_styled(writer, AnsiColor::Dim, ty.as_bytes(), color_enabled)?;
+    }
+    writer.write_all(b"\n")
+}
+
+/// Run one retained, line-oriented admitted REPL session. A malformed or
+/// rejected submission reports its redacted evaluator code and leaves the
+/// session open.
+pub fn run<R: BufRead, W: Write>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        None::<&dyn SnapshotSessionLoader<Error = ()>>,
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        false,
+        None,
+    )
+}
+
+/// Run an admitted REPL session with an atomic, loader-backed `:at` command.
+///
+/// A successful `:at CWD|HEAD|ref` installs the owned candidate returned by
+/// `loader`. Failed preparation and malformed selectors report
+/// `ORNA-REPL-AT` and retain the prior session unchanged.
+pub fn run_with_snapshot_loader<R: BufRead, W: Write, L: SnapshotSessionLoader + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        false,
+        None,
+    )
+}
+
+/// Run an admitted REPL session with color enabled according to the CLI mode.
+pub fn run_with_snapshot_loader_and_color<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    color_enabled: bool,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        color_enabled,
+        None,
+    )
+}
+
+/// Run an admitted REPL with a host-provided submission adapter. The adapter is
+/// discarded after successful snapshot replacement because its transaction
+/// authority is bound to the initial committed source snapshot.
+pub fn run_with_snapshot_loader_and_color_and_submitter<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: FnMut(&mut AdmittedReplSession, &str) -> Result<Option<CanonicalValue>, ReplFailure>,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    submitter: &mut S,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let submitter: &mut ReplSubmissionHandler<'_> = submitter;
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        None::<WatchBinding<'_, dyn WatchFrameSource<Error = ()>>>,
+        color_enabled,
+        Some(submitter),
+    )
+}
+
+/// Run with a host-owned live watch frame source. The REPL receives complete
+/// encoded frames, while the host owns the subscription and resync transport.
+pub fn run_with_watch<R: BufRead, W: Write, S: WatchFrameSource + ?Sized>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    source: &mut S,
+    state: &mut WatchCommandState,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        None::<&dyn SnapshotSessionLoader<Error = ()>>,
+        Some(WatchBinding { source, state }),
+        false,
+        None,
+    )
+}
+
+/// Run with both an atomic snapshot loader and a host-owned live watch.
+pub fn run_with_loader_and_watch<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: WatchFrameSource + ?Sized,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: &L,
+    source: &mut S,
+    state: &mut WatchCommandState,
+) -> io::Result<()> {
+    run_loop(
+        reader,
+        writer,
+        session,
+        Some(loader),
+        Some(WatchBinding { source, state }),
+        false,
+        None,
+    )
+}
+
+fn run_loop<
+    R: BufRead,
+    W: Write,
+    L: SnapshotSessionLoader + ?Sized,
+    S: WatchFrameSource + ?Sized,
+>(
+    reader: &mut R,
+    writer: &mut W,
+    session: &mut AdmittedReplSession,
+    loader: Option<&L>,
+    mut watch: Option<WatchBinding<'_, S>>,
+    color_enabled: bool,
+    mut submitter: Option<&mut ReplSubmissionHandler<'_>>,
+) -> io::Result<()> {
+    loop {
+        pump_watch_frames(&mut watch, writer, color_enabled)?;
+        write_styled(writer, AnsiColor::Dim, b"> ", color_enabled)?;
+        writer.flush()?;
+        match read_submission(reader)? {
+            ReadSubmission::Eof => {
+                close_session_watch(&mut watch, writer, color_enabled)?;
+                return Ok(());
+            }
+            ReadSubmission::TooLong => {
+                write_repl_error(writer, "ORNA-REPL-INPUT-LIMIT", color_enabled)?;
+            }
+            ReadSubmission::InvalidUtf8 => {
+                write_repl_error(writer, "ORNA-REPL-INPUT-UTF8", color_enabled)?;
+            }
+            ReadSubmission::Source(source) => {
+                let command = source.trim();
+                if command == ":quit" {
+                    close_session_watch(&mut watch, writer, color_enabled)?;
+                    return Ok(());
+                }
+                if let Some(help) = parse_help_command(command) {
+                    match help {
+                        Ok(text) => {
+                            write_styled(writer, AnsiColor::Cyan, text.as_bytes(), color_enabled)?;
+                        }
+                        Err(()) => {
+                            write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
+                        }
+                    }
+                    if help.is_ok() {
+                        writer.write_all(b"\n")?;
+                    }
+                } else if let Some(target) = parse_snapshot_target(command) {
+                    let Some(loader) = loader else {
+                        write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
+                        continue;
+                    };
+                    match target.and_then(|target| loader.load_snapshot(target).map_err(|_| ())) {
+                        Ok(candidate) => {
+                            *session = candidate;
+                            submitter = None;
+                        }
+                        Err(()) => write_repl_error(writer, "ORNA-REPL-AT", color_enabled)?,
+                    }
+                } else if let Some(rest) = parse_watch_source(command) {
+                    dispatch_watch(rest, &mut watch, writer, color_enabled)?;
+                } else if source.trim_start().starts_with(':') {
+                    write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
+                } else {
+                    let result = match submitter.as_deref_mut() {
+                        Some(submit) => submit(session, &source),
+                        None => session.submit(&source).map_err(ReplFailure::from),
+                    };
+                    match result {
+                        Ok(Some(value)) => write_repl_value(writer, &value, color_enabled)?,
+                        Ok(None) => {}
+                        Err(failure) => {
+                            write_repl_failure(writer, &failure, &source, color_enabled)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+/// Starts (or rebinds) the host watch, then drains available frames.
+fn dispatch_watch<W: Write, S: WatchFrameSource + ?Sized>(
+    source: &str,
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(binding) = watch.as_mut() else {
+        write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?;
+        return Ok(());
+    };
+    match binding.source.start_watch(source) {
+        Ok(presentation) => {
+            if let Some(previous) = binding.state.install(presentation)
+                && binding.source.close_watch(previous).is_err()
+            {
+                write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+            }
+            drain_available_frames(binding, writer, color_enabled)?;
+        }
+        Err(_) => write_repl_error(writer, "ORNA-REPL-COMMAND", color_enabled)?,
+    }
+    Ok(())
+}
+
+/// Cancels the watch owned by this session when the REPL closes.
+fn close_session_watch<W: Write, S: WatchFrameSource + ?Sized>(
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(binding) = watch.as_mut() else {
+        return Ok(());
+    };
+    if let Some(watch) = binding.state.close()
+        && binding.source.close_watch(watch).is_err()
+    {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+/// Applies one frame to the owning presentation and prints its outcome.
+fn accept_frame<W: Write>(
+    state: &mut WatchCommandState,
+    frame: Vec<u8>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    let Some(presentation) = state.presentation.as_mut() else {
+        return Ok(());
+    };
+    match presentation.receive_encoded(&frame) {
+        Ok(LivePresentationUpdate::SnapshotInstalled) => {
+            if let Some(published) = presentation.published() {
+                write_styled(
+                    writer,
+                    AnsiColor::Green,
+                    b"watch: snapshot installed",
+                    color_enabled,
+                )?;
+                writer.write_all(b" (rev ")?;
+                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
+                writer.write_all(b")\n")?;
+            }
+        }
+        Ok(LivePresentationUpdate::DeltaApplied) => {
+            if let Some(published) = presentation.published() {
+                write_styled(
+                    writer,
+                    AnsiColor::Green,
+                    b"watch: delta applied",
+                    color_enabled,
+                )?;
+                writer.write_all(b" (rev ")?;
+                write_styled_display(writer, AnsiColor::Dim, published.revision(), color_enabled)?;
+                writer.write_all(b")\n")?;
+            }
+        }
+        Ok(LivePresentationUpdate::ResyncRequired) => {
+            write_styled(
+                writer,
+                AnsiColor::Yellow,
+                b"watch: resync required\n",
+                color_enabled,
+            )?;
+        }
+        Err(_) => write_repl_error(writer, "ORNA-REPL-WATCH-FRAME", color_enabled)?,
+    }
+    Ok(())
+}
+
+#[allow(clippy::needless_pass_by_value)]
+/// Drains every immediately available frame; `Ok(None)` keeps the REPL
+/// interactive instead of blocking the line loop.
+fn drain_available_frames<W: Write, S: WatchFrameSource + ?Sized>(
+    binding: &mut WatchBinding<'_, S>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    if !send_pending_resync(binding, writer, color_enabled)? {
+        return Ok(());
+    }
+    let Some(watch) = binding.state.watch() else {
+        return Ok(());
+    };
+    loop {
+        match binding.source.next_frame(watch) {
+            Ok(Some(frame)) => {
+                accept_frame(binding.state, frame, writer, color_enabled)?;
+                if !send_pending_resync(binding, writer, color_enabled)? {
+                    return Ok(());
+                }
+            }
+            Ok(None) => return Ok(()),
+            Err(_) => {
+                write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Sends the presentation's pending resync through its owning host source.
+/// A failed send remains pending and is retried at the next loop boundary.
+fn send_pending_resync<W: Write, S: WatchFrameSource + ?Sized>(
+    binding: &mut WatchBinding<'_, S>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<bool> {
+    let Some(request) = binding.state.take_resync_request() else {
+        return Ok(true);
+    };
+    if let Ok(()) = binding.source.request_resync(request) {
+        binding.state.acknowledge_resync_request(request);
+        Ok(true)
+    } else {
+        write_repl_error(writer, "ORNA-REPL-WATCH-SOURCE", color_enabled)?;
+        Ok(false)
+    }
+}
+fn pump_watch_frames<W: Write, S: WatchFrameSource + ?Sized>(
+    watch: &mut Option<WatchBinding<'_, S>>,
+    writer: &mut W,
+    color_enabled: bool,
+) -> io::Result<()> {
+    if let Some(binding) = watch.as_mut() {
+        drain_available_frames(binding, writer, color_enabled)?;
+    }
+    Ok(())
+}
+
+fn parse_help_command(command: &str) -> Option<Result<&'static str, ()>> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":help") {
+        return None;
+    }
+    let topic = words.next();
+    if words.next().is_some() {
+        return Some(Err(()));
+    }
+    Some(match topic {
+        None => Ok(REPL_HELP),
+        Some("help") => Ok(":help [name]"),
+        Some("at") => Ok(":at CWD|HEAD|ref"),
+        Some("quit") => Ok(":quit"),
+        Some(_) => Err(()),
+    })
+}
+
+fn parse_snapshot_target(command: &str) -> Option<Result<SnapshotTarget, ()>> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":at") {
+        return None;
+    }
+    let Some(selector) = words.next() else {
+        return Some(Err(()));
+    };
+    if words.next().is_some() {
+        return Some(Err(()));
+    }
+    if selector.chars().any(char::is_control) {
+        return Some(Err(()));
+    }
+    Some(Ok(match selector {
+        "CWD" => SnapshotTarget::Cwd,
+        "HEAD" => SnapshotTarget::Head,
+        reference => SnapshotTarget::Ref(reference.into()),
+    }))
+}
+
+/// Splits a `:watch` console command into its required source expression.
+fn parse_watch_source(command: &str) -> Option<&str> {
+    let mut words = command.split_ascii_whitespace();
+    if words.next() != Some(":watch") {
+        return None;
+    }
+    let rest = command
+        .split_once(":watch")
+        .map_or("", |(_, rest)| rest)
+        .trim();
+    if rest.is_empty() {
+        return None;
+    }
+    Some(rest)
+}
+
+fn read_submission<R: BufRead>(reader: &mut R) -> io::Result<ReadSubmission> {
+    let mut source = Vec::new();
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(if source.is_empty() {
+                ReadSubmission::Eof
+            } else {
+                decode_submission(source)
+            });
+        }
+        let take = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1);
+        if source.len().saturating_add(take) > MAX_INPUT_BYTES {
+            let complete = bytes.get(take - 1) == Some(&b'\n');
+            reader.consume(take);
+            if !complete {
+                drain_line(reader)?;
+            }
+            return Ok(ReadSubmission::TooLong);
+        }
+        let complete = bytes.get(take - 1) == Some(&b'\n');
+        source.extend_from_slice(&bytes[..take]);
+        reader.consume(take);
+        if complete {
+            return Ok(decode_submission(source));
+        }
+    }
+}
+
+fn decode_submission(source: Vec<u8>) -> ReadSubmission {
+    String::from_utf8(source).map_or(ReadSubmission::InvalidUtf8, ReadSubmission::Source)
+}
+
+fn drain_line<R: BufRead>(reader: &mut R) -> io::Result<()> {
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let take = bytes
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |position| position + 1);
+        let complete = bytes.get(take - 1) == Some(&b'\n');
+        reader.consume(take);
+        if complete {
+            return Ok(());
+        }
+    }
+}
+
+pub fn inspect(value: &CanonicalValue) -> String {
+    let (text, ty) = inspect_raw(value.raw(), 0);
+    format!("{text} : {ty}")
+}
+
+fn inspect_raw(raw: &Raw, depth: usize) -> (String, &'static str) {
+    if depth >= MAX_INSPECT_DEPTH {
+        return ("…".into(), "Value");
+    }
+    match raw {
+        Raw::Null => ("null".into(), "Null"),
+        Raw::Bool(value) => (value.to_string(), "Bool"),
+        Raw::Int(value) => (truncate(&value.to_string()), "Int"),
+        Raw::Float(bits) => (format_float(*bits), "Float"),
+        Raw::Bytes(bytes) => (inspect_bytes(bytes), "Bytes"),
+        Raw::Text(value) => (format!("\"{}\"", escape(value)), "Str"),
+        Raw::Array(values) => (inspect_sequence(values, depth), "Array"),
+        Raw::Map(entries) => (inspect_map(entries, depth), "Map"),
+        // OVB tag 0 is the protected-value boundary. Discard the whole inner
+        // subtree before rendering so even nested inspect fallbacks cannot
+        // turn a secret payload into printable structure.
+        Raw::Tag(0, _) => ("<redacted>".into(), "Secret"),
+        // This generic display has no field-level disclosure proof. Diagnostic
+        // text, Error payloads, renderer properties, and typed sys.Value data
+        // therefore remain opaque here; callers needing a privileged view must
+        // use a separately authorized projection.
+        Raw::Tag(60011, _) => ("<redacted>".into(), "Diagnostic"),
+        Raw::Tag(60012, _) => ("<redacted>".into(), "Present"),
+        Raw::Tag(60016, _) => ("<redacted>".into(), "Error"),
+        Raw::Tag(60026, _) => ("<redacted>".into(), "sys.Value"),
+        // OVB tag 37 is the closed 1.0 UUID representation. Keep its
+        // structural fallback human-readable without turning presentation
+        // into an alternate persistence encoding.
+        Raw::Tag(37, value) => inspect_uuid(value),
+        Raw::Tag(tag, value) => {
+            let (text, _) = inspect_raw(value, depth + 1);
+            (format!("Tag<{tag}>({text})"), "Tagged")
+        }
+    }
+}
+
+fn inspect_uuid(value: &Raw) -> (String, &'static str) {
+    let Raw::Bytes(bytes) = value else {
+        return ("Tag<37>(<invalid>)".into(), "Tagged");
+    };
+    let Ok(bytes) = <[u8; 16]>::try_from(bytes.as_slice()) else {
+        return ("Tag<37>(<invalid>)".into(), "Tagged");
+    };
+    (canonical_uuid_text(bytes), "Uuid")
+}
+
+fn inspect_sequence(values: &[Raw], depth: usize) -> String {
+    let mut items = values
+        .iter()
+        .take(MAX_INSPECT_ITEMS)
+        .map(|value| inspect_raw(value, depth + 1).0)
+        .collect::<Vec<_>>();
+    if values.len() > MAX_INSPECT_ITEMS {
+        items.push("…".into());
+    }
+    format!("[{}]", items.join(", "))
+}
+
+fn inspect_map(entries: &[(Raw, Raw)], depth: usize) -> String {
+    let mut items = entries
+        .iter()
+        .take(MAX_INSPECT_ITEMS)
+        .map(|(key, value)| {
+            let key = inspect_raw(key, depth + 1).0;
+            let value = inspect_raw(value, depth + 1).0;
+            format!("{key}: {value}")
+        })
+        .collect::<Vec<_>>();
+    if entries.len() > MAX_INSPECT_ITEMS {
+        items.push("…".into());
+    }
+    format!("{{{}}}", items.join(", "))
+}
+
+fn inspect_bytes(bytes: &[u8]) -> String {
+    let mut text = String::new();
+    for byte in bytes.iter().take(MAX_INSPECT_TEXT / 2) {
+        write!(&mut text, "{byte:02x}").expect("writing to String is infallible");
+    }
+    if bytes.len() > MAX_INSPECT_TEXT / 2 {
+        text.push('…');
+    }
+    format!("0x{text}")
+}
+
+fn format_float(bits: u64) -> String {
+    let value = f64::from_bits(bits);
+    if value.is_nan() {
+        "NaN".into()
+    } else if value.is_infinite() {
+        if value.is_sign_negative() {
+            "-Infinity".into()
+        } else {
+            "Infinity".into()
+        }
+    } else {
+        value.to_string()
+    }
+}
+
+fn escape(value: &str) -> String {
+    truncate(&value.escape_default().to_string())
+}
+
+fn truncate(value: &str) -> String {
+    let mut end = value.len().min(MAX_INSPECT_TEXT);
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut text = value[..end].to_owned();
+    if end < value.len() {
+        text.push('…');
+    }
+    text
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orna_evaluator::Limits;
+    use std::{cell::Cell, io::BufReader};
+
+    #[test]
+    fn inspect_is_bounded_and_redacts_protected_values() {
+        let value = CanonicalValue::protected();
+        assert_eq!(inspect(&value), "<redacted> : Secret");
+        assert_eq!(
+            truncate(&"x".repeat(MAX_INSPECT_TEXT + 1)),
+            format!("{}…", "x".repeat(MAX_INSPECT_TEXT))
+        );
+    }
+
+    #[test]
+    fn inspect_redacts_payload_bearing_protected_values_inside_collections() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let raw = Raw::Map(vec![
+            (
+                Raw::Text("credential".into()),
+                Raw::Array(vec![Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned())))]),
+            ),
+            (
+                Raw::Tag(0, Box::new(Raw::Text(fixture.to_owned()))),
+                Raw::Text("keyed payload".into()),
+            ),
+        ]);
+
+        let rendered = inspect_raw(&raw, 0).0;
+        assert!(rendered.contains("<redacted>"), "{rendered}");
+        assert!(!rendered.contains(fixture), "{rendered}");
+    }
+
+    #[test]
+    fn inspect_redacts_payloads_in_diagnostic_present_error_and_sys_value_tags() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("credential".into()),
+                    Raw::Text(fixture.into()),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+
+        for raw in [diagnostic, present, error, sys_value] {
+            let value = CanonicalValue::new(raw).expect("fixture wrapper is canonical");
+            let display = inspect(&value);
+            assert!(display.starts_with("<redacted> : "), "{display}");
+            assert!(!display.contains(fixture), "{display}");
+        }
+    }
+
+    #[test]
+    fn composed_debug_inspect_and_trace_projections_keep_wrapper_tails_opaque() {
+        let fixture = include_str!("../tests/fixtures/secret-surface.orna").trim();
+        let tagged = |number, payload| Raw::Tag(number, Box::new(payload));
+        let diagnostic = tagged(
+            60011,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text(fixture.into())),
+                (Raw::Int(1.into()), Raw::Int(3.into())),
+                (Raw::Int(2.into()), Raw::Text(fixture.into())),
+                (Raw::Int(3.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(4.into()),
+                    Raw::Array(vec![Raw::Text(fixture.into())]),
+                ),
+                (Raw::Int(5.into()), Raw::Array(vec![])),
+                (Raw::Int(6.into()), Raw::Bool(false)),
+            ]),
+        );
+        let sys_value = tagged(
+            60026,
+            Raw::Array(vec![
+                Raw::Array(vec![Raw::Int(0.into()), Raw::Text("Str".into())]),
+                Raw::Text(fixture.into()),
+            ]),
+        );
+        let present = tagged(
+            60012,
+            Raw::Array(vec![
+                Raw::Text("value".into()),
+                Raw::Null,
+                Raw::Map(vec![(
+                    Raw::Text("diagnostic".into()),
+                    Raw::Array(vec![diagnostic.clone(), sys_value.clone()]),
+                )]),
+                Raw::Array(vec![]),
+            ]),
+        );
+        let error = tagged(
+            60016,
+            Raw::Map(vec![
+                (Raw::Int(0.into()), Raw::Text("ORNA-E-TEST".into())),
+                (Raw::Int(1.into()), Raw::Text(fixture.into())),
+                (Raw::Int(2.into()), Raw::Array(vec![])),
+                (
+                    Raw::Int(3.into()),
+                    Raw::Map(vec![(
+                        Raw::Text("credential".into()),
+                        Raw::Text(fixture.into()),
+                    )]),
+                ),
+            ]),
+        );
+        let raw = Raw::Array(vec![diagnostic, present, error, sys_value]);
+        let value = CanonicalValue::new(raw.clone()).expect("composed wrappers are canonical");
+
+        let debug = format!("{raw:?} {value:?}");
+        let display = inspect(&value);
+        let trace = value.redacted_for_trace().unwrap().encode().unwrap();
+        assert!(!debug.contains(fixture), "{debug}");
+        assert!(!display.contains(fixture), "{display}");
+        assert!(
+            !trace
+                .windows(fixture.len())
+                .any(|part| part == fixture.as_bytes())
+        );
+    }
+
+    #[test]
+    fn inspect_renders_canonical_uuid_text_without_affecting_ovb() {
+        let value = CanonicalValue::uuid([
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ]);
+        assert_eq!(
+            inspect(&value),
+            "00112233-4455-6677-8899-aabbccddeeff : Uuid"
+        );
+        assert_eq!(
+            value.encode().expect("canonical UUID OVB"),
+            vec![
+                0xd8, 0x25, 0x50, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa,
+                0xbb, 0xcc, 0xdd, 0xee, 0xff
+            ]
+        );
+    }
+
+    #[test]
+    fn scripted_loop_admits_typed_declarations() {
+        let mut input = b"let answer: Int = 42;\nanswer\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > 42 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn help_command_is_effect_free_and_lists_supported_console_operations() {
+        let mut input = b":help\n:help at\n:help unknown\n1 + 1\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            format!(
+                "> {REPL_HELP}\n> :at CWD|HEAD|ref\n> error[ORNA-REPL-COMMAND]: command is unknown or unavailable in this REPL\nhelp: enter `:help` to see the supported commands\n> 2 : Int\n> "
+            )
+        );
+    }
+
+    struct FailingSnapshotLoader;
+
+    impl SnapshotSessionLoader for FailingSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            _target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            Err(())
+        }
+    }
+
+    struct FreshSnapshotLoader;
+
+    impl SnapshotSessionLoader for FreshSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            assert_eq!(target, SnapshotTarget::Head);
+            Ok(AdmittedReplSession::new(Limits::default()))
+        }
+    }
+
+    struct CountingSnapshotLoader {
+        calls: Cell<usize>,
+    }
+
+    impl SnapshotSessionLoader for CountingSnapshotLoader {
+        type Error = ();
+
+        fn load_snapshot(
+            &self,
+            _target: SnapshotTarget,
+        ) -> Result<AdmittedReplSession, Self::Error> {
+            self.calls.set(self.calls.get() + 1);
+            Err(())
+        }
+    }
+
+    #[test]
+    fn malformed_snapshot_selection_does_not_call_the_loader() {
+        let mut input = b":at\n:at HEAD extra\n:at HEAD\x1b\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        let loader = CountingSnapshotLoader {
+            calls: Cell::new(0),
+        };
+        run_with_snapshot_loader(&mut input, &mut output, &mut session, &loader)
+            .expect("REPL runs");
+        assert_eq!(loader.calls.get(), 0);
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> "
+        );
+    }
+
+    #[test]
+    fn failed_snapshot_selection_preserves_the_existing_overlay() {
+        let mut input = b"let answer: Int = 42;\n:at HEAD\nanswer\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run_with_snapshot_loader(
+            &mut input,
+            &mut output,
+            &mut session,
+            &FailingSnapshotLoader,
+        )
+        .expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > error[ORNA-REPL-AT]: requested project snapshot could not be loaded\nhelp: choose an available snapshot with `:at CWD`, `:at HEAD`, or `:at ref`\n> 42 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn successful_snapshot_selection_replaces_the_existing_overlay() {
+        let mut input = b"let answer: Int = 42;\n:at HEAD\nanswer\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run_with_snapshot_loader(&mut input, &mut output, &mut session, &FreshSnapshotLoader)
+            .expect("REPL runs");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(
+            !output.contains("42 : Int"),
+            "old overlay survived: {output}"
+        );
+        assert!(
+            output.contains("error["),
+            "fresh session unexpectedly resolved answer: {output}"
+        );
+    }
+
+    #[test]
+    fn bounded_input_is_discarded_and_the_next_submission_runs() {
+        let mut input = vec![b'x'; MAX_INPUT_BYTES + 1];
+        input.extend_from_slice(b"\n1\n:quit\n");
+        let mut input = input.as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL recovers");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> error[ORNA-REPL-INPUT-LIMIT]: submission is longer than the REPL input limit\nhelp: shorten the submission and enter it again\n> 1 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn unicode_input_may_span_bufread_chunks() {
+        let source = "\"é\"\n:quit\n";
+        let mut input = BufReader::with_capacity(1, source.as_bytes());
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> \"\\u{e9}\" : Str\n> "
+        );
+    }
+
+    #[test]
+    fn failed_submission_keeps_the_last_successful_result() {
+        let mut input = b"1 + 1\nlet mismatch: Int = \"wrong\";\n$_\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(
+            output.starts_with("> 2 : Int\n> error[ORNA-S021-TYPE]: "),
+            "{output}"
+        );
+        assert!(output.contains("\nhelp: "), "{output}");
+        assert!(output.ends_with("> 2 : Int\n> "), "{output}");
+    }
+
+    #[test]
+    fn status_binding_reports_a_redacted_failure_then_a_success() {
+        let mut input = b"let secret_name: Int = \"private\";\n$?\n40 + 2\n$?\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        let output = String::from_utf8(output).expect("UTF-8");
+        assert!(output.starts_with("> error[ORNA-S021-TYPE]: "), "{output}");
+        let status_payload = output
+            .lines()
+            .find(|line| line.starts_with("> {"))
+            .expect("status binding prints its redacted payload");
+        assert!(!status_payload.contains("private"), "{output}");
+        assert!(status_payload.contains("\"redacted\": true"), "{output}");
+        assert!(
+            output.ends_with("> 42 : Int\n> null : Null\n> "),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn submitted_effect_is_rejected_without_changing_the_last_result() {
+        let mut input =
+            b"let seed: Int = 2;\nseed\nstd.net.http.get(\"https://example.com\")\n$_\n:quit\n"
+                .as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL runs");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> > 2 : Int\n> error[ORNA-REPL-EFFECT]: this input performs effects: network\nnote: the core REPL session never runs effects\nhelp: evaluate a pure expression here\nhelp: or run the input in a project repository REPL, where effects are committed\n> 2 : Int\n> "
+        );
+    }
+
+    #[test]
+    fn malformed_utf8_is_a_recoverable_submission_error() {
+        let mut input = b"2\n\xff\n$_\n:quit\n".as_slice();
+        let mut output = Vec::new();
+        let mut session = AdmittedReplSession::new(Limits::default());
+        run(&mut input, &mut output, &mut session).expect("REPL recovers");
+        assert_eq!(
+            String::from_utf8(output).expect("UTF-8"),
+            "> 2 : Int\n> error[ORNA-REPL-INPUT-UTF8]: submission is not valid UTF-8 text\nhelp: re-enter the submission using valid UTF-8\n> 2 : Int\n> "
+        );
+    }
+
+    struct BrokenWriter;
+
+    impl Write for BrokenWriter {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("writer failed"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writer_errors_are_propagated() {
+        let mut input = b":quit\n".as_slice();
+        let mut writer = BrokenWriter;
+        let mut session = AdmittedReplSession::new(Limits::default());
+        assert_eq!(
+            run(&mut input, &mut writer, &mut session)
+                .expect_err("writer error")
+                .kind(),
+            io::ErrorKind::Other
+        );
+    }
+
+    fn located(code: &str, message: &str, span: std::ops::Range<usize>, help: &str) -> ReplFailure {
+        ReplFailure {
+            code: code.to_owned(),
+            detail: Some(ReplDetail {
+                code: code.to_owned(),
+                message: message.to_owned(),
+                span: Some(span),
+                notes: Vec::new(),
+                help: vec![help.to_owned()],
+            }),
+        }
+    }
+
+    #[test]
+    fn unresolved_name_renders_its_line_column_caret_and_remedy() {
+        let failure = located(
+            "ORNA-S012-UNRESOLVED",
+            "name `he` cannot be resolved",
+            0..2,
+            "declare `he` before using it, for example `let he = <value>`",
+        );
+        let text = render_repl_failure(&failure, "he\n");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert_eq!(
+            lines[0],
+            "error[ORNA-S012-UNRESOLVED]: name `he` cannot be resolved"
+        );
+        assert!(lines.contains(&"  --> line 1, column 1"), "{text}");
+        assert!(lines.contains(&"1 | he"), "{text}");
+        assert!(lines.contains(&"  | ^^"), "{text}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("help: declare `he` before using it")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn string_literal_line_is_withheld_from_the_snippet() {
+        let source = "let secret_name: Int = \"private\";\n";
+        let failure = located(
+            "ORNA-S021-TYPE",
+            "static types are incompatible",
+            0..source.len() - 1,
+            "change the expression or its declared type",
+        );
+        let text = render_repl_failure(&failure, source);
+
+        assert!(text.contains("  --> line 1, column 1"), "{text}");
+        assert!(
+            text.contains("<source withheld: line contains a string literal>"),
+            "{text}"
+        );
+        assert!(!text.contains("private"), "{text}");
+    }
+
+    #[test]
+    fn multi_line_string_middle_line_without_a_quote_is_withheld() {
+        let source = "let s = \"first\nsecret middle\nlast\";\n";
+        let start = source.find("secret").expect("middle line fixture");
+        let failure = located(
+            "ORNA-S021-TYPE",
+            "static types are incompatible",
+            start..start + "secret".len(),
+            "change the expression or its declared type",
+        );
+        let text = render_repl_failure(&failure, source);
+
+        assert!(text.contains("  --> line 2, column 1"), "{text}");
+        assert!(
+            text.contains("<source withheld: line contains a string literal>"),
+            "{text}"
+        );
+        assert!(!text.contains("secret"), "{text}");
+        assert!(!text.contains("middle"), "{text}");
+    }
+
+    #[test]
+    fn end_of_input_error_caret_sits_after_the_last_token() {
+        let failure = located(
+            "ORNA-PARSE-001",
+            "expected namespace path",
+            3..3,
+            "name the module to import after `use`, for example `use library;`",
+        );
+        let text = render_repl_failure(&failure, "use\n");
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(lines.contains(&"  --> line 1, column 4"), "{text}");
+        assert!(lines.contains(&"  |    ^"), "{text}");
+    }
+
+    #[test]
+    fn multi_line_error_reports_the_line_of_its_span() {
+        let source = "let a = 1;\nnofn(2)\n";
+        let failure = located(
+            "ORNA-S012-UNRESOLVED",
+            "name `nofn` cannot be resolved",
+            11..15,
+            "declare `nofn` before using it",
+        );
+        let text = render_repl_failure(&failure, source);
+        let lines: Vec<&str> = text.lines().collect();
+
+        assert!(lines.contains(&"  --> line 2, column 1"), "{text}");
+        assert!(lines.contains(&"2 | nofn(2)"), "{text}");
+        assert!(lines.contains(&"  | ^^^^"), "{text}");
+    }
+
+    #[test]
+    fn failure_without_located_detail_renders_its_fixed_remedy_without_a_location() {
+        let text = render_repl_failure(&ReplFailure::code("ORNA-EVAL-PARSE"), "use\n");
+
+        assert!(text.starts_with("error[ORNA-EVAL-PARSE]: "), "{text}");
+        assert!(!text.contains("-->"), "{text}");
+        assert!(text.contains("\nhelp: "), "{text}");
+    }
+}

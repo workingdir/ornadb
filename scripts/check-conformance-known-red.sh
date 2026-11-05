@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate for the orna-conformance-v1 test suite against scripts/conformance-known-red.txt.
+# Gate for the orna-conformance test suite against scripts/conformance-known-red.txt.
 #
 # Each non-comment line of the list is:
 #   <test name><TAB><bead id><TAB><reason><TAB><expected failure substring>.
@@ -28,7 +28,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 2
 LIST=scripts/conformance-known-red.txt
 BEADS=scripts/conformance-known-red-beads.txt
-PKG=orna-conformance-v1
+PKG=orna-conformance
 CARGO=(cargo test --locked -p "$PKG")
 mode=check
 [ "${1:-}" = "--collect" ] && mode=collect

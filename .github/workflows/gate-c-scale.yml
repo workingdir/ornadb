@@ -4,7 +4,7 @@ name: Gate C scale
 # one million rows use ORP-1; indexed point/range queries, missing keys, unindexed
 # scan and concurrent writes in cold and warm partial clones.
 #
-# One job, driven by crates/orna-repository-v1/tests/row_store_scale.rs:
+# One job, driven by crates/orna-repository/tests/row_store_scale.rs:
 # - gate-c-bounded (pull_request, push to main, dispatch): the non-ignored row-store
 #   targets (ten rows, malformed graphs) and the 100k-row bounded-path tests.
 #
@@ -126,9 +126,9 @@ jobs:
             fi
           }
 
-          run_record row-store-bounded -p orna-repository-v1 --test row_store_scale -- --nocapture
-          run_record native-graph-insert-100k -p orna-repository-v1 --lib one_insert_into_a_100k_row_store_touches_a_bounded_path -- --nocapture
-          run_record native-graph-update-path -p orna-repository-v1 --lib one_update_reads_its_path_and_at_most_two_more_pages -- --nocapture
+          run_record row-store-bounded -p orna-repository --test row_store_scale -- --nocapture
+          run_record native-graph-insert-100k -p orna-repository --lib one_insert_into_a_100k_row_store_touches_a_bounded_path -- --nocapture
+          run_record native-graph-update-path -p orna-repository --lib one_update_reads_its_path_and_at_most_two_more_pages -- --nocapture
 
           exit "$status"
 

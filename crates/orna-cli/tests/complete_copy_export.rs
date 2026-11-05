@@ -1,0 +1,1799 @@
+//! `orna export` end to end: freeze a pinned snapshot into an archive, read the
+//! archive back with no repository, and reconstruct it into a fresh directory
+//! that has no object of the source.
+//!
+//! The repository is a real format-3 fixture built by `support/format3.rs`; the
+//! archive is written and read by the real `orna` binary, so this proves
+//! the three export modes are wired to the shared complete-copy path rather
+//! than to a private one.
+
+use std::{
+    io::{Read, Write},
+    path::Path,
+    process::{Command, Output, Stdio},
+};
+
+use sha2::{Digest, Sha256};
+use tempfile::TempDir;
+
+#[path = "support/format3.rs"]
+mod format3;
+use format3::*;
+
+#[path = "support/media_commit.rs"]
+mod media_commit;
+
+/// A CLI process with Git routing isolated, so the developer's own Git
+/// configuration cannot decide the outcome.
+fn isolated_cli() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_orna"));
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    for name in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_COMMON_DIR",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+    ] {
+        command.env_remove(name);
+    }
+    command
+}
+
+/// Runs `orna <arguments>` in `directory`.
+fn run(directory: &Path, arguments: &[&str]) -> Output {
+    isolated_cli()
+        .current_dir(directory)
+        .args(arguments)
+        .output()
+        .expect("CLI process starts")
+}
+
+/// Runs `orna repl` in `directory`, feeding `input` and ending with `:quit`.
+fn repl(directory: &Path, input: &str) -> Output {
+    let mut child = isolated_cli()
+        .current_dir(directory)
+        .arg("repl")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the REPL starts");
+    child
+        .stdin
+        .take()
+        .expect("REPL stdin")
+        .write_all(format!("{input}\n:quit\n").as_bytes())
+        .expect("write REPL input");
+    child.wait_with_output().expect("the REPL exits")
+}
+
+fn stdout(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn export_check_and_restore_carry_one_snapshot_offline() {
+    let (root, _repository, _relation_id) = empty_format3_repository();
+    let project: &Path = root.path();
+    let snapshot = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // Freeze the pinned snapshot: exit 0 and the primary commit on stdout.
+    let archive = project.join("archive");
+    let exported = run(project, &["export", "archive", "--at", "HEAD"]);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stdout(&exported).contains(&snapshot),
+        "export names the pinned commit: {}",
+        stdout(&exported)
+    );
+    assert!(archive.join("manifest.tsv").is_file());
+
+    // Read the archive back: the check mode needs no repository at all, so it
+    // runs from an unrelated directory.
+    let unrelated = TempDir::new().unwrap();
+    let archive_path = archive.to_str().unwrap();
+    let checked = run(unrelated.path(), &["export", archive_path, "--check"]);
+    assert_eq!(
+        checked.status.code(),
+        Some(0),
+        "check failed: {}",
+        stderr(&checked)
+    );
+    assert!(
+        stdout(&checked).contains(&snapshot),
+        "check reports the recorded snapshot: {}",
+        stdout(&checked)
+    );
+
+    // Reconstruct into a fresh directory: no remote is configured and the copy
+    // names the pinned commit as its HEAD. `--worktree` also materialises the
+    // pinned snapshot, which is what makes the copy usable and lets the source
+    // below be read from its own worktree.
+    let restored = project.join("restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        project,
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+    let head = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(head, snapshot, "the copy's HEAD is the pinned commit");
+    let remotes = String::from_utf8(git_output(&restored, &["remote"], None)).unwrap();
+    assert_eq!(remotes.trim(), "", "the copy configures no remote");
+
+    // The checked-out code is the snapshot's own source, read from the copy.
+    let source = std::fs::read_to_string(restored.join("main.orna")).unwrap();
+    assert_eq!(
+        source,
+        std::fs::read_to_string(project.join("main.orna")).unwrap()
+    );
+}
+
+#[test]
+fn export_refuses_a_second_snapshot_into_one_local_repository() {
+    let (root, _repository, _relation_id) = empty_format3_repository();
+    let project: &Path = root.path();
+
+    // An absent selector and an absent archive are both failures, and neither
+    // writes a claimed-complete archive.
+    let unresolved = run(project, &["export", "archive", "--at", "no-such-ref"]);
+    assert_eq!(unresolved.status.code(), Some(1), "{}", stderr(&unresolved));
+    assert!(!project.join("archive").join("manifest.tsv").exists());
+
+    let absent = run(project, &["export", "absent-archive", "--check"]);
+    assert_eq!(absent.status.code(), Some(1), "{}", stderr(&absent));
+
+    // The export verb belongs to a repository: a directory that is not one
+    // fails instead of writing an empty archive.
+    let unrelated = TempDir::new().unwrap();
+    let outside = run(unrelated.path(), &["export", "archive", "--at", "HEAD"]);
+    assert_eq!(outside.status.code(), Some(1), "{}", stderr(&outside));
+    assert!(!unrelated.path().join("archive").exists());
+}
+
+const MEDIA_FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/media");
+const IMPORT_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/media/import-image.orna"
+);
+const MEDIA_ROOT_PLACEHOLDER: &str = "__MEDIA_ROOT__";
+
+/// Reads every committed row through the ordinary repository reader, exactly
+/// as a query does.
+fn committed_rows(
+    repository: &orna_repository::Repository,
+    relation_id: [u8; 16],
+) -> Vec<orna_repository::AdmittedRow> {
+    let format = repository
+        .open_format_context()
+        .expect("open the format context");
+    let row_map = format.load_row_map(relation_id).expect("load the row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the native graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    graph
+        .range_rows(
+            &orna_repository::KeyRange::new(None, None, 16).expect("key range"),
+            &scope,
+        )
+        .expect("read the committed rows")
+}
+
+/// Commits an empty format-3 relation with an explicit secondary map, then
+/// installs a replace ref that points at the prior snapshot. Snapshot export
+/// must follow the pinned commit's real object graph rather than the overlay.
+fn commit_snapshot_with_secondary_root(
+    project: &Path,
+    relation_id: [u8; 16],
+) -> (String, String, String) {
+    let database_id = [0, 0, 0, 0, 0, 0, 0x40, 0, 0x80, 0, 0, 0, 0, 0, 0, 1];
+    let schema_source = std::fs::read(project.join("main.orna")).unwrap();
+    // The chunk entry carries the chunk's SHA-256; the kind-6 node and the
+    // rows domains carry the format-3 schema identity.
+    let chunk_digest: [u8; 32] = Sha256::digest(&schema_source).into();
+    let schema_digest: [u8; 32] = Sha256::new()
+        .chain_update(b"orna.schema.v3\0")
+        .chain_update(&schema_source)
+        .finalize()
+        .into();
+
+    let chunk_oid = git_object(project, "blob", &schema_source);
+    let mut byte_index = vec![0x85, 0x01, 0x04, 0x00];
+    append_cbor_head(&mut byte_index, 0, schema_source.len());
+    byte_index.extend_from_slice(&[0x81, 0x83]);
+    append_cbor_head(&mut byte_index, 0, schema_source.len());
+    append_cbor_bytes(&mut byte_index, &git_oid_bytes(&chunk_oid));
+    append_cbor_bytes(&mut byte_index, &chunk_digest);
+    let byte_index_oid = native_fixture_node(project, &byte_index, &[(chunk_oid.as_str(), "blob")]);
+
+    let mut schema = vec![0x85, 0x01, 0x06];
+    append_cbor_head(&mut schema, 0, schema_source.len());
+    append_cbor_bytes(&mut schema, &schema_digest);
+    append_cbor_bytes(&mut schema, &git_oid_bytes(&byte_index_oid));
+    let schema_oid = native_fixture_node(project, &schema, &[(byte_index_oid.as_str(), "tree")]);
+
+    let mut primary_domain = vec![0x83, 0x64];
+    primary_domain.extend_from_slice(b"rows");
+    append_cbor_bytes(&mut primary_domain, &relation_id);
+    append_cbor_bytes(&mut primary_domain, &schema_digest);
+    let mut primary_data = vec![0x84, 0x01, 0x01];
+    primary_data.extend_from_slice(&primary_domain);
+    primary_data.push(0x80);
+    let primary_root = native_fixture_node(project, &primary_data, &[]);
+
+    let mut secondary_domain = vec![0x83, 0x69];
+    secondary_domain.extend_from_slice(b"secondary");
+    append_cbor_bytes(&mut secondary_domain, &relation_id);
+    append_cbor_bytes(&mut secondary_domain, &schema_digest);
+    let mut secondary_data = vec![0x84, 0x01, 0x01];
+    secondary_data.extend_from_slice(&secondary_domain);
+    secondary_data.push(0x80);
+    let secondary_root = native_fixture_node(project, &secondary_data, &[]);
+
+    let mut relation_domain = vec![0x82, 0x69];
+    relation_domain.extend_from_slice(b"relations");
+    append_cbor_bytes(&mut relation_domain, &database_id);
+    let mut relation_map = vec![0x84, 0x01, 0x01];
+    relation_map.extend_from_slice(&relation_domain);
+    relation_map.extend_from_slice(&[0x81, 0x82]);
+    append_cbor_bytes(&mut relation_map, &relation_id);
+    relation_map.push(0x84);
+    for oid in [&schema_oid, &primary_root, &secondary_root] {
+        append_cbor_bytes(&mut relation_map, &git_oid_bytes(oid));
+    }
+    relation_map.push(0x00);
+    let relation_map_oid = native_fixture_node(
+        project,
+        &relation_map,
+        &[
+            (schema_oid.as_str(), "tree"),
+            (primary_root.as_str(), "tree"),
+            (secondary_root.as_str(), "tree"),
+        ],
+    );
+
+    let mut store_data = vec![0x83, 0x01, 0x00];
+    append_cbor_bytes(&mut store_data, &git_oid_bytes(&relation_map_oid));
+    let store_root =
+        native_fixture_node(project, &store_data, &[(relation_map_oid.as_str(), "tree")]);
+    let ledger_bytes = std::fs::read(project.join(".orna/database.orna")).unwrap();
+    let ledger_oid = git_object(project, "blob", &ledger_bytes);
+    let source_oid = git_object(project, "blob", &schema_source);
+    let orna_tree = git_tree(
+        project,
+        &format!("100644 blob {ledger_oid}\tdatabase.orna\n040000 tree {store_root}\tstore\n"),
+    );
+    let root_tree = git_tree(
+        project,
+        &format!("040000 tree {orna_tree}\t.orna\n100644 blob {source_oid}\tmain.orna\n"),
+    );
+    let parent = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let snapshot = String::from_utf8(git_output(
+        project,
+        &[
+            "commit-tree",
+            &root_tree,
+            "-p",
+            &parent,
+            "-m",
+            "secondary map fixture",
+        ],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    let head_ref = String::from_utf8(git_output(project, &["symbolic-ref", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(project, &["update-ref", &head_ref, &snapshot]);
+    let replacement_ref = format!("refs/replace/{snapshot}");
+    git(project, &["update-ref", &replacement_ref, &parent]);
+
+    (snapshot, store_root, secondary_root)
+}
+
+#[test]
+fn complete_copy_preserves_secondary_native_roots_after_source_removal() {
+    let (root, repository, relation_id) = empty_format3_repository();
+    let source = root.path();
+    let source_path = source.to_path_buf();
+    let (snapshot, store_root, secondary_root) =
+        commit_snapshot_with_secondary_root(source, relation_id);
+
+    let replaced_store = format!("{snapshot}:.orna/store");
+    assert_ne!(
+        String::from_utf8(git_output(source, &["rev-parse", &replaced_store], None))
+            .unwrap()
+            .trim(),
+        store_root,
+        "the fixture's replace ref redirects ordinary Git walks away from the secondary root"
+    );
+
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///unavailable/original.git",
+        ],
+    );
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("secondary-root-archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(source, &["export", archive_path, "--at", &snapshot]);
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+
+    drop(repository);
+    drop(root);
+    assert!(
+        !source_path.exists(),
+        "the source repository is gone before restore"
+    );
+
+    let restored = outside.path().join("secondary-root-restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        outside.path(),
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+
+    let head = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    assert_eq!(head, snapshot, "the copy restores the pinned commit");
+    let copied_store = format!("{snapshot}:.orna/store");
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["rev-parse", &copied_store], None))
+            .unwrap()
+            .trim(),
+        store_root,
+        "the committed store root is unchanged"
+    );
+    let secondary_expression = format!("{secondary_root}^{{tree}}");
+    git_output(&restored, &["cat-file", "-e", &secondary_expression], None);
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the reconstructed repository has no remote"
+    );
+
+    let reopened =
+        orna_repository::Repository::discover(&restored).expect("discover the offline copy");
+    let format = reopened
+        .open_format_context()
+        .expect("reopen the pinned format-3 context offline");
+    format
+        .validate_store_root()
+        .expect("validate the copied native store root offline");
+}
+
+#[allow(clippy::too_many_lines)]
+#[test]
+/// ORNA-GIT-001: complete copies preserve the real snapshot gitlink and its dependency content.
+fn complete_copy_preserves_pinned_dependency_under_replace_ref() {
+    const DEPENDENCY_PATH: &str = "deps/reference project";
+    const DEPENDENCY_SOURCE: &[u8] = include_bytes!("fixtures/reference-project/main.orna");
+
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let source_path = source.to_path_buf();
+    let dependency_source = TempDir::new().unwrap();
+    let dependency_source_path = dependency_source.path().to_path_buf();
+    git(dependency_source.path(), &["init", "--quiet"]);
+    git(
+        dependency_source.path(),
+        &["config", "user.email", "kieran@drewett.dev"],
+    );
+    git(
+        dependency_source.path(),
+        &["config", "user.name", "kierandrewett"],
+    );
+    std::fs::write(
+        dependency_source.path().join("main.orna"),
+        DEPENDENCY_SOURCE,
+    )
+    .unwrap();
+    git(dependency_source.path(), &["add", "main.orna"]);
+    git(
+        dependency_source.path(),
+        &["commit", "--quiet", "-m", "checked-in dependency fixture"],
+    );
+    let dependency_commit = String::from_utf8(git_output(
+        dependency_source.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let parent = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(
+        source,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            dependency_source_path.to_str().unwrap(),
+            DEPENDENCY_PATH,
+        ],
+    );
+    git(
+        source,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "pin checked-in dependency fixture",
+        ],
+    );
+    let snapshot = String::from_utf8(git_output(source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let gitlink = git_output(
+        source,
+        &[
+            "--no-replace-objects",
+            "ls-tree",
+            &snapshot,
+            "--",
+            DEPENDENCY_PATH,
+        ],
+        None,
+    );
+    assert!(
+        String::from_utf8_lossy(&gitlink).contains(&format!(
+            "160000 commit {dependency_commit}\t{DEPENDENCY_PATH}"
+        )),
+        "the committed snapshot stores the exact dependency commit as a native gitlink"
+    );
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///unavailable/superproject.git",
+        ],
+    );
+    git(
+        source,
+        &["update-ref", &format!("refs/replace/{snapshot}"), &parent],
+    );
+    let replaced_gitlinks = git_output(
+        source,
+        &["ls-tree", "-r", "-z", "--full-tree", &snapshot],
+        None,
+    );
+    assert!(
+        replaced_gitlinks
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .all(|entry| !entry.starts_with(b"160000 commit ")),
+        "ordinary tree traversal is redirected by the fixture's replace ref"
+    );
+
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("dependency-archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", &snapshot],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+
+    drop(repository);
+    drop(root);
+    drop(dependency_source);
+    assert!(!source_path.exists(), "source is gone before restore");
+    assert!(
+        !dependency_source_path.exists(),
+        "the dependency origin is gone before restore"
+    );
+
+    let restored = outside.path().join("restored-dependency");
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&restored_output)
+    );
+    let restored_dependency = restored.join(DEPENDENCY_PATH);
+    assert_eq!(
+        String::from_utf8(git_output(
+            &restored_dependency,
+            &["rev-parse", "HEAD"],
+            None,
+        ))
+        .unwrap()
+        .trim(),
+        dependency_commit,
+        "restored gitlink uses the commit pinned by the real snapshot"
+    );
+    assert_eq!(
+        std::fs::read(restored_dependency.join("main.orna")).unwrap(),
+        DEPENDENCY_SOURCE,
+        "the checked-in dependency source is restored without its remote"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored_dependency, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the restored dependency has no remote"
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+/// `orna publish` of a database holding an imported media row produces a
+/// complete copy whose history lists the publication commit and whose
+/// reconstructed copy reads the same row with no media fetch.
+#[tokio::test]
+/// Verifies that an independent offline copy retains the format-3 row-to-Blob
+/// graph and exact payload commitment. ORNA-BLOB-019, ORNA-OGB-001, and
+async fn publish_then_history_then_offline_copy_carries_the_publication_commit() {
+    let (root, repository, relation_id) = empty_format3_repository();
+    let project: &Path = root.path();
+    let source_repository_path = project.to_path_buf();
+    git(
+        project,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "file:///deliberately-unavailable/original.git",
+        ],
+    );
+    let source = TempDir::new().unwrap();
+    std::fs::copy(
+        Path::new(MEDIA_FIXTURES).join("pixel.png"),
+        source.path().join("pixel.png"),
+    )
+    .unwrap();
+
+    // Commit one imported media row under the identity `orna publish` will
+    // derive, so the CLI verb sees the range this harness leaves pending.
+    let (runtime_identity, initial_digest) = cli_runtime_identity(&repository);
+    let state = orna_runtime::RuntimeState::open(&repository, runtime_identity, initial_digest)
+        .await
+        .unwrap();
+    let writer = state
+        .acquire_lease(runtime_identity.repository_id)
+        .await
+        .unwrap();
+    let capability = repository.capture_capability(relation_id).unwrap();
+    let mut filesystem = orna_sys::FilesystemProvider::with_limits(1 << 20, 16).unwrap();
+    filesystem.allow_root(source.path()).unwrap();
+    let mut bindings =
+        orna_evaluator::SysHostBindingRegistry::new(orna_sys::EnvironmentProvider::default())
+            .with_filesystem_provider(filesystem)
+            .with_repository_capture_capability(capability);
+    let fixture = std::fs::read_to_string(IMPORT_FIXTURE).unwrap();
+    let media_root = format!("{:?}", source.path().to_string_lossy().as_ref());
+    let expression = fixture
+        .trim_end()
+        .replace(MEDIA_ROOT_PLACEHOLDER, &media_root);
+    media_commit::commit_capture_pending(
+        &repository,
+        &state,
+        writer,
+        &mut bindings,
+        &expression,
+        "image",
+        0xb0,
+        true,
+        relation_id,
+    )
+    .await;
+    drop(bindings);
+    drop(state);
+
+    // Next: reader inputs — the relation id, a key spelling that names the
+    // imported row, and the committed bytes the copy must reproduce.
+    let relation = hex(&relation_id);
+    let bytes_on_disk = std::fs::metadata(Path::new(MEDIA_FIXTURES).join("pixel.png"))
+        .unwrap()
+        .len();
+
+    let parent = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let published = run(project, &["publish"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "publish failed: {}",
+        stderr(&published)
+    );
+    let published_repository =
+        orna_repository::Repository::discover(project).expect("discover published repository");
+    let source_rows = committed_rows(&published_repository, relation_id);
+    assert_eq!(source_rows.len(), 1, "publish commits the imported row");
+    let publication = stdout(&published)
+        .split_whitespace()
+        .find(|word| word.len() == 40 && word.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .map_or_else(
+            || {
+                panic!(
+                    "publish names the publication commit: {}",
+                    stdout(&published)
+                )
+            },
+            str::to_owned,
+        );
+    let head = String::from_utf8(git_output(project, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // Step 2: the history of the imported row lists the publication commit.
+    let history = run(
+        project,
+        &["history", &relation, "image", "--format", "json"],
+    );
+    assert_eq!(
+        history.status.code(),
+        Some(0),
+        "history failed: {}",
+        stderr(&history)
+    );
+    let revisions: serde_json::Value = serde_json::from_slice(&history.stdout).unwrap();
+    let commits: Vec<String> = revisions
+        .as_array()
+        .expect("history --format json prints a list")
+        .iter()
+        .filter_map(|revision| revision["commit"].as_str().map(str::to_owned))
+        .collect();
+    assert!(
+        commits.iter().any(|commit| commit == &publication),
+        "the publication commit {publication} is listed: {commits:?}"
+    );
+    let listed_head = commits
+        .first()
+        .expect("the walk lists the newest commit first");
+    assert!(
+        head.starts_with(listed_head.as_str()),
+        "the newest listed revision is HEAD {head}"
+    );
+
+    // Make ordinary Git walks substitute the pre-publication commit. The
+    // exporter must still archive the pinned publication's actual row/blob graph.
+    let replacement_ref = format!("refs/replace/{publication}");
+    git(project, &["update-ref", &replacement_ref, &parent]);
+    let publication_store = format!("{publication}:.orna/store");
+    let parent_store = format!("{parent}:.orna/store");
+    assert_eq!(
+        String::from_utf8(git_output(
+            project,
+            &["rev-parse", &publication_store],
+            None
+        ))
+        .unwrap()
+        .trim(),
+        String::from_utf8(git_output(project, &["rev-parse", &parent_store], None))
+            .unwrap()
+            .trim(),
+        "the fixture's replace ref redirects ordinary Git walks to the empty parent"
+    );
+    // Step 3: freeze that publication and reconstruct it somewhere else.
+    let outside = TempDir::new().unwrap();
+    let archive = outside.path().join("publication-archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        project,
+        &["export", archive_path, "--at", "HEAD", "--at", &parent],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export failed: {}",
+        stderr(&exported)
+    );
+    let expected_source = std::fs::read_to_string(project.join("main.orna")).unwrap();
+    drop(repository);
+    drop(root);
+    drop(source);
+    assert!(
+        !source_repository_path.exists(),
+        "the source repository is gone"
+    );
+    let restored = outside.path().join("restored");
+    let restored_path = restored.to_str().unwrap();
+    let reconstructed = run(
+        outside.path(),
+        &[
+            "export",
+            archive_path,
+            "--restore",
+            restored_path,
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+
+    // Step 4: the copy opens offline, recovers the committed key, and reads its
+    // raw Blob bytes. A missing payload or descriptor closure fails the read.
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the restored repository has no configured remotes"
+    );
+    for commit in [&parent, &publication] {
+        assert_eq!(
+            String::from_utf8(git_output(
+                &restored,
+                &["show", &format!("{commit}:main.orna")],
+                None,
+            ))
+            .unwrap(),
+            expected_source,
+            "each snapshot independently recovers its module source"
+        );
+        let database = String::from_utf8(git_output(
+            &restored,
+            &["show", &format!("{commit}:.orna/database.orna")],
+            None,
+        ))
+        .unwrap();
+        assert!(
+            database.contains("repository_format: 3"),
+            "each snapshot independently recovers its format-3 database schema"
+        );
+        git_output(&restored, &["checkout", "--force", commit], None);
+        let member_copy = orna_repository::Repository::discover(&restored)
+            .expect("discover the selected copied snapshot");
+        let checked_out =
+            String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None)).unwrap();
+        assert_eq!(
+            checked_out.trim(),
+            commit,
+            "the selected snapshot is checked out"
+        );
+        let member_rows = committed_rows(&member_copy, relation_id);
+        if commit == &publication {
+            assert_eq!(
+                member_rows, source_rows,
+                "the published member recovers its row"
+            );
+            assert!(
+                member_rows.iter().any(|row| {
+                    row.key() == &orna_repository::TypedKey::Bytes(b"image".to_vec())
+                        || row.key() == &orna_repository::TypedKey::Text("image".to_owned())
+                }),
+                "the copied publication retains the concrete image key"
+            );
+        } else {
+            assert!(
+                member_rows.is_empty(),
+                "the pre-publication snapshot has no row"
+            );
+        }
+    }
+    let copy = orna_repository::Repository::discover(&restored).expect("open the copy");
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the copy configures no remote"
+    );
+    let copy_rows = committed_rows(&copy, relation_id);
+    assert_eq!(
+        copy_rows, source_rows,
+        "the copy reads the identical committed row"
+    );
+    let row = copy_rows.first().expect("the copy carries the row");
+    let drawn = row.blob_fields().expect("the row decodes its Blob fields");
+    assert_eq!(drawn.len(), 1, "the row carries exactly one Blob field");
+    let raw_payload = std::fs::read(Path::new(MEDIA_FIXTURES).join("pixel.png")).unwrap();
+    let expected_sha256: [u8; 32] = Sha256::digest(&raw_payload).into();
+    let format = copy
+        .open_format_context()
+        .expect("open the restored format context");
+    let row_map = format
+        .load_row_map(relation_id)
+        .expect("load the restored committed row map");
+    let graph = format
+        .open_native_graph(&row_map)
+        .expect("open the restored native graph");
+    let scope = graph
+        .open_read_scope()
+        .expect("open the restored read scope");
+    let copied_row = graph
+        .lookup_row(row.key(), &scope)
+        .expect("look up the copied image row")
+        .expect("the image key remains present");
+    let descriptor = copied_row
+        .value()
+        .dependencies()
+        .into_iter()
+        .find(|dependency| dependency.kind() == orna_repository::NativeObjectKind::Tree)
+        .expect("the copied row depends on its Blob descriptor")
+        .oid()
+        .clone();
+    let reference = graph
+        .admit_blob_reference(&copied_row, &descriptor, &scope)
+        .expect("admit the copied descriptor from its row");
+    let copied_payload = graph
+        .read_blob_range(&reference, 0..drawn[0].1.length(), &scope)
+        .expect("read raw Blob bytes from the restored snapshot")
+        .bytes()
+        .to_vec();
+    assert_eq!(
+        copied_payload, raw_payload,
+        "the restored Blob bytes match the fixture"
+    );
+    let copied_sha256: [u8; 32] = Sha256::digest(&copied_payload).into();
+    assert_eq!(
+        copied_sha256, expected_sha256,
+        "the restored raw Blob hash matches"
+    );
+    assert_eq!(
+        drawn[0].1.sha256(),
+        expected_sha256,
+        "the restored Blob row preserves its raw content hash"
+    );
+    assert_eq!(
+        drawn[0].1.length(),
+        bytes_on_disk,
+        "the row still carries the committed payload length"
+    );
+}
+
+/// A repository is only discoverable from a directory inside the worktree.
+#[test]
+fn export_discovers_the_repository_from_a_subdirectory() {
+    let (root, _repository, _relation_id) = empty_format3_repository();
+    let project: &Path = root.path();
+    let nested = project.join(".orna");
+    let archive = project.join("nested-archive");
+
+    let exported = run(
+        &nested,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export from a subdirectory failed: {}",
+        stderr(&exported)
+    );
+    assert!(archive.join("manifest.tsv").is_file());
+}
+
+#[allow(clippy::too_many_lines)]
+/// A promised object that exists only at `origin` must not be fetched to make
+/// an otherwise incomplete local snapshot exportable.
+#[test]
+fn export_fails_locally_for_a_missing_promisor_object() {
+    let (root, _repository, _) = empty_format3_repository();
+    let source = root.path();
+    std::fs::write(source.join("remote-only.txt"), b"promisor-only payload").unwrap();
+    git(source, &["add", "remote-only.txt"]);
+    git(source, &["commit", "--quiet", "-m", "promisor source"]);
+    let oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:remote-only.txt"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    // Git maintenance may pack loose objects while this fixture runs.
+    let has_origin_object = || {
+        Command::new("git")
+            .current_dir(source)
+            .args(["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .status()
+            .expect("check origin object availability")
+            .success()
+    };
+    assert!(has_origin_object(), "origin has the promised object");
+
+    let outside = TempDir::new().unwrap();
+    let partial = outside.path().join("partial");
+    git_output(
+        outside.path(),
+        &[
+            "clone",
+            "--local",
+            source.to_str().unwrap(),
+            partial.to_str().unwrap(),
+        ],
+        None,
+    );
+    git(&partial, &["config", "extensions.partialClone", "origin"]);
+    git(&partial, &["config", "remote.origin.promisor", "true"]);
+    git(
+        &partial,
+        &["config", "remote.origin.partialclonefilter", "blob:none"],
+    );
+    let partial_object = partial.join(".git/objects").join(&oid[..2]).join(&oid[2..]);
+    assert!(
+        partial_object.is_file(),
+        "the clone initially has the object"
+    );
+    std::fs::remove_file(&partial_object).unwrap();
+
+    let has_local_object = || {
+        Command::new("git")
+            .current_dir(&partial)
+            .args(["cat-file", "-e", &oid])
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .status()
+            .expect("check the local object database")
+            .success()
+    };
+    assert!(
+        !has_local_object(),
+        "the object is missing locally before export"
+    );
+    assert!(has_origin_object(), "the origin can still serve the object");
+    let archive = outside.path().join("incomplete-copy");
+    std::fs::create_dir(&archive).unwrap();
+    let exported = run(
+        &partial,
+        &[
+            "--debug",
+            "export",
+            archive.to_str().unwrap(),
+            "--at",
+            "HEAD",
+        ],
+    );
+    assert_ne!(
+        exported.status.code(),
+        Some(0),
+        "export refuses a locally incomplete snapshot: {} {}",
+        stdout(&exported),
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains(&oid),
+        "diagnostic names missing object {oid}: {}",
+        stderr(&exported)
+    );
+    assert!(
+        std::fs::read_dir(&archive).unwrap().next().is_none(),
+        "a failed export preserves its existing empty destination"
+    );
+    assert!(
+        !has_local_object(),
+        "export does not fetch the promised object from origin"
+    );
+
+    // An actual offline source: the promisor URL no longer resolves, but the
+    // export still reports the missing object rather than a host-file fallback.
+    let disabled_origin = outside.path().join("disabled-origin");
+    git(
+        &partial,
+        &[
+            "remote",
+            "set-url",
+            "origin",
+            disabled_origin.to_str().unwrap(),
+        ],
+    );
+    let offline_archive = outside.path().join("offline-copy");
+    let offline_export = run(
+        &partial,
+        &["export", offline_archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_ne!(
+        offline_export.status.code(),
+        Some(0),
+        "offline export must fail"
+    );
+    assert!(
+        stderr(&offline_export)
+            .contains("error[E2000]: A required Git object is unavailable offline"),
+        "offline diagnostic names the unavailable Git-object scope: {}",
+        stderr(&offline_export)
+    );
+    assert!(
+        !offline_archive.exists(),
+        "offline failure creates no destination"
+    );
+    assert!(
+        !has_local_object(),
+        "offline export keeps the object absent locally"
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+/// A streamed blob remains byte-identical after the source and its configured
+/// origin are unavailable; restore publishes only the verified local copy.
+#[test]
+fn restore_streams_large_blob_after_source_and_origin_are_gone() {
+    let (root, repository, _) = empty_format3_repository();
+    let source = root.path();
+    let outside = TempDir::new().unwrap();
+    let unavailable_origin = outside.path().join("unavailable-origin");
+    git(
+        source,
+        &[
+            "remote",
+            "add",
+            "origin",
+            unavailable_origin.to_str().unwrap(),
+        ],
+    );
+
+    let payload_length = 8 * 1024 * 1024;
+    let payload: Vec<u8> = (0..payload_length)
+        .map(|index| u8::try_from((index * 31 + (index >> 8)) & 0xff).expect("masked to one byte"))
+        .collect();
+    let expected_sha256: [u8; 32] = Sha256::digest(&payload).into();
+    std::fs::write(source.join("large-payload.bin"), &payload).unwrap();
+    git(source, &["add", "large-payload.bin"]);
+    git(
+        source,
+        &["commit", "--quiet", "-m", "large offline payload"],
+    );
+    let source_oid = String::from_utf8(git_output(
+        source,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    let archive = outside.path().join("archive");
+    let exported = run(
+        source,
+        &["export", archive.to_str().unwrap(), "--at", "HEAD"],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "offline-local export failed: {}",
+        stderr(&exported)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(source, &["remote", "get-url", "origin"], None))
+            .unwrap()
+            .trim(),
+        unavailable_origin.to_str().unwrap(),
+        "the source remote is explicitly unavailable"
+    );
+
+    drop(repository);
+    std::fs::remove_dir_all(source).unwrap();
+    assert!(
+        !source.exists(),
+        "the source repository is gone before restore"
+    );
+    assert!(
+        !unavailable_origin.exists(),
+        "the configured origin is unavailable"
+    );
+
+    let restored = outside.path().join("restored");
+    std::fs::create_dir(&restored).unwrap();
+    let restored_output = run(
+        outside.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        restored_output.status.code(),
+        Some(0),
+        "offline restore failed: {}",
+        stderr(&restored_output)
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the reconstructed repository has no remote"
+    );
+    let restored_oid = String::from_utf8(git_output(
+        &restored,
+        &["rev-parse", "HEAD:large-payload.bin"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    assert_eq!(
+        restored_oid, source_oid,
+        "the pinned blob object is preserved"
+    );
+
+    let mut payload_file = std::fs::File::open(restored.join("large-payload.bin")).unwrap();
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024];
+    let mut restored_length = 0_u64;
+    loop {
+        let count = payload_file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        restored_length += u64::try_from(count).expect("a read count fits u64");
+        hasher.update(&buffer[..count]);
+    }
+    assert_eq!(
+        restored_length,
+        u64::try_from(payload_length).expect("payload length fits u64")
+    );
+    let restored_sha256: [u8; 32] = hasher.finalize().into();
+    assert_eq!(
+        restored_sha256, expected_sha256,
+        "streamed raw payload hash"
+    );
+}
+
+/// Committed legacy format-1 fixture (`tests/fixtures/legacy-format1.bundle`).
+const LEGACY_BUNDLE: &str = "tests/fixtures/legacy-format1.bundle";
+
+#[allow(clippy::too_many_lines)]
+/// Gate F (ACCEPTANCE.md:63-68): a complete copy of a workspace that holds a
+/// legacy format-1 snapshot and a format-3 snapshot exports both members, and
+/// each reconstructs offline with its recorded format intact. The format-3
+/// member is a fresh init; the migrated-member leg (`migrate copy` publication)
+/// is blocked on ornadb-5il1.192 and is not covered here.
+#[test]
+fn export_restores_a_legacy_and_a_format3_snapshot_offline() {
+    let parent = TempDir::new().unwrap();
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.path().join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "clone legacy bundle: {}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    // The original remote is disabled: nothing below may contact it.
+    git(&source, &["remote", "remove", "origin"]);
+    // HEAD pins `vendor/stdlib` with no recorded `.gitmodules` origin, which a
+    // complete copy must refuse (E2000). The parent snapshot predates that
+    // gitlink, so it is the legacy member whose closure is self-contained.
+    let legacy = String::from_utf8(git_output(&source, &["rev-parse", "HEAD~1"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // The format-3 member is a fresh init whose objects are fetched into the
+    // same repository, so both snapshots live in one archive. It is not a
+    // migrated workspace: no CLI step publishes a migrate-copy candidate yet
+    // (ornadb-5il1.192).
+    let (migrated_root, _format3, _relation_id) = empty_format3_repository();
+    let migrated_commit = String::from_utf8(git_output(
+        migrated_root.path(),
+        &["rev-parse", "HEAD"],
+        None,
+    ))
+    .unwrap()
+    .trim()
+    .to_owned();
+    git(
+        &source,
+        &[
+            "fetch",
+            "--quiet",
+            migrated_root.path().to_str().unwrap(),
+            "HEAD:refs/heads/migrated",
+        ],
+    );
+
+    let archive = parent.path().join("archive");
+    let archive_path = archive.to_str().unwrap();
+    let exported = run(
+        &source,
+        &[
+            "export",
+            archive_path,
+            "--at",
+            &legacy,
+            "--at",
+            &migrated_commit,
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of legacy and migrated members failed: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stdout(&exported).contains(&migrated_commit),
+        "export names the migrated member: {}",
+        stdout(&exported)
+    );
+
+    // Each member reconstructs offline; the copy keeps its recorded format.
+    for (commit, expected) in [
+        (legacy.as_str(), orna_repository::RepositoryFormat::Legacy1),
+        (
+            migrated_commit.as_str(),
+            orna_repository::RepositoryFormat::Format3,
+        ),
+    ] {
+        let restored = parent.path().join(format!("restored-{commit}"));
+        let restored_path = restored.to_str().unwrap();
+        let reconstructed = run(
+            parent.path(),
+            &[
+                "export",
+                archive_path,
+                "--restore",
+                restored_path,
+                "--at",
+                commit,
+            ],
+        );
+        assert_eq!(
+            reconstructed.status.code(),
+            Some(0),
+            "restore of {commit} failed: {}",
+            stderr(&reconstructed)
+        );
+        let head = String::from_utf8(git_output(&restored, &["rev-parse", "HEAD"], None))
+            .unwrap()
+            .trim()
+            .to_owned();
+        assert_eq!(head, commit, "the copy's HEAD is the restored member");
+        let remotes = String::from_utf8(git_output(&restored, &["remote"], None)).unwrap();
+        assert_eq!(remotes.trim(), "", "the copy configures no remote");
+
+        let repository = orna_repository::Repository::discover(&restored).unwrap();
+        let context = repository
+            .open_format_context_at_selector(commit)
+            .expect("restored member opens offline");
+        assert_eq!(context.repository_format(), expected);
+    }
+}
+
+/// The commit `selector` names in `directory`.
+fn rev_parse(directory: &Path, selector: &str) -> String {
+    String::from_utf8(git_output(directory, &["rev-parse", selector], None))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// One `orna query --format json` report, from the copy or from a source.
+fn query_report(directory: &Path, arguments: &[&str]) -> serde_json::Value {
+    let mut words = vec!["query"];
+    words.extend_from_slice(arguments);
+    words.extend_from_slice(&["--format", "json"]);
+    let output = run(directory, &words);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "orna {words:?} failed: {}",
+        stderr(&output)
+    );
+    serde_json::from_slice(&output.stdout).expect("orna query prints JSON")
+}
+
+/// The row count `orna query <relation> --at <commit> --format json` reports.
+fn query_rows(directory: &Path, relation: &str, commit: &str) -> u64 {
+    let report = query_report(directory, &[relation, "--at", commit]);
+    report["rows"].as_u64().expect("orna query counts rows")
+}
+
+/// A relation id's 16 raw bytes.
+fn relation_bytes(relation: &str) -> [u8; 16] {
+    assert_eq!(
+        relation.len(),
+        32,
+        "a relation id is 32 hex digits: {relation:?}"
+    );
+    let mut bytes = [0_u8; 16];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&relation[index * 2..index * 2 + 2], 16)
+            .expect("a relation id is hexadecimal");
+    }
+    bytes
+}
+
+/// Gate F (`implementation/ACCEPTANCE.md:61-68`): one archive carries a legacy
+/// format-1 member beside a migrated format-3 member, the export manifest names
+/// each member's recorded format, and one offline restore of that archive
+/// answers a row from each member.
+///
+/// ORNA-UPGRADE-001 dispatches each member by its recorded format,
+/// ORNA-UPGRADE-002 keeps the legacy rows readable under their original
+/// decoders, and ORNA-GIT-003/ORNA-GIT-007 make the copy self-contained: no
+/// source repository, no origin and no remote is available to the restored copy.
+#[allow(clippy::too_many_lines)]
+#[test]
+fn export_restores_a_legacy_and_a_migrated_snapshot_offline() {
+    /// The migrated member's source: one table, so one row is committed.
+    const MUSIC_SOURCE: &str = "pub table Music(id: Str) { title: Str, }\n";
+    const INSERT_LONDON: &str = r#"main.Music.insert({ id: "london", title: "Live in London" })"#;
+    /// The committed fixture's compact `Int` table: keys 1..=4.
+    const COMPACT_INT_TABLE: &str = "018f0000000071000000000000000001";
+    /// The fixture's editable table: two committed loose row units.
+    const LOOSE_TABLE: &str = "contacts/Contact";
+
+    let parent = TempDir::new().unwrap();
+
+    // The migrated member is a real format-3 workspace with one published row,
+    // built by the product verbs. Plain Git writes its config so the commits
+    // below have an identity this test controls.
+    let migrated_root = parent.path().join("migrated");
+    let initialized = run(parent.path(), &["init", migrated_root.to_str().unwrap()]);
+    assert_eq!(
+        initialized.status.code(),
+        Some(0),
+        "orna init failed: {}",
+        stderr(&initialized)
+    );
+    std::fs::write(migrated_root.join("main.orna"), MUSIC_SOURCE).unwrap();
+    git(&migrated_root, &["config", "user.name", "Orna Test"]);
+    git(
+        &migrated_root,
+        &["config", "user.email", "orna-test@example.invalid"],
+    );
+    git(&migrated_root, &["config", "commit.gpgsign", "false"]);
+    git(&migrated_root, &["add", "main.orna", ".orna/database.orna"]);
+    let declared = run(&migrated_root, &["commit", "-m", "Declare Music"]);
+    assert_eq!(
+        declared.status.code(),
+        Some(0),
+        "orna commit failed: {}",
+        stderr(&declared)
+    );
+    let relation = stdout(&declared)
+        .lines()
+        .find_map(|line| line.strip_prefix("admitted table Music as relation "))
+        .unwrap_or_else(|| {
+            panic!(
+                "orna commit names the Music relation: {}",
+                stdout(&declared)
+            )
+        })
+        .to_owned();
+    let inserted = repl(&migrated_root, INSERT_LONDON);
+    assert_eq!(
+        inserted.status.code(),
+        Some(0),
+        "REPL insert failed: {}",
+        stderr(&inserted)
+    );
+    let published = run(&migrated_root, &["publish", "--message", "Add london"]);
+    assert_eq!(
+        published.status.code(),
+        Some(0),
+        "orna publish failed: {}",
+        stderr(&published)
+    );
+    let migrated = rev_parse(&migrated_root, "HEAD");
+    assert_eq!(
+        query_rows(&migrated_root, &relation, &migrated),
+        1,
+        "the migrated member commits its published row"
+    );
+
+    // The legacy member is the committed format-1 bundle, cloned, with the
+    // original remote removed. Its HEAD pins a gitlink with no recorded
+    // `.gitmodules` origin, which a complete copy refuses (ORNA-GIT-007), so its
+    // parent is the self-contained legacy snapshot — and it still carries the
+    // compact tables and the loose row units.
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.path().join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "clone legacy bundle: {}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    git(&source, &["remote", "remove", "origin"]);
+    let legacy = rev_parse(&source, "HEAD~1");
+    // One repository must hold both snapshots for one archive to carry both:
+    // the migrated commit's objects are fetched into the legacy clone.
+    git(
+        &source,
+        &[
+            "fetch",
+            "--quiet",
+            migrated_root.to_str().unwrap(),
+            "HEAD:refs/heads/migrated",
+        ],
+    );
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--at",
+            &legacy,
+            "--at",
+            &migrated,
+        ],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(0),
+        "export of the legacy and migrated members failed: {}",
+        stderr(&exported)
+    );
+
+    // Each member's recorded format is in the manifest, so a reader that only
+    // knows the current format can still see which member is a compatibility
+    // input (ORNA-UPGRADE-001).
+    let document = std::fs::read_to_string(archive.join("manifest.tsv")).unwrap();
+    for (commit, format) in [(&legacy, "legacy-1"), (&migrated, "format-3")] {
+        let line = document
+            .lines()
+            .find(|line| line.starts_with(&format!("archive\t{commit}\t")))
+            .unwrap_or_else(|| panic!("the manifest records {commit}: {document}"));
+        let fields: Vec<&str> = line.split('\t').collect();
+        assert_eq!(
+            fields.len(),
+            4,
+            "the archive line names the member's format: {line:?}"
+        );
+        assert_eq!(fields[0], "archive");
+        assert_eq!(fields[3], format, "the member's recorded format: {line:?}");
+    }
+    // The archive says so in its header too, so a reader that only knows the
+    // older three-column line refuses it instead of misreading the column.
+    assert_eq!(document.lines().next(), Some("orna-complete-copy 3"));
+
+    // The sources go away before the restore: the copy must answer from the
+    // archive alone (ORNA-GIT-003, ORNA-GIT-007).
+    std::fs::remove_dir_all(&source).unwrap();
+    std::fs::remove_dir_all(&migrated_root).unwrap();
+    assert!(!source.exists(), "the legacy source repository is gone");
+    assert!(
+        !migrated_root.exists(),
+        "the migrated source repository is gone"
+    );
+
+    // One restore carries both members; the primary member is the first
+    // selector's snapshot.
+    let restored = parent.path().join("restored");
+    let reconstructed = run(
+        parent.path(),
+        &[
+            "export",
+            archive.to_str().unwrap(),
+            "--restore",
+            restored.to_str().unwrap(),
+            "--worktree",
+        ],
+    );
+    assert_eq!(
+        reconstructed.status.code(),
+        Some(0),
+        "restore failed: {}",
+        stderr(&reconstructed)
+    );
+    assert_eq!(
+        rev_parse(&restored, "HEAD"),
+        legacy,
+        "the copy's HEAD is the primary member"
+    );
+    assert_eq!(
+        String::from_utf8(git_output(&restored, &["remote"], None))
+            .unwrap()
+            .trim(),
+        "",
+        "the copy configures no remote"
+    );
+
+    let copy = orna_repository::Repository::discover(&restored).expect("the copy is a repository");
+    let manifest = orna_repository::complete_copy::read_complete_copy_manifest(&archive)
+        .expect("read the verified manifest");
+
+    // A row of the legacy member, read by the versioned legacy reader that
+    // answered this table before the migration (ORNA-UPGRADE-002).
+    let legacy_pin = manifest
+        .pin_member(&copy, &legacy)
+        .expect("pin the legacy member");
+    assert_eq!(legacy_pin.commit().as_str(), legacy);
+    assert_eq!(
+        legacy_pin.format_context().repository_format(),
+        orna_repository::RepositoryFormat::Legacy1
+    );
+    let rows = orna_application::read_legacy_table_rows(
+        &copy,
+        legacy_pin.commit(),
+        &orna_application::LegacyTableAddress::TablePath(LOOSE_TABLE.to_owned()),
+    )
+    .expect("the restored legacy member answers its committed loose rows");
+    assert_eq!(
+        rows.source(),
+        orna_application::LegacyRowSource::LooseRowUnit
+    );
+    assert_eq!(rows.rows().len(), 2, "two committed row units");
+    let alice = rows
+        .rows()
+        .iter()
+        .find(|row| *row.key() == orna_repository::TypedKey::Text("alice-smith".to_owned()))
+        .unwrap_or_else(|| {
+            panic!(
+                "the restored legacy member carries alice-smith: {:?}",
+                rows.rows()
+            )
+        });
+    assert!(
+        alice.fields().iter().any(|field| {
+            field.name() == &orna_application::LegacyFieldName::Declared("name".to_owned())
+                && field.value() == &orna_value::Raw::Text("Alice Smith".to_owned())
+        }),
+        "the legacy row decodes its committed field: {:?}",
+        alice.fields()
+    );
+    assert_eq!(
+        query_rows(&restored, COMPACT_INT_TABLE, &legacy),
+        4,
+        "orna query answers the legacy member offline"
+    );
+
+    // A row of the migrated member, read through the owner-issued member pin so
+    // the row map comes from that member's own format-3 store.
+    let migrated_pin = manifest
+        .pin_member(&copy, &migrated)
+        .expect("pin the migrated member");
+    assert_eq!(migrated_pin.commit().as_str(), migrated);
+    assert_eq!(
+        migrated_pin.format_context().repository_format(),
+        orna_repository::RepositoryFormat::Format3
+    );
+    let relation_id = relation_bytes(&relation);
+    let row_map = migrated_pin
+        .format_context()
+        .load_row_map(relation_id)
+        .expect("load the migrated member's row map");
+    let graph = migrated_pin
+        .format_context()
+        .open_native_graph(&row_map)
+        .expect("open the migrated member's graph");
+    let scope = graph.open_read_scope().expect("open a read scope");
+    assert!(
+        graph
+            .lookup_row(
+                &orna_repository::TypedKey::Text("london".to_owned()),
+                &scope
+            )
+            .expect("read the migrated member row")
+            .is_some(),
+        "the restored migrated member carries the published london row"
+    );
+    let point = run(
+        &restored,
+        &[
+            "query", &relation, "--key", "london", "--at", &migrated, "--format", "json",
+        ],
+    );
+    assert_eq!(
+        point.status.code(),
+        Some(0),
+        "orna query --key fails: {}",
+        stderr(&point)
+    );
+    let point: serde_json::Value = serde_json::from_slice(&point.stdout).unwrap();
+    assert_eq!(point["rows"].as_u64(), Some(1), "{point}");
+}
+
+/// Clones the committed legacy fixture with its original remote removed.
+fn clone_legacy_fixture(parent: &Path) -> std::path::PathBuf {
+    let bundle = Path::new(env!("CARGO_MANIFEST_DIR")).join(LEGACY_BUNDLE);
+    let source = parent.join("source");
+    let cloned = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .arg("clone")
+        .arg("--quiet")
+        .arg(&bundle)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success(), "clone legacy bundle");
+    git(&source, &["remote", "remove", "origin"]);
+    source
+}
+
+/// ORNA-GIT-007 (`24-git-history.md:19`): a full mirror of the superproject is
+/// not a complete submodule copy, so a gitlink whose dependency cannot be
+/// accounted for must not export as offline-complete. The fixture HEAD pins
+/// `vendor/stdlib` with no `.gitmodules` origin; the export is refused with a
+/// typed missing-origin error before any archive is written.
+#[test]
+fn export_refuses_a_gitlink_without_a_recorded_origin() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_legacy_fixture(parent.path());
+    let head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &["export", archive.to_str().unwrap(), "--at", &head],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(1),
+        "a gitlink without a recorded origin is refused: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains("has no recorded origin"),
+        "the refusal names the missing origin: {}",
+        stderr(&exported)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
+}
+
+/// ORNA-GIT-007 again: with the origin recorded in `.gitmodules`, a gitlink
+/// whose dependency repository is absent from this copy is still unavailable,
+/// so the export is refused as unavailable rather than offline-complete.
+#[test]
+fn export_refuses_a_gitlink_whose_dependency_repository_is_unavailable() {
+    let parent = TempDir::new().unwrap();
+    let source = clone_legacy_fixture(parent.path());
+    // The legacy member before the stdlib gitlink: a format record and no
+    // gitlinks, so the new commit adds only the dependency pin under test.
+    let base = String::from_utf8(git_output(&source, &["rev-parse", "HEAD~1"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+    git(&source, &["checkout", "--quiet", "--detach", &base]);
+    std::fs::write(
+        source.join(".gitmodules"),
+        "[submodule \"vendor/dep\"]\n\tpath = vendor/dep\n\turl = https://example.invalid/dep.git\n",
+    )
+    .unwrap();
+    git(&source, &["add", ".gitmodules"]);
+    git(
+        &source,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{base},vendor/dep"),
+        ],
+    );
+    git(
+        &source,
+        &[
+            "-c",
+            "user.name=orna-fixture",
+            "-c",
+            "user.email=orna-fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "pin dependency without a local repository",
+        ],
+    );
+    let head = String::from_utf8(git_output(&source, &["rev-parse", "HEAD"], None))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let archive = parent.path().join("archive");
+    let exported = run(
+        &source,
+        &["export", archive.to_str().unwrap(), "--at", &head],
+    );
+    assert_eq!(
+        exported.status.code(),
+        Some(1),
+        "a gitlink with no dependency repository is refused: {}",
+        stderr(&exported)
+    );
+    assert!(
+        stderr(&exported).contains("A pinned dependency is unavailable"),
+        "the refusal names the unavailable dependency: {}",
+        stderr(&exported)
+    );
+    assert!(!archive.exists(), "no archive is written on refusal");
+}

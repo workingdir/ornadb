@@ -10,7 +10,7 @@ use crate::{
     catalogue::CatalogueSnapshot,
     catalogue_diff::{CatalogueSemanticDiff, catalogue_diff},
 };
-use orna_value_v1::Value as CanonicalValue;
+use orna_value::Value as CanonicalValue;
 use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -796,7 +796,7 @@ fn canonical_digest(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SemanticSnapshotError {
     /// A canonical OVB value could not be encoded.
-    ValueEncoding(orna_value_v1::Error),
+    ValueEncoding(orna_value::Error),
     /// A table and natural key appeared more than once.
     DuplicateRow,
     /// A function and canonical argument identity appeared more than once.

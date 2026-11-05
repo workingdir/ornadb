@@ -108,7 +108,7 @@ const ANSWER_USE: &str =
 fn capture_standard(project: &Project) {
     let module = project.root().join("stdlib/std");
     fs::create_dir_all(&module).unwrap();
-    orna_repository_v1::initialize_repository(&module).expect("std repository");
+    orna_repository::initialize_repository(&module).expect("std repository");
     fs::write(module.join("collection.orna"), CAPTURED_COLLECTION).unwrap();
     git(&module, &["add", "-A"]);
     git(&module, &["commit", "--quiet", "-m", "standard"]);

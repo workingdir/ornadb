@@ -1,0 +1,24 @@
+[package]
+name = "orna-security"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "Security boundaries and encrypted secret provider for Orna"
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+sha2 = "0.10"
+subtle = "2.6"
+tempfile = "3.23.0"
+zeroize = "1.8"
+
+[dev-dependencies]
+serde_json = "1.0"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }

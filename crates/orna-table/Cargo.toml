@@ -1,0 +1,11 @@
+[package]
+name = "orna-table"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "In-memory transactional table primitive for Orna 1.0"
+publish = false
+
+[dependencies]
+num-bigint = "0.4.6"

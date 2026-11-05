@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use orna_syntax_v1::SyntaxSpan;
+use orna_syntax::SyntaxSpan;
 
 use crate::documents::Document;
 use crate::names::{DeclaredKind, Role, key_of};
@@ -161,13 +161,13 @@ pub(crate) fn plan(
 /// (ORNA-LEX-007) is never produced.
 pub(crate) fn valid_identifier(name: &str) -> bool {
     let source = format!("fn {name}() = 0;");
-    let parse = orna_syntax_v1::parse_module(&source);
+    let parse = orna_syntax::parse_module(&source);
     parse.diagnostics.is_empty()
         && matches!(
             parse.value.items.as_slice(),
             [item] if matches!(
                 &item.declaration,
-                orna_syntax_v1::Declaration::Function { signature, .. }
+                orna_syntax::Declaration::Function { signature, .. }
                     if signature.name == name && key_of(&signature.name) == key_of(name)
             )
         )

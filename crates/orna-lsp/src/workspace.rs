@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
 use lsp_types::Uri;
-use orna_syntax_v1::{Keyword, SyntaxSpan, Token, TokenKind, TypeExpr, lex, parse_module};
+use orna_syntax::{Keyword, SyntaxSpan, Token, TokenKind, TypeExpr, lex, parse_module};
 
 use crate::analysis::{self, EditorParse, EditorSymbol};
 use crate::documents::Document;
@@ -893,7 +893,7 @@ fn path_keys(path: &TypePath) -> Vec<Key> {
 fn module_imports(file: &FileAnalysis) -> Imports {
     let mut imports = Imports::default();
     for item in &file.parse.value.items {
-        let orna_syntax_v1::Declaration::Use { path, tail } = &item.declaration else {
+        let orna_syntax::Declaration::Use { path, tail } = &item.declaration else {
             continue;
         };
         let keys = path
@@ -901,20 +901,20 @@ fn module_imports(file: &FileAnalysis) -> Imports {
             .map(|segment| key_of(&segment.name))
             .collect::<Vec<_>>();
         match tail {
-            orna_syntax_v1::UseTail::None => {
+            orna_syntax::UseTail::None => {
                 if let Some(last) = keys.last() {
                     imports.aliases.insert(last.clone(), keys.clone());
                 }
             }
-            orna_syntax_v1::UseTail::Alias { name, .. } => {
+            orna_syntax::UseTail::Alias { name, .. } => {
                 imports.aliases.insert(key_of(name), keys);
             }
-            orna_syntax_v1::UseTail::Names(names) => {
+            orna_syntax::UseTail::Names(names) => {
                 for name in names {
                     imports.names.insert(key_of(&name.name), keys.clone());
                 }
             }
-            orna_syntax_v1::UseTail::Glob { .. } => imports.globs.push(keys),
+            orna_syntax::UseTail::Glob { .. } => imports.globs.push(keys),
         }
     }
     imports

@@ -10,7 +10,7 @@ playground editor metadata, build workflow, and app-specific fixtures are not
 part of OrnaDB 1.1.0. No replacement browser application is introduced by this
 decision.
 
-Keep the native `orna-cli-v1` integration suite as an independent CI gate. Its
+Keep the native `orna-cli` integration suite as an independent CI gate. Its
 workflow uses per-ref concurrency and does not cancel an in-progress run, so a
 worker ref cannot replace the main ref's pending CLI gate.
 

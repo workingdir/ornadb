@@ -12,7 +12,7 @@ use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, CodeLens, Command,
     Location, Moniker, MonikerKind, Range, SymbolKind, TypeHierarchyItem, UniquenessLevel,
 };
-use orna_syntax_v1::{
+use orna_syntax::{
     Declaration, Implementation, SyntaxSpan, TableMember, TypeExpr, TypeMember, TypeRepresentation,
 };
 
@@ -21,7 +21,7 @@ use crate::documents::PositionMapper;
 use crate::names::{DeclaredKind, Role};
 use crate::workspace::{Resolved, Target, Workspace};
 
-const MONIKER_SCHEME: &str = "orna-syntax-v1";
+const MONIKER_SCHEME: &str = "orna-syntax";
 
 /// Line indexes of the modules one request touches, each built once.
 struct Mappers<'a> {
@@ -606,7 +606,7 @@ mod tests {
     use crate::workspace::{FileAnalysis, Module};
 
     fn file(uri: &str, text: &str) -> Arc<FileAnalysis> {
-        let parse = orna_syntax_v1::parse_module(text);
+        let parse = orna_syntax::parse_module(text);
         assert!(parse.diagnostics.is_empty(), "{:#?}", parse.diagnostics);
         Arc::new(FileAnalysis::new(Document::new(
             uri.parse().unwrap(),

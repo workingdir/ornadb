@@ -11,8 +11,8 @@ use orna_core::{
     },
     types::{ResolvedType, StandardScalar},
 };
-use orna_syntax_v1::parse_module;
-use orna_value_v1::{Raw, Value};
+use orna_syntax::parse_module;
+use orna_value::{Raw, Value};
 
 const BASE_SOURCE: &str = include_str!("fixtures/semantic-diff/base.orna");
 const CANDIDATE_SOURCE: &str = include_str!("fixtures/semantic-diff/candidate.orna");

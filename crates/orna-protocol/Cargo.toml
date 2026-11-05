@@ -1,0 +1,13 @@
+[package]
+name = "orna-protocol"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "Bounded canonical Orna 1.0 live-protocol envelope codec"
+
+[dependencies]
+num-bigint = "0.4.6"
+num-traits = "0.2.19"
+orna-foundation = { path = "../orna-foundation" }
+sha2 = "0.10.9"

@@ -1,0 +1,35 @@
+[package]
+name = "orna-application"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MPL-2.0"
+description = "Authoritative source admission and activation seam for Orna applications"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+browser-wasm = ["orna-evaluator/browser-wasm"]
+test-support = []
+[dependencies]
+orna-evaluator = { path = "../orna-evaluator" }
+orna-foundation = { path = "../orna-foundation" }
+orna-runtime = { path = "../orna-runtime" }
+orna-semantic = { path = "../orna-semantic" }
+orna-value = { path = "../orna-value" }
+orna-syntax = { path = "../orna-syntax" }
+orna-live = { path = "../orna-live" }
+orna-protocol = { path = "../orna-protocol" }
+orna-project = { path = "../orna-project" }
+num-bigint = "0.4.6"
+sha2 = "0.10.9"
+getrandom = "0.3.4"
+orna-repository = { path = "../orna-repository" }
+orna-security = { path = "../orna-security" }
+
+[dev-dependencies]
+futures = "0.3.31"
+orna-application = { path = ".", features = ["test-support"] }
