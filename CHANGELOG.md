@@ -5,6 +5,28 @@ Debian changelog, a package manifest, or proof that a production artifact has
 been published.
 
 ## Unreleased
+- `orna migrate copy` is idempotent and reproducible for a populated format-1
+  workspace (ornadb-5il1.397, Gate F; UPGRADE-3 items 3-7 and
+  ORNA-UPGRADE-002/004/005/006). Re-running it against the same destination now
+  recovers the prepared copy instead of failing with `E2100`: recovery admitted
+  the candidate only as a complete format-3 snapshot, so a candidate that still
+  carries the legacy `.orna/storage` layout — every populated source — was
+  refused as `MixedFormats`. Recovery now reads the candidate's own
+  `database.orna`, requires the legacy `format.orna` marker to be gone, and
+  still compares the whole candidate tree with the journal's managed entries;
+  the whole-snapshot admission rule is unchanged for ordinary readers, so a
+  store-less mixed snapshot is still refused when a reader opens it. A second
+  run leaves the candidate commit, index, journal and carried stream rows
+  unchanged and prints the same summary. Two independent migrations of one
+  source now produce the same bytes: the migration commit is written with the
+  converted snapshot's committer time (`Repository::build_private_commit_at`)
+  instead of the wall clock, so the object is a function of its tree, parent
+  and message. New `migration_kill_matrix` test target (feature
+  `crash-barriers`) SIGKILLs `orna migrate copy` at each migration boundary
+  (staging, candidate, journal, synced, published, carried) and `orna migrate
+  abort` after the quarantine rename, then restarts and proves the recovered
+  copy equals an uninterrupted one byte for byte, the source is untouched, and
+  an acknowledged stream checkpoint is carried exactly once.
 - A project's pinned `stdlib/std` snapshot now has its function bodies checked
   when the snapshot is attached, instead of being admitted on declarations
   alone (ORNA-MODULE-003). `orna check` and `orna commit` refuse a pinned
